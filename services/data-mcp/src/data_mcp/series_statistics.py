@@ -47,19 +47,21 @@ The verified table is kept per process under `artifact.artifact_digest`, the
 sha256 of its bytes, with the `expected_series` and `continuing` it was
 checked against (`_TABLES`). A retrieval's `get_data` digest and the harness's
 evidence check on the same mint therefore download and decode the artifact
-once. Only a table that passed every check is kept, so a failure is retried
-by the next call.
+once, and concurrent misses on one key wait on the first. Only a table that
+passed every check is kept, so a failure is retried by the next call.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import httpx2
@@ -140,7 +142,7 @@ _FACET = TypeAdapter(SeriesStatisticsModel.model_fields["facet"].annotation)
 # caller's own docstring for what "degrade" means there.
 _FETCH_TIMEOUT_S = 30.0
 
-# The Arrow bytes the verified tables `_TABLES` keeps may hold in total. A
+# The Arrow buffer bytes the verified tables `_TABLES` may hold in total. A
 # 25,000-series CRS file is about 7.5 MiB as Arrow, so this keeps several of
 # the largest and every small one a turn reads.
 _TABLES_MAX_BYTES = 64 * 1024 * 1024
@@ -155,22 +157,77 @@ class _TableKey(NamedTuple):
     continuing: str | None
 
 
-# Verified tables, least recently used first. A key names immutable bytes
-# and a deterministic read of them, so an entry never goes stale. It is only
-# evicted to stay under `_TABLES_MAX_BYTES`.
-_TABLES: OrderedDict[_TableKey, pa.Table] = OrderedDict()
+@dataclass
+class _Flight:
+    """The lock the callers missing one key share, and how many of them hold or await it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
 
 
-def _remember(key: _TableKey, table: pa.Table) -> None:
-    """Keep `table` under `key`, evicting the least recently used tables past
-    `_TABLES_MAX_BYTES`. A table larger than the whole budget is not kept."""
-    if table.nbytes > _TABLES_MAX_BYTES:
-        return
-    _TABLES[key] = table
-    held = sum(t.nbytes for t in _TABLES.values())
-    while held > _TABLES_MAX_BYTES:
-        _, evicted = _TABLES.popitem(last=False)
-        held -= evicted.nbytes
+class _VerifiedTables:
+    """Verified tables, least recently used first, within `max_bytes` of Arrow buffers.
+
+    A key names immutable bytes and a deterministic read of them, so an entry
+    never goes stale. It is only evicted to stay under `max_bytes`. A table is
+    sized by every buffer it references (`pa.Table.get_total_buffer_size`),
+    so a slice counts the whole buffer it keeps alive. `flight` hands the
+    callers missing one key a single lock, so the first fetches and the rest
+    find its table.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._tables: OrderedDict[_TableKey, tuple[pa.Table, int]] = OrderedDict()
+        self._held = 0
+        self._flights: dict[_TableKey, _Flight] = {}
+
+    def get(self, key: _TableKey) -> pa.Table | None:
+        """The table kept under `key`, marked most recently used, or `None`."""
+        entry = self._tables.get(key)
+        if entry is None:
+            return None
+        self._tables.move_to_end(key)
+        return entry[0]
+
+    def put(self, key: _TableKey, table: pa.Table) -> None:
+        """Keep `table` under `key`, evicting the least recently used past
+        `max_bytes`. A table larger than the whole budget is not kept."""
+        size = table.get_total_buffer_size()
+        if size > self.max_bytes:
+            return
+        if (replaced := self._tables.pop(key, None)) is not None:
+            self._held -= replaced[1]
+        self._tables[key] = (table, size)
+        self._held += size
+        while self._held > self.max_bytes:
+            _, (_, evicted) = self._tables.popitem(last=False)
+            self._held -= evicted
+
+    @contextlib.asynccontextmanager
+    async def flight(self, key: _TableKey, *, deadline: CallDeadline | None) -> AsyncIterator[None]:
+        """Hold `key`'s lock, waiting for it until `deadline` at the latest."""
+        flight = self._flights.setdefault(key, _Flight())
+        flight.users += 1
+        try:
+            async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
+                await flight.lock.acquire()
+            try:
+                yield
+            finally:
+                flight.lock.release()
+        finally:
+            flight.users -= 1
+            if not flight.users:
+                del self._flights[key]
+
+    def clear(self) -> None:
+        """Forget every table."""
+        self._tables.clear()
+        self._held = 0
+
+
+_TABLES = _VerifiedTables(_TABLES_MAX_BYTES)
 
 
 def clear_series_statistics_cache() -> None:
@@ -325,27 +382,29 @@ async def fetch_series_statistics_table(
 
     key = _TableKey(artifact.artifact_digest, expected_series, continuing)
     if (held := _TABLES.get(key)) is not None:
-        _TABLES.move_to_end(key)
         return held
-    async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
-        link = await artifact_link(subject_id, content_version, artifact.artifact_digest)
-        # `Accept-Encoding: identity` is what keeps `_read_bounded`'s cap exact.
-        async with get_client().stream_link(
-            link,
-            timeout_s=_FETCH_TIMEOUT_S,
-            headers={"Accept-Encoding": "identity"},
-            transport=transport,
-        ) as response:
-            fetched = await _read_bounded(response, max_bytes=artifact.bytes)
-    computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
-    if computed_digest != artifact.artifact_digest:
-        raise SeriesStatisticsSchemaError(
-            "fetched artifact bytes do not hash to the advertised artifact_digest "
-            f"{artifact.artifact_digest!r}; computed {computed_digest!r}"
-        )
-    table = _read(fetched, expected_series=expected_series, continuing=continuing)
-    _remember(key, table)
-    return table
+    async with _TABLES.flight(key, deadline=deadline):
+        if (held := _TABLES.get(key)) is not None:
+            return held
+        async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
+            link = await artifact_link(subject_id, content_version, artifact.artifact_digest)
+            # `Accept-Encoding: identity` is what keeps `_read_bounded`'s cap exact.
+            async with get_client().stream_link(
+                link,
+                timeout_s=_FETCH_TIMEOUT_S,
+                headers={"Accept-Encoding": "identity"},
+                transport=transport,
+            ) as response:
+                fetched = await _read_bounded(response, max_bytes=artifact.bytes)
+        computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
+        if computed_digest != artifact.artifact_digest:
+            raise SeriesStatisticsSchemaError(
+                "fetched artifact bytes do not hash to the advertised artifact_digest "
+                f"{artifact.artifact_digest!r}; computed {computed_digest!r}"
+            )
+        table = _read(fetched, expected_series=expected_series, continuing=continuing)
+        _TABLES.put(key, table)
+        return table
 
 
 async def _read_bounded(response: httpx2.Response, *, max_bytes: int) -> bytes:

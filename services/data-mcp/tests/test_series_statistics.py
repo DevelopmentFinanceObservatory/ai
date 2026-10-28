@@ -24,6 +24,8 @@ from data_mcp.series_statistics import (
     SERIES_STATISTICS_SCHEMA,
     SeriesStatisticsSchemaError,
     _read_bounded,
+    _TableKey,
+    _VerifiedTables,
     continuing_method,
     fetch_series_statistics,
     fetch_series_statistics_table,
@@ -946,6 +948,58 @@ async def test_another_artifact_is_fetched_on_its_own() -> None:
 
     assert first == ["link", "get"]
     assert second == ["link", "get"]
+
+
+async def test_concurrent_reads_of_one_artifact_fetch_it_once() -> None:
+    """Three reads of one artifact that all miss the cache at once reach the
+    link route and the GET once. The others wait for the first's table."""
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    requests: list[str] = []
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("link")
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    async def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("get")
+        # Yield, so the other reads reach the cache while this GET is in flight.
+        await asyncio.sleep(0.01)
+        return httpx2.Response(200, content=data)
+
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        tables = await asyncio.gather(
+            *(
+                fetch_series_statistics_table(
+                    subject_id=_SPEC_ID,
+                    content_version=_CONTENT_VERSION,
+                    artifact=artifact,
+                    expected_series=1,
+                    continuing=None,
+                    transport=httpx2.MockTransport(get_handler),
+                )
+                for _ in range(3)
+            )
+        )
+
+    assert requests == ["link", "get"]
+    assert all(table is tables[0] for table in tables)
+
+
+def test_a_slice_counts_every_buffer_it_keeps_alive() -> None:
+    """A one-row slice of a large table holds the large table's buffers, so it is
+    sized by them and a budget below them does not keep it."""
+    whole = pa.table({"value": pa.array(range(100_000), type=pa.int64())})
+    one_row = whole.slice(0, 1)
+    tables = _VerifiedTables(max_bytes=whole.get_total_buffer_size() - 1)
+    key = _TableKey("sha256:" + "0" * 64, 1, None)
+
+    tables.put(key, one_row)
+
+    assert one_row.nbytes < tables.max_bytes
+    assert tables.get(key) is None
 
 
 def _with_column(data: bytes, name: str, column: pa.Array) -> bytes:

@@ -100,9 +100,6 @@ from translator.referral import (
 from translator.tool import (
     IssueResolution,
     _compile_failure_action,
-    _current_listing,
-    _ListedOnce,
-    _Listing,
     _referral_payload,
     authored_answer,
     build_translate,
@@ -1249,24 +1246,49 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     assert context.state[PLAN_STATE_KEY] == translated
 
 
-async def test_a_translation_lists_the_surface_once_however_many_rounds_it_proposes(
+async def test_translate_asks_search_once_for_a_pinned_identity_it_cannot_reach(
     real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
 ) -> None:
-    """Inside one translation (`_current_listing`) every proposal round reads the first
-    list. Outside one, and in the next translation, the surface is listed again."""
-    counting = _CountingSurface(schemas=real_schemas)
-    listed = _ListedOnce(counting)
+    """Search cannot be reached for the pin's identity on record. The group rewrite
+    and discovery share the one refusal, and the next translation asks again."""
+    pinned = requirement(
+        measure="official development assistance",
+        entities=[Entity(name="France", role="donor")],
+        across=("recipient",),
+        source_spec_id=SPEC_AFRICA,
+        unit=None,
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_AFRICA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    identity = {"seed": "africa", "requested_window": period_window(pinned.period)}
+    save_windowed_pins(
+        context.state,
+        [WindowedPin(spec_id=SPEC_AFRICA, identity=identity, windowed_from=SPEC_OTHER)],
+    )
+    unavailable = ToolCallResult(
+        is_error=True,
+        structured_content={"code": "upstream_unavailable", "retry_mode": "retry_after_delay"},
+    )
+    surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": unavailable})
+    translate = build_translate(surface=surface)
 
-    for _translation in range(2):
-        token = _current_listing.set(_Listing())
-        try:
-            assert await listed.list_tools() == real_schemas
-            assert await listed.list_tools() == real_schemas
-        finally:
-            _current_listing.reset(token)
-    await listed.list_tools()
+    answer = await translate(context)
 
-    assert counting.listed == 3
+    assert answer["kind"] == ReferralKind.DISCOVERY_UNAVAILABLE.value, answer
+    assert surface.calls["resolve_definition"] == 1
+
+    await translate(context)
+
+    assert surface.calls["resolve_definition"] == 2
 
 
 SPEC_G7 = "spec_9c7a11e2" + "0" * 24

@@ -158,7 +158,6 @@ from .basis_alignment import (
     TOTAL_NET,
     US_2023,
     BasisCompiles,
-    Overlapping,
     WholeCompiles,
     basis_block,
 )
@@ -5077,38 +5076,34 @@ class _PartMovedCompiles(_PartAndWholeCompiles):
 
 
 @pytest.mark.parametrize(
-    ("fake", "options", "calls", "most", "concept"),
+    ("fake", "options", "calls", "concept"),
     [
         (
             _PartAndWholeCompiles,
             ("provider:inclusive", "provider:bilateral", "provider:inclusive"),
             [1, 3, 4, 4],
-            [2, 1, 0],
             None,
         ),
-        (_PartMovedCompiles, ("provider:inclusive",), [1, 4], [2], "health"),
+        (_PartMovedCompiles, ("provider:inclusive",), [1, 3], "health"),
     ],
     ids=["scope-kept", "scope-moved"],
 )
-async def test_a_provider_switch_compiles_the_parts_whole_beside_it_once_a_turn(
+async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
     decision: Any,
     monkeypatch: pytest.MonkeyPatch,
     fake: type[_PartAndWholeCompiles],
     options: tuple[str, ...],
     calls: list[int],
-    most: list[int],
     concept: str | None,
 ) -> None:
     """US health aid in 2023 as a share of its declared whole, switched on the plan
     card to bilateral plus imputed multilateral aid, back to bilateral, and to the
-    inclusive scope again. Each switch posts the part and the whole the revision
-    compiles from it at once, as dev Search keeps the part's scope through a
-    provider switch, so the revision asks Search nothing; and a resubmit the turn
-    already made is not posted again. The whole on bilateral flows is the one the
-    first draft compiled, and the second inclusive switch repeats the first. Where
-    Search answers the part with another scope, the whole posted beside it is not
-    the one the revision needs, and the revision compiles the whole again from
-    Search's answer."""
+    inclusive scope again. Each switch posts the part, and the revision compiles
+    the whole from Search's answer. A resubmit the turn already made is not posted
+    again. The whole on bilateral flows is the one the first draft compiled, and
+    the second inclusive switch repeats the first, so it posts nothing. Where
+    Search answers the part with another scope, the revision compiles the whole
+    from that scope."""
     # The user's words asked for bilateral aid, so the card shows the provider row.
     searched = copy.deepcopy(US_2023["health"])
     scope = searched["spec"]["resolved"]["scope_choices"]
@@ -5161,14 +5156,13 @@ async def test_a_provider_switch_compiles_the_parts_whole_beside_it_once_a_turn(
         planner_seam, "declare_ready", lambda answer, ctx: {**answer, "summary": {}}
     )
     compiles = fake()
-    surface = Overlapping(compiles)
     seam = PlannerSeam(
         settings=Settings(),
-        surface=cast(Any, surface),
+        surface=cast(Any, compiles),
         translate=translate,
         model=ScriptedPlannerLlm(script=[]),
     )
-    switching = switch.switch_node(planner=seam, definition_surface=cast(Any, surface))
+    switching = switch.switch_node(planner=seam, definition_surface=cast(Any, compiles))
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
@@ -5186,9 +5180,8 @@ async def test_a_provider_switch_compiles_the_parts_whole_beside_it_once_a_turn(
         )
         assert "plan" in drafted, drafted
         ctx.state["plan"] = json.dumps(drafted["plan"])
-        counted, opened = [len(compiles.calls)], []
+        counted = [len(compiles.calls)]
         for option_id in options:
-            surface.most = 0
             shown = Plan.model_validate_json(ctx.state["plan"])
             (row,) = [
                 d
@@ -5204,11 +5197,9 @@ async def test_a_provider_switch_compiles_the_parts_whole_beside_it_once_a_turn(
             async for event in switching(ctx, {"switch": pick}):
                 assert "switch_failed" not in event.output, event.output["switch_failed"]
             counted.append(len(compiles.calls))
-            opened.append(surface.most)
         shown = Plan.model_validate_json(ctx.state["plan"])
         return {
             "calls": counted,
-            "most": opened,
             "whole": shown.requirement("total").source_spec_id,  # type: ignore[union-attr]
         }
 
@@ -5229,9 +5220,8 @@ async def test_a_provider_switch_compiles_the_parts_whole_beside_it_once_a_turn(
         if event.output is not None
     ]
 
-    # The draft compiles the whole; each switch posts at most the part and its whole.
+    # The draft compiles the whole. Each switch posts the part, and a new whole once.
     assert result["calls"] == calls
-    assert result["most"] == most
     # The plan reads the inclusive whole, compiled from the part Search answered.
     assert result["whole"] == US_2023["whole_inclusive"]["spec"]["spec_id"]
     whole = [

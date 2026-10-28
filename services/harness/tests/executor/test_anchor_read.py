@@ -235,17 +235,23 @@ async def test_a_translation_states_its_rolling_years_from_the_newest_year_the_d
     assert (sent["window_start"], sent["window_end"]) == tuple(str(year) for year in window)
 
 
-@pytest.mark.parametrize("moved", [False, True], ids=["as-it-was", "requirement-moved"])
+@pytest.mark.parametrize(
+    ("moved", "restated"),
+    [(False, False), (False, True), (True, False)],
+    ids=["as-it-was", "restated", "requirement-moved"],
+)
 async def test_a_translation_again_stands_on_the_read_of_a_group_left_as_it_was(
     rolling_draft: Callable[..., Plan],
     source: Callable[..., SelectedSource],
     manifest: Callable[..., dict[str, Any]],
     real_schemas: list[ToolSchema],
     moved: bool,
+    restated: bool,
 ) -> None:
     """A switch or an amendment translates the draft again. A group whose retrievals and
     requirement are as they were reads as the earlier read did, with no retrieval and no
-    `resolve_anchor`. One whose requirement moved reads again."""
+    `resolve_anchor`, and so does the translated plan amended, its years restated from
+    the newest year the first read found. One whose requirement moved reads again."""
     draft = rolling_draft()
     context = _Context(draft, source())
     surface = ScriptedSurface(
@@ -255,7 +261,12 @@ async def test_a_translation_again_stands_on_the_read_of_a_group_left_as_it_was(
     first = await _propose(context, surface)
     translated = context.plan()
 
-    again = rolling_draft(period=Period(start=2016, end=2024)) if moved else draft
+    if moved:
+        again = rolling_draft(period=Period(start=2016, end=2024))
+    elif restated:
+        again = translated.amend(evidence_requirements=[])
+    else:
+        again = draft
     context.state[PLAN_STATE_KEY] = again.model_dump_json()
     if moved:
         context.specs = {"annual_debt_service": source().spec_id}
@@ -276,10 +287,13 @@ async def test_a_translation_again_stands_on_the_read_of_a_group_left_as_it_was(
     second = await _propose(context, surface)
 
     assert second["outcome"] == "ok", second
-    assert second.get("restated") == first.get("restated")
+    # The restated plan states the years the first read found, so none move again.
+    assert second.get("restated") == (None if restated else first.get("restated"))
     reads = [name for name, _ in surface.calls]
     assert reads == ["get_data", "resolve_anchor"] * (2 if moved else 1)
-    if not moved:
+    if restated:
+        assert context.plan().workflow == translated.workflow
+    elif not moved:
         assert second == first
         assert context.plan() == translated
 

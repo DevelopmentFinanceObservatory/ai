@@ -2404,13 +2404,15 @@ _UNAVAILABLE = ToolCallResult(is_error=True, structured_content={"retry_mode": "
 
 
 @pytest.mark.parametrize(
-    ("answer", "invocations", "calls"),
+    ("answer", "invocations", "keep_retryable", "calls"),
     [
-        (_DEFINITE, (("t1", 1), ("t1", 1)), 1),
-        (_DEFINITE, (("t1", 1), ("t2", 1)), 2),
-        (_REFUSED, (("t1", 2),), 1),
-        (_REFUSED, (("t1", 1), ("t1", 1)), 2),
-        (_UNAVAILABLE, (("t1", 2),), 2),
+        (_DEFINITE, (("t1", 1), ("t1", 1)), False, 1),
+        (_DEFINITE, (("t1", 1), ("t2", 1)), False, 2),
+        (_REFUSED, (("t1", 2),), False, 1),
+        (_REFUSED, (("t1", 1), ("t1", 1)), False, 2),
+        (_UNAVAILABLE, (("t1", 2),), False, 2),
+        (_UNAVAILABLE, (("t1", 2),), True, 1),
+        (_UNAVAILABLE, (("t1", 1), ("t1", 1)), True, 2),
     ],
     ids=[
         "answer-kept-for-the-turn",
@@ -2418,20 +2420,26 @@ _UNAVAILABLE = ToolCallResult(is_error=True, structured_content={"retry_mode": "
         "refusal-kept-for-the-invocation",
         "next-invocation-asks-a-refusal-again",
         "retryable-refusal-asked-again",
+        "retryable-refusal-kept-for-a-translation",
+        "next-invocation-asks-a-retryable-refusal-again",
     ],
 )
 async def test_a_turn_asks_search_once_per_resolve_unless_it_can_answer_otherwise_later(
-    answer: ToolCallResult, invocations: tuple[tuple[str, int], ...], calls: int
+    answer: ToolCallResult,
+    invocations: tuple[tuple[str, int], ...],
+    keep_retryable: bool,
+    calls: int,
 ) -> None:
     """The same `resolve_definition` again in a turn reaches Search once. A definite
     answer is kept in the turn's session state for every later invocation of it, and
-    a refusal for the rest of its invocation, unless it is one the same call can
-    escape later. Another turn, a session of its own, asks again."""
+    a refusal for the rest of its invocation. One the same call can escape later is
+    asked again, unless the block is a translation's, which keeps it for the rest of
+    the block. Another turn, a session of its own, asks again."""
     surface = _Answering(answer)
     states: dict[str, dict[str, Any]] = {}
 
     for turn, made in invocations:
-        with resolving_once(states.setdefault(turn, {})):
+        with resolving_once(states.setdefault(turn, {}), keep_retryable=keep_retryable):
             for _ in range(made):
                 if answer.is_error:
                     with pytest.raises(DefinitionNotResolvedError):
@@ -2440,6 +2448,22 @@ async def test_a_turn_asks_search_once_per_resolve_unless_it_can_answer_otherwis
                     await resolve_definition(surface, spec_id=SPEC_KENYA, identity={})
 
     assert surface.calls == calls
+
+
+async def test_a_retryable_refusal_is_kept_for_its_translation_alone() -> None:
+    """Inside one planner entry, each translation (a block of its own) asks Search once
+    for a call it meets a Search outage on, however often it makes it, and the next
+    translation asks again."""
+    surface = _Answering(_UNAVAILABLE)
+
+    with resolving_once({}):
+        for _translation in range(2):
+            with resolving_once(keep_retryable=True):
+                for _call in range(2):
+                    with pytest.raises(DefinitionNotResolvedError):
+                        await resolve_definition(surface, spec_id=SPEC_KENYA, identity={})
+
+    assert surface.calls == 2
 
 
 async def test_concurrent_identical_resolves_in_one_invocation_wait_on_the_first() -> None:

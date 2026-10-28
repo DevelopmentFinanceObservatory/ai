@@ -3,8 +3,11 @@
 `admit` runs the whole chain a `propose_plan` call runs, in order: the lists
 it states (`_Patch`), which plan it means (`_resolve_intent`) and that plan
 as the model wrote it (`planner.plan.authored`), the pins it
-moves back from their windowed copies (`_unwindowed_pins`), a referral the
-user has not answered (`_referral_unanswered`), the inputs of each
+moves back from their windowed copies (`_unwindowed_pins`), the rules that
+read no pin and so refuse before any Search read (`across_years` the planner
+may not name, a referral the user has not answered, and drafts and
+requirements that do not name each other once each: `_across_years_unread`,
+`_referral_unanswered`, `_draft_unreferenced`), the inputs of each
 calculation put on one measure basis and provider scope (`_aligned_bases`), the decisions it
 settles (`planner.plan.settle_decisions`), the measure decisions and then the
 scope decisions written on the model's behalf (`_measure_decisions`,
@@ -45,7 +48,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import chain
-from typing import Annotated, Any, NamedTuple, Protocol, cast
+from typing import Annotated, Any, NamedTuple, Protocol, cast, get_args
 
 from compiler.evidence import named_refs, open_axes_for
 from compiler.sources import (
@@ -56,6 +59,7 @@ from compiler.sources import (
     slot_codes,
     source_from_spec_block,
 )
+from data_mcp.scope import ScopeAxis
 from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.plan_display import concept_name, sector_words
@@ -97,6 +101,7 @@ from planner.plan import (
     DecisionDraft,
     DecisionFixes,
     DecisionScope,
+    DecisionsUncitedError,
     Decline,
     Entity,
     EvidenceRequirement,
@@ -121,6 +126,7 @@ from planner.plan import (
     amendment_entry,
     authored,
     bound_fixes,
+    check_references,
     check_wholes_span_their_totals,
     cut_user_text,
     dataset_roots,
@@ -459,8 +465,33 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     user_settled = _user_settled_measures(measures, view, pins)
     evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
+    # The refusals that hold whatever the requirements pin come before the
+    # Search reads alignment asks for, so a plan they refuse costs none, and
+    # everything after alignment reads the pins the reads settle. Alignment
+    # moves only the pins of dataset inputs. Steps keep the years they
+    # combine, and every requirement its id and inputs. A pending referral
+    # also outranks an overridden user decision, since answering it may
+    # change the patch.
+    written = _requirements_after(previous, evidence_requirements, removed_evidence_requirements)
+    blocked = (
+        _across_years_unread(
+            patch.across_years,
+            requirements=written,
+            previous=previous,
+            reads_user_words=reads_user_words,
+        )
+        or _referral_unanswered(existing, referral, view)
+        or _draft_unreferenced(
+            patch,
+            written if previous is not None else evidence_requirements,
+            previous=previous,
+            proposer=proposer,
+        )
+    )
+    if blocked is not None:
+        return blocked
     realigned = _aligned_bases(
-        _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
+        written,
         evidence_requirements,
         shown=pins,
         aligned=aligned_pins(view.state),
@@ -468,16 +499,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         view=view,
         proposer=proposer,
     )
-    # A refusal asking for a Search read waits until the plan's own rules are
-    # checked on the requirements as written, so a plan they refuse costs no
-    # read (`_reads_wanted`).
-    reads: dict[str, object] | None = None
     if isinstance(realigned, dict):
-        if not _reads_wanted(realigned):
-            return realigned
-        reads = realigned
-    else:
-        evidence_requirements = realigned
+        return realigned
+    evidence_requirements = realigned
     # Every requirement once aligned; the decisions below change citations alone.
     aligned_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
@@ -545,17 +569,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             user_spoke=user_spoke,
         ),
     ]
-    # A pending referral outranks an overridden user decision: answering it
-    # may change the patch.
     blocked = (
-        _across_years_unread(
-            patch.across_years,
-            requirements=requirements_after,
-            previous=previous,
-            reads_user_words=reads_user_words,
-        )
-        or _referral_unanswered(existing, referral, view)
-        or (
+        (
             None
             if user_spoke
             else _user_decision_refused(
@@ -572,7 +587,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
     )
     if blocked is not None:
-        return reads or blocked
+        return blocked
     try:
         if previous is not None:
             plan = previous.amend(
@@ -625,10 +640,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
         # `Plan` validation compares the sides of a share by name; the
         # pins resolve them to graph refs, so an alias divides by itself too.
-        # The refs follow the pins, so a plan whose reads are still to make
-        # is checked once they are made.
-        if reads is None:
-            check_wholes_span_their_totals(stated, refs=_entity_refs(view))
+        check_wholes_span_their_totals(stated, refs=_entity_refs(view))
         split = split_of(stated)
         # The recorded plan carries the copies, and `Plan` validation checks
         # they are the split of `stated` before `_window_pins` gives each pin
@@ -644,8 +656,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             if split.copies
             else stated
         )
-        if reads is not None:
-            return reads
         plan, copies = _window_pins(materialized, shown=pins, definition_lookup=definition_lookup)
     except (ValidationError, ValueError) as exc:
         # The plan-level rules: unique slots and ids, every citation naming
@@ -653,14 +663,11 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # each field, a non-blank question, and the size limit on the whole. A removal naming an item
         # the plan does not state is a `ValueError` from `Plan.amend` itself,
         # and a first draft or restart with no `question`/`answer_mode` is
-        # one raised above. A first year the plan's pins do not state yet
-        # waits for the reads that move them.
-        unknown = _first_year_unknown_cause(exc)
-        if reads is not None and unknown is not None:
-            return reads
+        # one raised above.
         cause = _unsupported_cause(exc)
         if cause is not None:
             view.record_unsupported(cause.operation)
+        unknown = _first_year_unknown_cause(exc)
         if unknown is not None:
             exc = _first_year_refusal(
                 unknown, shown=pins, read=read, definition_lookup=definition_lookup
@@ -699,19 +706,78 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
 
 
-def _reads_wanted(refusal: Mapping[str, object]) -> bool:
-    """Whether `refusal`, from `_aligned_bases`, asks for a Search read the plan waits on.
+def _draft_unreferenced(
+    patch: _Patch,
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    previous: Plan | None,
+    proposer: Proposer,
+) -> dict[str, object] | None:
+    """The `INVALID_PLAN` refusal of the parts of `patch` that do not name each other once each, or `None`.
 
-    A search for an input pinned to no dataset (`BASIS_UNKNOWN`) or a compile
-    of an input on its calculation's options (`BASES_UNALIGNED`), which
-    `planner.agent.with_source_reads` makes before proposing again. `admit`
-    returns such a refusal only once the plan passes the rules that hold
-    whatever the requirements pin. A plan those rules refuse is refused for
-    them first, and its reads are never made. The checks that read the pins
-    (graph refs, windows, first years, referrals, scope rows) run after the
-    reads.
+    `admit` asks it before any Search read the plan waits on, so it reads no
+    pin (`planner.plan.check_references`). `requirements` are those the plan
+    states as the model wrote them: the patch's own on a first draft, every
+    requirement once the patch lands on an amendment (`previous`), where
+    `Plan.amend` keeps one item per slot, id and decline key, so only a first
+    draft can repeat one.
+
+    Code adds and drops decisions and citations once the pins are known, so
+    only what it cannot change is checked. The decisions every citation must
+    name are the drafts, those `previous` carries, and any of a slot code
+    writes (`_slot_code_writes`), cited or not. Code drops a citation only of
+    one of those. The decisions a requirement must cite are the drafts, less
+    any code may cite or drop: one under a slot code writes, which code may
+    cite or replace by its own, a cited one fixing the measure, which may
+    give way to a compiled whole's (`_without_replaced_whole_decisions`), and
+    one an amendment removes (`Plan.amend`). A carried decision left uncited
+    is swept or kept for the user (`_uncited_carried_decisions`,
+    `_user_decision_refused`). So `Plan` validation refuses whatever this
+    refuses.
     """
-    return bool(unpinned_wanted(refusal) or realignments_wanted(refusal))
+    cited = {slot for requirement in requirements for slot in requirement.decision_ids}
+    amends = previous is not None
+    removed = set(patch.removed_decisions) if amends else set()
+    drafted = [draft.slot for draft in patch.decisions]
+    slots = [
+        draft.slot
+        for draft in patch.decisions
+        if not _slot_code_writes(draft.slot)
+        and not ("measure" in (draft.fixes or ()) and draft.slot in cited)
+        and draft.slot not in removed
+    ]
+    made = {
+        *drafted,
+        *(decision.slot for decision in (previous.decisions if previous is not None else ())),
+        *(slot for slot in cited if _slot_code_writes(slot)),
+    }
+    try:
+        check_references(
+            requirements,
+            slots=list(dict.fromkeys(slots)) if amends else slots,
+            declines=() if amends else [decline.key for decline in patch.declined],
+            made=made,
+        )
+    except ValueError as exc:
+        return _invalid_data(exc, proposer)
+    return None
+
+
+def _slot_code_writes(slot: str) -> bool:
+    """Whether `slot` has the form of a decision `propose_plan` writes itself.
+
+    Those are a pin's measure and scope decisions (`search_pin_slot`,
+    `scope_choice_slot`), and the decisions a compiled whole or a provider
+    difference states (`_whole_slot`, `_provider_difference_slot`).
+    """
+    return slot.startswith(
+        (
+            search_pin_slot(""),
+            *(scope_choice_slot("", axis) for axis in get_args(ScopeAxis)),
+            _whole_slot(""),
+            _provider_difference_slot(""),
+        )
+    )
 
 
 class _Patch(BaseModel):
@@ -800,7 +866,8 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
     An ask left unaccounted for (`AsksUnaccountedError`) answers
     `_asks_unaccounted`, and a party an answer drops (`AskRoleDroppedError`)
     answers `_ask_role_dropped`, and a share dividing a member by itself
-    (`WholeIsItsMemberError`) answers `_whole_is_its_member`. A rolling period a rule refused
+    (`WholeIsItsMemberError`) answers `_whole_is_its_member`, and decisions no
+    requirement cites (`DecisionsUncitedError`) answer `_decisions_uncited`. A rolling period a rule refused
     (`RollingPlanError`) answers `_rolling_refused`, which names the rule.
 
     `exc.errors()` carries a `loc` tuple and, for a `model_validator` failure,
@@ -840,6 +907,8 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
 
 def _rule_refused(raised: object, proposer: Proposer) -> dict[str, object] | None:
     """The typed problem for `raised` when it is an error a plan rule raised, else `None`."""
+    if isinstance(raised, DecisionsUncitedError):
+        return _decisions_uncited(raised)
     if isinstance(raised, AsksUnaccountedError):
         return _asks_unaccounted(raised, proposer)
     if isinstance(raised, AskRoleDroppedError):
@@ -849,6 +918,19 @@ def _rule_refused(raised: object, proposer: Proposer) -> dict[str, object] | Non
     if isinstance(raised, RollingPlanError):
         return _rolling_refused(raised)
     return None
+
+
+def _decisions_uncited(exc: DecisionsUncitedError) -> dict[str, object]:
+    """Return the `INVALID_PLAN` problem for decisions no requirement cites.
+
+    `detail.uncited` names their slots.
+    """
+    return problem(
+        ProblemCode.INVALID_PLAN,
+        f"Invalid plan data: {exc}. Cite each on the requirements it fixes, or drop it.",
+        outcome=Outcome.INVALID_INPUT,
+        detail={"uncited": list(exc.slots)},
+    )
 
 
 def _rolling_refused(exc: RollingPlanError) -> dict[str, object]:

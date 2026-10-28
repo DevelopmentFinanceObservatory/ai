@@ -65,7 +65,6 @@ from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTIO
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
 from harness.scope_choices import (
-    PartScope,
     ScopeChoice,
     mark_planner_axes,
     option_axis,
@@ -103,6 +102,7 @@ from translator.discovery import (
     SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
+    answered_once,
     call_within_entry,
     load_log,
     refusal_retryable,
@@ -155,7 +155,6 @@ from planner.records import (
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
 from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
-from planner.workflow import ResolvedGroup
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
@@ -1578,15 +1577,33 @@ async def compile_whole(
     source = pin_sources(state).get(part_pin)
     block = source.spec_block(part_pin) if source is not None else None
     scope = part_scope(part_pin, block)
-    request = (
-        whole_request(scope, axis, groups=block_groups(block))
-        if block is not None and scope is not None
-        else None
-    )
-    if source is None or block is None or scope is None or request is None:
+    slot = axis_slot(scope, axis) if scope is not None else None
+    if source is None or block is None or scope is None or slot is None:
         return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
+    identity = copy.deepcopy(scope.base.identity)
+    for held in identity.get("slots") or ():
+        if held.get("property") == slot:
+            held["binding"] = {"state": "unbound"}
+    concepts = {entry.axis: entry.concept for entry in scope.entries}
+    entries = [
+        ScopeEntry(
+            axis=choice.axis,
+            option_id=choice.active,
+            provenance="explicit",
+            concept=concepts.get(choice.axis),
+            origin=ChoiceOrigin(choice_id=choice.id),
+        )
+        for choice in scope.choices
+        if choice.axis != axis
+    ]
     try:
-        part = await request.resolve(surface)
+        part = await resolve_definition(
+            surface,
+            spec_id=spec_id_for(canonicalize(identity)),
+            identity=identity,
+            groups=block_groups(block),
+            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
+        )
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
             return _refusing(_basis_uncompiled(realignment, str(exc)))
@@ -1615,74 +1632,6 @@ async def compile_whole(
         )
 
     return hold
-
-
-@dataclass(frozen=True)
-class WholeRequest:
-    """The resubmit a declared whole is compiled with (`whole_request`)."""
-
-    spec_id: str
-    identity: dict[str, Any]
-    groups: tuple[ResolvedGroup, ...]
-    entries: tuple[ScopeEntry, ...]
-
-    async def resolve(self, surface: ToolSurface) -> Mapping[str, Any]:
-        """Search's part for this whole, through data-mcp's `resolve_definition`.
-
-        Raises:
-            DefinitionNotResolvedError: As `translator.discovery.resolve_definition` raises it.
-        """
-        return await resolve_definition(
-            surface,
-            spec_id=self.spec_id,
-            identity=self.identity,
-            groups=self.groups,
-            scope_entries=[
-                entry.model_dump(mode="json", exclude_none=True) for entry in self.entries
-            ],
-        )
-
-
-def whole_request(
-    scope: PartScope, axis: str, *, groups: Iterable[ResolvedGroup]
-) -> WholeRequest | None:
-    """The resubmit compiling the whole of the part `scope` describes over every option on `axis`.
-
-    The part's base identity with the slot its choice on `axis` binds
-    (`submission.service.axis_slot`) set unbound, under the spec_id that
-    identity hashes to, with `groups`, the part's entity groups, and one
-    explicit entry from each of its other choices holding its active option,
-    with the concept of the part's entry on that axis (`compile_whole`).
-    `None` when the part offers no choice on `axis` binding one slot.
-
-    A plan card switch builds the same request for the part it is about to
-    compile (`harness.graph.switch`), so the whole the revision then compiles
-    is the call the switch already made.
-    """
-    slot = axis_slot(scope, axis)
-    if slot is None:
-        return None
-    identity = copy.deepcopy(scope.base.identity)
-    for held in identity.get("slots") or ():
-        if held.get("property") == slot:
-            held["binding"] = {"state": "unbound"}
-    concepts = {entry.axis: entry.concept for entry in scope.entries}
-    return WholeRequest(
-        spec_id=spec_id_for(canonicalize(identity)),
-        identity=identity,
-        groups=tuple(groups),
-        entries=tuple(
-            ScopeEntry(
-                axis=choice.axis,
-                option_id=choice.active,
-                provenance="explicit",
-                concept=concepts.get(choice.axis),
-                origin=ChoiceOrigin(choice_id=choice.id),
-            )
-            for choice in scope.choices
-            if choice.axis != axis
-        ),
-    )
 
 
 async def run_together[T](calls: Iterable[Awaitable[T]]) -> list[T]:
@@ -1731,7 +1680,10 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     `refused` for a refusal, and the next proposal is refused
     (`submission.service._aligned_bases`). The search takes the time the
     translator's own discovery gives one
-    (`translator.discovery.call_within_entry`).
+    (`translator.discovery.call_within_entry`), and is made once an
+    invocation (`translator.discovery.answered_once`), so a read the
+    proposal's other refused search discarded (`with_source_reads`) is not
+    repeated.
 
     The holds are made when the read returned is applied (`SourceRead`). It
     answers `None` once the search is held, or `SURFACE_UNAVAILABLE` when
@@ -1739,8 +1691,13 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     (`translator.discovery.refusal_retryable`); nothing is held then, so the
     next proposal searches again.
     """
+    arguments = {"parts": [unpinned.part]}
     try:
-        answer = await call_within_entry(surface, tool=SEARCH, arguments={"parts": [unpinned.part]})
+        answer = await answered_once(
+            SEARCH,
+            arguments,
+            lambda: call_within_entry(surface, tool=SEARCH, arguments=arguments),
+        )
     except ToolSurfaceUnavailableError as exc:
         return _refusing(_search_unavailable(unpinned, str(exc)))
     if answer.is_error and refusal_retryable(answer):
@@ -1841,7 +1798,9 @@ async def with_source_reads(
     proposal waits for its slowest read. Their writes are made in the order
     the refusal names them, up to the first read refused, whose refusal is
     answered (`_held_in_order`), so the state is the one reading them one
-    after another leaves.
+    after another leaves. A search the refused read's writes discarded keeps
+    its answer for the invocation (`pin_by_search`), so the next proposal
+    searches only for what was refused.
     """
     while True:
         result = propose()

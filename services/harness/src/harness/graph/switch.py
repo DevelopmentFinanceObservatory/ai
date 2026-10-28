@@ -7,12 +7,16 @@ and that source's stored scope (`harness.turn_records.SearchReading.scope`).
 It posts the scope's base identity with its entries and the switch
 (`harness.scope_choices.switch_entries`) through data-mcp's
 `resolve_definition` (`translator.discovery.resolve_definition`), which
-registers the identity they compile to. Each whole the plan declares on a
-switched part is posted at the same time, built from the scope the switch
-posts (`_wholes_ahead`), and the turn keeps Search's answers
-(`translator.discovery.resolving_once`), so the revision's compile of that
-whole is served the answer and a switch repeating one the turn made posts
-nothing. The
+registers the identity they compile to. That answer is the switched pin.
+The plan pins it, and its reading and pin source state the dataset over
+the years the question asked for. Where the plan reads the pin over one
+window of its own, the same scope over that window is posted beside it
+(`_windowed_post`), the dataset admission copies the pin to
+(`submission.service._window_pins`), and Search's answer is held as the
+copy's (`translator.discovery.hold_resolved`), so translating the revised
+plan does not post the copy again. The turn keeps Search's answers
+(`translator.discovery.resolving_once`), so a switch repeating one the
+turn made posts nothing. The
 plan is then revised by the planner seam with no model call
 (`harness.graph.seams.PlannerModel.revise`): each requirement pinning a
 switched source pins the compiled one, the decisions follow their pins,
@@ -62,21 +66,25 @@ from compiler.sources import block_groups
 from compiler.surface import ToolSurface
 from data_mcp.definition_writes import windowed_identity
 from google.adk import Context, Event
-from planner.agent import WholeRequest, run_together, whole_request
+from planner.agent import run_together
 from planner.plan import (
     DatasetRequirement,
     Decision,
     PinSource,
     SessionState,
+    WindowedPin,
     authored,
+    definitions_on_record,
     earlier_block,
     exact_codes,
+    identity_on_record,
     is_scope_choice,
     pin_sources,
     plan_revision,
     repinned,
     save_pin_sources,
     split_of,
+    windowed_pin,
     windowed_pins,
 )
 from planner.plan import Plan as PlannerPlan
@@ -84,7 +92,14 @@ from planner.tool_results import ProblemCode
 from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
 from submission.service import requirement_window
-from translator.discovery import DefinitionNotResolvedError, resolve_definition, resolving_once
+from translator.discovery import (
+    RESOLVED_STATE_PREFIX,
+    DefinitionNotResolvedError,
+    hold_resolved,
+    load_log,
+    resolve_definition,
+    resolving_once,
+)
 
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
@@ -128,7 +143,9 @@ _RETRYABLE_REVISION_CODES = frozenset(
 )
 
 # The state the planner seam and the translator keep while drafting, which a
-# revision that fails leaves as it found.
+# revision that fails leaves as it found. The parts Search answered this turn
+# (`RESOLVED_STATE_PREFIX`) are not drafting state. Each holds whatever the
+# switch's outcome, so a failed switch keeps them.
 _DRAFTING_PREFIXES = ("planner:", "translator:")
 # The other state a revision writes, which a switch that fails or is stopped
 # puts back too: the plan, and the readings `store_search` stores for the
@@ -344,15 +361,11 @@ async def _switched_plan(
             pin,
             reading,
             scope,
-            _posted_scope(scope, choice=choice, option_id=option_id, window=windows.get(pin)),
+            _posted_scope(scope, choice=choice, option_id=option_id),
             _groups(reading, specs.get(pin) or _source_block(sources.get(pin), pin)),
         )
         for pin, reading, scope, choice in targets
     ]
-    # Each whole declared on a switched part is compiled beside the part, from
-    # the scope the switch posts, so the revision finds it answered
-    # (`translator.discovery.resolving_once`) where Search keeps that scope.
-    wholes = _wholes_ahead(plan, posts, to_origin=to_origin)
     answered = await run_together(
         [
             *(
@@ -367,10 +380,14 @@ async def _switched_plan(
                 )
                 for pin, reading, scope, posted, groups in posts
             ),
-            *(_compile_ahead(surface, whole) for whole in wholes),
+            *(
+                _windowed_post(surface, posted, window=windows.get(pin), groups=groups)
+                for pin, _, _, posted, groups in posts
+            ),
         ]
     )
     switched = cast(list[_Switched], answered[: len(posts)])
+    windowed = cast(list[Mapping[str, Any] | None], answered[len(posts) :])
     moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
     save_pin_sources(
@@ -383,6 +400,12 @@ async def _switched_plan(
             },
         },
     )
+    shown = pin_sources(state)
+    on_record = {
+        item.spec_id: recorded
+        for item in switched
+        if (recorded := identity_on_record(item.spec_id, shown=shown, end_open=True)) is not None
+    }
     codes = {
         item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
     }
@@ -393,12 +416,22 @@ async def _switched_plan(
         and (origin := to_origin.get(requirement.source_spec_id or "", requirement.source_spec_id))
         in moved_to
     ]
-    revised = await planner.revise(
-        ctx=ctx,
-        prior_plan=plan.model_dump(mode="json"),
-        evidence_requirements=requirements,
-        inherits={new: old for old, new in moved_to.items()},
-    )
+    # Admission and the translation find each switched dataset on record, so
+    # admission copies it over the plan's years and the translation is served
+    # Search's answer for that copy.
+    with definitions_on_record(on_record):
+        for copy, part in _answered_copies(
+            state, switched, windowed, windows=[windows.get(pin) for pin, *_ in posts]
+        ):
+            hold_resolved(
+                state, spec_id=copy.spec_id, identity=copy.identity, groups=copy.groups, part=part
+            )
+        revised = await planner.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=requirements,
+            inherits={new: old for old, new in moved_to.items()},
+        )
     if "plan" not in revised:
         refused = revised.get("refused") or {}
         logger.warning("plan switch not revised: %s", refused)
@@ -536,29 +569,12 @@ def _groups(reading: SearchReading, block: Mapping[str, Any] | None) -> tuple[Re
     return tuple(reading.entity_groups or (block_groups(block) if block is not None else ()))
 
 
-def _posted_scope(
-    scope: PartScope,
-    *,
-    choice: ScopeChoice,
-    option_id: str,
-    window: Mapping[str, Any] | None = None,
-) -> PartScope:
-    """The scope a switch of `choice` to `option_id` asks Search for.
-
-    `scope` with the switch's entries (`switch_entries`) and `option_id`
-    active on the choice's axis. Its base identity is over `window`
-    (`data_mcp.definition_writes.windowed_identity`) when one is given and
-    differs from the base's own, so Search answers the definition the plan
-    retrieves and admission makes no windowed copy of it
-    (`submission.service._window_pins`).
-    """
-    base = scope.base
-    if window is not None and base.identity.get("requested_window") != window:
-        spec_id, identity = windowed_identity(base.identity, window)
-        base = base.model_copy(update={"spec_id": spec_id, "identity": dict(identity)})
+def _posted_scope(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> PartScope:
+    """The scope a switch of `choice` to `option_id` asks Search for: `scope`
+    with the switch's entries (`switch_entries`) and `option_id` active on the
+    choice's axis."""
     return scope.model_copy(
         update={
-            "base": base,
             "entries": tuple(switch_entries(scope, choice=choice, option_id=option_id)),
             "choices": tuple(
                 held.model_copy(update={"active": option_id}) if held.axis == choice.axis else held
@@ -589,47 +605,74 @@ def _windows(plan: PlannerPlan, *, to_origin: Mapping[str, str]) -> dict[str, di
     return {pin: windows[0] for pin, windows in read.items() if len(windows) == 1}
 
 
-def _wholes_ahead(
-    plan: PlannerPlan,
-    posts: Sequence[tuple[str, SearchReading, PartScope, PartScope, tuple[ResolvedGroup, ...]]],
+async def _windowed_post(
+    surface: ToolSurface,
+    posted: PartScope,
     *,
-    to_origin: Mapping[str, str],
-) -> list[WholeRequest]:
-    """The compile of each whole `plan` declares on a part the switch posts (`posts`).
+    window: Mapping[str, Any] | None,
+    groups: Sequence[ResolvedGroup],
+) -> Mapping[str, Any] | None:
+    """Search's part for `posted` with its base identity over `window`
+    (`data_mcp.definition_writes.windowed_identity`), posted beside `posted`.
 
-    The request `planner.agent.compile_whole` makes once the revision pins
-    the part to Search's answer (`whole_request`), built from the scope the
-    switch posts for it with the same groups. Where Search's answer keeps
-    that scope, as it does for a provider or basis switch, the revision's
-    compile is this call.
+    `None`, and nothing posted, when no window is given or the base is over it
+    already. The post is optional, since admission copies the pin over the
+    window whatever it answered (`_answered_copies`), so any failure is logged
+    and answers `None`, and none cancels the switch's own posts (`run_together`).
     """
-    posted = {pin: (scope, groups) for pin, _, _, scope, groups in posts}
-    written = authored(plan)
-    parts = {
-        requirement.id: to_origin.get(requirement.source_spec_id, requirement.source_spec_id)
-        for requirement in written.evidence_requirements
-        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
-    }
-    wholes: list[WholeRequest] = []
-    for requirement in written.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is None:
-            continue
-        held = posted.get(parts.get(requirement.whole_of.part) or "")
-        if held is None:
-            continue
-        request = whole_request(held[0], requirement.whole_of.axis, groups=held[1])
-        if request is not None and request not in wholes:
-            wholes.append(request)
-    return wholes
-
-
-async def _compile_ahead(surface: ToolSurface, whole: WholeRequest) -> None:
-    """Post `whole` (`_wholes_ahead`). Its answer is the turn's, for the
-    revision to be served. A failure is the revision's to meet, so it is logged here."""
+    base = posted.base
+    if window is None or base.identity.get("requested_window") == window:
+        return None
+    spec_id, identity = windowed_identity(base.identity, window)
     try:
-        await whole.resolve(surface)
+        return await resolve_definition(
+            surface,
+            spec_id=spec_id,
+            identity=identity,
+            groups=groups,
+            scope_entries=[
+                entry.model_dump(mode="json", exclude_none=True) for entry in posted.entries
+            ],
+        )
     except DefinitionNotResolvedError as exc:
-        logger.info("whole compiled ahead of a switch not answered: %s: %s", exc.code, exc)
+        logger.info("plan switch over the plan's window not answered: %s: %s", exc.code, exc)
+    except Exception:
+        logger.warning("plan switch over the plan's window failed", exc_info=True)
+    return None
+
+
+def _answered_copies(
+    state: SessionState,
+    switched: Sequence[_Switched],
+    windowed: Sequence[Mapping[str, Any] | None],
+    *,
+    windows: Sequence[Mapping[str, Any] | None],
+) -> list[tuple[WindowedPin, Mapping[str, Any]]]:
+    """Each copy admission makes of a switched pin (`submission.service._window_pins`)
+    that Search already answered, with that answer.
+
+    The copy is the pin's identity on record over its window
+    (`planner.plan.windowed_pin`), looked up as admission looks up a closed
+    requirement's pin, so a copy made here is one admission makes. Search's
+    answer for the scope posted over the window (`_windowed_post`) is the
+    copy's when it names the copy's spec_id, which hashes the identity.
+    """
+    shown = pin_sources(state)
+    log = load_log(state)
+    copies: list[tuple[WindowedPin, Mapping[str, Any]]] = []
+    for item, part, window in zip(switched, windowed, windows, strict=True):
+        if part is None or window is None:
+            continue
+        recorded = identity_on_record(
+            item.spec_id, shown=shown, end_open=False, definition_lookup=log.recorded_definition
+        )
+        if recorded is None:
+            continue
+        copy = windowed_pin(item.spec_id, recorded, window)
+        spec = part.get("spec") if part.get("status") == "definite" else None
+        if isinstance(spec, Mapping) and spec.get("spec_id") == copy.spec_id:
+            copies.append((copy, part))
+    return copies
 
 
 async def _resubmit(
@@ -744,9 +787,10 @@ def _pin_source(
 
 def _restorable_state(ctx: Context) -> dict[str, Any]:
     """A copy of the state a switch that fails, is stopped or raises puts back:
-    the drafting state (`_DRAFTING_PREFIXES`) and `_RESTORED_KEYS`."""
+    the drafting state (`_DRAFTING_PREFIXES`, less `RESOLVED_STATE_PREFIX`) and
+    `_RESTORED_KEYS`."""
     state = ctx.state.to_dict()
-    kept = {key: value for key, value in state.items() if key.startswith(_DRAFTING_PREFIXES)}
+    kept = {key: value for key, value in state.items() if _drafting(key)}
     kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}
     return json.loads(json.dumps(kept))
 
@@ -754,10 +798,15 @@ def _restorable_state(ctx: Context) -> dict[str, Any]:
 def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
     """Put the state back as `before` holds it, clearing any drafting key written since."""
     for key in ctx.state.to_dict():
-        if key.startswith(_DRAFTING_PREFIXES) and key not in before:
+        if _drafting(key) and key not in before:
             ctx.state[key] = None
     for key, value in before.items():
         ctx.state[key] = value
+
+
+def _drafting(key: str) -> bool:
+    """Whether `key` is drafting state a failed switch puts back (`_DRAFTING_PREFIXES`)."""
+    return key.startswith(_DRAFTING_PREFIXES) and not key.startswith(RESOLVED_STATE_PREFIX)
 
 
 async def apply_stored_choice(

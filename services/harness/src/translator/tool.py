@@ -47,21 +47,13 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from contextvars import ContextVar
-from dataclasses import dataclass
 from enum import StrEnum
 from typing import assert_never, cast
 
 from common.telemetry import record_event
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult, compile_plan
 from compiler.rolling import anchor_groups
-from compiler.surface import (
-    ProgressCallback,
-    ToolCallResult,
-    ToolSchema,
-    ToolSurface,
-    ToolSurfaceUnavailableError,
-)
+from compiler.surface import ToolSchema, ToolSurface, ToolSurfaceUnavailableError
 from executor.outcomes import (
     AnchorResult,
     MethodChoiceNeeded,
@@ -102,7 +94,7 @@ from planner.records import (
 )
 from planner.shapes import pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
-from planner.workflow import SelectedSource, ToolId, Workflow
+from planner.workflow import SelectedSource, Workflow
 from pydantic import JsonValue, ValidationError
 
 from translator.discovery import (
@@ -995,7 +987,9 @@ def build_translator_core(
         return moved_plan, moved_translation, recompiled
 
     async def propose_operations(
-        translation: Translation, tool_context: ToolContext
+        translation: Translation,
+        tool_context: ToolContext,
+        schemas: Sequence[ToolSchema] | None = None,
     ) -> dict[str, object]:
         """Compile `translation` against the recorded draft, the sources discovery
         recorded and the live tool surface, and record it on the plan if it
@@ -1007,14 +1001,17 @@ def build_translator_core(
         known, the action that moves past it; the plan is then left
         untouched, and a decline the closing issue earns
         (`_earned_decline`) is recorded as optional, for the rest of the
-        planner entry."""
+        planner entry. `schemas` are the surface's tools as the caller
+        listed them (`translator.mechanical._propose_until_settled`), or,
+        when `None`, as this call lists them."""
         plan = _translatable_draft(tool_context)
         if isinstance(plan, dict):
             return plan
-        try:
-            schemas = await surface.list_tools()
-        except ToolSurfaceUnavailableError as exc:
-            return problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED)
+        if schemas is None:
+            try:
+                schemas = await surface.list_tools()
+            except ToolSurfaceUnavailableError as exc:
+                return problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED)
 
         requirement_keys, pinned, across = dataset_keys(plan)
 
@@ -1266,6 +1263,7 @@ def build_translator_core(
         discover_source=discover_source_tool.func,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
+        list_tools=surface.list_tools,
     )
 
 
@@ -1382,46 +1380,6 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
     return mapped
 
 
-@dataclass
-class _Listing:
-    """The surface one translation listed, `None` until it lists it."""
-
-    schemas: list[ToolSchema] | None = None
-
-
-# The listing of the translation the current call runs in; unset outside one.
-_current_listing: ContextVar[_Listing | None] = ContextVar("translation_listing", default=None)
-
-
-class _ListedOnce:
-    """`surface`, listed at most once inside one translation (`_current_listing`).
-    The first list that succeeds answers every later one, so every proposal
-    round compiles against the one surface. Outside a translation each list
-    reads the surface. The run lists it again for itself."""
-
-    def __init__(self, surface: ToolSurface) -> None:
-        self._surface = surface
-
-    async def list_tools(self) -> list[ToolSchema]:
-        listing = _current_listing.get()
-        if listing is None:
-            return await self._surface.list_tools()
-        if listing.schemas is None:
-            listing.schemas = await self._surface.list_tools()
-        return list(listing.schemas)
-
-    async def call_tool(
-        self,
-        *,
-        tool: ToolId,
-        arguments: Mapping[str, object],
-        on_progress: ProgressCallback | None = None,
-    ) -> ToolCallResult:
-        return await self._surface.call_tool(
-            tool=tool, arguments=arguments, on_progress=on_progress
-        )
-
-
 def build_translate(
     *,
     surface: ToolSurface,
@@ -1437,7 +1395,7 @@ def build_translate(
     `describe_nodes` are as `build_translator_core` takes them.
     """
     core = build_translator_core(
-        surface=_ListedOnce(surface),
+        surface=surface,
         resolve_entities=resolve_entities,
         anchor_read=anchor_read,
         describe_nodes=describe_nodes,
@@ -1451,7 +1409,9 @@ def build_translate(
         (`translator.discovery.name_pinned_groups`). Each identity is
         resolved at most once in the turn
         (`translator.discovery.resolving_once`), so a switch or an amendment
-        that leaves a pin as it was asks Search nothing for it.
+        that leaves a pin as it was asks Search nothing for it. A Search
+        outage one identity meets is kept for the rest of the translation, so
+        the group rewrite and discovery ask for it once.
 
         Returns:
             `{"outcome": "ok"}` once the plan compiled, with `restated` when
@@ -1462,15 +1422,12 @@ def build_translate(
             `across` dropped. Each names a requirement by the id the model
             wrote (`authored_answer`).
 
-        The surface is listed once for the whole translation (`_ListedOnce`).
+        A translation that reaches a compile lists the surface once, however
+        many rounds it proposes (`translator.mechanical._propose_until_settled`).
         """
-        token = _current_listing.set(_Listing())
-        try:
-            with resolving_once(tool_context.state):
-                named = await name_pinned_groups(tool_context, surface=surface)
-                answer = _planner_answer(await run_translate(tool_context, core=core))
-        finally:
-            _current_listing.reset(token)
+        with resolving_once(tool_context.state, keep_retryable=True):
+            named = await name_pinned_groups(tool_context, surface=surface)
+            answer = _planner_answer(await run_translate(tool_context, core=core))
         if answer.get("outcome") == Outcome.UNSUPPORTED.value:
             # Every kind `OUTCOME_OF` maps to `unsupported` is an
             # `UnsupportedOperation`, so the plan has to decline it.

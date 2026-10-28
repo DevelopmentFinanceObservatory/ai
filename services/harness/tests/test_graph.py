@@ -19,7 +19,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, cast, override
+from typing import Any, ClassVar, NamedTuple, cast, override
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -131,6 +131,7 @@ from planner.plan import (
     open_window,
     plan_revision,
     repinned,
+    windowed_pins,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -150,7 +151,7 @@ from submission.service import (
     save_aligned_pin,
     scope_choice_decisions,
 )
-from translator.discovery import PartFault, PartNotResolvedError
+from translator.discovery import RESOLVED_STATE_PREFIX, PartFault, PartNotResolvedError
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import (
@@ -3168,16 +3169,18 @@ _PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
 
 
 def _posted(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The spec_id and identity a plan card switch of `scope` posts, which are its
-    base identity over the window the plan reads (`_PLAN_WINDOW`) in place of the
-    whole span its search answered."""
+    """The spec_id and identity a plan card switch of `scope` posts beside the
+    part, which are its base identity over the window the plan reads
+    (`_PLAN_WINDOW`) in place of the whole span its search answered."""
     spec_id, identity = windowed_identity(scope["base"]["identity"], _PLAN_WINDOW)
     return spec_id, dict(identity)
 
 
-def _posted_id(scope: dict[str, Any]) -> str:
-    """The spec_id a plan card switch of `scope` posts (`_posted`)."""
-    return _posted(scope)[0]
+def _switch_posts(search: SearchStub, scope: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """The entries a plan card switch of `scope` posted: the part's, over the years
+    its search answered, then the same scope over the years the plan reads (`_posted`)."""
+    entries = [entry for body in search.posted for entry in body["input"]["entries"]]
+    return tuple(sorted(entries, key=lambda entry: entry["variable_text"] != scope["id"]))
 
 
 def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -3428,16 +3431,19 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
                 ],
             }
         )
-    search = SearchStub(answer={_posted_id(scope): envelope})
+    search = SearchStub(answer={scope["id"]: envelope})
 
     runner, seam, plan, scope, events = await _switch_runner(
         real_schemas, search, {"plan": revised.model_dump(mode="json"), "summary": {}}
     )
 
     assert len(seam.calls) == 1  # the first draft; the switch drafts nothing
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert (entry["variable_text"], entry["identity"]) == _posted(scope)
+    # The part over the years its search answered, and beside it the same scope
+    # over the years the plan reads.
+    entry, over_window = _switch_posts(search, scope)
+    assert (entry["variable_text"], entry["identity"]) == (scope["id"], scope["base"]["identity"])
+    assert (over_window["variable_text"], over_window["identity"]) == _posted(scope)
+    assert over_window["scope_entries"] == entry["scope_entries"]
     assert entry["scope_entries"] == [
         scope["entries"][1],
         {
@@ -3530,7 +3536,7 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
         schemas=real_schemas,
         version=2,
     )
-    search = SearchStub(answer={_posted_id(scope): envelope})
+    search = SearchStub(answer={scope["id"]: envelope})
     part = "spec_" + "4" * 32
     whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
 
@@ -3541,7 +3547,7 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
         earlier_whole=whole,
     )
 
-    assert len(search.posted) == 1
+    assert len(search.posted) == 2  # the part, and the part over the plan's years
     assert len(seam.revisions) == 1
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered
@@ -3557,13 +3563,12 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     and ref, and no total, which Search recomputes."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={_posted_id(scope): envelope})
+    search = SearchStub(answer={scope["id"]: envelope})
     groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
     await _switch_runner(real_schemas, search, entity_groups=groups)
 
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
+    entry, _ = _switch_posts(search, scope)
     assert entry["entity_groups"] == wire_groups(
         block_groups({"resolved": {"entity_groups": groups}})
     )
@@ -3602,7 +3607,7 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
         schemas=real_schemas,
         version=2,
     )
-    search = SearchStub(answer={_posted_id(scope): envelope})
+    search = SearchStub(answer={scope["id"]: envelope})
 
     runner, *_ = await _switch_runner(
         real_schemas,
@@ -3646,13 +3651,14 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     leaves the readings as they were and the planner's drafting state as it
     found it. A revision's refusal gives the reason its own
     (`harness.sentences.refusal_reason`); only one Search could not answer
-    in time can succeed later."""
+    in time can succeed later. The part Search answered stays in the turn's
+    resolve store, which holds whatever the switch's outcome."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = (
         SearchStub(
             refuse={
-                _posted_id(scope): {
+                scope["id"]: {
                     "code": code,
                     "title": "Requested Option Unavailable",
                     "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
@@ -3662,7 +3668,7 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
             }
         )
         if refused_by == "search"
-        else SearchStub(answer={_posted_id(scope): envelope})
+        else SearchStub(answer={scope["id"]: envelope})
     )
 
     why = "Official development assistance would then count different providers' spending."
@@ -3702,6 +3708,10 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     # The fake seam drafted with no pin sources or rounds of its own.
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
+    resolved = [
+        value for key, value in state.items() if key.startswith(RESOLVED_STATE_PREFIX) and value
+    ]
+    assert len(resolved) == (0 if refused_by == "search" else 1)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 
 
@@ -3730,7 +3740,7 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     try:
         runner, seam, plan, scope, events = await _switch_runner(
             real_schemas,
-            SearchStub(answer={_posted_id(scope): envelope}),
+            SearchStub(answer={scope["id"]: envelope}),
             {"plan": revised.model_dump(mode="json"), "summary": {}},
             seam_type=seam_type,
         )
@@ -3793,7 +3803,7 @@ async def test_a_switch_whose_revision_raises_puts_the_state_back_and_raises(
     with pytest.raises(RuntimeError, match="revision broke"):
         await _switch_runner(
             real_schemas,
-            SearchStub(answer={_posted_id(scope): envelope}),
+            SearchStub(answer={scope["id"]: envelope}),
             {"plan": revised.model_dump(mode="json"), "summary": {}},
             seam_type=_RaisingSeam,
         )
@@ -3916,19 +3926,25 @@ class _TranslatingSeam(_Seam):
         return await self._seam.revise(**kwargs)
 
 
-async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
-    real_schemas: list[ToolSchema],
-) -> None:
+class _SwitchedOff(NamedTuple):
+    """A switch off a stated source (`_switch_off_a_stated_source`): the runner, the
+    switch's events, the seam that revised, the pin Search answered and the copy
+    of it over the plan's years."""
+
+    runner: Any
+    events: list[Any]
+    seam: _TranslatingSeam
+    new_pin: str
+    copy_pin: str
+
+
+async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _SwitchedOff:
     """The deployed failure: the planner stated the CRS as the health
     numerator's source, and the user switched it to bilateral plus imputed
-    multilateral, a dataset Search names otherwise. The switch drops the
-    stated source with the pin it left, so the translation takes the new pin
-    with no search, the plan compiles, and its run accepts what the new
-    dataset returns. The switch posts the identity over the years the plan
-    reads, so Search's answer covers exactly them and the translation asks
-    Search nothing; the identity over every year its search answered would
-    come back covering more years, and the translation would search for the
-    dataset again over the plan's."""
+    multilateral, a dataset Search names otherwise and holds from 1995. The
+    switch posts the identity over every year its search answered, which the
+    plan pins, and beside it the same scope over the years the plan reads,
+    Search's answer for the copy admission makes of the pin."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -3937,7 +3953,7 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
         "coverage": {
             "kind": "exact",
             "has_data": True,
-            "window": {"start_year": 2015, "end_year": 2024},
+            "window": {"start_year": 1995, "end_year": 2024},
         },
         "facets": {"provenance": _INCLUSIVE_PROVENANCE},
         "entities": [{"role": "country", "ref": "country/KEN", "label": "Kenya"}],
@@ -3960,9 +3976,14 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     seam = _TranslatingSeam(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
     )
-    every_year = copy.deepcopy(envelope)
-    every_year["parts"][0]["spec"]["resolved"]["coverage"]["window"]["start_year"] = 1995
-    search = SearchStub(answer={_posted_id(scope): envelope, scope["id"]: every_year})
+    identity = block["definition"]["identity"]
+    copy_pin, copied = windowed_identity(identity, _PLAN_WINDOW)
+    over_window = copy.deepcopy(envelope)
+    copied_block = over_window["parts"][0]["spec"]
+    copied_block["spec_id"] = copied_block["definition"]["spec_id"] = copy_pin
+    copied_block["definition"]["identity"] = copied
+    copied_block["resolved"]["coverage"]["window"]["start_year"] = 2015
+    search = SearchStub(answer={scope["id"]: envelope, _posted(scope)[0]: over_window})
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
         planner=seam,
@@ -3983,17 +4004,29 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             "switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"},
         },
     )
+    return _SwitchedOff(runner, events, seam, new_pin, copy_pin)
 
-    # The switch posted the identity over the plan's years, so the translation
-    # takes Search's answer as the source and asks Search nothing.
+
+async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A switch off a stated source (`_switch_off_a_stated_source`) drops the
+    stated source with the pin it left, so the translation takes the new pin
+    with no search, the plan compiles, and its run accepts what the new
+    dataset returns. The translation is served Search's answer for the copy
+    over the plan's years, which the switch posted, and asks Search nothing."""
+    runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(real_schemas)
+
+    # The switch's post over the plan's years answered the copy admission made,
+    # so the translation takes it as the source and asks Search nothing.
     assert seam.surface.calls == []
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered, offered.get("switch_failed")
     revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
     (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
-    assert (dataset.source_spec_id, dataset.source) == (new_pin, None)
+    assert (dataset.source_spec_id, dataset.source) == (copy_pin, None)
     assert revised.workflow is not None
-    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [new_pin]
+    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [copy_pin]
     approved = PlannerPlan.model_validate(
         revised.model_dump()
         | {
@@ -4002,7 +4035,7 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             "approved_at": datetime.now(UTC),
         }
     )
-    manifest = _get_data_manifest(spec_id=new_pin)
+    manifest = _get_data_manifest(spec_id=copy_pin)
     manifest["citation"]["sources"] = [_INCLUSIVE_PROVENANCE]
     fetched = ToolCallResult(is_error=False, structured_content=manifest, text="fetched")
 
@@ -4013,6 +4046,24 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     )
 
     assert isinstance(outcome, Accepted), outcome
+
+
+async def test_a_later_period_amendment_reads_the_switched_dataset_over_every_year_it_holds(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """After a switch off a stated source (`_switch_off_a_stated_source`), the
+    stored reading is of the switched dataset, the planner's block for it
+    states the years Search holds it for, from 1995, and the plan's copy over
+    its own years is held as a copy of that dataset. A later amendment of the period
+    reads the dataset whole and copies it over the new years."""
+    runner, _, _, new_pin, copy_pin = await _switch_off_a_stated_source(real_schemas)
+
+    state = _session_state(runner)
+    shown = state["planner:pin_sources"][new_pin]["block"]
+    assert shown["resolved"]["coverage"]["window"]["start_year"] == 1995
+    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert stored.spec_id == new_pin
+    assert windowed_pins(cast(SessionState, state))[copy_pin].windowed_from == new_pin
 
 
 @pytest.mark.parametrize(
