@@ -86,6 +86,12 @@ class ResolvedGroup(StrictModel):
     leaves out; empty for any other set and on a search answer without it.
     `members` are the parties a bound total holds where Search lists them
     (DAC countries' total lists the DAC members); empty where it lists none.
+    For a set read as its members, `left_out` labels the residuals the set's
+    published total counts that the members leave out ("Africa, unallocated
+    by country (DAC)"), and `sum_differs` says the source publishes its own
+    figure for the set, which can differ from the members' sum. Both are
+    empty or false where Search states nothing is left out or predates the
+    fields.
     A requirement's `Entity` naming the label, case-folded, on the set's side
     of the flow is met by the source under either reading
     (`compiler.evidence.resolve_group`), except that one asking for the members
@@ -108,6 +114,12 @@ class ResolvedGroup(StrictModel):
     )
     members: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
         default=(), exclude_if=lambda members: not members
+    )
+    left_out: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda labels: not labels
+    )
+    sum_differs: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda differs: not differs
     )
 
     @property

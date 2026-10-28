@@ -1331,34 +1331,10 @@ _BEFORE_CONCEPTS = {
 }
 
 
-@pytest.mark.parametrize(
-    ("resolved", "total_name"),
-    [
-        pytest.param(
-            {**_BEFORE_CONCEPTS, "concept_label": "official development assistance"},
-            "official development assistance",
-            id="concept",
-        ),
-        pytest.param(_BEFORE_CONCEPTS, "official development assistance", id="before-concepts"),
-        pytest.param(
-            json.loads(
-                (Path(__file__).parent / "fixtures" / "seed_education_aid_kenya.json").read_text()
-            )["spec"]["resolved"],
-            "education, official development assistance",
-            id="before-concepts-bracketed",
-        ),
-    ],
-)
-def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
-    resolved: dict[str, object], total_name: str
-) -> None:
-    """A share of health aid in all official development assistance. The total
-    was compiled again from its basis choice, so Search's names for its block
-    name it: its `concept_label`, which states no measure, since its measure is
-    one of its clauses; or, from a Search that sends none, its shape label,
-    "gross disbursements (official development assistance)", less the measure
-    Search composed it from. A measure label with its own bracket, as Search
-    recorded "gross disbursements (nominal)", holds the qualifiers inside it."""
+def _health_share_basis_line(resolved: dict[str, object]) -> str:
+    """The basis line of a share of health aid in all official development
+    assistance, whose total was compiled again from its basis choice and so
+    is named by Search's names for its block, `resolved`."""
     health = _example_part(sector="sector:120+130")
     scope = health["scope"]
     scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
@@ -1385,11 +1361,34 @@ def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
         }
     ]
     specs = {"spec_total": {"spec_id": "spec_total", "resolved": resolved}}
+    return basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[])
 
-    assert basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[]) == (
-        'Counted as: "health aid": health incl. population and reproductive health '
-        "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
-        f"{total_name}: gross disbursements, current USD."
+
+_HEALTH_CLAUSES = (
+    'Counted as: "health aid": health incl. population and reproductive health '
+    "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
+)
+
+
+def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept() -> None:
+    """A share of health aid in all official development assistance. The total
+    was compiled again from its basis choice, so Search's names for its block
+    name it: its `concept_label`, which states no measure, since its measure is
+    one of its clauses."""
+    resolved = {**_BEFORE_CONCEPTS, "concept_label": "official development assistance"}
+
+    assert _health_share_basis_line(resolved) == (
+        f"{_HEALTH_CLAUSES}official development assistance: gross disbursements, current USD."
+    )
+
+
+def test_a_total_from_a_search_stating_no_concept_is_named_by_searchs_label_as_written() -> None:
+    """The same share from a Search that sends no `concept_label`: the total is
+    named by its shape label as Search composed it, measure included, so the
+    measure reads in the name and again as its clause."""
+    assert _health_share_basis_line(_BEFORE_CONCEPTS) == (
+        f"{_HEALTH_CLAUSES}gross disbursements (official development assistance): "
+        "gross disbursements, current USD."
     )
 
 

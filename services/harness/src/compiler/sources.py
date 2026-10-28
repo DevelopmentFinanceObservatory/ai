@@ -887,7 +887,10 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     union of such totals, absent for any other set. `side_classes` is the
     classes of party, totals aside, the dataset publishes on such a set's side,
     absent for any other set and from a Search that predates it. `members` are
-    the parties a bound total holds where Search lists them. A class outside
+    the parties a bound total holds where Search lists them. `left_out` and
+    `sum_differs` are, for a set read as its members, the residuals its total
+    counts that the members leave out and whether the source publishes its own
+    figure for it, absent from a Search that predates them. A class outside
     `common.place_type.PartyClass` fails the block.
     """
     found = []
@@ -903,6 +906,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     whole_of=_party_classes(group.get("whole_of")),
                     side_classes=_party_classes(group.get("side_classes")),
                     members=tuple(_strings(group.get("members"))),
+                    left_out=tuple(_strings(group.get("left_out"))),
+                    sum_differs=_flag(group.get("sum_differs")) is True,
                 )
             )
     return tuple(found)
@@ -1098,9 +1103,12 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     """The sentence saying an answer reads `group` as its members, or `None` when it binds the total.
 
     `answer` is how the answer reads the members, `None` when the column
-    the group sits on is not known. An answer combining a flow side's
-    members leaves out what the source allocates to the group and to no
-    single member ("Africa, regional"), which only the group's total counts.
+    the group sits on is not known. An answer combining the members leaves
+    out the residuals Search says the group's total counts beside them
+    (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"), named
+    as Search names them; where Search states none, the sentence states none.
+    Where Search says the source publishes its own figure for the group
+    (`ResolvedGroup.sum_differs`), the sentence says that figure can differ.
     """
     if group.reads_total:
         return None
@@ -1112,10 +1120,15 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     if answer is MembersAnswer.EACH:
         return f"The figures for {group.label} are its members' figures, each on its own."
     left_out = (
-        " and leaves out amounts the data allocates to no single country"
-        if group.role in FLOW_ROLE_COLUMNS
+        " and leaves out what the data allocates to no single country: " + "; ".join(group.left_out)
+        if group.left_out
         else ""
     )
+    if group.sum_differs:
+        left_out += (
+            ", and the source publishes its own figure for the group, "
+            "which can differ from one built from its members"
+        )
     if answer is MembersAnswer.SUMMED:
         return f"The figure for {group.label} adds up its members' figures{left_out}."
     return f"The figure for {group.label} is computed from its members' figures{left_out}."

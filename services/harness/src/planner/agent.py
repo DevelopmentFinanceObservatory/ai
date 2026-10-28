@@ -1541,12 +1541,15 @@ async def compile_whole(
     that is stays Search's answer. Search keeps the part's measure basis,
     and its region on another role, which an option the whole cannot serve
     would otherwise leave to Search's default. The provider scope of a
-    donor or recipient whole is posted as a carried entry: Search counts
-    the whole on it where the whole offers it, and otherwise drops it and
-    counts the whole on its own default, since the scope names whose
-    spending a named donor counts and Search offers the inclusive scope on
-    no total naming no donor. The part keeps its own scope, and the whole's
-    caveat says what each side counts (`submission.service._whole_shares`).
+    donor whole is posted as a carried entry: Search counts the whole on it
+    where the whole offers it, and otherwise drops it and counts the whole
+    on its own default, since the scope names whose spending a named donor
+    counts and Search offers the inclusive scope on no total naming no
+    donor. The part keeps its own scope, and the whole's caveat says what
+    each side counts (`submission.service._whole_shares`). A recipient
+    whole names the part's donor, so Search can count it on the part's
+    scope, and its provider scope is posted as an explicit entry that
+    Search refuses where it cannot hold it, as the other choices are.
     No model call is made. The planner is shown the answer
     as a source of its own (the part's source holding the whole's block, as
     `compile_on_basis` holds a realigned one). The whole takes its choices
@@ -1592,7 +1595,7 @@ async def compile_whole(
             axis=choice.axis,
             option_id=choice.active,
             provenance="carried"
-            if column is not None and choice.axis == PROVIDER_AXIS
+            if axis == "donor" and choice.axis == PROVIDER_AXIS
             else "explicit",
             concept=concepts.get(choice.axis),
             origin=ChoiceOrigin(choice_id=choice.id),
@@ -1621,7 +1624,7 @@ async def compile_whole(
     held = _parties_outside(scope, spec, column) if column is not None else _Containment()
     if held.outside or held.unshown:
         return underivable(*_uncontained(part_pin, axis, held))
-    answered = _answered_options(spec)
+    answered = _answered_options(spec_id, spec)
     inherited: dict[str, str] = {
         choice.axis: choice.provenance
         for choice in choices
@@ -1677,18 +1680,12 @@ def _opened(
     )
 
 
-def _answered_options(spec: Mapping[str, Any]) -> dict[str, str]:
-    """The option each scope choice of `spec`, a Search spec block, holds active, by
-    axis (`compile_whole`)."""
-    resolved = spec.get("resolved")
-    scope = resolved.get("scope_choices") if isinstance(resolved, Mapping) else None
-    return {
-        choice["axis"]: choice["active"]
-        for choice in (scope or {}).get("choices") or ()
-        if isinstance(choice, Mapping)
-        and isinstance(choice.get("axis"), str)
-        and isinstance(choice.get("active"), str)
-    }
+def _answered_options(spec_id: str, spec: Mapping[str, Any]) -> dict[str, str]:
+    """The option each scope choice of `spec`, the Search spec block of `spec_id`,
+    holds active, by axis (`compile_whole`). Empty where it records no choices this
+    release reads (`submission.service.part_scope`)."""
+    scope = part_scope(spec_id, spec)
+    return {choice.axis: choice.active for choice in scope.choices} if scope is not None else {}
 
 
 class _Containment(NamedTuple):

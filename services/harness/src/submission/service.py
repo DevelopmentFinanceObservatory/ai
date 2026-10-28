@@ -42,7 +42,7 @@ import hashlib
 import logging
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast, get_args
@@ -58,9 +58,10 @@ from compiler.sources import (
     slot_codes,
     source_from_spec_block,
 )
+from data_mcp.scope import ChoiceOrigin
 from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
-from harness.plan_display import concept_name
+from harness.plan_display import plan_words
 from harness.scope_choices import (
     ANY_REPORTERS,
     BILATERAL_REPORTERS,
@@ -502,13 +503,20 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         measures=measures,
         user_settled=user_settled,
     )
+    scopes = scope_choice_decisions(pins, wholes=_whole_only_pins(aligned_after, wholes))
     settled, evidence_requirements = _scope_decisions(
         settled,
         evidence_requirements,
         previous=previous,
-        scopes=scope_choice_decisions(pins, wholes=_whole_only_pins(aligned_after, wholes)),
+        scopes=scopes,
         wholes=_whole_decisions(wholes, aligned_after, shown=pins),
-        calculations=_provider_difference_decisions(aligned_after, shown=pins),
+        calculations=_provider_difference_decisions(
+            aligned_after,
+            shown=pins,
+            plan_decisions=_decisions_after(previous, settled, removed=removed_decisions),
+            scope_decisions=scopes,
+            previous=previous,
+        ),
         removed=removed_decisions,
     )
     requirements_after = _requirements_after(
@@ -3773,10 +3781,15 @@ class _InputBasis:
     to. `stated` says the user stated it: an explicit entry settled the
     choice, or a carried one, the user's choice earlier in the conversation,
     and the origin's block does not mark the axis as the planner's
-    (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `rank` is how narrow the origin's part is (`_part_rank`).
+    (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`), or Search settled the
+    provider row on the words it searched (`_provider_read_in_words`). `rank` is how narrow the origin's part is (`_part_rank`).
     `flows` is where the origin's part's flows lie (`_Flows`). `own_flows` is
     the money its reporters' own flows count (`_own_flows`), read on the
-    provider axis alone and `None` on any other.
+    provider axis alone and `None` on any other. `part` is the spec_id of the
+    origin's part before any choice (`PartScope.base`) and `actives` the option
+    each of its choices holds, by axis. The two together are what the origin
+    compiles to, so two inputs holding one `part` and one option on every axis
+    read one series.
     """
 
     requirement_id: str
@@ -3787,6 +3800,8 @@ class _InputBasis:
     rank: int
     flows: _Flows
     own_flows: frozenset[ProviderMoney] | None
+    part: str
+    actives: tuple[tuple[str, str], ...]
 
     def label(self, option_id: str) -> str:
         """The reader's label of `option_id` on this input, or the id when the choice lists none."""
@@ -3904,12 +3919,37 @@ def _input_bases(
             pin=pin,
             origin=origin,
             choice=choice,
-            stated=choice.provenance != "default" and axis not in planner_axes(block),
+            stated=choice.provenance != "default"
+            and (axis not in planner_axes(block) or _provider_read_in_words(scope, choice)),
             rank=_part_rank(scope.base.identity),
             flows=_Flows.of(scope, block),
             own_flows=_own_flows(scope, block) if axis == PROVIDER_AXIS else None,
+            part=scope.base.spec_id,
+            actives=tuple((held.axis, held.active) for held in scope.choices),
         )
     return bases
+
+
+def _provider_read_in_words(scope: PartScope, choice: ScopeChoice) -> bool:
+    """Whether Search settled `choice`, a provider choice of the part `scope` records,
+    on the words it searched: an explicit choice no entry from a choice
+    (`ChoiceOrigin`) holds on its axis.
+
+    Such a row is the one the words picked ("multilateral ODA"), so it counts as
+    stated even on a pin the planner searched for (`planner.agent.pin_by_search`),
+    whose block marks the axis as the planner's and so carries nothing to a later
+    search (`harness.scope_choices.carried_entries`). An entry from a choice is one
+    the planner posted to align the pin (`planner.agent.compile_on_basis`) or a
+    carried one. A basis read in the planner's words stays the planner's.
+    """
+    return (
+        choice.axis == PROVIDER_AXIS
+        and choice.provenance == "explicit"
+        and not any(
+            entry.axis == choice.axis and isinstance(entry.origin, ChoiceOrigin)
+            for entry in scope.entries
+        )
+    )
 
 
 def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[ProviderMoney]:
@@ -3919,20 +3959,20 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
     the core contributions its funders paid it, and either where some are or may
     be.
 
-    Search states it on the donor side: for a set bound there, whether it holds
-    a multilateral (`entity_groups.origin.holds_multilaterals`); for a donor
-    role left open, whether the donors there do (`role_axis_facts`); and for each
-    donor bound, `multilateral` where it is one. Search marks only parties the
-    graph types `Organization`, so an unmarked country is none. Anything else
-    states nothing: an unmarked organisation or total, or an open role stating
-    nothing, may hold one, as an unreadable axis counts as overlapping.
+    Search states it on the donor side. Each donor bound there counts what the set
+    naming it states (`entity_groups.origin.holds_multilaterals`), where it is that
+    set's total or one of its members, or where the set names neither; any other
+    donor counts `multilateral` where Search marks it one (`_donor_money`). The part
+    counts every money any of its donors counts, so DAC countries' total beside IDA
+    counts both. For a donor role left open, the donors there state it
+    (`role_axis_facts`). Search marks only parties the graph types `Organization`,
+    so an unmarked country is none. Anything else states nothing: an unmarked
+    organisation or total, or an open role stating nothing, may hold one, as an
+    unreadable axis counts as overlapping.
     """
     resolved = (block or {}).get("resolved") or {}
     donors = (scope.base.identity.get("entities") or {}).get("origin") or ()
-    if donors:
-        group = (resolved.get("entity_groups") or {}).get("origin")
-        stated = group.get("holds_multilaterals") if isinstance(group, Mapping) else None
-    else:
+    if not donors:
         fact = next(
             (
                 fact
@@ -3942,17 +3982,25 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
             {},
         )
         stated = fact.get("holds_multilaterals")
-    if isinstance(stated, bool):
-        return ANY_REPORTERS if stated else BILATERAL_REPORTERS
-    if not donors:
+        if isinstance(stated, bool):
+            return ANY_REPORTERS if stated else BILATERAL_REPORTERS
         return ANY_REPORTERS
+    group = (resolved.get("entity_groups") or {}).get("origin")
+    group = group if isinstance(group, Mapping) else {}
+    marker = group.get("holds_multilaterals")
+    named = {group.get("total"), *(group.get("members") or ())} - {None}
     entities = {
         entity.get("ref"): entity
         for entity in resolved.get("entities") or ()
         if isinstance(entity, Mapping) and entity.get("role") == "origin"
     }
-    kinds = {_donor_money(entities.get(donor)) for donor in donors}
-    return kinds.pop() if len(kinds) == 1 else ANY_REPORTERS
+    money: set[ProviderMoney] = set()
+    for donor in donors:
+        if isinstance(marker, bool) and (not named or donor in named):
+            money |= ANY_REPORTERS if marker else BILATERAL_REPORTERS
+        else:
+            money |= _donor_money(entities.get(donor))
+    return frozenset(money)
 
 
 def _donor_money(entity: Mapping[str, Any] | None) -> frozenset[ProviderMoney]:
@@ -4013,7 +4061,8 @@ def _aligned_bases(
     a comparison, share, quotient or sum contrasting provider scopes says so
     (`_provider_difference_decisions`).
     Otherwise its dataset inputs with a choice on the axis are counted on
-    one option. Only a comparison, share, quotient or sum aligns the
+    one option, except a calculation's whose two sides would then read one
+    series, which keep their own (`_sides_one_series`). Only a comparison, share, quotient or sum aligns the
     provider scope, and not one the user asked to keep its inputs' own
     (`accept_provider_difference`); a join keeps each input's own
     (`_aligns`). Calculations sharing an input, such as a sum read by a
@@ -4035,7 +4084,11 @@ def _aligned_bases(
     bilateral aid plus Germany's inclusive aid, over disjoint sectors, such
     as US bilateral health aid plus US inclusive education aid, or over
     inputs sharing no money, such as US bilateral aid plus US core
-    contributions to multilaterals, is served as stated.
+    contributions to multilaterals, is served as stated. A sum whose inputs
+    are aligned on one provider scope is refused the same way where their
+    reporters' own flows count different money (`_double_counted`), as DAC
+    countries' inclusive aid plus IDA's outflows both count the donors' aid
+    through multilaterals.
 
     A calculation aligns each group of inputs it reads (`_input_groups`). A
     share or quotient beneath another calculation is one figure, its own
@@ -4167,11 +4220,15 @@ class _InputGroup(NamedTuple):
     `members` are requirement ids, the datasets among them the inputs.
     `accepted` says a ratio beneath the calculation supplying a member accepts a
     provider difference (`accept_provider_difference`), so the calculation
-    leaves the group's provider scopes as they stand.
+    leaves the group's provider scopes as they stand. `sides` are the members
+    each side of a comparison, sum, share or quotient reads, for one reading
+    its sides as one group, so alignment can keep the two sides apart
+    (`_sides_one_series`); `None` for any other group.
     """
 
     members: frozenset[str]
     accepted: bool = False
+    sides: tuple[frozenset[str], frozenset[str]] | None = None
 
 
 def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list[_InputGroup]]:
@@ -4229,7 +4286,14 @@ def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list
                 for position in (0, 1)
             ]
         else:
-            groups[step.id] = [_InputGroup(frozenset(reached(step.id, {**cut, step.id: inputs})))]
+            sides = (
+                (frozenset(reached(inputs[0], cut)), frozenset(reached(inputs[1], cut)))
+                if isinstance(step, ComparisonRequirement | SumOfRequirement) or step.id in ratios
+                else None
+            )
+            groups[step.id] = [
+                _InputGroup(frozenset(reached(step.id, {**cut, step.id: inputs})), sides=sides)
+            ]
     return groups
 
 
@@ -4248,12 +4312,31 @@ def _alignment_targets(
     share, and each takes its group's option, or its own when the group's
     inputs were stated on different options.
 
+    Alignment keeps the two sides of a comparison, sum, share or quotient on
+    different series, whichever calculation moves them. Once an axis's options
+    are chosen, a calculation whose sides each read an input of one part that
+    alignment has put on one series (`_sides_one_series`) has every group that
+    moved one of those inputs left unaligned on that axis, and the options are
+    chosen again until no group changes. The axis is what the calculation
+    contrasts, as "what share of US ODA goes to multilaterals" reads US
+    multilateral ODA over US total ODA, and counting the total on the
+    multilateral row, whether for the share or for a comparison of the total
+    with France's multilateral ODA, would answer 100%, the difference of the
+    two 0, and their sum twice the multilateral row. Every input of a
+    calculation left unaligned keeps its own option, so a group moving one of
+    them is left unaligned too, and the outcome is the same in any step order.
+    The inputs keep their own options, as those the user stated on different
+    options do. The provider difference is stated
+    (`_provider_difference_decisions`), and a sum whose inputs then count one
+    money is refused (`_refuse_double_count`), as US bilateral ODA plus US
+    total ODA is, the total already holding the bilateral flows.
+
     Raises:
         _Unservable: When the inputs of one calculation cannot be counted on one option.
     """
     targets: dict[tuple[str, str], tuple[str, str]] = {}
     for axis, bases in by_axis.items():
-        aligning: list[tuple[EvidenceRequirement, list[_InputBasis], str]] = []
+        candidates: list[_Aligning] = []
         for step in steps:
             if not _reads_on(step, axis):
                 continue
@@ -4267,29 +4350,167 @@ def _alignment_targets(
                     continue
                 aligns = _aligns(step, axis) and not (axis == PROVIDER_AXIS and group.accepted)
                 own = _shared_basis(inputs) if aligns else None
-                if own is not None:
-                    aligning.append((step, inputs, own))
-                else:
-                    _refuse_double_count(
-                        step, axis, inputs, aligns=aligns, view=view, proposer=proposer
-                    )
-        groups: list[set[str]] = []
-        for _, inputs, _ in aligning:
-            joined = {basis.requirement_id for basis in inputs}
-            for group in [group for group in groups if group & joined]:
-                joined |= group
-                groups.remove(group)
-            groups.append(joined)
-        group_target = {
-            requirement_id: _shared_basis([b for r, b in bases.items() if r in group])
-            for group in groups
-            for requirement_id in group
-        }
-        for step, inputs, own in aligning:
-            target = group_target[inputs[0].requirement_id] or own
-            for basis in inputs:
-                _claim(targets, basis, axis, target, step, view=view, proposer=proposer)
+                candidates.append(_Aligning(step, group, inputs, aligns, own))
+        aligning = [
+            (candidate, own) for candidate in candidates if (own := candidate.own) is not None
+        ]
+        while True:
+            chosen = _chosen_options(aligning, bases)
+            counted: dict[str, set[str]] = {}
+            for (candidate, _), target in zip(aligning, chosen, strict=True):
+                for basis in candidate.inputs:
+                    counted.setdefault(basis.requirement_id, set()).add(target)
+            moved = {
+                move
+                for candidate in candidates
+                for move in _sides_one_series(
+                    candidate.group, candidate.inputs, axis, targets, counted
+                )
+            }
+            # The inputs of a calculation kept apart stay on their own options.
+            aligned = [candidate for candidate, _ in aligning]
+            held = {
+                basis.requirement_id
+                for candidate in candidates
+                if candidate.own is not None and candidate not in aligned
+                for basis in candidate.inputs
+            }
+            kept = [
+                (candidate, own)
+                for (candidate, own), target in zip(aligning, chosen, strict=True)
+                if not any(
+                    (basis.requirement_id, target) in moved
+                    or (basis.requirement_id in held and target != basis.choice.active)
+                    for basis in candidate.inputs
+                )
+            ]
+            if len(kept) == len(aligning):
+                break
+            aligning = kept
+        aligned = [candidate for candidate, _ in aligning]
+        for candidate in candidates:
+            if candidate in aligned:
+                continue
+            # A group left unaligned to keep two sides apart refuses as one
+            # accepting a provider difference does, on every input.
+            kept_apart = candidate.own is not None
+            _refuse_double_count(
+                candidate.step,
+                axis,
+                [basis for basis in candidate.inputs if basis.stated]
+                if candidate.aligns and not kept_apart
+                else candidate.inputs,
+                view=view,
+                proposer=proposer,
+            )
+        for (candidate, _), target in zip(aligning, chosen, strict=True):
+            for basis in candidate.inputs:
+                _claim(targets, basis, axis, target, candidate.step, view=view, proposer=proposer)
+            _refuse_double_count(
+                candidate.step,
+                axis,
+                [_counted_on(basis, target) for basis in candidate.inputs],
+                view=view,
+                proposer=proposer,
+            )
     return targets
+
+
+class _Aligning(NamedTuple):
+    """One group of inputs a calculation reads on one axis (`_alignment_targets`).
+
+    `aligns` says the calculation counts them on one option (`_aligns`), and
+    `own` is the option they share (`_shared_basis`), `None` where it leaves
+    them on their own.
+    """
+
+    step: EvidenceRequirement
+    group: _InputGroup
+    inputs: list[_InputBasis]
+    aligns: bool
+    own: str | None
+
+
+def _chosen_options(
+    aligning: Sequence[tuple[_Aligning, str]], bases: Mapping[str, _InputBasis]
+) -> list[str]:
+    """The option each group of `aligning`, with the option its own inputs share,
+    counts its inputs on, in order.
+
+    The groups sharing an input are joined, and each takes the option its
+    joined inputs share (`_shared_basis`), or its own where they were stated on
+    different options, which `_claim` refuses where it moves an input another
+    group counts on another option.
+    """
+    joined_groups: list[set[str]] = []
+    for candidate, _ in aligning:
+        joined = {basis.requirement_id for basis in candidate.inputs}
+        for held in [held for held in joined_groups if held & joined]:
+            joined |= held
+            joined_groups.remove(held)
+        joined_groups.append(joined)
+    shared = {
+        requirement_id: _shared_basis([b for r, b in bases.items() if r in joined])
+        for joined in joined_groups
+        for requirement_id in joined
+    }
+    return [shared[candidate.inputs[0].requirement_id] or own for candidate, own in aligning]
+
+
+def _sides_one_series(
+    group: _InputGroup,
+    inputs: Sequence[_InputBasis],
+    axis: str,
+    targets: Mapping[tuple[str, str], tuple[str, str]],
+    counted: Mapping[str, Collection[str]],
+) -> frozenset[tuple[str, str]]:
+    """The moves alignment on `axis` makes that put an input of each side of
+    `group`, a comparison's, sum's, share's or quotient's, on one series: each
+    input moved and the option it moves to.
+
+    `counted` holds every option any aligning group counts an input on, so a pair
+    is caught on whichever group moves it, in any step order. Two inputs read one
+    series where their origins share a part (`_InputBasis.part`) and hold one
+    option on every axis (`_InputBasis.actives`), which on `axis` is an option
+    `counted` gives or the input's own, and on an earlier axis the one in
+    `targets`. A part
+    and its options are what a pin compiles to. Two inputs on one series before
+    alignment moves either are left alone, since alignment did not put them
+    there. A group with no sides (`_InputGroup.sides`) has none to keep apart.
+    """
+    if group.sides is None:
+        return frozenset()
+
+    def readings(basis: _InputBasis) -> list[tuple[str, tuple[str, dict[str, str]]]]:
+        """Each option `basis` can be counted on along `axis`, with the series it reads there."""
+        others = {
+            held: targets.get((basis.requirement_id, held), (active, ""))[0]
+            for held, active in basis.actives
+            if held != axis
+        }
+        options = {basis.choice.active, *counted.get(basis.requirement_id, ())}
+        return [(option, (basis.part, {**others, axis: option})) for option in sorted(options)]
+
+    first, second = (
+        [basis for basis in inputs if basis.requirement_id in side] for side in group.sides
+    )
+    return frozenset(
+        (basis.requirement_id, option)
+        for one in first
+        for other in second
+        for one_option, one_series in readings(one)
+        for other_option, other_series in readings(other)
+        if one_series == other_series
+        for basis, option in ((one, one_option), (other, other_option))
+        if option != basis.choice.active
+    )
+
+
+def _counted_on(basis: _InputBasis, option_id: str) -> _InputBasis:
+    """`basis` as its input is counted once aligned on `option_id` (`_alignment_targets`)."""
+    if basis.choice.active == option_id:
+        return basis
+    return replace(basis, choice=basis.choice.model_copy(update={"active": option_id}))
 
 
 def _refuse_double_count(
@@ -4297,13 +4518,13 @@ def _refuse_double_count(
     axis: str,
     inputs: Sequence[_InputBasis],
     *,
-    aligns: bool,
     view: SessionView,
     proposer: Proposer,
 ) -> None:
-    """Refuse a sum whose `inputs`, left on their own options of `axis`, count one
-    provider's flows twice (`_double_counted`): of a sum that `aligns` them,
-    those the user stated, and of one leaving a provider difference, every one.
+    """Refuse a sum whose `inputs`, each on the option of `axis` it is counted on,
+    count one provider's flows twice (`_double_counted`): of a sum aligning them,
+    every input on the option it aligns to, or those the user stated where they
+    stated different ones, and of one leaving a provider difference, every one.
 
     Raises:
         _Unservable: When two such inputs, on scopes counting one money
@@ -4311,7 +4532,7 @@ def _refuse_double_count(
     """
     if axis != PROVIDER_AXIS or not isinstance(step, SumOfRequirement):
         return
-    pair = _double_counted([basis for basis in inputs if basis.stated] if aligns else inputs)
+    pair = _double_counted(inputs)
     if pair is None:
         return
     first, other = pair
@@ -4499,18 +4720,25 @@ class _Unservable(Exception):  # noqa: N818 -- carries the refusal `_aligned_bas
 
 
 def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBasis] | None:
-    """The first two inputs of `kept`, the inputs of a sum counted on their own options,
-    that are on different options whose scopes count one money (`_shared_money`)
-    and can count one flow (`_Flows.meet`); `None` when none can.
+    """The first two inputs of `kept`, the inputs of a sum each on the option it is
+    counted on, whose options count one money (`_shared_money`) by different
+    streams and can count one flow (`_Flows.meet`); `None` when none can.
 
-    A sum aligning its inputs keeps those the user stated; one accepting a
-    provider difference keeps every input (`_alignment_targets`)."""
+    Two inputs count a money by different streams where they hold different
+    options, or one option whose reporters' own flows count different money
+    (`_InputBasis.own_flows`): DAC countries' inclusive aid and IDA's outflows on
+    the inclusive scope both count the donors' aid through multilaterals, one as
+    an imputed share and one as what IDA spends. Two inputs on one option whose
+    reporters count the same money count it by the same streams, and whether
+    their flows overlap is no question of provider scope.
+
+    `_refuse_double_count` gives the inputs (`_alignment_targets`)."""
     return next(
         (
             (first, other)
             for index, first in enumerate(kept)
             for other in kept[index + 1 :]
-            if first.choice.active != other.choice.active
+            if (first.choice.active != other.choice.active or first.own_flows != other.own_flows)
             and _shared_money(first, other)
             and first.flows.meet(other.flows)
         ),
@@ -4984,8 +5212,67 @@ def _derived_slot(prefix: str, requirement_id: str) -> str:
     return f"{prefix}{hashlib.sha256(requirement_id.encode()).hexdigest()[:16]}"
 
 
+def _card_names(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    decisions: Sequence[Decision],
+    scope_decisions: Mapping[str, Sequence[Decision]],
+    previous: Plan | None,
+    shown: Mapping[str, PinSource],
+) -> dict[str, str]:
+    """What the plan card names each retrieval of `requirements` by, by requirement
+    id (`harness.plan_display.plan_words`), read off the plan they state once this
+    call lands, not compiled yet: `decisions`, and each retrieval citing the scope
+    decisions its pin states (`scope_decisions`, `scope_choice_decisions`), as
+    `_scope_decisions` cites them, since its sector decision names it where Search
+    states no concept. Each retrieval the card's plan `previous` holds alike keeps
+    its name there, and any other reads the source of the block its pin was shown
+    with (`shown`)."""
+    datasets = [
+        requirement.model_copy(
+            update={
+                "decision_ids": (
+                    *requirement.decision_ids,
+                    *(
+                        decision.slot
+                        for decision in scope_decisions.get(requirement.source_spec_id, ())
+                    ),
+                )
+            }
+        )
+        if requirement.source_spec_id is not None
+        else requirement
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+    ]
+    # The card names a retrieval off the retrievals and decisions alone. The
+    # calculations are left out, since the plan is not validated yet and one can
+    # still read a requirement the patch removed.
+    draft = Plan.model_construct(
+        decisions=(*decisions, *(d for held in scope_decisions.values() for d in held)),
+        evidence_requirements=tuple(datasets),
+    )
+    pinned: dict[str, SelectedSource] = {}
+    for requirement in datasets:
+        if requirement.source_spec_id is None:
+            continue
+        block = _pin_block(requirement.source_spec_id, shown)
+        if block is None:
+            continue
+        try:
+            pinned[requirement.source_spec_id] = source_from_spec_block(block)
+        except ValueError:
+            continue
+    return dict(plan_words(draft, shown_as=previous, pinned=pinned).names)
+
+
 def _provider_difference_decisions(
-    requirements: Sequence[EvidenceRequirement], *, shown: Mapping[str, PinSource]
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    shown: Mapping[str, PinSource],
+    plan_decisions: Sequence[Decision] = (),
+    scope_decisions: Mapping[str, Sequence[Decision]] | None = None,
+    previous: Plan | None = None,
 ) -> dict[str, tuple[Decision, ...]]:
     """The decisions each comparison, share, quotient or sum states about its inputs' provider scopes, by its requirement id.
 
@@ -5007,8 +5294,10 @@ def _provider_difference_decisions(
     (`_InputGroup.accepted`) reads as accepted, and a decision naming one is
     worded as the user's request. The
     decision says so in reader words, one sentence per input naming what it
-    counts, or that its dataset does not
-    say (`_provider_sentence`); where that passes the rationale's limit,
+    counts, or that its dataset does not say (`_provider_sentence`), each input
+    named as the plan card names it on the plan `requirements`, `plan_decisions` and
+    the scope decisions of their pins (`scope_decisions`) state, the card's plan
+    `previous` (`_card_names`); where that passes the rationale's limit,
     each input is named without its dataset title, and where that still
     does, the first sentence is followed by how many inputs the calculation
     reads (`_fitting_rationale`). It is the planner's, qualifies the answer
@@ -5024,6 +5313,13 @@ def _provider_difference_decisions(
         if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
         for block in [_pin_block(requirement.source_spec_id, shown)]
     ]
+    names = _card_names(
+        requirements,
+        decisions=plan_decisions,
+        scope_decisions=scope_decisions or {},
+        previous=previous,
+        shown=shown,
+    )
     whole_parts = {
         requirement.id: requirement.whole_of.part
         for requirement in requirements
@@ -5076,7 +5372,12 @@ def _provider_difference_decisions(
                             (
                                 lead,
                                 *(
-                                    _provider_sentence(requirement, block, provider, titled=titled)
+                                    _provider_sentence(
+                                        names[requirement.id],
+                                        block,
+                                        provider,
+                                        titled=titled,
+                                    )
                                     for requirement, block, provider in inputs
                                 ),
                             )
@@ -5102,19 +5403,18 @@ def _fitting_rationale(*forms: str) -> str:
 
 
 def _provider_sentence(
-    requirement: DatasetRequirement,
+    name: str,
     block: Mapping[str, Any] | None,
     provider: Option | None,
     *,
     titled: bool = True,
 ) -> str:
-    """One sentence saying which providers' spending the input `requirement` counts:
-    "<concept> counts <provider label>, from <dataset>." with the input named as
-    the plan card names it (`_input_concept`), or that its dataset does not say.
-    The dataset is left out where Search names none (`_dataset_title`), or
-    without `titled`, the short form a long rationale falls back to."""
-    concept = _input_concept(requirement, block)
-    concept = f"{concept[:1].upper()}{concept[1:]}"
+    """One sentence saying which providers' spending an input counts:
+    "<name> counts <provider label>, from <dataset>." with `name` the input's name
+    on the plan card (`_card_names`), or that its dataset does not say. The
+    dataset is left out where Search names none (`_dataset_title`), or without
+    `titled`, the short form a long rationale falls back to."""
+    concept = f"{name[:1].upper()}{name[1:]}"
     title = _dataset_title(block) if titled else None
     if provider is None:
         if title is None:
@@ -5123,24 +5423,6 @@ def _provider_sentence(
     if title is None:
         return f"{concept} counts {provider.label}."
     return f"{concept} counts {provider.label}, from {title}."
-
-
-def _input_concept(requirement: DatasetRequirement, block: Mapping[str, Any] | None) -> str:
-    """What `requirement` fetches in the reader's words, named by the plan card's
-    rule (`harness.plan_display.concept_name`) over its pin's block and scope
-    record: what Search says the series count (`compiler.sources.block_concept_label`),
-    else the option its sector choice holds, else what Search says the dataset
-    measures (`resolved.shape.label`, the field `SelectedSource.measure_label`
-    copies)."""
-    resolved = (block or {}).get("resolved") or {}
-    label = (resolved.get("shape") or {}).get("label")
-    held = _held_sector(_block_scope(block))
-    return concept_name(
-        requirement.measure,
-        concept_label=block_concept_label(block),
-        sector=held.label if held is not None else None,
-        measure_label=label if isinstance(label, str) and label else None,
-    )
 
 
 def _block_scope(block: Mapping[str, Any] | None) -> PartScope | None:

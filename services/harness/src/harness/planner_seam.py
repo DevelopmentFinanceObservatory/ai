@@ -94,6 +94,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -144,6 +145,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    windowed_pins,
 )
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
@@ -154,6 +156,7 @@ from submission.service import (
     AlignedPin,
     Proposal,
     aligned_pins,
+    part_scope,
     searched_pins,
     submit,
 )
@@ -1414,38 +1417,51 @@ def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) 
     """How a sentence about `revision`, which did not compile, names its
     requirements (`harness.plan_display.plan_words`): each `prior`, the plan the
     card shows, holds by its name there, and each new one by its own, read off
-    the source Search answered for its pin (`_pinned_sources`)."""
+    the source Search answered for its pin (`_sources_by_spec_id`)."""
     if revision is None:
         return plan_display.plan_words(prior)
     return plan_display.plan_words(
-        revision, shown_as=prior, pinned=_pinned_sources(state, revision)
+        revision, shown_as=prior, pinned=_sources_by_spec_id(state, revision)
     )
 
 
-def _pinned_sources(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
+def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
+    """Every spec block `state` holds a pin's source in, by spec_id: those of
+    the datasets the planner was shown (`pin_sources`), then this turn's
+    searches (`ORCHESTRATOR_SPECS_KEY`), then the pins compiled for a
+    calculation's inputs (`aligned_pins`), each later one in place of an
+    earlier one for its spec_id."""
+    blocks: dict[str, Mapping[str, Any]] = {
+        spec_id: block
+        for spec_id, shown in pin_sources(state).items()
+        if (block := shown.spec_block(spec_id)) is not None
+    }
+    blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    for pin in aligned_pins(state):
+        (part,) = pin.digest["part_digests"]
+        if (block := part.get("spec_block")) is not None:
+            blocks[pin.spec_id] = block
+    return blocks
+
+
+def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
     """The source each spec_id a retrieval of `plan` pins reads, by spec_id,
-    from the block Search answered for it, found among the datasets the planner
-    was shown (`pin_sources`) and the pins compiled for a calculation's inputs
-    (`aligned_pins`). A block not readable as a source is left out, so the
+    from the block `state` holds for it (`_spec_blocks`). A pin copied over
+    its requirement's window (`planner.plan.windowed_pins`) reads its
+    origin's block. A block not readable as a source is left out, so the
     retrieval is named by its composed label."""
+    to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
     spec_ids = {
         requirement.source_spec_id
         for requirement in plan.evidence_requirements
         if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
     }
-    blocks = {
-        spec_id: block
-        for spec_id, shown in pin_sources(state).items()
-        if spec_id in spec_ids and (block := shown.spec_block(spec_id)) is not None
-    }
-    for pin in aligned_pins(state):
-        if pin.spec_id not in spec_ids:
-            continue
-        (part,) = pin.digest["part_digests"]
-        if (block := part.get("spec_block")) is not None:
-            blocks[pin.spec_id] = block
+    blocks = _spec_blocks(state)
     sources: dict[str, SelectedSource] = {}
-    for spec_id, block in blocks.items():
+    for spec_id in spec_ids:
+        block = blocks.get(to_origin.get(spec_id, spec_id))
+        if block is None:
+            continue
         try:
             sources[spec_id] = source_from_spec_block(block)
         except ValueError:
@@ -1734,13 +1750,10 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     `switch` node stores a switched one: under the words of the reading it
     was compiled from, keeping that reading's asked, held-open and share
     roles, with its compiled scope on `SearchReading.scope`. A declared
-    whole (`AlignedPin.whole_axis`) is no reading of its part's words. Over
-    every donor or recipient it is named as the plan card names the
-    requirement that pins it (`harness.plan_display.plan_words`): the part's
-    concept with the population Search bound, "health from official donors
-    (DAC) to Kenya". Over every sector, or where no plan in `planner_state`
-    pins it, it is named by the axis it opens, on its measure
-    (`harness.plan_display.whole_name`). Its block marks
+    whole (`AlignedPin.whole_axis`) is no reading of its part's words. It
+    is named off its own block and its part's (`_whole_reading_name`),
+    whatever plan the turn ends on, "health from official donors (DAC) to
+    Kenya" over every donor. Its block marks
     the axes it was compiled on as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
     so the reading reads it in `SearchReading.planner_axes` and
     `harness.scope_choices.carried_entries` leaves that entry out.
@@ -1765,7 +1778,7 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         )
     ]
     stored = {reading.spec_id for reading in readings}
-    wholes = _whole_names(planner_state, held)
+    blocks: dict[str, Mapping[str, Any]] | None = None
     for pin in held:
         if pin.spec_id in stored:
             continue
@@ -1775,10 +1788,9 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         digest = copy.deepcopy(pin.digest)
         (part,) = digest["part_digests"]
         if pin.whole_axis is not None:
-            measure = ((part.get("spec_block") or {}).get("resolved") or {}).get("measure_label")
-            part["variable"] = wholes.get(pin.spec_id) or plan_display.whole_name(
-                pin.whole_axis, measure=measure if isinstance(measure, str) else None
-            )
+            if blocks is None:
+                blocks = _spec_blocks(planner_state)
+            part["variable"] = _whole_reading_name(pin, part.get("spec_block"), blocks=blocks)
         elif origin is not None:
             part["variable"] = origin.text
         store_search(
@@ -1801,23 +1813,45 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         stored.add(found.spec_id)
 
 
-def _whole_names(state: SessionState, held: Sequence[AlignedPin]) -> dict[str, str]:
-    """The name the plan card gives each donor or recipient whole of `held`, by
-    its spec_id. It is the name the plan `state` holds gives the declared whole
-    (`DatasetRequirement.whole_of`) pinning it, read off the sources its pins
-    answered (`_pinned_sources`). Empty without a plan."""
-    plan = load_plan(state)
-    spec_ids = {pin.spec_id for pin in held if pin.whole_axis in ("donor", "recipient")}
-    if plan is None or not spec_ids:
-        return {}
-    names = plan_display.plan_words(plan, pinned=_pinned_sources(state, plan)).names
-    return {
-        requirement.source_spec_id: names[requirement.id]
-        for requirement in plan_display.shown_plan(plan).evidence_requirements
-        if isinstance(requirement, DatasetRequirement)
-        and requirement.whole_of is not None
-        and requirement.source_spec_id in spec_ids
-    }
+def _whole_reading_name(
+    pin: AlignedPin, block: Mapping[str, Any] | None, *, blocks: Mapping[str, Mapping[str, Any]]
+) -> str:
+    """The name a declared whole's reading is stored under, read off its own
+    `block` and its part's (`pin.origin` in `blocks`) alone, so it holds
+    whatever plan the turn ends on. Over every donor or recipient, as the
+    plan card names it (`harness.plan_display.source_whole_name`), on the
+    sector option the whole's scope holds, else the part's. Over every
+    sector, or from a block not readable as a source, by the axis the whole
+    opens, on its measure (`harness.plan_display.whole_name`)."""
+    assert pin.whole_axis is not None
+    raw = ((block or {}).get("resolved") or {}).get("measure_label")
+    measure = raw if isinstance(raw, str) and raw else None
+    by_axis = plan_display.whole_name(pin.whole_axis, measure=measure)
+    if pin.whole_axis == "sector":
+        return by_axis
+    try:
+        source = source_from_spec_block(block or {})
+    except ValueError:
+        return by_axis
+    part: SelectedSource | None = None
+    part_block = blocks.get(pin.origin)
+    if part_block is not None:
+        with suppress(ValueError):
+            part = source_from_spec_block(part_block)
+    sector = _sector_option(pin.spec_id, block) or _sector_option(pin.origin, part_block)
+    named = plan_display.source_whole_name(
+        pin.whole_axis, source=source, part=part, sector=sector, measure=measure
+    )
+    return named or by_axis
+
+
+def _sector_option(spec_id: str, block: Mapping[str, Any] | None) -> str | None:
+    """The label of the sector option the scope choices of `block`, the spec
+    block of `spec_id`, hold active. `None` where it holds no sector choice."""
+    scope = part_scope(spec_id, block)
+    choice = next((c for c in scope.choices if c.axis == "sector"), None) if scope else None
+    option = choice.active_option if choice is not None else None
+    return option.label if option is not None else None
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:

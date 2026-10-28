@@ -596,22 +596,77 @@ def _who(
         side = flow_side(entity.role) if entity.role else None
         name = region.chosen if entity.members and region is not None else entities_phrase([entity])
         sides[side].append(name)
-    for side, label in _side_groups(requirement, plan, sources=sources):
-        if not sides[side]:
-            sides[side].append(label)
     if source is not None:
-        for axis in source.open_entity_axes or ():
-            side = flow_side(axis.column)
-            if side is None or sides[side] or axis.member_count is None or axis.member_count < 2:
-                continue
-            word = party_role(axis.column) or singular(axis.column)
-            sides[side].append(f"{axis.member_count:,} {pluralize(word)}")
+        _source_parties(source, sides)
+    return _sides_phrase(sides)
+
+
+def _source_parties(source: SelectedSource, sides: dict[str | None, list[str]]) -> None:
+    """Name each side of the flow `sides` leaves empty from `source`: the named
+    set it binds there (`SelectedSource.groups`), else how many members it
+    holds on its open axis there, when two or more."""
+    for group in source.groups:
+        side = flow_side(group.role)
+        if side is not None and not sides[side]:
+            sides[side].append(group.label)
+    for axis in source.open_entity_axes or ():
+        side = flow_side(axis.column)
+        if side is None or sides[side] or axis.member_count is None or axis.member_count < 2:
+            continue
+        word = party_role(axis.column) or singular(axis.column)
+        sides[side].append(f"{axis.member_count:,} {pluralize(word)}")
+
+
+def _sides_phrase(sides: Mapping[str | None, Sequence[str]]) -> str:
+    """The parties `sides` names, by the side of the flow each is on: "from
+    United States to Kenya", "for Kenya"."""
     joined = {side: _joined(names) for side, names in sides.items() if names}
     return " ".join(
         f"{preposition} {joined[side]}"
         for side, preposition in (("giving", "from"), ("receiving", "to"), (None, "for"))
         if side in joined
     )
+
+
+def source_whole_name(
+    axis: str,
+    *,
+    source: SelectedSource,
+    part: SelectedSource | None,
+    sector: str | None,
+    measure: str | None,
+) -> str | None:
+    """What a declared whole leaving the donor or recipient `axis` open
+    fetches, named off the source Search answered for it alone, with no plan.
+
+    As the plan card names it (`_concept`), by `concept_name`'s rule: the
+    concept Search states for `source`, else for the part's source `part`,
+    else the `sector` option the whole was counted on, else the label Search
+    composed for `source`'s measure, else `part`'s, else `measure`. Then the
+    parties `source` binds, each side by the named set bound there, else its
+    entities, else the members its open axis holds, and the opened side,
+    still unnamed, as every party there: "official development assistance
+    from DAC countries", "gross disbursements (official development
+    assistance) from official donors (DAC) to Kenya". `None` where `axis` is
+    on no side of a flow or nothing names the concept."""
+    side = flow_side(axis)
+    concept = concept_name(
+        measure or "",
+        concept_label=source.concept_label or (part.concept_label if part is not None else None),
+        sector=sector,
+        measure_label=source.measure_label or (part.measure_label if part is not None else None),
+    )
+    if side is None or not concept:
+        return None
+    sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
+    bound = {flow_side(group.role) for group in source.groups}
+    for entity in source.entities:
+        if (entity_side := flow_side(entity.role)) is not None and entity_side not in bound:
+            sides[entity_side].append(entity.label)
+    _source_parties(source, sides)
+    if not sides[side]:
+        sides[side].append(whole_name(axis))
+    return f"{concept} {_sides_phrase(sides)}"
 
 
 def _joined(names: Sequence[str]) -> str:
@@ -663,14 +718,14 @@ def card_decision_text(text: str, plan: Plan) -> str:
 
     Each spec_id is named (`with_source_names`). A text the planner opened
     with a scope option's id reads with that id as the option's label and
-    keeps the rest: "provider:inclusive because the user asked for it" reads
-    "<label> because the user asked for it". A slug the planner wrote for an
-    option ("crs_total") reads as words ("crs total").
+    the rest as the planner wrote it: "provider:inclusive because the user
+    asked for it" reads "<label> because the user asked for it". A slug the
+    planner wrote for an option ("crs_total") reads as words ("crs total").
     """
     named = with_source_names(text, plan).strip()
     if (labelled := _option_labelled(named, plan)) is not None:
         label, rest = labelled
-        return f"{label}{_after_label(rest, label)}"
+        return f"{label}{rest}"
     return _unslugged(named)
 
 
@@ -684,34 +739,6 @@ def _option_labelled(text: str, plan: Plan) -> tuple[str, str] | None:
             if text == option.option_id or text.startswith(f"{option.option_id} "):
                 return label, text.removeprefix(option.option_id)
     return None
-
-
-def _after_label(rest: str, label: str) -> str:
-    """`rest`, the text after an option's id, less the words it opens with that
-    open the option's `label`, since a planner that wrote the id often went on
-    with the option's name: "health incl. population is the sector asked for"
-    after the label "health incl. population and reproductive health
-    (CRS 120 + 130)" leaves " is the sector asked for".
-
-    The label is matched character by character as a prefix of `rest`,
-    ignoring case and whitespace on both sides, so "(CRS 120+130)" echoes
-    "(CRS 120 + 130)". The echo ends after the last label word matched in full
-    where `rest` does not go on with a letter or digit. Punctuation the planner
-    added after it stays ("n.e.s., chosen" after a label ending "n.e.s."
-    leaves ", chosen"). The rest keeps the planner's spacing.
-    """
-    end = 0
-    at = 0
-    for word in label.split():
-        for char in word:
-            while at < len(rest) and rest[at].isspace():
-                at += 1
-            if at == len(rest) or rest[at].casefold() != char.casefold():
-                return rest[end:]
-            at += 1
-        if at == len(rest) or not rest[at].isalnum():
-            end = at
-    return rest[end:]
 
 
 def _unslugged(text: str) -> str:
@@ -728,7 +755,7 @@ def concept_name(
 ) -> str:
     """What a retrieval fetches, in the reader's words: the one naming rule the
     plan card (`_concept`) and the caveats `propose_plan` writes
-    (`submission.service._input_concept`) share.
+    (`submission.service._card_names`) share.
 
     Search's `concept_label` for the source ("health", "official development
     assistance"), which states no basis, codes, provider scope or dataset.
@@ -769,14 +796,19 @@ def _concept(
     A declared whole (`DatasetRequirement.whole_of`) is its part with the
     part's axis opened, and ignores the planner's `measure`. Over every
     sector it is named by that axis ("all sectors"). Over every donor or
-    recipient it counts the part's concept, so it is named as its part is,
-    and the parties it reads (`_who`, `_parties`) name the population its
-    source holds there. A plan not compiled reads its source off `sources`
+    recipient it is named by the concept Search states for its own source,
+    which differs from the part's where Search counted the whole on another
+    series (bilateral ODA's whole on total ODA), else as its part is; the
+    parties it reads (`_who`, `_parties`) name the population its source
+    holds there. A plan not compiled reads its source off `sources`
     (`_source`)."""
     if requirement.whole_of is not None:
         part = plan.requirement(requirement.whole_of.part)
         if requirement.whole_of.axis == "sector" or not isinstance(part, DatasetRequirement):
             return whole_name(requirement.whole_of.axis)
+        own = _source(requirement.id, plan, sources)
+        if own is not None and own.concept_label:
+            return own.concept_label
         return _concept(part, plan, sources=sources)
     sector = _governing(requirement, plan).get("sector")
     source = _source(requirement.id, plan, sources)
@@ -1876,17 +1908,11 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     return f"Fetch {measure} for {_parties(requirement, plan)}"
 
 
-def _side_groups(
-    requirement: DatasetRequirement,
-    plan: Plan,
-    *,
-    sources: Mapping[str, SelectedSource] | None = None,
-) -> list[tuple[str, str]]:
+def _side_groups(requirement: DatasetRequirement, plan: Plan) -> list[tuple[str, str]]:
     """Each named set `requirement`'s selected source binds on a side of the
     flow (`SelectedSource.groups`), as that side and the set's label, in the
-    source's order; empty before compile unless `sources` holds its source
-    (`_source`). `_parties` and `_who` name a side by it."""
-    source = _source(requirement.id, plan, sources)
+    source's order; empty before compile. `_parties` names a side by it."""
+    source = _selected_source(requirement.id, plan)
     return [
         (side, group.label)
         for group in (source.groups if source is not None else ())

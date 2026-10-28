@@ -654,20 +654,14 @@ _G7_MEMBERS = (("country/FRA", "France"), ("country/JPN", "Japan"))
             _G7_MEMBERS,
             None,
             (),
-            [
-                "The figure for G7 adds up its members' figures and leaves out amounts the data "
-                "allocates to no single country."
-            ],
+            ["The figure for G7 adds up its members' figures."],
             Reduction.SUM,
         ),
         (
             _G7_MEMBERS,
             None,
             (),
-            [
-                "The figure for G7 is computed from its members' figures and leaves out amounts "
-                "the data allocates to no single country."
-            ],
+            ["The figure for G7 is computed from its members' figures."],
             Reduction.MEAN,
         ),
         (

@@ -50,7 +50,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 from google.genai import _api_client, errors, types
 from harness.graph.state import APPROVE_INTERRUPT, store_search
 from harness.orchestrator_tools import _search_context
-from harness.plan_display import shown_decisions
+from harness.plan_display import plan_words, shown_decisions
 from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
 from harness.prefix_cache import PrefixCache
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
@@ -5277,6 +5277,58 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
         assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
 
 
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize(
+    ("total_donor", "code"),
+    [
+        pytest.param(
+            "InternationalDevelopmentAssociation",
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="multilateral-reporter",
+        ),
+        pytest.param("country/USA", Outcome.OK.value, id="one-reporter-kind"),
+    ],
+)
+def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_money(
+    decision: DecisionFactory, accept: bool, total_donor: str, code: str
+) -> None:
+    """US health aid plus a total, both counted bilateral plus imputed multilateral,
+    whether the sum aligns its inputs or accepts a provider difference. Where the
+    total is IDA's, whose own outflows spend the core contributions its funders paid
+    it, both inputs count the donors' aid through multilaterals, one as an imputed
+    share and one as IDA's spending, so the sum is refused although both hold one
+    option. Where both report as countries they count each money by the same
+    streams, and the provider scope says nothing of whether their flows overlap."""
+    ctx = _FakeToolContext()
+    total = _from_donors(
+        provider_block(TOTAL, narrow=False, active="provider:inclusive"), [total_donor]
+    )
+    if total_donor != "country/USA":
+        (donor,) = total["resolved"]["entities"]
+        donor.update(entity_type="Organization", multilateral=True)
+    _show_blocks(
+        ctx,
+        _from_donors(
+            provider_block(HEALTH, narrow=True, active="provider:inclusive"), ["country/USA"]
+        ),
+        total,
+    )
+
+    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+    if code == Outcome.OK.value:
+        assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
+        return
+    assert result["detail"]["basis"] == {
+        "spec_id": TOTAL,
+        "option_ids": ["provider:inclusive"],
+        "requirement_id": "total",
+        "step_id": "sum",
+    }
+    assert load_plan(ctx.state) is None
+
+
 def _from_donors(block: dict[str, Any], donors: list[str]) -> dict[str, Any]:
     """`block` with its part's base identity bound to `donors`, countries, as its
     origin, all providers when empty, each stated as Search states a bound country."""
@@ -6570,18 +6622,32 @@ async def test_a_declared_whole_read_by_another_calculation_is_refused_for_a_pla
     assert load_plan(ctx.state) is None
 
 
+def _french(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block`, a `US_2023` health part, with France as its donor: a part of
+    its own (`PartScope.base`), under a spec_id of its own."""
+    part = block["resolved"]["scope_choices"]["base"]["spec_id"]
+    text = json.dumps(block)
+    for us, fr in (
+        (part, f"spec_{'7' * 32}"),
+        (block["spec_id"], f"spec_{'8' * 32}"),
+        ("country/USA", "country/FRA"),
+        ("United States of America", "France"),
+    ):
+        text = text.replace(us, fr)
+    return json.loads(text)
+
+
 async def test_a_declared_whole_follows_its_part_when_another_calculation_realigns_it(
     decision: DecisionFactory,
 ) -> None:
     """US bilateral health aid as a share of a declared whole, and also compared with
-    health aid the user asked for with imputed multilateral flows. The comparison
-    moves the part to the inclusive compile, so the whole is compiled from that
-    final pin and the share divides an inclusive part by an inclusive total."""
+    French health aid the user asked for with imputed multilateral flows. The
+    comparison moves the part to the inclusive compile, so the whole is compiled from
+    that final pin and the share divides an inclusive part by an inclusive total."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     inclusive = us_2023_block("health_inclusive")
-    stated = _stated_provider(json.loads(json.dumps(inclusive)))
-    stated["spec_id"] = f"spec_{'8' * 32}"
+    stated = _stated_provider(_french(inclusive))
     _show_blocks(ctx, us_2023_block("health"), inclusive, stated)
     save_aligned_pin(
         ctx.state,
@@ -6604,8 +6670,8 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
             DatasetRequirement(
                 id="health_stated",
                 decision_ids=["measure"],
-                measure="US aid to health with imputed multilateral flows",
-                entities=[Entity(name="United States", role="donor")],
+                measure="French aid to health with imputed multilateral flows",
+                entities=[Entity(name="France", role="donor")],
                 period=Period(start=2023, end=2023),
                 source_spec_id=stated["spec_id"],
             ),
@@ -7218,6 +7284,41 @@ async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inp
             noted.rationale
         )
         assert whole_counts is not None and whole_counts in noted.rationale
+
+
+async def test_a_provider_difference_names_inputs_of_one_concept_as_the_card_does(
+    decision: DecisionFactory,
+) -> None:
+    """The CRS bilateral total compared with the DAC1 total, the comparison accepting
+    the difference. Search names both "official development assistance", so the
+    card tells the two apart, and the stated difference names each input as the
+    card does, so its two sentences read two subjects."""
+    ctx = _FakeToolContext()
+    blocks = [_search_labelled("whole"), _search_labelled("dac1_contributions")]
+    _show_blocks(ctx, *blocks)
+
+    result = await _us_2023(
+        _tools_reading(WholeCompiles())["propose_plan"].func,
+        ctx,
+        decision(),
+        part="whole",
+        whole="dac1_contributions",
+        share=False,
+        accept=True,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
+    # The card's names before compile, read off the blocks the inputs pin.
+    uncompiled = plan.model_copy(update={"translation": None, "workflow": None})
+    pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks}
+    names = plan_words(uncompiled, pinned=pinned).names
+    subjects = {f"{names[rid][:1].upper()}{names[rid][1:]} counts " for rid in (_PART, _WHOLE)}
+    assert len(subjects) == 2, subjects
+    for subject in subjects:
+        assert subject in stated.rationale, (subject, stated.rationale)
 
 
 @pytest.mark.parametrize(
@@ -7985,7 +8086,8 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     recipient: the whole is compiled from the part's base identity with that role's
     column dropped, the entity set named on it and the region choice adding to it
     left out, every other choice held as an entry, the provider scope as a carried
-    one Search may drop, and no search. Search's answer is the population the whole
+    one Search may drop over every donor and an explicit one over every recipient,
+    whose total names the part's donor, and no search. Search's answer is the population the whole
     holds, and the caveat names it and what both sides' dataset counts alike."""
     block = _us_health_to_africa() if part == "africa" else _us_block(part)
     surface = _OpenedWholeCompiles(block, groups=groups)
@@ -8001,7 +8103,8 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     del identity["entities"][column]
     assert call["identity"] == identity
     assert {entry["axis"] for entry in call["scope_entries"]} == entries
-    assert {e["axis"]: e["provenance"] for e in call["scope_entries"]}["provider"] == "carried"
+    provider = "carried" if axis == "donor" else "explicit"
+    assert {e["axis"]: e["provenance"] for e in call["scope_entries"]}["provider"] == provider
     assert list(call.get("entity_groups") or {}) == posted_groups
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, _OPENED_WHOLE[axis])]
     plan = load_plan(ctx.state)
@@ -8402,14 +8505,16 @@ _SUM_BLOCKS: dict[str, Any] = json.loads(
 
 
 def _named(block: dict[str, Any]) -> list[Entity]:
-    """The parties `block` binds, as a plan names them: a set by Search's label for it,
-    each other entity by its label."""
+    """The parties `block` binds, as a plan names them: a set's total by Search's label
+    for the set, each other entity by its label."""
     resolved = block["resolved"]
     groups = resolved.get("entity_groups") or {}
     roles = {"origin": "donor", "destination": "recipient"}
     return [
         Entity(
-            name=groups[e["role"]]["label"] if e["role"] in groups else e["label"],
+            name=groups[e["role"]]["label"]
+            if (groups.get(e["role"]) or {}).get("total") == e["ref"]
+            else e["label"],
             role=roles[e["role"]],
         )
         for e in resolved["entities"]
@@ -8433,20 +8538,36 @@ def _unmarked(block: dict[str, Any]) -> dict[str, Any]:
     return copied
 
 
-_ARE_MULTILATERAL = "are"
-_MAY_BE_MULTILATERAL = "may include"
+def _beside_ida(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block`, a DAC countries' total, binding IDA beside that total on its
+    donor side, under a spec_id of its own, with IDA's entity as Search marks it
+    (`ida_health_to_kenya`): a multilateral organisation."""
+    copied = json.loads(json.dumps(block))
+    copied["spec_id"] = f"spec_{'8' * 32}"
+    resolved = copied["resolved"]
+    ida = next(
+        e
+        for e in _SUM_BLOCKS["ida_health_to_kenya"]["resolved"]["entities"]
+        if e["role"] == "origin"
+    )
+    resolved["entities"] = [*resolved["entities"], ida]
+    identity = resolved["scope_choices"]["base"]["identity"]
+    identity["entities"]["origin"] = [*identity["entities"]["origin"], ida["ref"]]
+    return copied
+
+
+_SUM_BLOCKS["dac_countries_and_ida_bilateral"] = _beside_ida(_SUM_BLOCKS["dac_countries_bilateral"])
 
 
 @pytest.mark.parametrize(
-    ("first", "second", "unmarked", "cause", "donors"),
+    ("first", "second", "unmarked", "refused"),
     [
         # Multilateral ODA counts the DAC countries' core contributions, which IDA spends.
         pytest.param(
             "dac_countries_multilateral",
             "ida_health_to_kenya",
             None,
-            "both count the donor's aid through multilaterals",
-            (_PART, _ARE_MULTILATERAL),
+            "provider:multilateral",
             id="multilateral-oda-and-ida",
         ),
         # Total ODA counts them too, beside the DAC countries' bilateral flows.
@@ -8454,27 +8575,24 @@ _MAY_BE_MULTILATERAL = "may include"
             "dac_countries_contributions",
             "ida_health_to_kenya",
             None,
-            "the figure counted as bilateral plus core contributions to multilaterals "
-            "already holds the donor's aid through multilaterals",
-            (_PART, _ARE_MULTILATERAL),
+            "provider:contributions",
             id="total-oda-and-ida",
         ),
         # Bilateral ODA counts the DAC countries' own flows alone, and IDA's spending is
         # not theirs: no money is counted twice.
         pytest.param(
-            "dac_countries_bilateral", "ida_health_to_kenya", None, None, None, id="bilateral-oda"
+            "dac_countries_bilateral", "ida_health_to_kenya", None, None, id="bilateral-oda"
         ),
         # US bilateral health aid and IDA's share no money either.
         pytest.param(
-            "us_health_to_kenya", "ida_health_to_kenya", None, None, None, id="us-bilateral-and-ida"
+            "us_health_to_kenya", "ida_health_to_kenya", None, None, id="us-bilateral-and-ida"
         ),
         # IDA stating no marker: nothing says its outflows are not a multilateral's.
         pytest.param(
             "dac_countries_multilateral",
             "ida_health_to_kenya",
             _PART,
-            "both count the donor's aid through multilaterals",
-            (_PART, _MAY_BE_MULTILATERAL),
+            "provider:multilateral",
             id="multilateral-oda-and-unmarked-ida",
         ),
         # DAC countries' total stating nothing of what it holds: its bilateral ODA may
@@ -8486,9 +8604,18 @@ _MAY_BE_MULTILATERAL = "may include"
             "dac_countries_bilateral",
             "dac_countries_multilateral",
             _TOTAL,
-            "both count the donor's aid through multilaterals",
-            (_TOTAL, _MAY_BE_MULTILATERAL),
+            "provider:bilateral",
             id="unmarked-bilateral-oda-and-multilateral-oda",
+        ),
+        # DAC countries' total marked as holding no multilateral, bound beside IDA. The
+        # bilateral ODA of the two counts IDA's outflows, which spend the contributions
+        # multilateral ODA counts.
+        pytest.param(
+            "dac_countries_and_ida_bilateral",
+            "dac_countries_multilateral",
+            None,
+            "provider:bilateral",
+            id="bilateral-oda-of-dac-countries-and-ida-and-multilateral-oda",
         ),
     ],
 )
@@ -8497,8 +8624,7 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
     first: str,
     second: str,
     unmarked: str | None,
-    cause: str | None,
-    donors: tuple[str, str] | None,
+    refused: str | None,
 ) -> None:
     """Two figures added, the sum accepting a provider difference. IDA's health aid to
     Kenya, which Search marks a multilateral's outflows, spends the core contributions
@@ -8506,9 +8632,10 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
     figure counting the DAC countries' core contributions, on multilateral ODA or total
     ODA, since no donor or year keeps the two apart and the contributions would be
     counted twice. Beside the DAC countries' bilateral ODA or US bilateral health aid,
-    which count bilateral money alone, it is served. A figure whose donors Search
-    states nothing of (`unmarked`) may be a multilateral's outflows, and the refusal
-    says they may include multilateral organisations."""
+    which count bilateral money alone, it is served, unless IDA is bound beside the
+    DAC countries there. A figure whose donors Search states nothing of (`unmarked`)
+    may be a multilateral's outflows. The refusal names the second figure and the
+    option the first is counted on (`refused`)."""
     blocks = {
         _TOTAL: _SUM_BLOCKS[first],
         _PART: _SUM_BLOCKS[second],
@@ -8546,19 +8673,372 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
         tool_context=ctx,
     )
 
-    if cause is None:
+    if refused is None:
         assert result["outcome"] == Outcome.OK.value, result
         return
-    assert donors is not None
     assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
-    assert result["detail"]["basis"]["step_id"] == _SUM
-    assert cause in result["message"], result["message"]
-    named, verb = donors
-    assert (
-        f"the donors of {named!r} {verb} multilateral organisations, whose outflows spend "
-        "the core contributions their funders paid them"
-    ) in result["message"], result["message"]
+    assert result["detail"]["basis"] == {
+        "spec_id": blocks[_PART]["spec_id"],
+        "option_ids": [refused],
+        "requirement_id": _PART,
+        "step_id": _SUM,
+    }
     assert load_plan(ctx.state) is None
+
+
+def _searched_in_words(block: dict[str, Any], *, stated: bool = True) -> dict[str, Any]:
+    """A copy of `block` as the planner holds a search for it (`planner.agent.pin_by_search`):
+    every axis Search settled other than by default marked as the planner's. With
+    `stated`, Search read its provider row in the searched words ("multilateral ODA"),
+    an explicit entry from text in place of the entry from a choice it was recorded
+    with."""
+    copied = json.loads(json.dumps(block))
+    scope = copied["resolved"]["scope_choices"]
+    if stated:
+        scope["entries"] = [
+            {
+                **entry,
+                "origin": {"kind": "text", "text": copied["resolved"]["concept_label"]}
+                | {"start": 0, "end": len(copied["resolved"]["concept_label"])},
+            }
+            if entry["axis"] == "provider"
+            else entry
+            for entry in scope["entries"]
+        ]
+    copied[PLANNER_AXES_BLOCK_KEY] = sorted(
+        c["axis"] for c in scope["choices"] if c["provenance"] != "default"
+    )
+    return copied
+
+
+def _dac_countries(requirement_id: str, block: dict[str, Any]) -> DatasetRequirement:
+    """`requirement_id` pinning `block` over 2019, naming the parties it binds (`_named`)."""
+    return DatasetRequirement(
+        id=requirement_id,
+        decision_ids=["measure"],
+        measure=f"figure {requirement_id}",
+        entities=_named(block),
+        period=Period(start=2019, end=2019),
+        source_spec_id=block["spec_id"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("second", "stated", "refused"),
+    [
+        pytest.param("dac_countries_multilateral", True, None, id="rows-read-in-words"),
+        # The same pins compiled by the planner on those rows, entries from a choice. They are the
+        # planner's, but both rows read one DAC1 part, so counting the multilateral row
+        # as bilateral would add the bilateral series to itself. Each keeps its row.
+        pytest.param("dac_countries_multilateral", False, None, id="rows-the-planner-compiled"),
+        # A total Search counts by default beside the bilateral row the planner compiled.
+        # One part, so the total keeps its scope, which already holds the bilateral
+        # flows, and the sum is refused (`refused`, the option the first input is on).
+        pytest.param(
+            "dac_countries_contributions", False, "provider:bilateral", id="total-by-default"
+        ),
+    ],
+)
+def test_a_sum_of_provider_rows_searched_in_words_keeps_each_row(
+    decision: DecisionFactory, second: str, stated: bool, refused: str | None
+) -> None:
+    """ "US bilateral plus multilateral ODA": the planner searched each input, and
+    Search read DAC1 bilateral ODA and multilateral ODA in the words it searched. The
+    sum keeps both pins, and is served, since bilateral flows and core contributions
+    count no money twice. Alignment never puts two rows of one part on one row, so
+    rows the planner compiled keep theirs too, and a total beside the bilateral row
+    keeps its own scope and is refused as counting the bilateral flows twice."""
+    blocks = {
+        _TOTAL: _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"], stated=stated),
+        _PART: _searched_in_words(_SUM_BLOCKS[second], stated=stated),
+    }
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, *blocks.values())
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="How much US bilateral plus multilateral ODA was there in 2019?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            *(_dac_countries(rid, block) for rid, block in blocks.items()),
+            SumOfRequirement(
+                id=_SUM,
+                decision_ids=["measure"],
+                left=RequirementSide(input_id=_TOTAL),
+                right=RequirementSide(input_id=_PART),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    if refused is not None:
+        assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
+        assert result["detail"]["basis"] == {
+            "spec_id": blocks[_PART]["spec_id"],
+            "option_ids": [refused],
+            "requirement_id": _PART,
+            "step_id": _SUM,
+        }
+        assert load_plan(ctx.state) is None
+        return
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [(rid, block["spec_id"]) for rid, block in blocks.items()]
+
+
+def _another_part(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block` as a part of its own (`PartScope.base`), under a spec_id of its
+    own, as another donor's DAC1 row reads."""
+    part = block["resolved"]["scope_choices"]["base"]["spec_id"]
+    text = json.dumps(block)
+    for held, other in ((part, f"spec_{'6' * 32}"), (block["spec_id"], f"spec_{'5' * 32}")):
+        text = text.replace(held, other)
+    return json.loads(text)
+
+
+@pytest.mark.parametrize(
+    ("stated", "realigned"),
+    [
+        pytest.param(True, None, id="rows-read-in-words"),
+        # The same rows compiled by the planner, no one's statement, so the second moves
+        # to the first input's scope.
+        pytest.param(False, "provider:bilateral", id="rows-the-planner-compiled"),
+    ],
+)
+def test_provider_rows_of_two_parts_read_in_words_keep_their_own(
+    decision: DecisionFactory, stated: bool, realigned: str | None
+) -> None:
+    """ "US bilateral ODA plus France's multilateral ODA": two parts, so neither row
+    would read the other's series. Search read each row in the words the planner
+    searched, so each is stated and the sum keeps both pins, bilateral flows and core
+    contributions counting no money twice."""
+    blocks = {
+        _TOTAL: _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"], stated=stated),
+        _PART: _another_part(
+            _searched_in_words(_SUM_BLOCKS["dac_countries_multilateral"], stated=stated)
+        ),
+    }
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, *blocks.values())
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="How much US bilateral ODA plus France's multilateral ODA was there in 2019?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            *(_dac_countries(rid, block) for rid, block in blocks.items()),
+            SumOfRequirement(
+                id=_SUM,
+                decision_ids=["measure"],
+                left=RequirementSide(input_id=_TOTAL),
+                right=RequirementSide(input_id=_PART),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    if realigned is not None:
+        assert result["code"] == ProblemCode.BASES_UNALIGNED.value, result
+        assert [(r["spec_id"], r["option_ids"]) for r in result["detail"]["realign"]] == [
+            (blocks[_PART]["spec_id"], [realigned])
+        ]
+        return
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [(rid, block["spec_id"]) for rid, block in blocks.items()]
+
+
+def _share(numerator: str, denominator: str) -> ShareOfRequirement:
+    """`numerator` as a share of `denominator`."""
+    return ShareOfRequirement(
+        id=_SHARE,
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=numerator),
+        denominator=RequirementSide(input_id=denominator),
+    )
+
+
+def _difference(minuend: str, subtrahend: str) -> ComparisonRequirement:
+    """`minuend` less `subtrahend`."""
+    return ComparisonRequirement(
+        id=_COMPARE,
+        decision_ids=["measure"],
+        minuend=RequirementSide(input_id=minuend),
+        subtrahend=RequirementSide(input_id=subtrahend),
+    )
+
+
+def _added(left: str, right: str) -> SumOfRequirement:
+    """`left` plus `right`."""
+    return SumOfRequirement(
+        id=_SUM,
+        decision_ids=["measure"],
+        left=RequirementSide(input_id=left),
+        right=RequirementSide(input_id=right),
+    )
+
+
+_US_MULTILATERAL = _searched_in_words(_SUM_BLOCKS["dac_countries_multilateral"])
+_US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
+
+
+@pytest.mark.parametrize(
+    ("blocks", "steps", "realigned", "caveated"),
+    [
+        # Multilateral ODA read in words over the DAC1 total Search counts by default.
+        # One part, so the total counted as multilateral ODA would be the numerator's
+        # series and the share 100%.
+        pytest.param(
+            {"first": _US_MULTILATERAL, "second": _US_TOTAL},
+            [_share("first", "second")],
+            None,
+            [_SHARE],
+            id="multilateral-over-total",
+        ),
+        # The total stated too ("US ODA"), so both rows are stated, on different scopes.
+        pytest.param(
+            {
+                "first": _US_MULTILATERAL,
+                "second": _searched_in_words(
+                    _stated_provider(
+                        json.loads(json.dumps(_SUM_BLOCKS["dac_countries_contributions"]))
+                    )
+                ),
+            },
+            [_share("first", "second")],
+            None,
+            [_SHARE],
+            id="multilateral-over-stated-total",
+        ),
+        # The same two figures subtracted would give a difference of 0.
+        pytest.param(
+            {"first": _US_MULTILATERAL, "second": _US_TOTAL},
+            [_difference("first", "second")],
+            None,
+            [_COMPARE],
+            id="multilateral-minus-total",
+        ),
+        # US health aid the user asked for with imputed multilateral flows, less US
+        # bilateral health aid. One CRS part, so counting the bilateral figure as
+        # inclusive would subtract a figure from itself.
+        pytest.param(
+            {
+                "first": _stated_provider(
+                    json.loads(json.dumps(us_2023_block("health_inclusive")))
+                ),
+                "second": us_2023_block("health"),
+            },
+            [_difference("first", "second")],
+            None,
+            [_COMPARE],
+            id="inclusive-minus-bilateral-health",
+        ),
+        # The share beside a comparison of the total with France's multilateral ODA.
+        # The comparison alone would move the total onto the multilateral row, and the
+        # share would read it twice. Neither moves it.
+        pytest.param(
+            {
+                "first": _US_MULTILATERAL,
+                "second": _US_TOTAL,
+                "other": _another_part(_US_MULTILATERAL),
+            },
+            [_share("first", "second"), _difference("second", "other")],
+            None,
+            [_SHARE, _COMPARE],
+            id="a-second-calculation-moves-the-total",
+        ),
+        # The share beside a comparison of the total with France's bilateral ODA, each
+        # step order. The share wants the total on the multilateral row, the comparison
+        # on the bilateral one, and the first would read one series twice. Neither
+        # moves it, whichever step comes first.
+        *(
+            pytest.param(
+                {
+                    "first": _US_MULTILATERAL,
+                    "second": _US_TOTAL,
+                    "other": _another_part(
+                        _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"])
+                    ),
+                },
+                steps,
+                None,
+                [_SHARE, _COMPARE],
+                id=f"two-calculations-want-the-total-on-two-rows-{order}",
+            )
+            for order, steps in (
+                ("share-first", [_share("first", "second"), _difference("second", "other")]),
+                ("comparison-first", [_difference("second", "other"), _share("first", "second")]),
+            )
+        ),
+        # US bilateral plus multilateral ODA, rows the planner compiled, as a share of
+        # France's multilateral ODA. The share alone would move the bilateral row onto
+        # the multilateral one, and the sum would add one series to itself.
+        pytest.param(
+            {
+                "first": _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"], stated=False),
+                "second": _searched_in_words(
+                    _SUM_BLOCKS["dac_countries_multilateral"], stated=False
+                ),
+                "other": _another_part(_US_MULTILATERAL),
+            },
+            [_added("first", "second"), _share(_SUM, "other")],
+            None,
+            [_SUM, _SHARE],
+            id="a-share-of-a-sum-moves-a-sum-input",
+        ),
+        # US bilateral health aid over the DAC1 total. Different parts, so the total
+        # moves to the narrower part's scope.
+        pytest.param(
+            {
+                "first": _searched_in_words(_SUM_BLOCKS["us_health_to_kenya"]),
+                "second": _US_TOTAL,
+            },
+            [_share("first", "second")],
+            [("second", "provider:bilateral")],
+            [],
+            id="health-over-total",
+        ),
+    ],
+)
+def test_two_sides_never_read_one_series(
+    decision: DecisionFactory,
+    blocks: dict[str, dict[str, Any]],
+    steps: list[EvidenceRequirement],
+    realigned: list[tuple[str, str]] | None,
+    caveated: list[str],
+) -> None:
+    """Calculations over a figure on a provider row and one the planner left on
+    another. Where the two read one part, no calculation counts one on the other's
+    row, which would read one series on both sides of a share, comparison or sum, so
+    every pin is kept and each calculation `caveated` states what its inputs count.
+    Where they read different parts, the input is aligned on the other's scope
+    (`realigned`, each input and the option it moves to)."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, *blocks.values())
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of US ODA goes to multilaterals?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            *(_dac_countries(rid, block) for rid, block in blocks.items()),
+            *steps,
+        ],
+        tool_context=ctx,
+    )
+
+    if realigned is not None:
+        assert result["code"] == ProblemCode.BASES_UNALIGNED.value, result
+        assert [(r["spec_id"], r["option_ids"]) for r in result["detail"]["realign"]] == [
+            (blocks[rid]["spec_id"], [option]) for rid, option in realigned
+        ]
+        return
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [(rid, block["spec_id"]) for rid, block in blocks.items()]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    differ = {d.slot for d in plan.decisions if d.caveat == "providers_differ"}
+    assert [
+        step_id for step_id in caveated if differ & set(plan.requirement(step_id).decision_ids)
+    ] == caveated
 
 
 # --- a pin whose identity a search recorded, over the requirement's period ----------

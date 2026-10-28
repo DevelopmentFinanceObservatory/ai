@@ -3423,6 +3423,41 @@ def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its
     ]
 
 
+_ODA = "official development assistance"
+
+
+def test_a_donor_whole_counted_on_another_series_is_named_by_its_own_concept(
+    decision: DecisionFactory,
+) -> None:
+    """The United States' bilateral ODA to Kenya as a share of its whole over every
+    donor, which Search counted on total ODA, the bilateral series not being
+    published for official donors (DAC): the card names the whole by the
+    concept Search states for its own source, total ODA, and the part by its."""
+    plan = us_share_of_kenya_oda(
+        decision,
+        whole={**DAC_DONORS, "concept_label": _ODA},
+        numerator={**US_DONOR, "concept_label": "bilateral ODA"},
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(update={"whole_of": WholeOf(part="us", axis="donor")})
+                if r.id == "all_oda"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+
+    assert [row["label"] for row in card_rows(plan)] == [
+        "Fetch bilateral ODA for United States and Kenya",
+        f"Fetch {_ODA} for Kenya and official donors (DAC)",
+        f"Total {_ODA} by year",
+        f"Bilateral ODA as a share of {_ODA}",
+    ]
+
+
 def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
     decision: DecisionFactory,
 ) -> None:
@@ -3565,62 +3600,31 @@ def test_a_choice_shows_no_planner_slug_or_option_id(text: str, shown: str) -> N
 
 
 @pytest.mark.parametrize(
-    ("label", "text", "shown"),
+    ("text", "shown"),
     [
         (
-            _RECORDED_SECTOR_LABEL,
             "measure_basis:net because the user asked for net flows",
             "net disbursements, current USD because the user asked for net flows",
         ),
         (
-            _RECORDED_SECTOR_LABEL,
             "sector:130",
             "population policy, programme, and reproductive health, CRS 130 alone",
         ),
-        (_RECORDED_SECTOR_LABEL, "crs_total", "crs total"),
-        (_RECORDED_SECTOR_LABEL, "sector:120+130 health incl. population", _RECORDED_SECTOR_LABEL),
+        ("crs_total", "crs total"),
         (
-            _RECORDED_SECTOR_LABEL,
             "sector:120+130 Health incl. population is the sector the user asked for",
-            f"{_RECORDED_SECTOR_LABEL} is the sector the user asked for",
-        ),
-        (
-            _RECORDED_SECTOR_LABEL,
-            "sector:120+130 health matters most here",
-            f"{_RECORDED_SECTOR_LABEL} matters most here",
-        ),
-        (
-            _RECORDED_SECTOR_LABEL,
-            f"sector:120+130 {_RECORDED_SECTOR_LABEL}.",
-            f"{_RECORDED_SECTOR_LABEL}.",
-        ),
-        (
-            _RECORDED_SECTOR_LABEL,
-            "sector:120+130 health incl. population, the sector asked for",
-            f"{_RECORDED_SECTOR_LABEL}, the sector asked for",
-        ),
-        (
-            _RECORDED_SECTOR_LABEL,
-            f"sector:120+130 {_RECORDED_SECTOR} (CRS 120+130) is asked",
-            f"{_RECORDED_SECTOR_LABEL} is asked",
-        ),
-        (
-            "multisector aid n.e.s.",
-            "sector:120+130 multisector aid n.e.s., chosen",
-            "multisector aid n.e.s., chosen",
+            f"{_RECORDED_SECTOR_LABEL} Health incl. population is the sector the user asked for",
         ),
     ],
 )
-def test_a_decisions_reason_keeps_its_words_after_the_option_id(
-    label: str, text: str, shown: str
-) -> None:
+def test_a_decisions_reason_keeps_its_words_after_the_option_id(text: str, shown: str) -> None:
     """A reason, question or caveat opening with an option's id reads that id
-    as the option's label and keeps the planner's words after it, less any
-    words that open the label, which the label already says."""
+    as the option's label and keeps the planner's words after it as written,
+    including words that repeat the label."""
     payload = _recorded_payload("long")
     for decision in payload["decisions"]:
         if (decision.get("scope") or {}).get("axis") == "sector":
-            decision["options"][0] = decision["chosen"] = label
+            decision["options"][0] = decision["chosen"] = _RECORDED_SECTOR_LABEL
     plan = Plan.model_validate(
         {
             key: value

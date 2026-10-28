@@ -1062,6 +1062,52 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
     assert members_reading(union, answer=MembersAnswer.SUMMED) is None
 
 
+# DAC members summed on the donor side, where Search states nothing left out,
+# and Africa's countries summed on the recipient side, where Search names the
+# residual Africa's published total counts beside them. The G7's published
+# total is a figure of its own, which can differ from its members' sum.
+@pytest.mark.parametrize(
+    ("group", "left_out"),
+    [
+        (
+            {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
+            "",
+        ),
+        (
+            {
+                "destination": {
+                    "ref": "africa",
+                    "label": "Africa",
+                    "total": None,
+                    "left_out": ["Africa, unallocated by country (DAC)"],
+                    "sum_differs": False,
+                }
+            },
+            " and leaves out what the data allocates to no single country: "
+            "Africa, unallocated by country (DAC)",
+        ),
+        (
+            {"origin": {"ref": None, "label": "G7", "total": None, "sum_differs": True}},
+            ", and the source publishes its own figure for the group, "
+            "which can differ from one built from its members",
+        ),
+    ],
+    ids=[
+        "donor-members-leave-nothing-out",
+        "recipient-members-leave-out-a-residual",
+        "donor-total-differs-from-its-members-sum",
+    ],
+)
+def test_summed_members_state_only_the_residuals_search_names(
+    group: dict[str, dict[str, object]], left_out: str
+) -> None:
+    (read,) = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=group)).groups
+
+    assert members_reading(read, answer=MembersAnswer.SUMMED) == (
+        f"The figure for {read.label} adds up its members' figures{left_out}."
+    )
+
+
 def test_a_resubmit_posts_a_whole_total_without_its_marker() -> None:
     source = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL))
 
