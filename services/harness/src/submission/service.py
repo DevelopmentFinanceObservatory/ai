@@ -453,6 +453,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     realigned = _aligned_bases(
         _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
         evidence_requirements,
+        carried=previous.evidence_requirements if previous is not None else (),
         shown=pins,
         aligned=aligned_pins(view.state),
         searched=searched_pins(view.state),
@@ -3400,8 +3401,9 @@ def _scope_decisions(
             (`scope_choice_decisions`).
         wholes: The decision each whole compiled from its part states, by
             requirement id (`_whole_decisions`).
-        calculations: The decisions each calculation accepting a provider
-            difference states, by requirement id, empty for one stating none.
+        calculations: The provider-scope decisions each comparison, share,
+            quotient or sum states, by requirement id, empty for one stating
+            none (`_provider_difference_decisions`).
         removed: The slots this call removes.
 
     Returns:
@@ -3804,6 +3806,7 @@ def _aligned_bases(
     requirements: Sequence[EvidenceRequirement],
     evidence_requirements: Sequence[EvidenceRequirement],
     *,
+    carried: Sequence[EvidenceRequirement],
     shown: Mapping[str, PinSource],
     aligned: Sequence[AlignedPin],
     searched: Sequence[SearchedPin],
@@ -3829,8 +3832,12 @@ def _aligned_bases(
     (`_declared_wholes`). A part with no pin is searched for first. A whole
     not compiled yet answers `BASES_UNALIGNED` naming it
     (`Realignment.whole_axis`), and a part Search cannot leave the axis
-    open on answers `SHARE_WHOLE_UNDERIVABLE`. A share declaring nothing
-    is never rewritten: its inputs are aligned as any calculation's are.
+    open on answers `SHARE_WHOLE_UNDERIVABLE`. A compiled whole is never
+    aligned: it holds the options the user switched on its own row, so its
+    calculation's other inputs are aligned among themselves, and a provider
+    scope it differs on is stated (`_provider_difference_decisions`). A share
+    declaring nothing is never rewritten: its inputs are aligned as any
+    calculation's are.
 
     A calculation reading several inputs (a comparison, sum, share, quotient
     or join) contrasts sector and region, and keeps those as stated. On
@@ -3838,7 +3845,9 @@ def _aligned_bases(
     (bilateral flows alone, or with imputed multilateral flows), it
     contrasts its inputs only when the user stated different options on
     them (explicit or carried entries naming different options, an entry
-    this planner compiled excluded, as `_InputBasis.stated` reads them).
+    this planner compiled excluded, as `_InputBasis.stated` reads them), and
+    a comparison, share, quotient or sum contrasting provider scopes says so
+    (`_provider_difference_decisions`).
     Otherwise its dataset inputs with a choice on the axis are counted on
     one option. Only a comparison, share, quotient or sum aligns the
     provider scope, and not one the user asked to keep its inputs' own
@@ -3876,6 +3885,7 @@ def _aligned_bases(
         requirements: Every requirement the plan states once this call's
             patch lands (`_requirements_after`).
         evidence_requirements: This call's own requirements.
+        carried: The requirements of the plan this call amends, empty for none.
         shown: The datasets the planner was shown (`planner.plan.pin_sources`).
         aligned: The pins compiled so far (`aligned_pins`).
         searched: The searches made so far for unpinned inputs (`searched_pins`).
@@ -3911,6 +3921,7 @@ def _aligned_bases(
     try:
         wholes = _declared_wholes(
             requirements,
+            carried=carried,
             shown=shown,
             unsearched=unsearched,
             compiled=[pin for pin in aligned if pin.whole_axis is not None],
@@ -3922,8 +3933,11 @@ def _aligned_bases(
     compiled = {
         (pin.origin, pin.option_ids): pin.spec_id for pin in aligned if pin.whole_axis is None
     }
+    # A compiled whole holds the options the user switched on its own row, so
+    # alignment never moves it; its calculation's other inputs align as before.
+    aligning = [requirement for requirement in requirements if requirement.id not in wholes]
     by_axis = {
-        axis: _input_bases(requirements, shown=shown, origins=origins, axis=axis)
+        axis: _input_bases(aligning, shown=shown, origins=origins, axis=axis)
         for axis in _ALIGNED_AXES
     }
     reads: dict[str, Sequence[str]] = {
@@ -4121,7 +4135,8 @@ def _providers_unaligned(
     sector (`DatasetRequirement.whole_of`), or pin an input counted on that
     scope. `accept_provider_difference` is named only for a user who asked for
     that input's source, so the planner does not take it as a way past the
-    refusal.
+    refusal. `detail.requirement_id` names the input, as every refusal about
+    one requirement does, for its sentence (`harness.sentences`).
     """
     return problem(
         ProblemCode.PROVIDERS_UNALIGNED,
@@ -4135,12 +4150,13 @@ def _providers_unaligned(
         f"{basis.requirement_id!r}'s source as it stands.",
         outcome=Outcome.INVALID_INPUT,
         detail={
+            "requirement_id": basis.requirement_id,
             "provider": {
                 "step_id": step.id,
                 "requirement_id": basis.requirement_id,
                 "spec_id": basis.origin,
                 "option_id": target,
-            }
+            },
         },
     )
 
@@ -4206,6 +4222,7 @@ def _aligns(step: EvidenceRequirement, axis: str) -> bool:
 def _declared_wholes(
     requirements: Sequence[EvidenceRequirement],
     *,
+    carried: Sequence[EvidenceRequirement],
     shown: Mapping[str, PinSource],
     unsearched: Mapping[str, DatasetRequirement],
     compiled: Sequence[AlignedPin],
@@ -4218,7 +4235,11 @@ def _declared_wholes(
     and providers as the part, but for the options the user switched on the
     whole's own row. Those are the options of the compiled whole the
     whole's pin is (`AlignedPin.option_ids`, held by `harness.graph.switch`
-    for a switch), which a whole compiled again from another part keeps.
+    for a switch), else of the one the requirement of the same id pins in
+    the plan this call amends (`carried`), so a whole restated with its
+    `whole_of` and no pin keeps them, and a whole compiled again from
+    another pin of its part keeps them too. A whole restated with another
+    `whole_of` starts from the part's own options.
     `compiled` holds the wholes compiled so far (`AlignedPin.key`), so wholes
     declaring one part, axis and options share one compile. A whole that
     cannot name its part so (`planner.plan.whole_of_fault`) is left for
@@ -4249,6 +4270,11 @@ def _declared_wholes(
         raise _Unservable(_basis_unknown(list(searches.values())))
     pins = {pin.key: pin.spec_id for pin in compiled}
     own = {(pin.spec_id, pin.whole_axis): pin.option_ids for pin in compiled}
+    before = {
+        requirement.id: requirement
+        for requirement in carried
+        if isinstance(requirement, DatasetRequirement)
+    }
     wanted: dict[tuple[str, str, tuple[str, ...]], Realignment] = {}
     wholes: dict[str, str] = {}
     for whole, part, axis in declared:
@@ -4271,7 +4297,7 @@ def _declared_wholes(
                     whole_id=whole.id, part_spec_id=pin, reason=reason, cause=cause
                 )
             )
-        options = own.get((whole.source_spec_id, axis), ())
+        options = _switched_options(whole, before.get(whole.id), own, axis=axis)
         held = pins.get((pin, options, axis))
         if held is not None:
             wholes[whole.id] = held
@@ -4283,6 +4309,27 @@ def _declared_wholes(
     if wanted:
         raise _Unservable(_bases_unaligned(list(wanted.values()), {}))
     return wholes
+
+
+def _switched_options(
+    whole: DatasetRequirement,
+    before: DatasetRequirement | None,
+    own: Mapping[tuple[str, str | None], tuple[str, ...]],
+    *,
+    axis: str,
+) -> tuple[str, ...]:
+    """The options the user switched on the declared whole `whole`'s own row
+    (`_declared_wholes`), `before` being the requirement of its id in the plan
+    amended and `own` each compiled whole's options by its pin and axis.
+
+    Those of the compiled whole `whole` pins, else of the one `before` pins,
+    and none when `before` declares another part or axis."""
+    if before is not None and before.whole_of != whole.whole_of:
+        return ()
+    for pin in (whole.source_spec_id, before.source_spec_id if before is not None else None):
+        if pin is not None and (pin, axis) in own:
+            return own[pin, axis]
+    return ()
 
 
 def _whole_slot(requirement_id: str) -> str:
@@ -4428,9 +4475,9 @@ _PROVIDER_DIFFERENCE_PREFIX = "providers_differ_"
 
 
 def _provider_difference_slot(step_id: str) -> str:
-    """The `Decision.slot` of the decision the calculation `step_id` states when it
-    accepts a provider difference (`_provider_difference_decisions`). Nothing reads
-    it back: such a decision is known by its `caveat`."""
+    """The `Decision.slot` of the decision the calculation `step_id` states when its
+    inputs may count different providers (`_provider_difference_decisions`). Nothing
+    reads it back: such a decision is known by its `caveat`."""
     return _derived_slot(_PROVIDER_DIFFERENCE_PREFIX, step_id)
 
 
@@ -4447,18 +4494,21 @@ def _derived_slot(prefix: str, requirement_id: str) -> str:
 def _provider_difference_decisions(
     requirements: Sequence[EvidenceRequirement], *, shown: Mapping[str, PinSource]
 ) -> dict[str, tuple[Decision, ...]]:
-    """The decisions each calculation accepting a provider difference states, by its requirement id.
+    """The decisions each comparison, share, quotient or sum states about its inputs' provider scopes, by its requirement id.
 
-    The user asked for its inputs as each dataset counts them
-    (`accept_provider_difference`). Every such calculation has an entry, empty
-    when it states none, so a calculation the plan carries is restated as
-    one it states (`_scope_decisions`). It states one unless every pinned
-    dataset input's scope record holds a provider scope and all match
+    Every such calculation (`_PROVIDER_ALIGNED`) has an entry, empty when it
+    states none, so a calculation the plan carries is restated as one it
+    states (`_scope_decisions`). One accepting a provider difference, the
+    user having asked for its inputs as each dataset counts them
+    (`accept_provider_difference`), states one unless every pinned dataset
+    input's scope record holds a provider scope and all match
     (`Option.provider_scope` of each active option): an input whose record
     states none may count other providers, since nothing says what it
-    counts. The decision says so in reader words, one sentence per input
-    naming what it counts, or that its dataset does not say
-    (`_provider_sentence`). It is the planner's, qualifies the answer
+    counts. Any other states one when every such record holds a provider
+    scope and they differ, as when the user set its inputs to different
+    scopes (`_aligned_bases`). The decision says so in reader words, one
+    sentence per input naming what it counts, or that its dataset does not
+    say (`_provider_sentence`). It is the planner's, qualifies the answer
     (`Decision.caveat` `providers_differ`), and is cited by the calculation
     (`_scope_decisions`).
     """
@@ -4469,7 +4519,7 @@ def _provider_difference_decisions(
     reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
     decisions: dict[str, tuple[Decision, ...]] = {}
     for step in requirements:
-        if not isinstance(step, _PROVIDER_ALIGNED) or not step.accept_provider_difference:
+        if not isinstance(step, _PROVIDER_ALIGNED):
             continue
         decisions[step.id] = ()
         under = reached(step.id, reads)
@@ -4482,7 +4532,8 @@ def _provider_difference_decisions(
             for block in [_pin_block(requirement.source_spec_id, shown)]
         ]
         scopes = {provider.provider_scope if provider else None for _, _, provider in inputs}
-        if None not in scopes and len(scopes) < 2:
+        differ = step.accept_provider_difference if None in scopes else len(scopes) > 1
+        if not differ:
             continue
         sides = " ".join(
             _provider_sentence(requirement, block, provider)
@@ -4501,6 +4552,9 @@ def _provider_difference_decisions(
                 rationale=(
                     "The question asks for the inputs as their datasets count them, so they may "
                     f"count different providers' spending. {sides}"
+                    if step.accept_provider_difference
+                    else "The inputs are set to different provider scopes, so they count "
+                    f"different providers' spending. {sides}"
                 ),
                 caveat="providers_differ",
             )
@@ -4637,7 +4691,8 @@ def share_whole_underivable(
     says why no whole was compiled, as a clause, and `cause` names that
     reason as a code: `part_unpinned`, `part_not_shown`, `part_block_missing`,
     `scope_unreadable`, `axis_not_held`, or `whole_refused` when Search
-    refuses the whole (`planner.agent.compile_whole`).
+    refuses the whole (`planner.agent.compile_whole`). `detail.requirement_id`
+    names the whole for the refusal's sentence (`harness.sentences`).
     """
     return problem(
         ProblemCode.SHARE_WHOLE_UNDERIVABLE,
@@ -4646,7 +4701,10 @@ def share_whole_underivable(
         f"providers. {reason}. Pin the part to a dataset Search offers that choice on, or "
         f"drop `whole_of` and pin a total for {whole_id!r} of its own.",
         outcome=Outcome.INVALID_INPUT,
-        detail={"whole": {"whole_id": whole_id, "part_spec_id": part_spec_id, "cause": cause}},
+        detail={
+            "requirement_id": whole_id,
+            "whole": {"whole_id": whole_id, "part_spec_id": part_spec_id, "cause": cause},
+        },
     )
 
 
@@ -4701,7 +4759,8 @@ def _bases_unaligned(
 
     `by_axis` holds each input's choice by axis. `planner.agent.with_source_reads`
     answers it by compiling each and proposing again, so the planner sees it
-    only where no tool surface reaches Search.
+    only where no tool surface reaches Search. `detail.requirement_id` names
+    the first input for the refusal's sentence (`harness.sentences`).
     """
 
     def move(item: Realignment) -> str:
@@ -4727,7 +4786,10 @@ def _bases_unaligned(
         f"{moves}. Search compiles each on its calculation's options before the plan is "
         "recorded, and could not be reached to do so; propose the plan again.",
         outcome=Outcome.REFUSED,
-        detail={"realign": [item.detail() for item in wanted]},
+        detail={
+            "requirement_id": wanted[0].requirement_id,
+            "realign": [item.detail() for item in wanted],
+        },
     )
 
 

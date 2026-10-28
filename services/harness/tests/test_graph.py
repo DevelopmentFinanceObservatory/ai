@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,7 +94,12 @@ from harness.graph.state import (
     frame_id_for,
     frame_store_ref,
 )
-from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SWITCH_STOP
+from harness.graph.switch import (
+    SCOPE_CHOICE_NOT_APPLIED,
+    SWITCH_CANCELLED,
+    SWITCH_STOP,
+    SwitchFailedError,
+)
 from harness.planner_seam import PlannerSeam
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
@@ -3631,21 +3636,62 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 
 
-async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cancelled() -> None:
-    """A Stop cancels the revision, and the switch itself is cancelled while the
-    revision's own cleanup still runs: the switch ends cancelled, and offers no
-    plan as if only the Stop had ended it."""
-    stop = asyncio.Event()
-    unwinding = asyncio.Event()
+def _unwinding_revision(
+    unwinding: asyncio.Event, *, error: type[BaseException], linger: float = 0
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """A revision that waits until cancelled, then sets `unwinding`, waits
+    `linger` seconds and raises `error` as its cleanup ends."""
 
     async def revision() -> dict[str, Any]:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             unwinding.set()
-            await asyncio.sleep(5)
-            raise
+            await asyncio.sleep(linger)
+            raise error from None
         raise AssertionError("unreachable")
+
+    return revision
+
+
+_UNWIND_ERRORS = pytest.mark.parametrize(
+    "error", [asyncio.CancelledError, RuntimeError], ids=["clean-cancel", "cleanup-raises"]
+)
+
+
+@_UNWIND_ERRORS
+async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
+    error: type[BaseException],
+) -> None:
+    """A Stop cancels the revision, whose cleanup ends cleanly or raises an error of
+    its own: either way the user stopped the switch, so it ends under
+    `switch_cancelled`, which the `switch` node answers by putting the plan back."""
+    stop = asyncio.Event()
+    unwinding = asyncio.Event()
+    revision = _unwinding_revision(unwinding, error=error)
+    token = SWITCH_STOP.set(stop)
+    try:
+        switch = asyncio.ensure_future(switch_module._unless_stopped(cast(Any, None), revision()))
+    finally:
+        SWITCH_STOP.reset(token)
+    await asyncio.sleep(0)
+    stop.set()
+
+    with pytest.raises(SwitchFailedError) as stopped:
+        await asyncio.wait_for(switch, timeout=5)
+    assert stopped.value.code == SWITCH_CANCELLED
+
+
+@_UNWIND_ERRORS
+async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cancelled(
+    error: type[BaseException],
+) -> None:
+    """A Stop cancels the revision, and the switch itself is cancelled while the
+    revision's own cleanup still runs, which then ends cleanly or raises: the
+    switch ends cancelled, and offers no plan as if only the Stop had ended it."""
+    stop = asyncio.Event()
+    unwinding = asyncio.Event()
+    revision = _unwinding_revision(unwinding, error=error, linger=5)
 
     token = SWITCH_STOP.set(stop)
     try:

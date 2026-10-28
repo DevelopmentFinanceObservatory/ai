@@ -53,6 +53,7 @@ from harness.plan_display import shown_decisions
 from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
 from harness.prefix_cache import PrefixCache
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
+from harness.sentences import PlanWords, refusal_reason, refusal_sentence
 from harness.studio_state import _turn_identities
 from harness.turn_records import RecordedIdentity, _periods
 from planner import agent as planner_agent
@@ -4937,6 +4938,7 @@ def test_a_basis_the_user_stated_on_one_input_is_the_one_every_input_takes(
 
     assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
     assert refused["detail"] == {
+        "requirement_id": "health",
         "realign": [
             {
                 "spec_id": HEALTH,
@@ -4944,7 +4946,7 @@ def test_a_basis_the_user_stated_on_one_input_is_the_one_every_input_takes(
                 "requirement_id": "health",
                 "step_id": "share",
             }
-        ]
+        ],
     }
     assert load_plan(ctx.state) is None
 
@@ -5151,7 +5153,16 @@ def test_a_calculation_counts_its_inputs_on_one_provider_scope(
     assert [
         (r["spec_id"], r["option_ids"], r["requirement_id"]) for r in refused["detail"]["realign"]
     ] == realign
+    _names_the_requirement(refused, realign[0][2])
     assert load_plan(ctx.state) is None
+
+
+def _names_the_requirement(refused: Mapping[str, object], requirement_id: str) -> None:
+    """The planner's sentence for `refused` names `requirement_id` by its id, and
+    the user's reason names it by its name on the plan card."""
+    assert f"for requirement {requirement_id!r}" in refusal_sentence(refused)
+    named = PlanWords(names={requirement_id: "the named figure"})
+    assert "the named figure" in refusal_reason(refused, words=named)
 
 
 @pytest.mark.parametrize(
@@ -5166,8 +5177,9 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
     decision: DecisionFactory, calculation: Callable[..., Any], code: str
 ) -> None:
     """ "Bilateral health aid as a share of all US aid with multilateral": the share
-    contrasts the two scopes as stated. The same two inputs summed would count the
-    bilateral flows twice, so the sum is refused."""
+    contrasts the two scopes as stated, and a decision of the planner's, cited by
+    the share, says the inputs count different providers' spending. The same two
+    inputs summed would count the bilateral flows twice, so the sum is refused."""
     ctx = _FakeToolContext()
     _show_blocks(
         ctx,
@@ -5178,6 +5190,11 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
     result = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
 
     assert result.get("outcome") == code or result.get("code") == code, result
+    if code == Outcome.OK.value:
+        plan = load_plan(ctx.state)
+        assert plan is not None
+        (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
+        assert stated.slot in plan.requirement("share").decision_ids
     if code == ProblemCode.OPERATION_UNSUPPORTED.value:
         assert result["detail"]["basis"] == {
             "spec_id": TOTAL,
@@ -6202,16 +6219,18 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     assert "health, CRS 120 alone" in named["narrow_whole"]
 
 
+@pytest.mark.parametrize("restated_pin", [True, False], ids=["pinned", "restated-unpinned"])
 async def test_a_declared_whole_keeps_the_choice_switched_on_its_own_row(
-    decision: DecisionFactory,
+    decision: DecisionFactory, restated_pin: bool
 ) -> None:
     """US health aid compared with a declared whole, the part over every sector, the
     comparison taking each input as its dataset counts it, which the user then
     switched to bilateral plus imputed multilateral on the whole's own row:
     the switch holds Search's answer as the whole compiled from the part with that
-    option, and the plan re-pinned to it keeps it with no compile. When the part
-    moves to malaria aid, the whole is compiled again from the new part, with the
-    whole's own option held."""
+    option, and the plan re-pinned to it keeps it with no compile, and so does a
+    later amendment restating the whole with `whole_of` and no pin, as the
+    planner's prompt has it. When the part moves to malaria aid, the whole is
+    compiled again from the new part, with the whole's own option held."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), _malaria_block())
@@ -6251,6 +6270,13 @@ async def test_a_declared_whole_keeps_the_choice_switched_on_its_own_row(
         amends_version=first["version"],
         tool_context=ctx,
     )
+    if not restated_pin:
+        restated = load_plan(ctx.state).requirement(_WHOLE)  # type: ignore[union-attr]
+        kept = await propose(
+            evidence_requirements=[restated.model_copy(update={"source_spec_id": None})],
+            amends_version=kept["version"],
+            tool_context=ctx,
+        )
 
     assert kept["outcome"] == Outcome.OK.value, kept
     assert len(surface.calls) == 1
@@ -6278,6 +6304,55 @@ async def test_a_declared_whole_keeps_the_choice_switched_on_its_own_row(
         ("provider:inclusive",),
         "sector",
     )
+
+
+async def test_a_declared_whole_switched_on_its_own_row_is_never_realigned(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid as a share of a declared whole, the share aligning its inputs,
+    whose whole the user switched to bilateral plus imputed multilateral on its own
+    row. The whole is an answer of its own, compiled from the part, so alignment
+    leaves it on the user's option: it keeps its switched pin and its decision
+    saying it is the part's own total, and the share divides by a total other than
+    the part."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"))
+    propose = _tools_reading(surface)["propose_plan"].func
+    first = await _us_2023(propose, ctx, decision(), part="health", whole=None, declared=True)
+    assert first["outcome"] == Outcome.OK.value, first
+    switched = us_2023_block("whole_inclusive")
+    save_pin_sources(
+        ctx.state,
+        {**pin_sources(ctx.state), switched["spec_id"]: PinSource(block=switched, settled=True)},
+    )
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin=us_2023_block("health")["spec_id"],
+            option_ids=("provider:inclusive",),
+            spec_id=switched["spec_id"],
+            digest={},
+            whole_axis="sector",
+        ),
+    )
+    whole = load_plan(ctx.state).requirement(_WHOLE)  # type: ignore[union-attr]
+
+    kept = await propose(
+        evidence_requirements=[whole.model_copy(update={"source_spec_id": switched["spec_id"]})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert kept["outcome"] == Outcome.OK.value, kept
+    assert _pins(ctx) == [
+        (_PART, us_2023_block("health")["spec_id"]),
+        (_WHOLE, switched["spec_id"]),
+    ]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (stated,) = [d for d in plan.decisions if d.caveat == "derived_whole"]
+    assert stated.slot in plan.requirement(_WHOLE).decision_ids
 
 
 async def test_a_quotient_over_a_declared_whole_divides_by_the_parts_own_total(
@@ -6591,6 +6666,7 @@ async def test_a_calculation_over_a_total_counting_other_providers_is_served_onl
             "spec_id": us_2023_block("dac1_total_gross")["spec_id"],
             "option_id": "provider:bilateral",
         }
+        _names_the_requirement(result, _WHOLE)
         assert load_plan(ctx.state) is None
         return
     assert result["outcome"] == Outcome.OK.value, result
@@ -6923,6 +6999,7 @@ async def test_a_declared_whole_that_cannot_be_counted_from_its_part_is_refused_
             "part_spec_id": us_2023_block(part)["spec_id"],
             "cause": cause,
         }
+        _names_the_requirement(refused, _WHOLE)
     assert load_plan(ctx.state) is None
 
 

@@ -233,9 +233,11 @@ def switch_node(
 async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> dict[str, Any]:
     """`revision`'s payload, unless the user stops the switch first (`SWITCH_STOP`).
 
-    A stopped revision is cancelled; the `switch` node puts the drafting
-    state back, so the plan stands unchanged. A cancellation of the node
-    itself, while the revision unwinds, still cancels the node.
+    A stopped revision is cancelled and awaited without taking its outcome, so
+    a revision that ends in any way once the Stop came, an error its cleanup
+    raises included, ends stopped; the `switch` node puts the drafting state
+    back, so the plan stands unchanged. A cancellation of the node itself,
+    while the revision unwinds, still cancels the node.
 
     Raises:
         SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
@@ -244,23 +246,25 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
     stop = SWITCH_STOP.get()
     running = asyncio.ensure_future(revision)
     stopped = asyncio.ensure_future(stop.wait()) if stop is not None else None
+    finished: set[asyncio.Future[Any]] = set()
     try:
-        await asyncio.wait(
+        finished, _ = await asyncio.wait(
             {running, *([stopped] if stopped is not None else [])},
             return_when=asyncio.FIRST_COMPLETED,
         )
     finally:
-        for waiting in (running, stopped):
-            if waiting is not None and not waiting.done():
-                waiting.cancel()
-                try:
-                    await waiting
-                except asyncio.CancelledError:
-                    node = asyncio.current_task()
-                    if node is not None and node.cancelling():
-                        raise
-    if not running.cancelled():
+        unfinished = {
+            waiting for waiting in (running, stopped) if waiting is not None and not waiting.done()
+        }
+        for waiting in unfinished:
+            waiting.cancel()
+        if unfinished:
+            # Never raises what the tasks raise; a cancellation of the node does.
+            await asyncio.wait(unfinished)
+    if running in finished and not running.cancelled():
         return running.result()
+    if not running.cancelled() and (error := running.exception()) is not None:
+        logger.info("stopped plan switch raised while unwinding: %r", error)
     raise SwitchFailedError(
         "You stopped this change, so the plan is as it was.",
         code=SWITCH_CANCELLED,
