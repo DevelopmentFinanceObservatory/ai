@@ -1,0 +1,173 @@
+"""Early mints: a card's data asked for while the user reads the card.
+
+Approving a card starts its run, and the run's first wait is the mint behind
+each retrieval. `EarlyMints.offer` sends each retrieval's `get_data` when the
+`approve` node offers the card (`harness.graph.planning.approve`), so apis
+has the frame, or is building it, by the time the run asks again with the
+same arguments. Every card passes through that offer: a first draft, an
+amendment's or a run's replan, a switch, and a re-offer after a refused
+draft.
+
+Each call is sent once, marked background
+(`harness.mcp_client.McpExecutor.get_data_in_background`). apis admits a
+background mint only while it keeps one work slot and one materialise
+permit free for other callers, and declines it otherwise. A background mint
+apis admits runs to completion and holds its slot until then, whether or not
+the card is approved. data-mcp answers a background call `posted` once its
+mint POST has been written out, which is what this module logs, and keeps
+the POST open until apis answers it, so apis keeps its CPU for the mint.
+apis' verdict, `declined` among them, is on data-mcp's own
+`background mint answered` line.
+
+The calls go out together, at the offer. The ai service's CPU is throttled
+once a request ends, so the response that carried the card waits for them
+before it closes (`settle`, called from `harness.studio.StudioRunner`), for
+`settle_s` at most, after the turn's lock is released. A call still pending
+then is left running and logged `unsent_at_stream_end`. Each call is waited
+for once, by the response that offered it.
+
+The arguments are each retrieval step's own `step.args`, the arguments
+`executor.run` sends for a step with no bindings, so the run asks for the
+frame the early call built.
+
+One set per conversation, keyed by the card's `plan_revision`: an offer of
+the revision already started starts nothing. A new revision replaces the
+record, and the replaced set's calls run on. Nothing here touches the card,
+the plan or the run ledger. Each call logs one line with its spec_id, the
+revision, its outcome and its elapsed time, and a failure is logged and
+dropped.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from compiler.caller_clients import MAX_CALLERS
+from planner.plan import Plan, plan_revision
+from planner.workflow import ToolId
+
+from harness.conversation import current_conversation_id
+
+logger = logging.getLogger(__name__)
+
+# The tool a retrieval step calls.
+GET_DATA = ToolId(server="data-mcp", name="get_data")
+
+# Sends one `get_data` call marked background and returns its outcome as a
+# word (`McpExecutor.get_data_in_background`).
+SendGetData = Callable[[dict[str, Any]], Awaitable[str]]
+
+
+@dataclass
+class _MintSet:
+    """One card's early calls: its revision, each call with the spec_id it asks
+    for, and the calls a `settle` has already waited for."""
+
+    revision: str
+    calls: dict[asyncio.Task[None], Any] = field(default_factory=dict)
+    awaited: set[asyncio.Task[None]] = field(default_factory=set)
+
+
+class EarlyMints:
+    """Starts each offered card's retrievals before the user approves it.
+
+    `send` makes one call. `settle` waits `settle_s` at most for the calls of
+    the conversation's latest card. `clock` times each call.
+    """
+
+    def __init__(
+        self,
+        *,
+        send: SendGetData,
+        settle_s: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._send = send
+        self._settle_s = settle_s
+        self._clock = clock
+        # The latest set of each conversation, least recently offered first,
+        # bounded as the held MCP clients are.
+        self._sets: OrderedDict[str, _MintSet] = OrderedDict()
+        # Every call not yet finished, so none is collected mid-flight and
+        # `aclose` can cancel them.
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def offer(self, plan: Plan) -> None:
+        """Start `plan`'s retrievals, unless its revision is the one this
+        conversation last started. Returns at once. The calls run as tasks of
+        their own, in the current context, so they name the conversation's
+        caller."""
+        if plan.workflow is None:
+            return
+        revision = plan_revision(plan)
+        conversation = current_conversation_id.get()
+        latest = self._sets.get(conversation)
+        if latest is not None and latest.revision == revision:
+            return
+        mint_set = _MintSet(revision=revision)
+        self._sets[conversation] = mint_set
+        self._sets.move_to_end(conversation)
+        while len(self._sets) > MAX_CALLERS:
+            self._sets.popitem(last=False)
+        for step in plan.workflow.steps:
+            if step.tool != GET_DATA or step.bindings:
+                continue
+            args = dict(step.args)
+            task = asyncio.create_task(self._mint(revision, args))
+            mint_set.calls[task] = args.get("spec_id")
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def settle(self) -> None:
+        """Wait, `settle_s` at most, for the calls of this conversation's
+        latest card no earlier `settle` waited for, and log each one still
+        pending then. Those are left running. Each call is waited for once,
+        by the stream that offered it, so a later stream, such as the
+        approval's, never waits on it."""
+        mint_set = self._sets.get(current_conversation_id.get())
+        if mint_set is None:
+            return
+        pending = [
+            task for task in mint_set.calls if not task.done() and task not in mint_set.awaited
+        ]
+        if not pending:
+            return
+        mint_set.awaited.update(pending)
+        _, unsent = await asyncio.wait(pending, timeout=self._settle_s)
+        for task in unsent:
+            logger.info(
+                "early mint: spec_id=%s plan_revision=%s outcome=unsent_at_stream_end "
+                "elapsed_s=%.2f",
+                mint_set.calls[task],
+                mint_set.revision,
+                self._settle_s,
+            )
+
+    async def _mint(self, revision: str, args: dict[str, Any]) -> None:
+        """Send one call and log how it ended."""
+        started = self._clock()
+        try:
+            outcome = await self._send(args)
+        except Exception as exc:
+            outcome = f"error:{type(exc).__name__}"
+        logger.info(
+            "early mint: spec_id=%s plan_revision=%s outcome=%s elapsed_s=%.2f",
+            args.get("spec_id"),
+            revision,
+            outcome,
+            self._clock() - started,
+        )
+
+    async def aclose(self) -> None:
+        """Cancel every call still running, at shutdown."""
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._sets.clear()

@@ -24,7 +24,7 @@ import copy
 import hashlib
 import json
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,9 +61,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from google.adk.events import Event, EventActions
 from google.adk.models.llm_response import LlmResponse
-from google.adk.sessions import BaseSessionService, InMemorySessionService
+from google.adk.sessions import BaseSessionService, DatabaseSessionService, InMemorySessionService
 from google.genai import types
 from harness.conversation import current_conversation_id
+from harness.early_mint import EarlyMints
 from harness.graph.state import (
     AGENT_NAME,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
@@ -435,23 +436,32 @@ def _new_session_service() -> BaseSessionService:
 
 
 @pytest.fixture(autouse=True, params=["memory", "database"])
-def session_service_backend(
+async def session_service_backend(
     request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> str:
+) -> AsyncIterator[str]:
     """Every studio-door test in this file runs twice: once building its
     session service through `InMemorySessionService`, once through a
     sqlite-backed `DatabaseSessionService`, proving the studio door's
     durable state survives the JSON round trip a real deployment's Postgres
     also forces it through. `db_path` is per-test (`tmp_path`), so two tests
-    running the database backend never share a file."""
+    running the database backend never share a file.
+
+    Each sqlite service the test built is closed after it, so no aiosqlite
+    connection is left for the garbage collector to find during a later
+    test."""
+    opened: list[DatabaseSessionService] = []
     if request.param == "database":
         db_path = tmp_path / "studio.db"
-        monkeypatch.setattr(
-            _SessionServiceBackend,
-            "factory",
-            staticmethod(lambda: sqlite_session_service(db_path)),
-        )
-    return request.param
+
+        def opening() -> DatabaseSessionService:
+            service = sqlite_session_service(db_path)
+            opened.append(service)
+            return service
+
+        monkeypatch.setattr(_SessionServiceBackend, "factory", staticmethod(opening))
+    yield request.param
+    for service in opened:
+        await service.close()
 
 
 def _app(
@@ -466,6 +476,7 @@ def _app(
     store: StudioStore | None = None,
     served: Sequence[Mapping[str, Any]] = (),
     definition_surface: Any = None,
+    early_mints: EarlyMints | None = None,
 ) -> FastAPI:
     """`orchestrator_app` over this test's session backend, its agent's
     model answering from `script` and kept as `app.state.model`. The
@@ -485,6 +496,7 @@ def _app(
         edit_model=edit_model,
         served=served,
         definition_surface=definition_surface,
+        early_mints=early_mints,
     )
     app.state.model = model
     return app
@@ -844,6 +856,109 @@ async def test_a_malformed_drafted_plan_ends_the_turn_as_an_error_not_a_silent_s
 
 
 # --- the plan flow: pause, approve, execute --------------------------------------
+
+
+class _HeldSends:
+    """`EarlyMints`' send: records each call, then waits for `release`."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.sent: list[dict[str, Any]] = []
+
+    async def __call__(self, args: dict[str, Any]) -> str:
+        self.sent.append(args)
+        await self.release.wait()
+        return "posted"
+
+
+async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_posted() -> None:
+    """The card's frames all reach the stream, which stays open until the
+    card's early call is done and closes right after."""
+    sends = _HeldSends()
+    early = EarlyMints(send=sends, settle_s=30.0)
+    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
+    async with _client(app) as client:
+        streaming = asyncio.ensure_future(
+            _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        )
+        for _ in range(500):
+            if sends.sent:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
+        assert sends.sent and not streaming.done()
+        sends.release.set()
+        frames = await asyncio.wait_for(streaming, timeout=10)
+    assert _events(frames)[-1] == "plan.proposed"
+
+
+async def test_an_approval_posted_while_the_cards_stream_waits_on_early_mints_is_taken() -> None:
+    """The card's stream releases the conversation before it waits on the early
+    calls, so an approval posted while it still waits runs at once."""
+    sends = _HeldSends()
+    early = EarlyMints(send=sends, settle_s=30.0)
+    app = _app(
+        *_plan("q with forks", *_charts_the_plan()),
+        tool_surface=ScriptedSurface(),
+        early_mints=early,
+    )
+    store = app.state.studio.store
+    try:
+        async with _client(app) as client:
+            first = asyncio.ensure_future(
+                _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+            )
+            # The in-process transport hands the stream over only once it has
+            # ended, so the card's pause is read off the conversation instead.
+            for _ in range(500):
+                conversation = store.current(PRINCIPAL, CONVERSATION)
+                if sends.sent and conversation.pending and not conversation.lock.locked():
+                    break
+                await asyncio.sleep(0.01)
+            (interrupt_id,) = conversation.pending
+            assert not first.done()
+
+            second = await asyncio.wait_for(
+                _stream(client, "/api/studio/interrupt", _interrupt_body(interrupt_id, "approve")),
+                timeout=10,
+            )
+
+            assert "plan.approved" in _events(second)
+            assert not first.done()
+            sends.release.set()
+            assert _events(await asyncio.wait_for(first, timeout=10))[-1] == "plan.proposed"
+    finally:
+        await early.aclose()
+
+
+async def test_the_stream_waits_no_longer_than_the_bound_for_early_mints(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A call still pending at the bound is logged and left running. The
+    stream carries the same frames as a stream with no early mints."""
+    sends = _HeldSends()
+    early = EarlyMints(send=sends, settle_s=0.2)
+    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
+    try:
+        with caplog.at_level("INFO", logger="harness.early_mint"):
+            async with _client(app) as client:
+                started = time.monotonic()
+                frames = await asyncio.wait_for(
+                    _stream(client, "/api/studio/turn", _turn_body("q with forks")), timeout=10
+                )
+                waited = time.monotonic() - started
+        assert len(sends.sent) == 1
+        assert any("outcome=unsent_at_stream_end" in r.getMessage() for r in caplog.records)
+        assert waited < 5
+        plain = _app(*_plan("q with forks"), tool_surface=ScriptedSurface())
+        async with _client(plain) as client:
+            unwaited = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert _events(frames) == _events(unwaited)
+        assert (
+            _frame(frames, "plan.proposed")["steps"] == _frame(unwaited, "plan.proposed")["steps"]
+        )
+    finally:
+        await early.aclose()
 
 
 async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> None:
@@ -3234,6 +3349,25 @@ async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
 
     await asyncio.wait_for(closed.wait(), timeout=2)
     assert conversation.cancel_event is None  # disarmed on unwind
+
+
+async def test_a_stream_ending_leaves_the_cancel_event_a_later_stream_armed() -> None:
+    """A request that took the conversation after the lock was released arms its
+    own cancel event. The earlier stream's `finally` runs afterwards and leaves
+    that event and its reason in place, so a Stop still reaches the new stream."""
+
+    async def segment():
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    stream = _sse_stream(segment(), conversation=conversation)
+    await anext(stream)
+    later = conversation.cancel_event = asyncio.Event()
+    conversation.cancel_reason = "cancelled"
+    await stream.aclose()
+
+    assert conversation.cancel_event is later
+    assert conversation.cancel_reason == "cancelled"
 
 
 async def test_a_switch_stream_arms_its_own_stop_and_clears_only_that_one() -> None:

@@ -33,7 +33,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import AbstractContextManager, aclosing, nullcontext, suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -63,6 +63,7 @@ from harness.conversation import (
     current_conversation_key,
     current_user_message,
 )
+from harness.early_mint import EarlyMints
 from harness.graph.seams import Executor
 from harness.graph.state import (
     AGENT_NAME,
@@ -518,7 +519,7 @@ async def _sse_stream(
     conversation: ConversationState | None = None,
     switch: bool = False,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str]:
     """Serialise frames as SSE `data:` lines, one loop owning all three
     transport concerns: `: ka` comment heartbeats while the next frame is
     slow; cancellation via the conversation's cancel event when one is
@@ -580,9 +581,13 @@ async def _sse_stream(
     loop = asyncio.get_running_loop()
     open_steps = _OpenSteps()
     switch_stop: asyncio.Event | None = None
+    # The cancel event this stream last armed, so its `finally` clears only
+    # that one and not the event of a request that took the conversation after
+    # `_locked` released it.
+    armed_cancel: asyncio.Event | None = None
     if conversation is not None:
-        conversation.cancel_event = asyncio.Event()
-        cancel_wait = asyncio.ensure_future(conversation.cancel_event.wait())
+        armed_cancel = conversation.cancel_event = asyncio.Event()
+        cancel_wait = asyncio.ensure_future(armed_cancel.wait())
         if switch:
             # Armed here, by the stream the switch runs on, so an earlier
             # stream's `finally` cannot clear it.
@@ -631,11 +636,9 @@ async def _sse_stream(
                                 ):
                                     stop.set()
                                     reoffer_by = loop.time() + SWITCH_REOFFER_SECONDS
-                                    conversation.cancel_event = asyncio.Event()
+                                    armed_cancel = conversation.cancel_event = asyncio.Event()
                                     conversation.cancel_reason = None
-                                    cancel_wait = asyncio.ensure_future(
-                                        conversation.cancel_event.wait()
-                                    )
+                                    cancel_wait = asyncio.ensure_future(armed_cancel.wait())
                                     continue
                                 await _unwind(next_frame)
                                 if conversation.cancel_reason == "segment_lost":
@@ -716,8 +719,9 @@ async def _sse_stream(
             if cancel_wait is not None:
                 await _unwind(cancel_wait)
             if conversation is not None:
-                conversation.cancel_event = None
-                conversation.cancel_reason = None
+                if conversation.cancel_event is armed_cancel:
+                    conversation.cancel_event = None
+                    conversation.cancel_reason = None
                 if conversation.switch_stop is switch_stop:
                     conversation.switch_stop = None
             await flush_telemetry()
@@ -820,7 +824,10 @@ class StudioRunner:
     is `None` for a caller that has no `ToolSurface` to give it (a test that
     does not exercise plan steps); `create_workflow` gets `None` through in
     that case, and the graph's `execute` node is what refuses loudly if it
-    is ever reached.
+    is ever reached. `early_mints` is the workflow's own
+    (`harness.early_mint`): a segment's response waits for the calls of the
+    card it offered before it closes, while the request still has CPU
+    (`_settling`).
     """
 
     def __init__(
@@ -834,8 +841,10 @@ class StudioRunner:
         app_name: str | None = None,
         edit_model: Any | None = None,
         provenance: ProvenanceStore | None = None,
+        early_mints: EarlyMints | None = None,
     ) -> None:
         self.edit_model = edit_model
+        self.early_mints = early_mints
         # Resolved before the workflow exists (`AGENT_NAME` is the fixed
         # name every `create_root_workflow` call gives its `Workflow`, so
         # this matches `workflow.name` in every real caller) because the
@@ -940,6 +949,21 @@ class StudioRunner:
             self.recorder.drain(current_conversation_id.get())
             if self.surface_recorder is not None:
                 self.surface_recorder.drain(current_conversation_id.get())
+
+    async def _settling(self, stream: AsyncGenerator[str]) -> AsyncGenerator[str]:
+        """`stream`, then the wait for the early calls of the card it offered
+        (`harness.early_mint.EarlyMints.settle`).
+
+        The wait starts once `stream` has ended, so the conversation lock and
+        the segment are released and an answer to the card is taken at once.
+        It sends nothing and only keeps the response, and so the request's
+        CPU, open. A client that leaves first ends it.
+        """
+        async with aclosing(stream):
+            async for chunk in stream:
+                yield chunk
+        if self.early_mints is not None:
+            await self.early_mints.settle()
 
     async def _heartbeat(
         self,
@@ -1418,17 +1442,19 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             text = body.message if chip_label is None else f"Count {chip_label}."
             message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
             return StreamingResponse(
-                _sse_stream(
-                    studio._locked(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        studio._frames(
-                            principal=principal, conversation=conversation, message=message
+                studio._settling(
+                    _sse_stream(
+                        studio._locked(
+                            principal,
+                            body.conversation_id,
+                            conversation,
+                            segment_id,
+                            studio._frames(
+                                principal=principal, conversation=conversation, message=message
+                            ),
                         ),
-                    ),
-                    conversation=conversation,
+                        conversation=conversation,
+                    )
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
@@ -1771,16 +1797,18 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 approving=approving,
             )
             return StreamingResponse(
-                _sse_stream(
-                    studio._locked(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        frames,
-                    ),
-                    conversation=conversation,
-                    switch=body.decision is InterruptDecision.SWITCH,
+                studio._settling(
+                    _sse_stream(
+                        studio._locked(
+                            principal,
+                            body.conversation_id,
+                            conversation,
+                            segment_id,
+                            frames,
+                        ),
+                        conversation=conversation,
+                        switch=body.decision is InterruptDecision.SWITCH,
+                    )
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )

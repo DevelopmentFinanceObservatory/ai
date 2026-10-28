@@ -27,6 +27,7 @@ from common.materialisation import (
 from common.materialisation import set_store as set_frame_store
 from common.place_type import PARTY_KINDS
 from data_mcp import client_holder, get_data_tool
+from data_mcp.client import UpstreamClient
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
 from data_mcp.definition_store import (
     DefinitionStoreUnavailable,
@@ -44,6 +45,12 @@ from data_mcp.frame_materialisation import (
 )
 from data_mcp.get_data_tool import RootMint
 from data_mcp.manifest import Manifest, SeriesStatisticsModel, strip_manifest
+from data_mcp.mint_admission import (
+    BACKGROUND_MINT_SPAN_ATTRIBUTE,
+    BACKGROUND_OUTCOME_KEY,
+    MINT_ADMISSION_HEADER,
+    MINT_ADMISSION_META_KEY,
+)
 from data_mcp.operations import QueuedOperation, ResolvedOperation
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
 from data_mcp.server import mcp
@@ -60,11 +67,12 @@ from fastmcp.client.client import CallToolResult
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .node_fixtures import load_node_fixture
 from .resolve_results import members_result, resolve_result, resolved_result
-from .test_client import _client, _problem_body, id_token_auth, text_of
+from .test_client import _client, _problem_body, _settings, id_token_auth, text_of
 from .test_operations import _FakeClock
 
 Handler = (
@@ -340,6 +348,7 @@ async def _call_get_data(
     arguments: dict[str, object],
     *,
     auth: AuthProvider | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> CallToolResult:
     async with _client(handler, auth=auth) as upstream:
         client_holder.set_client(upstream)
@@ -349,7 +358,7 @@ async def _call_get_data(
             # runs, since `get_data` only reads the store via `get_store()`
             # once the request is dispatched below.
             set_store(store)
-            return await client.call_tool("get_data", arguments, raise_on_error=False)
+            return await client.call_tool("get_data", arguments, raise_on_error=False, meta=meta)
 
 
 # Successful mint
@@ -583,6 +592,167 @@ async def test_202_operation_polled_to_done_returns_the_same_result_as_a_sync_mi
     assert calls == ["/api/datasets", _OPERATION_POLL_PATH]
     assert _OPERATION_ID in text_of(result)
     assert "queued operation" in text_of(result)
+
+
+@pytest.mark.parametrize(
+    ("meta", "admissions", "background"),
+    [
+        ({MINT_ADMISSION_META_KEY: "background"}, ["background"], "queued"),
+        ({MINT_ADMISSION_META_KEY: "foreground"}, [None, None], None),
+        (None, [None, None], None),
+    ],
+    ids=["background", "other_value", "unmarked"],
+)
+async def test_a_background_call_marks_its_mint_post_and_ends_once_it_is_answered(
+    meta: dict[str, Any] | None,
+    admissions: list[str | None],
+    background: str | None,
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    """A call whose `_meta` asks for a background mint sends apis the admission header on
+    its mint POST and ends on apis' 202 without polling, its span marked. Any other call
+    sends the header nowhere and polls the operation to its frame."""
+    stored = _stored_definition()
+    manifest = _manifest_response(spec_id=stored.spec_id)
+    sent: list[str | None] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers.get(MINT_ADMISSION_HEADER))
+        if request.url.path == "/api/datasets":
+            operation = {
+                "operation_id": _OPERATION_ID,
+                "status": "pending",
+                "poll": _OPERATION_POLL_PATH,
+                "retry_after_ms": 1,
+            }
+            return httpx2.Response(202, json={"operation": operation})
+        if request.url.path == _OPERATION_POLL_PATH:
+            return httpx2.Response(
+                200,
+                json={
+                    "operation": {"operation_id": _OPERATION_ID, "status": "done"},
+                    "manifest": manifest,
+                },
+            )
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id}, meta=meta
+    )
+
+    assert result.is_error is False
+    assert sent == admissions
+    assert (result.structured_content or {}).get(BACKGROUND_OUTCOME_KEY) == background
+    marked = [
+        span
+        for span in exported_spans.get_finished_spans()
+        if (span.attributes or {}).get(BACKGROUND_MINT_SPAN_ATTRIBUTE) is True
+    ]
+    assert len(marked) == (1 if background else 0)
+
+
+class _ApisStillMinting(httpx2.AsyncBaseTransport):
+    """apis receiving the mint POST, as httpcore reports a written request body to
+    the request's trace extension, then answering only once `answer` is set: 200,
+    or `declined` apis' 503 decline of a background mint."""
+
+    def __init__(self, spec_id: str, *, declined: bool = False) -> None:
+        self.spec_id = spec_id
+        self.declined = declined
+        self.answer = asyncio.Event()
+        self.posts = 0
+        self.answered = False
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/datasets", request.url.path
+        self.posts += 1
+        trace = request.extensions.get("trace")
+        if trace is not None:
+            await trace("http11.send_request_body.complete", {"request": request})
+        await self.answer.wait()
+        self.answered = True
+        if self.declined:
+            return httpx2.Response(
+                503,
+                content=_problem_body(
+                    code="service_unavailable",
+                    retryable=True,
+                    constraint_id="mint_background_declined",
+                ),
+                headers={"Retry-After": "1"},
+            )
+        return httpx2.Response(200, json=_manifest_response(spec_id=self.spec_id))
+
+
+async def _background_call(apis: _ApisStillMinting, store: Any, *, answer: bool) -> CallToolResult:
+    """One background `get_data` call against `apis`, answered by apis before the
+    server shuts down when `answer`, and left unanswered at shutdown otherwise."""
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        client_holder.set_client(upstream)
+        async with Client(mcp) as client:
+            set_store(store)
+            result = await asyncio.wait_for(
+                client.call_tool(
+                    "get_data",
+                    {"spec_id": apis.spec_id},
+                    raise_on_error=False,
+                    meta={MINT_ADMISSION_META_KEY: "background"},
+                ),
+                timeout=5,
+            )
+            assert not apis.answered
+            (posting,) = get_data_tool._background_mints
+            assert not posting.done()
+            if answer:
+                apis.answer.set()
+                await asyncio.wait_for(posting, timeout=5)
+        if not answer:
+            assert posting.cancelled()
+    return result
+
+
+async def test_a_background_call_answers_posted_once_its_post_is_out_and_keeps_it_open() -> None:
+    """The call answers "posted" while apis is still minting; the POST stays open
+    until apis answers it, sent once."""
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id)
+
+    result = await _background_call(apis, _StubStore(stored), answer=True)
+
+    assert result.is_error is False
+    assert (result.structured_content or {})[BACKGROUND_OUTCOME_KEY] == "posted"
+    assert apis.answered
+    assert apis.posts == 1
+    assert not get_data_tool._background_mints
+
+
+async def test_apis_declining_a_posted_background_mint_is_logged_as_declined(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id, declined=True)
+
+    with caplog.at_level(logging.INFO, logger="data_mcp.get_data_tool"):
+        result = await _background_call(apis, _StubStore(stored), answer=True)
+
+    assert (result.structured_content or {})[BACKGROUND_OUTCOME_KEY] == "posted"
+    (line,) = [
+        r.getMessage() for r in caplog.records if "background mint answered" in r.getMessage()
+    ]
+    assert f"spec_id={stored.spec_id}" in line
+    assert "caller=" in line
+    assert "outcome=declined" in line
+    assert "elapsed_s=" in line
+
+
+async def test_shutdown_closes_a_background_post_apis_has_not_answered() -> None:
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id)
+
+    await _background_call(apis, _StubStore(stored), answer=False)
+
+    assert not apis.answered
+    assert not get_data_tool._background_mints
 
 
 async def test_get_data_reports_progress_during_a_polled_mint() -> None:

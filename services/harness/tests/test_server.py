@@ -265,6 +265,21 @@ def test_a_server_with_a_shared_secret_does_not_log_open_auth(
     assert not any("STUDIO AUTH IS OPEN" in w for w in warnings)
 
 
+@pytest.mark.parametrize("on", [True, False], ids=["on", "off"])
+def test_the_server_says_at_startup_whether_early_mints_are_on(
+    monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    """`EARLY_MINT` decides whether the studio gets early mints at all, and the
+    server logs which way it went."""
+    infos: list[str] = []
+    monkeypatch.setattr(server_module.logger, "info", lambda msg, *args: infos.append(msg % args))
+
+    app = create_app(settings=Settings(early_mint=on))
+
+    assert (app.state.studio.early_mints is not None) is on
+    assert any(line.startswith(f"early mints: {'on' if on else 'off'}") for line in infos)
+
+
 def test_the_execute_node_runs_against_the_recorded_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

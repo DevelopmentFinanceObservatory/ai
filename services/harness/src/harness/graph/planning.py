@@ -24,9 +24,11 @@ from planner.plan import (
     ASKS_STATE_KEY,
     PlanStatus,
     plan_revision,
+    stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
 
+from harness.early_mint import EarlyMints
 from harness.graph.seams import (
     PlannerModel,
 )
@@ -262,7 +264,20 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
     return draft_plan
 
 
-def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
+def approve_node(
+    *, early_mints: EarlyMints | None
+) -> Callable[[Context, dict[str, Any]], Iterator[Any]]:
+    """The `approve` node, offering each card it shows to `early_mints` when given."""
+
+    def approve_offering_early_mints(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
+        yield from approve(ctx, node_input, early_mints=early_mints)
+
+    return approve_offering_early_mints
+
+
+def approve(
+    ctx: Context, node_input: dict[str, Any], *, early_mints: EarlyMints | None = None
+) -> Iterator[Any]:
     """The approval gate, as a graph interrupt. Revision-bound.
 
     This is the only gate: nothing but the `execute` node reaches the
@@ -291,10 +306,19 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     `harness.studio_state.begin_turn` opens) and a matching log line with
     the same facts, `plan_version` and `amended`, off the `Plan` just
     approved.
+
+    Offering a card pending approval hands its plan to `early_mints`
+    (`harness.early_mint`), which starts the card's retrievals unless it
+    already started that revision. It returns at once and touches neither the
+    plan nor the state.
     """
     answer = (ctx.resume_inputs or {}).get(APPROVE_INTERRUPT)
     if not (ctx.state.get("awaiting_approve") and answer is not None):
         ctx.state["awaiting_approve"] = True
+        if early_mints is not None:
+            offered = stored_plan(ctx.state.get("plan"), state_key="plan")
+            if offered is not None and offered.status is PlanStatus.PENDING_APPROVAL:
+                early_mints.offer(offered)
         yield interrupt_event(
             RequestInput(
                 interrupt_id=APPROVE_INTERRUPT,
