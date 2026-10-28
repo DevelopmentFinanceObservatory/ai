@@ -133,6 +133,7 @@ from planner.plan import (
     PlanStatus,
     SessionState,
     UnsupportedOperation,
+    decision_pick,
     full_histories,
     full_history,
     identity_on_record,
@@ -1173,6 +1174,10 @@ class ToolContextSession:
     def user_spoke_since(self, version: int) -> bool:
         """`_user_spoke_since_recorded` over the call's session."""
         return _user_spoke_since_recorded(self.tool_context, version)
+
+    def decision_pick(self) -> tuple[str, str] | None:
+        """The pick on the plan card the call's planner entry holds (`planner.plan.decision_pick`)."""
+        return decision_pick(self.tool_context.state)
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
         """Record `operation` as answered `unsupported` in this planner entry."""

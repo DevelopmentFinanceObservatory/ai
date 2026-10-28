@@ -66,6 +66,7 @@ from harness.chart_binding import (
     over_cap_dimension,
     select_binding_ok,
 )
+from harness.decision_pick import DecisionPick
 from harness.graph import answer as answer_module
 from harness.graph import switch as switch_module
 from harness.graph.execute import (
@@ -87,6 +88,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
+    PICK_REPLAN_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
@@ -119,6 +121,7 @@ from planner.plan import (
     Coverage,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
     GrowthRequirement,
     Period,
@@ -128,9 +131,11 @@ from planner.plan import (
     SessionState,
     WindowedPin,
     authored,
+    decision_pick,
     open_window,
     plan_revision,
     repinned,
+    save_decision_pick,
     windowed_pins,
     with_authored_requirements,
 )
@@ -1760,6 +1765,235 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     redrafted = _output_of(events, "planner")
     assert redrafted["refusal_note"] == UNREADABLE_PLAN_NOTE
     assert redrafted["restarted"] is True
+
+
+# A planner decision the card offers to switch (`plan_display.switchable_decision`):
+# `_seam_plan`'s window, fixing the period, and the switch to its other option.
+_PICKED_WINDOW = DecisionPick(slot="window", chosen="2018-2024")
+_PICK_SWITCH = {"choice_id": "decision:window", "option_id": "option_2"}
+# A drafting key the replan writes, which a replan that does not land puts back.
+_DRAFTING_KEY = "planner:replan_scratch"
+
+
+def _pickable_plan(
+    *, schemas: list[ToolSchema], chosen: str = "2015-2024", version: int = 1
+) -> PlannerPlan:
+    """`_seam_plan` with its window decision fixing the period, so the card offers it."""
+    plan = _seam_plan(schemas=schemas, version=version)
+    (window,) = plan.decisions
+    fixed = window.model_copy(
+        update={"chosen": chosen, "fixes": DecisionFixes(period=Period(start=2015, end=2024))}
+    )
+    return plan.model_copy(update={"decisions": (fixed,)})
+
+
+class _ReplanSeam(_Seam):
+    """A `PlannerModel` that drafts its first plan outright and, on every
+    later call, writes `_DRAFTING_KEY`, waits for `release` when given one,
+    and then answers its next scripted result."""
+
+    def __init__(self, plans: list[dict[str, Any]], release: asyncio.Event | None = None) -> None:
+        super().__init__(plans)
+        self.release = release
+        self.replanning = asyncio.Event()
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if self.calls:
+            kwargs["ctx"].state[_DRAFTING_KEY] = "draft"
+            self.replanning.set()
+            if self.release is not None:
+                await self.release.wait()
+        return await super().__call__(**kwargs)
+
+
+async def test_a_planner_decisions_pick_replans_with_the_pick_held(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A switch of a planner decision's row routes to the planner, which is
+    handed the pick, no amendment, and the plan on record, and offers the
+    replanned plan with nothing else moved."""
+    plan = _pickable_plan(schemas=real_schemas)
+    replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
+    seam = _ReplanSeam(
+        [
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": replanned.model_dump(mode="json"), "summary": {}},
+        ]
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    assert seam.calls[1]["pick"] == _PICKED_WINDOW
+    assert seam.calls[1]["amendment"] is None
+    assert seam.calls[1]["prior_plan"] == plan.model_dump(mode="json")
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(replanned)
+    assert offered["moved"] == []
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _session_state(runner)[_DRAFTING_KEY] == "draft"
+
+
+async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_state_back(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The planner refuses the replan: the card offers the plan on record
+    again with the switch node's `switch_failed`, carrying the refusal's code
+    and the sentence for the user, and the drafting state is put back."""
+    plan = _pickable_plan(schemas=real_schemas)
+    refused = {
+        "text": "The draft budget is spent.",
+        "final": False,
+        "code": "budget_exhausted",
+        "reason": "This request has used its budget of 4 plan drafts.",
+    }
+    seam = _ReplanSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}, {"refused": refused}]
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"] == {
+        **_PICK_SWITCH,
+        "code": "budget_exhausted",
+        "reason": refused["reason"],
+        "retryable": True,
+    }
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _session_state(runner).get(_DRAFTING_KEY) is None
+    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
+
+
+async def test_a_stopped_pick_replan_offers_the_plan_unchanged_and_puts_its_state_back(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user stops the replan (`SWITCH_STOP`) while the planner drafts:
+    the draft is cancelled, and the card offers the plan on record again
+    under `switch_cancelled`, as a stopped scope switch does."""
+    plan = _pickable_plan(schemas=real_schemas)
+    seam = _ReplanSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}], release=asyncio.Event()
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    stop = asyncio.Event()
+
+    token = SWITCH_STOP.set(stop)
+    try:
+        resumed = asyncio.ensure_future(
+            _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+        )
+    finally:
+        SWITCH_STOP.reset(token)
+    await asyncio.wait_for(seam.replanning.wait(), timeout=5)
+    stop.set()
+    events = await asyncio.wait_for(resumed, timeout=5)
+
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"]["code"] == SWITCH_CANCELLED
+    assert offered["switch_failed"]["retryable"] is True
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _session_state(runner).get(_DRAFTING_KEY) is None
+
+
+class _AskingOnPickSeam(_ReplanSeam):
+    """`_ReplanSeam` that, on its second call, asks the user a question
+    through a real `ctx.run_node` pause after writing `_DRAFTING_KEY` and the
+    pick, as `PlannerSeam` records it."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if len(self.calls) == 1:
+            kwargs["ctx"].state[_DRAFTING_KEY] = "draft"
+            save_decision_pick(kwargs["ctx"].state, (kwargs["pick"].slot, kwargs["pick"].chosen))
+            self.calls.append(kwargs)
+            await kwargs["ctx"].run_node(_ask_the_user)
+            raise AssertionError("the ask pauses the replan")
+        return await super().__call__(**kwargs)
+
+
+async def test_a_planner_ask_during_a_pick_replan_keeps_its_state_and_resumes_with_the_pick(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The planner asks the user a question while replanning for a pick. The
+    replan runs as a task so a Stop can reach it, and the ask still pauses
+    the turn, with the replan's state kept for the resume, which is handed
+    the pick again and offers the replanned plan."""
+    plan = _pickable_plan(schemas=real_schemas)
+    replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
+    seam = _AskingOnPickSeam(
+        [
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": replanned.model_dump(mode="json"), "summary": {}},
+        ]
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+    assert _pending_interrupt(paused) == _PLANNER_ASK
+    assert _session_state(runner)[_DRAFTING_KEY] == "draft"
+
+    events = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
+
+    assert seam.calls[2]["pick"] == _PICKED_WINDOW
+    assert _output_of(events, "planner")["revision"] == plan_revision(replanned)
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+@pytest.mark.parametrize("ending", ["refused", "stopped"])
+async def test_a_pick_replan_failing_after_an_ask_puts_back_the_state_from_before_the_pick(
+    real_schemas: list[ToolSchema], ending: str
+) -> None:
+    """The planner asks a question while replanning for a pick, and the
+    resumed replan is refused or the user stops it. The card offers the plan
+    unchanged with `switch_failed`, and the state is as it stood before the
+    pick, with no drafting state, no pick for a later revision of the plan
+    to hold, and no record of the replan."""
+    plan = _pickable_plan(schemas=real_schemas)
+    refused = {"text": "No plan.", "final": False, "code": "plan_not_ready", "reason": "No plan."}
+    seam = _AskingOnPickSeam(
+        [
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"refused": refused},
+        ],
+        release=asyncio.Event() if ending == "stopped" else None,
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+    assert _pending_interrupt(paused) == _PLANNER_ASK
+    assert _session_state(runner)[PICK_REPLAN_KEY] is not None
+
+    stop = asyncio.Event()
+    token = SWITCH_STOP.set(stop)
+    try:
+        resumed = asyncio.ensure_future(_resume(runner, _PLANNER_ASK, {"answer": "2018"}))
+    finally:
+        SWITCH_STOP.reset(token)
+    if ending == "stopped":
+        await asyncio.wait_for(seam.replanning.wait(), timeout=5)
+        stop.set()
+    events = await asyncio.wait_for(resumed, timeout=5)
+
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"]["code"] == (
+        SWITCH_CANCELLED if ending == "stopped" else "plan_not_ready"
+    )
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    state = _session_state(runner)
+    assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert state.get(_DRAFTING_KEY) is None
+    assert decision_pick(cast(SessionState, state)) is None
+    assert state.get(PICK_REPLAN_KEY) is None
 
 
 async def test_an_approval_for_a_superseded_revision_routes_to_amend(
@@ -3938,13 +4172,40 @@ class _SwitchedOff(NamedTuple):
     copy_pin: str
 
 
-async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _SwitchedOff:
+class _RefusingPickSeam(_TranslatingSeam):
+    """A `_TranslatingSeam` whose replan for a pick asks the user a question
+    through a real `ctx.run_node` pause, after recording the pick and
+    drafting state as `PlannerSeam` does, and is refused once resumed."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        pick = kwargs.get("pick")
+        if pick is None:
+            return await super().__call__(**kwargs)
+        self.calls.append(kwargs)
+        ctx = kwargs["ctx"]
+        if ctx.resume_inputs:
+            return {"refused": {"text": "No plan.", "final": False, "code": "plan_not_ready"}}
+        save_decision_pick(ctx.state, (pick.slot, pick.chosen))
+        ctx.state[_DRAFTING_KEY] = "draft"
+        await ctx.run_node(_ask_the_user)
+        raise AssertionError("the ask pauses the replan")
+
+
+async def _switch_off_a_stated_source(
+    real_schemas: list[ToolSchema], *, before_switch: str | None = None
+) -> _SwitchedOff:
     """The deployed failure: the planner stated the CRS as the health
     numerator's source, and the user switched it to bilateral plus imputed
     multilateral, a dataset Search names otherwise and holds from 1995. The
     switch posts the identity over every year its search answered, which the
     plan pins, and beside it the same scope over the years the plan reads,
-    Search's answer for the copy admission makes of the pin."""
+    Search's answer for the copy admission makes of the pin.
+
+    `before_switch` is what happened on the card before the switch:
+    `"held_pick"` leaves a pick on the card in state, as a planner entry
+    records it, and `"refused_pick_replan"` switches the window decision,
+    which then fixes the period, and the planner's replan asks a question
+    and is refused once answered (`_RefusingPickSeam`)."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -3973,7 +4234,20 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
             ],
         }
     )
-    seam = _TranslatingSeam(
+    if before_switch == "refused_pick_replan":
+        plan = plan.model_copy(
+            update={
+                "decisions": tuple(
+                    d.model_copy(
+                        update={"fixes": DecisionFixes(period=Period(start=2015, end=2024))}
+                    )
+                    if d.slot == "window"
+                    else d
+                    for d in plan.decisions
+                )
+            }
+        )
+    seam = (_RefusingPickSeam if before_switch == "refused_pick_replan" else _TranslatingSeam)(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
     )
     identity = block["definition"]["identity"]
@@ -3995,6 +4269,17 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
         {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+    if before_switch == "held_pick":
+        save_decision_pick(
+            cast(SessionState, _session_state(runner)), ("window", "a label the plan lacks")
+        )
+    if before_switch == "refused_pick_replan":
+        paused = await _resume(
+            runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH}
+        )
+        assert _pending_interrupt(paused) == _PLANNER_ASK
+        refused = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
+        assert _output_of(refused, "planner")["switch_failed"]["code"] == "plan_not_ready"
 
     events = await _resume(
         runner,
@@ -4007,15 +4292,21 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
     return _SwitchedOff(runner, events, seam, new_pin, copy_pin)
 
 
+@pytest.mark.parametrize("before_switch", [None, "held_pick", "refused_pick_replan"])
 async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
-    real_schemas: list[ToolSchema],
+    real_schemas: list[ToolSchema], before_switch: str | None
 ) -> None:
     """A switch off a stated source (`_switch_off_a_stated_source`) drops the
     stated source with the pin it left, so the translation takes the new pin
     with no search, the plan compiles, and its run accepts what the new
     dataset returns. The translation is served Search's answer for the copy
-    over the plan's years, which the switch posted, and asks Search nothing."""
-    runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(real_schemas)
+    over the plan's years, which the switch posted, and asks Search nothing.
+    A pick on the card belongs to its planner entry, so the revision holds
+    none, whether a pick is left in state or a replan for one was refused
+    after a question the planner asked."""
+    runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(
+        real_schemas, before_switch=before_switch
+    )
 
     # The switch's post over the plan's years answered the copy admission made,
     # so the translation takes it as the source and asks Search nothing.

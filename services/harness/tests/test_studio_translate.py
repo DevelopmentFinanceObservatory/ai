@@ -82,7 +82,7 @@ from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
-from .test_plan_display import _recorded_plan
+from .test_plan_display import _fixing_measure, _recorded_plan
 from .test_planner_seam import ScriptedPlannerLlm, _seam
 from .test_turn_records import (
     _EXAMPLE_LINE,
@@ -377,6 +377,63 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
         "measure_basis:gross": "available",
         "measure_basis:net": "unavailable",
         "measure_basis:grant_equivalent": "partial",
+    }
+
+
+def test_a_planner_decision_settling_fields_is_a_row_the_card_can_switch() -> None:
+    """Kenya life expectancy with its measure decision fixing the measure: the
+    row names the decision by slot, offers each option as available with the
+    chosen one active, and a switch may name it. A rationale-only decision
+    stays a row with no choice."""
+    plan = _fixing_measure(scripted_plan("kenya life expectancy", spec_id=None))
+    (measure,) = plan.decisions
+    rationale = Decision(
+        slot="rounding",
+        description="How figures are rounded.",
+        options=("one decimal", "whole years"),
+        chosen="one decimal",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="Life expectancy is reported to one decimal.",
+    )
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    cited = dataset.model_copy(update={"decision_ids": (*dataset.decision_ids, "rounding")})
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [measure.model_copy(update={"chosen": measure.options[1]}), rationale],
+            "evidence_requirements": [
+                cited if r.id == dataset.id else r for r in plan.evidence_requirements
+            ],
+        }
+    )
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    rows = {row.id: row for row in frame.decisions}
+    switched, plain = rows["measure"], rows["rounding"]
+    assert (switched.choice_id, switched.active_option_id, switched.chosen) == (
+        "decision:measure",
+        "option_2",
+        "healthy life expectancy",
+    )
+    assert switched.options == [
+        PlanDecisionOption(
+            option_id="option_1", label="life expectancy at birth", status="available"
+        ),
+        PlanDecisionOption(
+            option_id="option_2", label="healthy life expectancy", status="available"
+        ),
+    ]
+    assert plain.choice_id is plain.options is plain.active_option_id is None
+    assert PlanAction.SWITCH in frame.actions
+    choices = translator._conversation.pending[frame.interrupt_id].choices
+    assert set(choices) == {"decision:measure"}
+    assert choices["decision:measure"].active == "option_2"
+    assert {k: o.label for k, o in choices["decision:measure"].options.items()} == {
+        "option_1": "life expectancy at birth",
+        "option_2": "healthy life expectancy",
     }
 
 

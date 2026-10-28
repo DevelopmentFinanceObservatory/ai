@@ -24,7 +24,7 @@ import copy
 import hashlib
 import json
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,9 +59,11 @@ from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.server import mcp as data_mcp
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from google.adk.events import Event, EventActions
+from google.adk import Context
+from google.adk.events import Event, EventActions, RequestInput
 from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import BaseSessionService, InMemorySessionService
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
 from harness.conversation import current_conversation_id
 from harness.graph.state import (
@@ -75,7 +77,7 @@ from harness.graph.state import (
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
-from harness.scripted import ScriptedSurface
+from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
@@ -4302,6 +4304,36 @@ async def test_a_skipped_ask_resumes_and_hands_the_skip_back() -> None:
     assert "The user skipped the question." in request_text(_model(app).requests[-1])
 
 
+async def test_an_answer_whose_session_read_fails_leaves_the_pause_free_to_answer_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route reads the turn's session to tell whether the answer resumes a
+    planner replan for a pick (`StudioRunner._resumes_a_pick_replan`) before
+    it claims a segment, so a read that fails claims nothing, and the same
+    answer sent again resumes the turn."""
+    reads = 0
+
+    async def _failing_once(*_args: Any, **_kwargs: Any) -> bool:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise ConnectionError("session store unreachable")
+        return False
+
+    monkeypatch.setattr(studio_module.StudioRunner, "_resumes_a_pick_replan", _failing_once)
+    app = _app(*_ask(), _text("Ask me something else."))
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        skip = _interrupt_body(_frame(first, "elicitation.request")["interrupt_id"], "skip")
+        with pytest.raises(ConnectionError):
+            await client.post("/api/studio/interrupt", json=skip, headers=AUTH)
+
+        again = await _stream(client, "/api/studio/interrupt", skip)
+
+    assert reads == 2
+    assert _events(again)[-1] == "done"
+
+
 async def test_a_free_text_answer_resumes_in_the_users_own_words() -> None:
     app = _app(*_ask(), _text("The OECD reading it is."))
     async with _client(app) as client:
@@ -4682,6 +4714,133 @@ async def test_a_switch_the_card_cannot_take_is_refused_with_its_constraint() ->
     assert answers[0].json()["current_plan"] == plan
     assert answers[-1].json()["error"] == "binding_invalid"
     assert conversation.approvals == []
+
+
+# A planner decision a plan card shows as a switchable row
+# (`harness.plan_display.switchable_decision`): the DAC total, with the top
+# 10 donors to switch to.
+_DECISION_ID = "decision:donor_scope"
+_SHOWN_DECISION = _PendingChoice(
+    active="option_1",
+    options={
+        "option_1": _PendingOption(label="the DAC total", status="available"),
+        "option_2": _PendingOption(label="the top 10 donors", status="available"),
+    },
+)
+
+
+async def test_a_planner_decision_switch_is_checked_as_a_scope_switch_and_resumes_the_plan() -> (
+    None
+):
+    """A switch naming a planner decision's row is refused 409 on a stale
+    revision and 422 on an option the row does not offer or already holds;
+    one to another option resumes the paused plan, approving nothing, and the
+    turn's record says which option the user chose."""
+    app = _app(*_plan())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client, choices={_DECISION_ID: _SHOWN_DECISION})
+        cases = [
+            ({"plan_revision": "0" * 64}, 409, "plan_revision_stale"),
+            ({"option_id": "option_3"}, 422, "switch_option_unavailable"),
+            ({"option_id": "option_1"}, 422, "switch_option_unavailable"),
+        ]
+        refused = [
+            await client.post(
+                "/api/studio/interrupt",
+                json=_switch_body(plan, choice_id=_DECISION_ID, **change),
+                headers=AUTH,
+            )
+            for change, _, _ in cases
+        ]
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _switch_body(plan, choice_id=_DECISION_ID, option_id="option_2"),
+        )
+
+    assert [(r.status_code, r.json().get("constraint_id")) for r in refused] == [
+        (status, constraint) for _, status, constraint in cases
+    ]
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert conversation.approvals == []
+    assert conversation.turn_user_message.endswith("(then: use the top 10 donors)")
+
+
+def _ask_while_replanning(ctx: Context) -> Iterator[Any]:
+    """A node asking the user one question, the way the planner's ask pauses a draft."""
+    if (ctx.resume_inputs or {}).get("replan_ask") is None:
+        yield create_request_input_event(
+            RequestInput(interrupt_id="replan_ask", message="Which years?")
+        )
+        return
+    yield Event(output="answered")
+
+
+class _AskingPickPlanner(ScriptedPlannerModel):
+    """`ScriptedPlannerModel` whose measure decision fixes the measure, so the
+    card offers it to switch, and whose replan for a pick asks the user a
+    question and then drafts until it is cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.replanning = asyncio.Event()
+
+    async def __call__(self, *, ctx: Context, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("pick") is None:
+            drafted = await super().__call__(ctx=ctx, **kwargs)
+            (measure,) = drafted["plan"]["decisions"]
+            measure["fixes"] = {"measure": measure["chosen"]}
+            return drafted
+        await ctx.run_node(_ask_while_replanning)
+        self.replanning.set()
+        await asyncio.sleep(5)
+        raise AssertionError("a stopped replan is cancelled")
+
+
+async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffers_the_plan() -> (
+    None
+):
+    """The user picks another option for a planner decision, and the planner
+    asks a question while it replans. The stream that answers it runs the
+    replan, so a Stop there is a switch's Stop: the stream ends on the same
+    plan re-offered with `switch_cancelled`, and the turn stays paused on it."""
+    planner = _AskingPickPlanner()
+    app = _app(*_plan(), planner=planner)
+    stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body())
+        plan = _frame(first, "plan.proposed")
+        (decision,) = [d for d in plan["decisions"] if d.get("choice_id")]
+        option = next(
+            o["option_id"]
+            for o in decision["options"]
+            if o["option_id"] != decision["active_option_id"]
+        )
+        asked = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _switch_body(plan, choice_id=decision["choice_id"], option_id=option),
+        )
+        elicitation = _frame(asked, "elicitation.request")
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        resumed = asyncio.ensure_future(
+            _stream(
+                client,
+                "/api/studio/interrupt",
+                _interrupt_body(elicitation["interrupt_id"], "skip"),
+            )
+        )
+        await asyncio.wait_for(planner.replanning.wait(), timeout=5)
+        cancelled = await client.post("/api/studio/cancel", json=stop, headers=AUTH)
+        assert cancelled.status_code == 204
+        frames = await asyncio.wait_for(resumed, timeout=5)
+
+    assert _events(frames)[-1] == "plan.proposed"
+    again = _frame(frames, "plan.proposed")
+    assert again["revision"] == plan["revision"]
+    assert again["switch_failed"]["code"] == "switch_cancelled"
+    assert list(conversation.pending) == [again["interrupt_id"]]
+    assert conversation.awaiting_answer
 
 
 async def test_a_stale_approve_gets_the_current_card_and_the_shown_revision_approves() -> None:

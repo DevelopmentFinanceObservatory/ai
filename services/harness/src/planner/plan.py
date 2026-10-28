@@ -166,6 +166,14 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 # Unset, the entry carries no amendment.
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
+# The session-state slot holding the option the user picked for a planner
+# decision on the plan card, as `{"slot", "chosen"}`, when the planner's
+# current entry replans to hold that pick. `harness.planner_seam.PlannerSeam`
+# writes it, or clears it, with `AMENDMENT_ENTRY_STATE_KEY` when an entry
+# starts, so an ask-the-user resume inside one entry keeps it. Admission
+# refuses a plan that does not state the pick (`submission.service.admit`).
+DECISION_PICK_STATE_KEY = "planner:decision_pick"
+
 # The session-state slot holding the `UnsupportedOperation` of every decline
 # earned in the planner's current entry that the recorded plan may make but
 # need not: a first-draft entry or a translation that refers a requirement
@@ -6188,6 +6196,28 @@ def amendment_entry(state: SessionState) -> bool:
 def save_amendment_entry(state: SessionState, amended: bool) -> None:
     """Record whether the planner's current entry opened with the user's amendment of the plan."""
     state[AMENDMENT_ENTRY_STATE_KEY] = amended
+
+
+def decision_pick(state: SessionState) -> tuple[str, str] | None:
+    """The `(slot, chosen)` the user picked on the plan card that the planner's
+    current entry holds (`DECISION_PICK_STATE_KEY`), or `None`."""
+    return pick_of(state.get(DECISION_PICK_STATE_KEY))
+
+
+def pick_of(raw: object) -> tuple[str, str] | None:
+    """The `(slot, chosen)` a pick stored as `{"slot", "chosen"}` states, or
+    `None` for anything else."""
+    if not isinstance(raw, dict):
+        return None
+    slot, chosen = raw.get("slot"), raw.get("chosen")
+    if not (isinstance(slot, str) and isinstance(chosen, str)):
+        return None
+    return slot, chosen
+
+
+def save_decision_pick(state: SessionState, pick: tuple[str, str] | None) -> None:
+    """Record the `(slot, chosen)` pick the planner's current entry holds, or clear it with `None`."""
+    state[DECISION_PICK_STATE_KEY] = None if pick is None else {"slot": pick[0], "chosen": pick[1]}
 
 
 def load_unsupported(state: SessionState) -> frozenset[UnsupportedOperation]:

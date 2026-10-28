@@ -50,6 +50,7 @@ from google.adk.errors import StaleSessionError
 from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events import Event
 from google.adk.runners import Runner
+from google.adk.sessions.base_session_service import GetSessionConfig
 from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
@@ -63,6 +64,7 @@ from harness.conversation import (
     current_conversation_key,
     current_user_message,
 )
+from harness.decision_pick import is_decision_choice
 from harness.graph.seams import Executor
 from harness.graph.state import (
     AGENT_NAME,
@@ -72,6 +74,7 @@ from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    PICK_REPLAN_KEY,
 )
 from harness.graph.switch import SWITCH_STOP
 from harness.provenance import ProvenanceStore
@@ -260,9 +263,10 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
 
     A switch names the revision of the plan the user saw, or is refused
     409 `plan_revision_stale`. It moves a choice the card shows
-    (`_PendingInterrupt.choices`) to an option the card offers as available
-    or partial, other than the active one, or is refused 422
-    `switch_option_unavailable`. `detail` is copy the card shows.
+    (`_PendingInterrupt.choices`), a scope choice or a planner decision
+    (`harness.decision_pick.is_decision_choice`), to an option the card
+    offers as available or partial, other than the active one, or is refused
+    422 `switch_option_unavailable`. `detail` is copy the card shows.
     """
     if body.plan_revision != pending.plan_revision:
         return _stale_plan_refusal(pending)
@@ -273,7 +277,8 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
     elif option is None:
         detail = "That option is not offered for this choice."
     elif body.option_id == choice.active:
-        detail = f"The plan already counts {option.label}."
+        verb = "uses" if is_decision_choice(body.choice_id or "") else "counts"
+        detail = f"The plan already {verb} {option.label}."
     elif option.status == "unavailable":
         detail = f"{option.label} cannot be counted for this plan."
     else:
@@ -872,6 +877,20 @@ class StudioRunner:
         exactly this call to give them back; nothing else on the served path
         closes it."""
         await self.recorder.aclose()
+
+    async def _resumes_a_pick_replan(
+        self, *, principal: str, conversation: ConversationState
+    ) -> bool:
+        """Whether the turn is paused inside a planner replan for a pick on
+        the plan card (`harness.graph.state.PICK_REPLAN_KEY`): a question
+        the planner asked while replanning, whose answer resumes the replan."""
+        session = await self.runner.session_service.get_session(
+            app_name=self.runner.app_name,
+            user_id=principal,
+            session_id=conversation.session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        return session is not None and bool(session.state.get(PICK_REPLAN_KEY))
 
     async def _ensure_session(
         self, *, user_id: str, session_id: str, state: dict[str, Any] | None = None
@@ -1539,6 +1558,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 lock.release()
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
+            # A stream that runs a plan-card switch arms the switch's Stop:
+            # one that answers the switch, and one that answers a question
+            # the planner asked while replanning for a pick on the card.
+            # Read before the segment is claimed, so a failed read leaves
+            # nothing claimed and the answer can be sent again.
+            switching = body.decision is InterruptDecision.SWITCH or (
+                pending.kind == "elicitation"
+                and await studio._resumes_a_pick_replan(
+                    principal=principal, conversation=conversation
+                )
+            )
             requested_answer: dict[str, Any] = {
                 "decision": body.decision.value,
                 "payload": body.payload,
@@ -1733,14 +1763,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 answer["at"] = recorded.at.isoformat()
         elif body.decision is InterruptDecision.SWITCH:
             # The graph's `switch` node revises the plan in code and offers
-            # it again; the turn's history record carries the choice.
+            # it again; a planner decision's switch (`is_decision_choice`)
+            # replans with the pick held (`harness.decision_pick`). The
+            # turn's history record carries the choice.
             assert body.choice_id is not None and body.option_id is not None
             answer = {
                 "approved": None,
                 "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
             }
             label = pending.choices[body.choice_id].options[body.option_id].label
-            conversation.add_to_turn(f"count {label}", user_words=False)
+            verb = "use" if is_decision_choice(body.choice_id) else "count"
+            conversation.add_to_turn(f"{verb} {label}", user_words=False)
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
             # An amendment refines the question, so the turn's history record
@@ -1780,7 +1813,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         frames,
                     ),
                     conversation=conversation,
-                    switch=body.decision is InterruptDecision.SWITCH,
+                    switch=switching,
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )

@@ -40,7 +40,7 @@ import functools
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -1037,25 +1037,51 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
     return f"{phrase} and {len(datasets) - 1} more" if len(datasets) > 1 else phrase
 
 
-def _scope_members(decision: Decision | None, plan: PlannerPlan) -> dict[str, Any]:
-    """The `PlanDecision` members a scope decision of `plan` adds: the id of
-    its row (`plan_display.choice_id`), its active option and each option
-    with its label, status, years and why it is limited (`REASON_COPY`).
-    Empty for any other decision."""
-    if decision is None or decision.scope is None:
+def _choice_members(
+    decision: Decision | None, plan: PlannerPlan, named: Callable[[str], str]
+) -> dict[str, Any]:
+    """The `PlanDecision` members a switchable decision of `plan` adds: the id
+    of its row, its active option and each option with its label and status.
+
+    A scope decision's row takes `plan_display.choice_id`, and each option
+    the status Search gave it, its years and why it is limited
+    (`REASON_COPY`). A planner decision the card can switch
+    (`plan_display.switchable_decision`) takes `plan_display.
+    decision_choice_id`, and each option `plan_display.decision_option_id`,
+    its label in the card's words (`named`) and status "available", the
+    chosen one active. Empty for any other decision.
+    """
+    if decision is None:
+        return {}
+    if decision.scope is not None:
+        return {
+            "choice_id": plan_display.choice_id(plan, decision),
+            "active_option_id": decision.active_option_id,
+            "options": [
+                PlanDecisionOption(
+                    option_id=state.option_id,
+                    label=label,
+                    status=state.status,
+                    reason=REASON_COPY.get(state.code) if state.code is not None else None,
+                    years=list(state.years) if state.years is not None else None,
+                )
+                for label, state in zip(decision.options, decision.scope.options, strict=True)
+            ],
+        }
+    if not plan_display.switchable_decision(decision):
         return {}
     return {
-        "choice_id": plan_display.choice_id(plan, decision),
-        "active_option_id": decision.active_option_id,
+        "choice_id": plan_display.decision_choice_id(decision),
+        "active_option_id": plan_display.decision_option_id(
+            decision.options.index(decision.chosen)
+        ),
         "options": [
             PlanDecisionOption(
-                option_id=state.option_id,
-                label=label,
-                status=state.status,
-                reason=REASON_COPY.get(state.code) if state.code is not None else None,
-                years=list(state.years) if state.years is not None else None,
+                option_id=plan_display.decision_option_id(index),
+                label=named(option),
+                status="available",
             )
-            for label, state in zip(decision.options, decision.scope.options, strict=True)
+            for index, option in enumerate(decision.options)
         ],
     }
 
@@ -1070,7 +1096,8 @@ def _search_default(decision: Decision | None) -> bool:
 
 
 def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
-    """The scope choices of the card's `decisions` a switch may name, by choice id.
+    """The choices of the card's `decisions` a switch may name, by choice id:
+    scope choices and switchable planner decisions (`_choice_members`).
 
     A choice is switchable when an option other than its active one is
     available or partial. The plan card lists `PlanAction.SWITCH` only
@@ -1097,7 +1124,7 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
 
 
 def held_labels(card: PlanProposed) -> dict[str, str]:
-    """The label of the option each scope choice of `card` holds, by choice id; the
+    """The label of the option each switchable choice of `card` holds, by choice id; the
     option's id where the choice lists no option by that id."""
     return {
         decision.choice_id: next(
@@ -1122,7 +1149,7 @@ def plan_approved(
     """The `plan.approved` frame for the plan card the user approved.
 
     Built from the card, so it states what the user saw: its title, summary,
-    step labels and caveats, and for each scope choice the short name
+    step labels and caveats, and for each switchable choice the short name
     (`PlanDecision.question`) and the label of the option it held. A choice
     holding another label than the one `baseline` keeps for its choice id,
     the label on the card the turn's first switch of it was made from
@@ -1772,7 +1799,7 @@ class _Translator:
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
             questions = plan_display.card_questions(plan)
-            scoped = {decision.slot: decision for decision in plan.decisions if decision.scope}
+            by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
             revision = payload.get("revision")
             steps = [
@@ -1844,12 +1871,12 @@ class _Translator:
                     ),
                     # A reason saying only that Search's default holds says nothing.
                     reason=""
-                    if _search_default(scoped.get(decision.get("slot", "")))
+                    if _search_default(by_slot.get(decision.get("slot", "")))
                     else named(decision.get("rationale", "")),
                     resolved_by=_RESOLVED_BY_TO_WIRE.get(
                         decision.get("resolved_by", ""), "default"
                     ),
-                    **_scope_members(scoped.get(decision.get("slot", "")), plan),
+                    **_choice_members(by_slot.get(decision.get("slot", "")), plan, named),
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions

@@ -246,30 +246,40 @@ def switch_node(
                 )
         except SwitchFailedError as exc:
             _restore(ctx, before)
-            logger.info(
-                "plan switch not applied: choice_id=%s option_id=%s code=%s",
-                choice_id,
-                option_id,
-                exc.code,
-            )
-            output = {
-                **plan.model_dump(mode="json"),
-                "summary": exc.reason,
-                "revision": plan_revision(plan),
-                "switch_failed": {
-                    "choice_id": choice_id,
-                    "option_id": option_id,
-                    "code": exc.code,
-                    "reason": exc.reason,
-                    "retryable": exc.retryable,
-                },
-            }
+            output = switch_failed_offer(plan, choice_id=choice_id, option_id=option_id, error=exc)
         except BaseException:
             _restore(ctx, before)
             raise
         yield Event(output=output, route="offer")
 
     return switch
+
+
+def switch_failed_offer(
+    plan: PlannerPlan, *, choice_id: str, option_id: str, error: SwitchFailedError
+) -> dict[str, Any]:
+    """The `approve` payload offering `plan` unchanged after the switch of row
+    `choice_id` to option `option_id` failed with `error`: `switch_failed`
+    names the row, the option, the code, the sentence saying why and
+    whether the same switch can succeed if asked again."""
+    logger.info(
+        "plan switch not applied: choice_id=%s option_id=%s code=%s",
+        choice_id,
+        option_id,
+        error.code,
+    )
+    return {
+        **plan.model_dump(mode="json"),
+        "summary": error.reason,
+        "revision": plan_revision(plan),
+        "switch_failed": {
+            "choice_id": choice_id,
+            "option_id": option_id,
+            "code": error.code,
+            "reason": error.reason,
+            "retryable": error.retryable,
+        },
+    }
 
 
 async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> dict[str, Any]:

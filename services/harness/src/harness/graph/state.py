@@ -96,6 +96,13 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The state a planner entry replanning for a pick on the plan card puts back
+# when the replan does not land (`harness.graph.planning`), written when the
+# entry starts and cleared when it ends. Set only while such a replan runs or
+# is paused on a planner-side ask, so the studio arms the switch's Stop on
+# the stream that resumes that ask. Outside the drafting prefixes the restore
+# resets (`harness.graph.switch._DRAFTING_PREFIXES`).
+PICK_REPLAN_KEY = "switch:pick_replan"
 # The `custom_metadata` key an orchestrator node's own status line travels
 # under ("Reading your question"), read by `studio_translate._Translator`.
 ORCHESTRATOR_STATUS_KEY = "orchestrator_status"

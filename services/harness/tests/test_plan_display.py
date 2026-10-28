@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from harness.decision_pick import DecisionPick, decision_pick
 from harness.plan_display import (
     _card_label,
     _concepts,
@@ -34,7 +35,9 @@ from harness.plan_display import (
     shown_decisions,
     shown_plan,
     step_rows,
+    switchable_decision,
 )
+from harness.scripted_plan import scripted_plan
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -75,6 +78,7 @@ from planner.plan import (
     WholeOf,
     frame_shapes,
     scope_choice_slot,
+    search_pin_slot,
 )
 from planner.records import (
     Breakdown,
@@ -3621,3 +3625,84 @@ def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> No
         "Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
         f"System (CRS): {side}, as a share of {side}."
     )
+
+
+def _planner_decision(**update: Any) -> Decision:
+    """A decision the planner wrote fixing the window's first year, with `update` set."""
+    return Decision.model_validate(
+        {
+            "slot": "window",
+            "description": "Which years the answer covers.",
+            "options": ["since 2015", "since 2020"],
+            "chosen": "since 2015",
+            "resolved_by": "planner_default",
+            "rationale": "The question asks for the last decade.",
+            "fixes": {"window_start": 2015},
+            **update,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("decision", "switchable"),
+    [
+        (_planner_decision(), True),
+        (_planner_decision(fixes=None), False),
+        (
+            _planner_decision(slot=search_pin_slot(_SPEC_A), fixes={"source_spec_id": _SPEC_A}),
+            False,
+        ),
+        (_scope_decision(_SPEC_A, "sector"), False),
+        (_planner_decision(caveat="providers_differ"), False),
+    ],
+    ids=["fixes_fields", "rationale_only", "search_pin", "scope_choice", "caveat"],
+)
+def test_only_a_planner_decision_settling_fields_switches_on_the_card(
+    decision: Decision, switchable: bool
+) -> None:
+    """The decisions `propose_plan` writes switch through Search or qualify
+    the answer, and a rationale settles nothing a switch could change."""
+    assert switchable_decision(decision) is switchable
+
+
+def _fixing_measure(plan: Plan) -> Plan:
+    """`plan` (the scripted Kenya life expectancy plan) with its measure
+    decision fixing the measure its dataset reads."""
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    return Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [
+                d.model_copy(update={"fixes": DecisionFixes(measure=dataset.measure)})
+                for d in plan.decisions
+            ],
+        }
+    )
+
+
+def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it() -> None:
+    """The row `decision:measure`'s second option is the decision's second
+    option. A row or option the card does not offer picks nothing."""
+    unfixed = scripted_plan("kenya life expectancy", spec_id=None)
+    plan = _fixing_measure(unfixed)
+    assert plan.decisions[0].options == ("life expectancy at birth", "healthy life expectancy")
+
+    picks = [
+        decision_pick(plan, choice_id=choice, option_id=option)
+        for choice, option in [
+            ("decision:measure", "option_2"),
+            ("decision:measure", "option_1"),
+            ("decision:measure", "option_3"),
+            ("decision:other", "option_2"),
+            ("measure", "option_2"),
+        ]
+    ]
+
+    assert picks == [
+        DecisionPick(slot="measure", chosen="healthy life expectancy"),
+        DecisionPick(slot="measure", chosen="life expectancy at birth"),
+        None,
+        None,
+        None,
+    ]
+    assert decision_pick(unfixed, choice_id="decision:measure", option_id="option_2") is None

@@ -230,7 +230,8 @@ class SessionView(Protocol):
     recorded plan, its rounds, pins shown and windowed, histories read,
     asks, the pending referral, the discovery log), read through their own
     loaders. The four readers answer from what the user was asked and
-    answered in this session. The four writes are the chain's only side
+    answered in this session, and `decision_pick` names the pick on the plan
+    card a planner entry replans for. The four writes are the chain's only side
     effects: an `unsupported` answer, an optional decline and the asks a
     `PERIOD_REDUCTION_UNSTATED` refusal names, each recorded even though the
     call is refused, and an admitted plan.
@@ -255,6 +256,10 @@ class SessionView(Protocol):
 
     def user_spoke_since(self, version: int) -> bool:
         """Whether the user has said anything (an answer, an amendment, a new message) since plan `version` was recorded."""
+        ...
+
+    def decision_pick(self) -> tuple[str, str] | None:
+        """The `(slot, chosen)` the user picked on the plan card that this proposal's planner entry replans to hold, or `None`."""
         ...
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
@@ -547,6 +552,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     ]
     # Between the user's turns, their decisions stand as they made them.
     user_spoke = previous is None or view.user_spoke_since(previous.version)
+    pick = view.decision_pick()
+    released = (
+        _released_by_pick(previous, requirements_after, pick)
+        if pick is not None and previous is not None and not user_spoke
+        else frozenset()
+    )
     contradicted = _contradicted_carried_decisions(
         previous, settled, requirements_after, removed=removed_decisions, user_spoke=user_spoke
     )
@@ -567,6 +578,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             requirements_after,
             removed=removed_decisions,
             user_spoke=user_spoke,
+            released=released,
         ),
     ]
     blocked = (
@@ -574,7 +586,11 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             None
             if user_spoke
             else _user_decision_refused(
-                previous, settled, requirements_after, removed=removed_decisions
+                previous,
+                settled,
+                requirements_after,
+                removed=removed_decisions,
+                released=released,
             )
         )
         or _shared_decision_contradicted(contradicted, proposer)
@@ -588,6 +604,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     if blocked is not None:
         return blocked
+    if pick is not None:
+        held = _picked_decision(
+            pick, _decisions_after(previous, settled, removed=removed_decisions), proposer
+        )
+        if not isinstance(held, Decision):
+            return held
+        settled = [*(d for d in settled if d.slot != held.slot), held]
     try:
         if previous is not None:
             plan = previous.amend(
@@ -5290,6 +5313,7 @@ def _uncited_carried_decisions(
     *,
     removed: Collection[str],
     user_spoke: bool,
+    released: Collection[str] = frozenset(),
 ) -> list[str]:
     """The slot of each decision `previous` records that no requirement of the patched plan cites.
 
@@ -5300,8 +5324,9 @@ def _uncited_carried_decisions(
     it. A slot this call restates or removes is left as the call says, since
     a decision the call states is the model's to cite. A user's decision is
     swept only once the user has spoken since `previous` (`user_spoke`),
-    since the patch then acts on their new words; before that
-    `_user_decision_refused` refuses the patch instead.
+    since the patch then acts on their new words, or when it is one of
+    `released` (`_released_by_pick`); before that `_user_decision_refused`
+    refuses the patch instead.
 
     Args:
         previous: The plan this call amends, or `None`.
@@ -5309,6 +5334,7 @@ def _uncited_carried_decisions(
         requirements: Every requirement the patched plan states.
         removed: The slots this call removes.
         user_spoke: Whether the user has spoken since `previous` was recorded.
+        released: The user's decisions a pick on the plan card lets go.
     """
     if previous is None:
         return []
@@ -5319,8 +5345,36 @@ def _uncited_carried_decisions(
         for decision in previous.decisions
         if decision.slot not in restated
         and decision.slot not in cited
-        and (user_spoke or decision.resolved_by is ResolvedBy.PLANNER_DEFAULT)
+        and (
+            user_spoke
+            or decision.resolved_by is ResolvedBy.PLANNER_DEFAULT
+            or decision.slot in released
+        )
     ]
+
+
+def _released_by_pick(
+    previous: Plan, requirements: Sequence[EvidenceRequirement], pick: tuple[str, str]
+) -> frozenset[str]:
+    """The user's decisions of `previous` that a pick on the plan card lets the patch drop.
+
+    The pick speaks for its own slot, and for each other user decision only
+    where the plan it asks for (`requirements`) neither cites it nor states
+    any of the requirements that cited it: a shape change took the
+    decision's requirements away with it. A user decision the new plan
+    still cites, or a surviving requirement still rests on, stands as the
+    user made it (`_user_decision_refused`).
+    """
+    kept = {requirement.id for requirement in requirements}
+    cited = {slot for requirement in requirements for slot in requirement.decision_ids}
+    released = {pick[0]}
+    for decision in previous.decisions:
+        if decision.resolved_by is not ResolvedBy.USER or decision.slot in cited:
+            continue
+        citing = [r.id for r in previous.evidence_requirements if decision.slot in r.decision_ids]
+        if not any(requirement_id in kept for requirement_id in citing):
+            released.add(decision.slot)
+    return frozenset(released)
 
 
 class _Contradiction(NamedTuple):
@@ -5430,6 +5484,7 @@ def _user_decision_refused(
     requirements: Sequence[EvidenceRequirement],
     *,
     removed: Collection[str],
+    released: Collection[str] = frozenset(),
 ) -> dict[str, object] | None:
     """The refusal for a patch that drops or changes a decision the user made, or `None`.
 
@@ -5442,13 +5497,15 @@ def _user_decision_refused(
     `fixes`, which no requirement citing it contradicts. How the patch got
     there (a moved value, a renamed requirement, a dropped citation, a
     restatement) does not matter. `USER_DECISION_DROPPED` answers a removal
-    or a lost last citation, `USER_DECISION_CONTRADICTED` any change.
+    or a lost last citation, `USER_DECISION_CONTRADICTED` any change. The
+    decisions a pick on the plan card lets go (`released`,
+    `_released_by_pick`) are not held.
     """
     if previous is None:
         return None
     stated = {decision.slot: decision for decision in decisions}
     for decided in previous.decisions:
-        if decided.resolved_by is not ResolvedBy.USER:
+        if decided.resolved_by is not ResolvedBy.USER or decided.slot in released:
             continue
         citing = [r for r in requirements if decided.slot in r.decision_ids]
         if decided.slot in removed or not citing:
@@ -5673,6 +5730,39 @@ def _measure_fixed(
             "measure_decision": pinned.slot,
             "chosen": pinned.chosen,
             "counts": counts,
+        },
+    )
+
+
+def _picked_decision(
+    pick: tuple[str, str], decisions: Sequence[Decision], proposer: Proposer
+) -> Decision | dict[str, object]:
+    """The decision of `decisions` holding the user's `pick` on the plan card, as theirs, or the refusal.
+
+    `pick` is the `(slot, chosen)` the planner's entry replans to hold
+    (`planner.plan.decision_pick`). The plan holds it when it states a
+    decision under that slot whose `chosen` is the picked label, whatever
+    the requirements citing it fix, since the pick may change the plan's
+    shape. That decision is recorded `resolved_by=user`. Any other plan is
+    refused with `USER_PICK_NOT_HELD`, whose `action` calls `proposer` to
+    restate the decision.
+    """
+    slot, chosen = pick
+    stated = next((decision for decision in decisions if decision.slot == slot), None)
+    if stated is not None and stated.chosen == chosen:
+        return stated.model_copy(update={"resolved_by": ResolvedBy.USER})
+    states = f"states {stated.chosen!r} for it" if stated is not None else "drops that decision"
+    return problem(
+        ProblemCode.USER_PICK_NOT_HELD,
+        f"The user picked {chosen!r} for decision {slot!r} on the plan card, and this plan "
+        f"{states}. Restate decision {slot!r} with `chosen` {chosen!r}, and change the "
+        "evidence requirements citing it so they state what that option asks for.",
+        outcome=Outcome.REFUSED,
+        action=proposer.action(needs=("decisions", "evidence_requirements")),
+        detail={
+            "slot": slot,
+            "chosen": chosen,
+            "stated": stated.chosen if stated is not None else None,
         },
     )
 

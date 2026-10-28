@@ -12,7 +12,7 @@ from collections.abc import (
     Iterator,
 )
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from common.telemetry import record_span
 from google.adk import Context, Event
@@ -23,10 +23,15 @@ from planner.plan import (
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     PlanStatus,
+    SessionState,
+    pick_of,
     plan_revision,
+    save_decision_pick,
 )
 from planner.plan import Plan as PlannerPlan
 
+from harness.decision_pick import DecisionPick, decision_pick
+from harness.graph import switch as switch_module
 from harness.graph.seams import (
     PlannerModel,
 )
@@ -36,6 +41,7 @@ from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
+    PICK_REPLAN_KEY,
     PLANNER_STARTED_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
@@ -43,6 +49,7 @@ from harness.graph.state import (
     readable_plan,
     state_json,
 )
+from harness.graph.switch import SwitchFailedError
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +116,20 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         again. The `"refused"` route's text opens with
         `UNREADABLE_PLAN_UNPLANNED_NOTE`.
 
+        An `"amend"` entry carrying `pick` (`approve` routes a switch of a
+        planner decision's row so) replans with the user's pick held: the
+        seam is passed it, and admission refuses a plan that does not state
+        it. The run can be stopped as a switch is (`harness.graph.switch.
+        SWITCH_STOP`), so it runs under the switch node's `_unless_stopped`.
+        A stop or a refusal routes `"pending_refusal"` with the unchanged
+        plan and the `switch_failed` the switch node offers
+        (`switch_failed_offer`). It puts back the state from before the pick
+        (`_pick_snapshot`) and clears the pick, as it does when the run
+        raises. A planner-side ask keeps the replan's state for its resume,
+        which restores from the same snapshot, and the studio arms the
+        switch's Stop on the stream resuming it (`PICK_REPLAN_KEY`). A
+        drafted plan carries an empty `moved`.
+
         `planner(...)` is awaited directly here, with no
         `asyncio.ensure_future` wrapper of its own: ADK's own docstring
         warns against wrapping a `ctx.run_node`-calling call in a task like
@@ -134,7 +155,12 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         avoids creating. Reports queue as they happen and relay the moment
         the `await` returns. A pause drops them instead: ADK streams the
         ask before the pause reaches this node, so anything relayed then
-        would follow the ask.
+        would follow the ask. A pick's replan is the one exception: Stop has
+        to reach it while it runs, so `_unless_stopped` runs it as a task. A
+        task copies the context it starts in, so the seam's `_active_call`
+        and `ctx.run_node` read the same values there, and the ask's
+        `NodeInterruptedError`, which the task holds, is raised again here
+        when the task's result is read.
         """
         raw = ctx.state.get("plan")
         question = ctx.state.get(ORCHESTRATOR_BRIEF_KEY, "")
@@ -180,34 +206,63 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             is_first_draft = True
         yield Event(custom_metadata={PLANNER_STARTED_KEY: {"revising": not is_first_draft}})
 
+        pick = _pick(payload) if existing is not None else None
+        # The state before the pick, which a pick's replan that is stopped,
+        # refused or raises puts back.
+        before = _pick_snapshot(ctx) if pick is not None else None
         progress: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        drafting = planner(
+            ctx=ctx,
+            question=question,
+            readings=[
+                *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+                *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+            ],
+            prior_plan=(
+                None if is_first_draft else (existing.model_dump(mode="json") if existing else None)
+            ),
+            refusal=refusal,
+            amendment=amendment,
+            canvas_digest=state_json(ctx, "canvas_digest"),
+            conversation_digest=state_json(ctx, "conversation_digest"),
+            on_progress=progress.put_nowait,
+            pick=pick,
+        )
+        failed: SwitchFailedError | None = None
         try:
-            drafted = await planner(
-                ctx=ctx,
-                question=question,
-                readings=[
-                    *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-                    *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
-                ],
-                prior_plan=(
-                    None
-                    if is_first_draft
-                    else (existing.model_dump(mode="json") if existing else None)
-                ),
-                refusal=refusal,
-                amendment=amendment,
-                canvas_digest=state_json(ctx, "canvas_digest"),
-                conversation_digest=state_json(ctx, "conversation_digest"),
-                on_progress=progress.put_nowait,
+            drafted = await (
+                drafting if pick is None else switch_module._unless_stopped(ctx, drafting)
             )
         except NodeInterruptedError:
             # A planner-side ask paused the draft mid-turn, and ADK has
             # already streamed the ask, so the reports queued so far are
-            # dropped with it: relayed now they would follow the ask.
+            # dropped with it: relayed now they would follow the ask. A
+            # pick's replan keeps its state for the resume.
+            raise
+        except SwitchFailedError as exc:
+            # Only a pick's replan, stopped by the user (`SWITCH_STOP`).
+            failed, drafted = exc, {}
+        except BaseException:
+            if before is not None:
+                _end_pick_replan(ctx, before)
             raise
         while not progress.empty():
             yield Event(custom_metadata={"progress": progress.get_nowait()})
         refused = drafted.get("refused") if isinstance(drafted, dict) else None
+        if pick is not None and (failed is not None or refused is not None):
+            assert existing is not None and before is not None
+            _end_pick_replan(ctx, before)
+            switch = payload.get("switch") or {}
+            yield Event(
+                output=switch_module.switch_failed_offer(
+                    existing,
+                    choice_id=str(switch.get("choice_id")),
+                    option_id=str(switch.get("option_id")),
+                    error=failed or _pick_refused(refused or {}, pick),
+                ),
+                route="pending_refusal",
+            )
+            return
         if refused is not None:
             text = str(refused.get("text", ""))
             if existing is not None and existing.status is PlanStatus.PENDING_APPROVAL:
@@ -246,11 +301,15 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             return
         planner_plan = PlannerPlan.model_validate(drafted["plan"])
         ctx.state["plan"] = planner_plan.model_dump_json()
+        if pick is not None:
+            ctx.state[PICK_REPLAN_KEY] = None
         yield Event(
             output={
                 **planner_plan.model_dump(mode="json"),
                 "summary": drafted["summary"],
                 "revision": plan_revision(planner_plan),
+                # A pick's replan moves no other choice of the card.
+                **({"moved": []} if pick is not None else {}),
                 **({"refusal_note": UNREADABLE_PLAN_NOTE} if unreadable else {}),
                 # The draft's version counts from 1 again, on a line of its
                 # own: no earlier card of the turn is a version of this plan.
@@ -260,6 +319,50 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         )
 
     return draft_plan
+
+
+def _pick(payload: dict[str, Any]) -> DecisionPick | None:
+    """The planner decision's option the user picked on the plan card, which
+    `approve`'s `"amend"` route carries under `pick`, or `None`."""
+    picked = pick_of(payload.get("pick"))
+    return DecisionPick(*picked) if picked is not None else None
+
+
+def _pick_snapshot(ctx: Context) -> dict[str, Any]:
+    """The state a pick's replan puts back when it does not land.
+
+    A fresh entry records the state as it stands under `PICK_REPLAN_KEY`.
+    The resume of a planner-side ask reads that record back, since the
+    first leg has written drafting state and readings since.
+    """
+    held = ctx.state.get(PICK_REPLAN_KEY)
+    if ctx.resume_inputs and isinstance(held, dict):
+        return held
+    snapshot = switch_module._restorable_state(ctx)
+    ctx.state[PICK_REPLAN_KEY] = snapshot
+    return snapshot
+
+
+def _end_pick_replan(ctx: Context, before: dict[str, Any]) -> None:
+    """End a pick's replan that did not land: put the state back as `before`
+    holds it, clear the pick so a later revision of the plan on record holds
+    none, and clear the snapshot."""
+    switch_module._restore(ctx, before)
+    save_decision_pick(cast(SessionState, ctx.state), None)
+    ctx.state[PICK_REPLAN_KEY] = None
+
+
+def _pick_refused(refused: dict[str, Any], pick: DecisionPick) -> SwitchFailedError:
+    """The `SwitchFailedError` for a pick's replan that the planner seam
+    refused: it takes the refusal's code and its sentence for the user
+    (`reason`), and is retryable unless no other plan for the same ask can
+    succeed (`final`), since another replan may draft one."""
+    return SwitchFailedError(
+        str(refused.get("reason") or refused.get("text") or "")
+        or f"The plan could not be redrafted to use {pick.chosen}.",
+        code=str(refused.get("code") or switch_module.SCOPE_CHOICE_NOT_APPLIED),
+        retryable=not refused.get("final"),
+    )
 
 
 def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
@@ -286,7 +389,10 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     and routes `"amend"` as one naming another revision does. An answer
     carrying `switch` (`{"choice_id", "option_id"}`, a scope choice the user
     moved on the card) routes `"switch"` to the `switch` node
-    (`harness.graph.switch`), which offers the revised plan back here. It
+    (`harness.graph.switch`), which offers the revised plan back here. A
+    switch of a planner decision's row (`harness.decision_pick.decision_pick`)
+    routes `"amend"` with the plan, the `pick` and the `switch`, and the
+    `planner` node replans holding the pick. It
     records a `plan.approved` span (nesting under the turn span
     `harness.studio_state.begin_turn` opens) and a matching log line with
     the same facts, `plan_version` and `amended`, off the `Plan` just
@@ -313,8 +419,27 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
         return
     switch = answer.get("switch") if isinstance(answer, dict) else None
     if isinstance(switch, dict):
+        pick = decision_pick(
+            plan,
+            choice_id=str(switch.get("choice_id")),
+            option_id=str(switch.get("option_id")),
+        )
+        if pick is not None:
+            # A planner decision's pick changes what the plan states, so the
+            # planner replans with the pick held.
+            yield Event(
+                output={
+                    "plan": plan.model_dump(mode="json"),
+                    "pick": {"slot": pick.slot, "chosen": pick.chosen},
+                    "switch": switch,
+                },
+                route="amend",
+            )
+            return
         # A switch moves a scope choice and approves nothing: the `switch`
-        # node revises the plan in code and offers it here again.
+        # node revises the plan in code and offers it here again. A row it
+        # cannot find, such as a planner decision the plan dropped, it
+        # offers back unchanged with `switch_failed`.
         yield Event(output={"switch": switch}, route="switch")
         return
     key: Any = plan_revision(plan)

@@ -114,6 +114,7 @@ from planner.agent import PROPOSE_PLAN, ToolContextSession, declare_ready, with_
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
+    DECISION_PICK_STATE_KEY,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
@@ -141,6 +142,7 @@ from planner.plan import (
     record_optional_decline,
     record_unsupported,
     save_amendment_entry,
+    save_decision_pick,
     save_pin_sources,
     save_plan,
     save_plan_rounds,
@@ -166,6 +168,7 @@ from translator.tool import Translate, build_translate, permitted_repair
 
 from harness import plan_display
 from harness.agents import build_tool_surface, create_planner_with_translator
+from harness.decision_pick import DecisionPick
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -443,6 +446,11 @@ class _RevisionSession(ToolContextSession):
         elected = super().elected_spec_ids()
         return elected | {new for new, old in self.inherits.items() if old in elected}
 
+    def decision_pick(self) -> tuple[str, str] | None:
+        """None: a revision answers a scope switch, so it holds no pick
+        whatever the session holds."""
+        return None
+
 
 class PlannerSeam:
     """`harness.graph.seams.PlannerModel`, implemented by `src/planner` and the translation it runs."""
@@ -529,6 +537,7 @@ class PlannerSeam:
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        pick: DecisionPick | None = None,
     ) -> dict[str, Any]:
         # `readings` is the search readings of the conversation's earlier
         # turns and then this turn's, as `harness.orchestrator_tools` stores
@@ -578,6 +587,15 @@ class PlannerSeam:
             # names (`submission.service.admit`). `_message` renders the
             # amendment on the same test.
             save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
+            # The option the user picked on the plan card, which this entry
+            # replans to hold: admission refuses a plan that does not state
+            # it, and lets go of the user's decisions the new plan drops with
+            # all their requirements (`submission.service.admit`). Any other
+            # entry clears it.
+            save_decision_pick(
+                cast(SessionState, ctx.session.state),
+                (pick.slot, pick.chosen) if pick is not None else None,
+            )
             clear_unsupported(cast(SessionState, ctx.session.state))
             for operation in _earned_by_refusal(refusal):
                 record_unsupported(cast(SessionState, ctx.session.state), operation)
@@ -674,6 +692,7 @@ class PlannerSeam:
                     prior_plan=_as_authored(seeded),
                     refusal=refusal,
                     amendment=amendment,
+                    pick=pick,
                     canvas_digest=canvas_digest,
                     conversation_digest=conversation_digest,
                     ledger=ledger,
@@ -685,6 +704,13 @@ class PlannerSeam:
                     ctx=ctx, message=message, on_progress=on_progress
                 )
                 if refused is not None:
+                    if pick is not None:
+                        # The card shows why under the decision the user
+                        # switched, as for a switch revised in code.
+                        state = cast(SessionState, ctx.session.state)
+                        return self._revision_refused(
+                            refused, words=_plan_words(state, load_plan(state) or seeded)
+                        )
                     return self._refused(refused)
                 assert submitted is not None and plan is not None, (
                     "_propose answers a refusal unless a proposal declared the plan on record "
@@ -772,10 +798,11 @@ class PlannerSeam:
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
         # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
-        # `ALIGNED_PINS_STATE_KEY` and `SEARCHED_PINS_STATE_KEY` too.
-        # The declines an ask-the-user resume still owes or may make, the
-        # failures it may repeat, the amendment that opened it and the pins
-        # compiled for its proposals are this entry's own.
+        # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY` and
+        # `SEARCHED_PINS_STATE_KEY` too. The declines an ask-the-user resume
+        # still owes or may make, the failures it may repeat, the amendment
+        # or card pick that opened it and the pins compiled for its proposals
+        # are this entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
@@ -783,6 +810,7 @@ class PlannerSeam:
             REDUCTION_REFUSED_ASKS_STATE_KEY,
             COMPILE_FAILURES_STATE_KEY,
             AMENDMENT_ENTRY_STATE_KEY,
+            DECISION_PICK_STATE_KEY,
             ALIGNED_PINS_STATE_KEY,
             SEARCHED_PINS_STATE_KEY,
         ):
@@ -1355,6 +1383,7 @@ class PlannerSeam:
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
         ledger: RenderedReadings = _NO_READINGS,
+        pick: DecisionPick | None = None,
         asks: Sequence[str] = (),
         ask_breakdowns: Sequence[AskBreakdown] = (),
         asks_across_years: Sequence[int] = (),
@@ -1366,7 +1395,9 @@ class PlannerSeam:
         conversation digests, the plan being changed, and the question.
         `fresh=False` -- a later `__call__` re-entering over the
         `amend`/`replan` edge -- renders only the new thing: the
-        `amendment`/`refusal` ask. `prior_plan` is never rendered when
+        `amendment`/`refusal` ask, and the option `pick` the user picked on
+        the plan card, on a line of its own, apart from any amendment.
+        `prior_plan` is never rendered when
         `fresh` is `False`, even though it is still accepted here and still
         seeded into `propose_plan`'s own drafting state unconditionally
         (`__call__`'s own `save_plan` call, which does not read `fresh`).
@@ -1417,6 +1448,13 @@ class PlannerSeam:
                 f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
                 f"Refusal: {cut_user_text(json.dumps(stop), MAX_QUESTION_CHARS)}\n"
                 f"Call {PROPOSE_PLAN} again with a plan that avoids it.{avoid}\n"
+            )
+        if pick is not None:
+            ask += (
+                f"\nOn the plan card the user picked {pick.chosen!r} for decision "
+                f"{pick.slot!r}. Call {PROPOSE_PLAN} again with that decision's `chosen` "
+                f"set to {pick.chosen!r} and the evidence requirements citing it changed to "
+                "state what that option asks for, which has it translated and compiled again.\n"
             )
         if not fresh:
             return ask
