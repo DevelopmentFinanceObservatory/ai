@@ -615,6 +615,7 @@ def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
         ("official development assistance gross disbursements", "official development assistance"),
         ("health grant equivalents (OECD headline)", "health"),
         ("health grant equivalents", "health"),
+        ("health ODA (grant equivalents)", "health ODA"),
     ],
     ids=[
         "basis-words-dropped",
@@ -625,6 +626,7 @@ def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
         "leading-concept-kept",
         "bracketed-label-dropped-whole",
         "bracketed-label-without-its-note-dropped",
+        "brackets-emptied-by-the-removal-dropped",
     ],
 )
 def test_a_measure_reads_without_its_basis_words_only_where_the_rest_names_it(
