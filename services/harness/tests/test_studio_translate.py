@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -82,7 +81,7 @@ from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
-from .test_plan_display import _recorded_plan
+from .test_plan_display import _recorded_payload, _recorded_plan
 from .test_planner_seam import ScriptedPlannerLlm, _seam
 from .test_turn_records import (
     _EXAMPLE_LINE,
@@ -552,7 +551,7 @@ def test_two_choices_on_one_axis_each_name_the_input_they_govern() -> None:
     card = _card_of(plan)
 
     assert sorted(row.question for row in card.decisions if row.choice_id is not None) == [
-        "Basis: health incl. population and reproductive health",
+        "Basis: health",
         "Basis: official development assistance",
         "Sector",
     ]
@@ -1971,8 +1970,7 @@ def test_a_recorded_plan_after_a_switch_reaches_the_card_in_the_users_words() ->
     ask and summed up in one sentence, its step labels name no basis, one
     step gives the answer, each scope choice goes by its short name, a
     default gives no reason, and the planner's slug reads as words."""
-    recorded = Path(__file__).parent / "fixtures" / "plan_card_recorded.json"
-    payload = json.loads(recorded.read_text())["long_switched_to_net"]
+    payload = _recorded_payload("long_switched_to_net")
 
     frame = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})[-1]
 
@@ -1980,16 +1978,12 @@ def test_a_recorded_plan_after_a_switch_reaches_the_card_in_the_users_words() ->
     assert frame.title == "Health share of US ODA in 2023"
     assert frame.summary is not None
     assert frame.summary.startswith("Net disbursements, current USD, in 2023")
-    health = "health incl. population and reproductive health"
     assert [(step.label, step.gives_answer) for step in frame.steps] == [
-        (f"Fetch {health} for United States", False),
-        (f"Total {health}", False),
+        ("Fetch health for United States", False),
+        ("Total health", False),
         ("Fetch official development assistance for United States", False),
         ("Total official development assistance", False),
-        (
-            "Health incl. population and reproductive health as a share of official development assistance",
-            True,
-        ),
+        ("Health as a share of official development assistance", True),
     ]
     assert [(row.question, row.chosen, row.reason) for row in frame.decisions or ()] == [
         (

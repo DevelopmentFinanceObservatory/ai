@@ -55,6 +55,7 @@ from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
 from harness.scope_choices import (
+    PROVIDER_STREAMS,
     REASON_COPY,
     SERVED_OTHERWISE,
     EntitiesBinding,
@@ -1375,22 +1376,18 @@ def _unworded_name(block: Mapping[str, Any] | None) -> str:
 
 
 def _served_name(block: Mapping[str, Any] | None) -> str | None:
-    """Search's name for what `block` counts, from `resolved.shape.label`: the
-    `measure` the search digest shows the model (`data_mcp.digest`).
-
-    A label that is the block's `measure_label` followed by the concept in
-    brackets ("gross disbursements (official development assistance)") gives
-    the concept alone, since the basis line states the measure as a clause.
-    `None` when the block states no label.
+    """Search's name for what `block` counts: `resolved.concept_label`, which
+    states no basis, since the basis line states the measure as a clause, else
+    `resolved.shape.label`, the `measure` the search digest shows the model
+    (`data_mcp.digest`), as Search composed it. `None` when the block states
+    neither.
     """
     resolved = (block or {}).get("resolved") or {}
+    concept = resolved.get("concept_label")
+    if isinstance(concept, str) and concept:
+        return concept
     label = (resolved.get("shape") or {}).get("label")
-    if not isinstance(label, str) or not label:
-        return None
-    measure = resolved.get("measure_label")
-    if isinstance(measure, str) and label.startswith(f"{measure} (") and label.endswith(")"):
-        return label[len(measure) + 2 : -1]
-    return label
+    return label if isinstance(label, str) and label else None
 
 
 def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
@@ -1479,12 +1476,13 @@ def _serves(option: Option, served: ServedScope, *, choice: ScopeChoice) -> bool
     netting are its own. A provider option counts whose spending is counted,
     by its scope binding or, binding a published total's slot, by its id
     (`Option.provider_scope`):
-    an inclusive one holds exactly when imputed multilateral aid is a served
-    component, and a bilateral or a contributions one (a published total
-    counting core contributions to multilaterals) only when it is not. The
-    record does not tell those two apart, so with no imputed component
-    either holds only when `choice` offers no option of the other. The
-    record holds no what/how slot, so any other slot option cannot be told.
+    one whose scope counts imputed multilateral aid (`PROVIDER_STREAMS`)
+    holds exactly when that is a served component, and any other (bilateral
+    flows, core contributions to multilaterals, or both, as published totals
+    count them) only when it is not. The record does not tell those apart,
+    so with no imputed component such an option holds only when `choice`
+    offers no other. The record holds no what/how slot, so any other slot
+    option cannot be told.
     """
     binding = option.binding
     if isinstance(binding, EntitiesBinding):
@@ -1509,10 +1507,19 @@ def _serves_provider(
     """`_serves` for a provider option of `choice` counting `scope`
     (`Option.provider_scope`), whether it binds the scope or a slot."""
     imputed = any(component.role == "imputed" for component in served.components)
-    if scope == "inclusive" or imputed:
-        return (scope == "inclusive") == imputed
-    offered = {option.provider_scope for option in choice.options}
-    return None if {"bilateral", "contributions"} <= offered else True
+    if _counts_imputed(scope) or imputed:
+        return _counts_imputed(scope) == imputed
+    untold = {
+        offered
+        for option in choice.options
+        if (offered := option.provider_scope) is not None and not _counts_imputed(offered)
+    }
+    return None if len(untold) > 1 else True
+
+
+def _counts_imputed(scope: ProviderScope) -> bool:
+    """Whether `scope` counts an imputed share of multilateral spending (`PROVIDER_STREAMS`)."""
+    return "imputed_multilateral" in PROVIDER_STREAMS[scope]
 
 
 def named_spec_ids(reading: SearchReading) -> list[str]:

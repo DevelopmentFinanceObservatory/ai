@@ -370,7 +370,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, the counts of its members and how many it serves, the label,
-    size and digest of the binding its `shape` states, entities and the named
+    size and digest of the binding its `shape` states, the concept it counts
+    and the tables it is published in, entities and the named
     sets it binds, the measure it elected and the others it offers, the entity
     axes it leaves open, unit (or that it varies per series), provenance and
     its account, the publisher codes it is exactly (`exact_codes`), the
@@ -405,6 +406,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             confidence=_text(resolved.get("confidence")),
             has_data=_flag(coverage.get("has_data")),
             measure_label=_text(shape.get("label")),
+            concept_label=_text(resolved.get("concept_label")),
+            published_tables=_text(resolved.get("published_tables")),
             elected_measure=_elected_measure(resolved),
             stat_var_member_count=_count(stat_vars.get("member_count")),
             stat_var_member_count_exact=_flag(stat_vars.get("member_count_exact")),
@@ -883,7 +886,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     `whole_of` is the classes of party a whole-population total holds, or a
     union of such totals, absent for any other set. `side_classes` is the
     classes of party, totals aside, the dataset publishes on such a set's side,
-    absent for any other set and from a Search that predates it. A class outside
+    absent for any other set and from a Search that predates it. `members` are
+    the parties a bound total holds where Search lists them. A class outside
     `common.place_type.PartyClass` fails the block.
     """
     found = []
@@ -898,6 +902,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     total=_text(group.get("total")),
                     whole_of=_party_classes(group.get("whole_of")),
                     side_classes=_party_classes(group.get("side_classes")),
+                    members=tuple(_strings(group.get("members"))),
                 )
             )
     return tuple(found)

@@ -255,6 +255,39 @@ def test_a_shape_without_a_digest_reads_as_none(shape: dict[str, Any] | None) ->
     assert source.shape_member_count == (shape or {}).get("member_count")
 
 
+@pytest.mark.parametrize(
+    ("labels", "read"),
+    [
+        (
+            {
+                "concept_label": "health",
+                "published_tables": "OECD Creditor Reporting System (CRS) and ONE Imputed "
+                "Multilateral Sectors",
+            },
+            (
+                "health",
+                "OECD Creditor Reporting System (CRS) and ONE Imputed Multilateral Sectors",
+            ),
+        ),
+        ({"concept_label": None, "published_tables": None}, (None, None)),
+        ({}, (None, None)),
+    ],
+    ids=["stated", "null", "before-the-fields"],
+)
+def test_the_concept_and_tables_search_states_are_read_as_stated(
+    labels: dict[str, Any], read: tuple[str | None, str | None]
+) -> None:
+    source = source_from_spec_block(_spec(**labels))
+
+    assert (source.concept_label, source.published_tables) == read
+    # A source stating neither keeps the serialised form of one saved before them.
+    dumped = source.model_dump()
+    assert ("concept_label" in dumped, "published_tables" in dumped) == (
+        read[0] is not None,
+        read[1] is not None,
+    )
+
+
 def test_a_source_without_a_provenance_facet_has_no_provenance() -> None:
     block = _spec()
     del block["resolved"]["facets"]["provenance"]

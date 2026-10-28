@@ -800,16 +800,29 @@ class DecisionDraft(_Choice):
     )
 
 
+# What a declared whole leaves open: the part's sector, or the party it names on one
+# side of the flow (`WholeOf.axis`).
+WholeAxis = Literal["sector", "donor", "recipient"]
+
+
 class WholeOf(StrictModel):
     """The part a dataset requirement is the whole of: that part's own dataset with one scope axis left open.
 
-    `propose_plan` compiles the whole from the part's pin, with the slot the
-    part's choice on `axis` binds unbound and every other choice held, and
-    pins the requirement to it (`submission.service._declared_wholes`).
+    `propose_plan` compiles the whole from the part's pin with `axis` left
+    open and every other choice held, and pins the requirement to it
+    (`submission.service._declared_wholes`). The sector is opened by
+    unbinding the slot the part's sector choice binds; a donor or recipient
+    by dropping the role the part binds there, its region entry and its
+    named set, so Search serves the total that holds the part.
     """
 
     part: Identifier = Field(description="The dataset requirement this one is the whole of.")
-    axis: Literal["sector"] = Field(description="The scope the whole leaves open.")
+    axis: WholeAxis = Field(
+        description=(
+            "What the whole leaves open: 'sector' for every sector, 'donor' for every donor, "
+            "'recipient' for every recipient."
+        )
+    )
 
 
 # The compiler writes a pinned requirement's retrieval, and which column a
@@ -942,8 +955,9 @@ class DatasetRequirement(TaggedModel):
         exclude_if=lambda whole_of: whole_of is None,
         description=(
             "Set on the total a share_of or quotient_of divides its part by, the part over "
-            "every sector, as all US aid is for US health aid: counted from the part's own "
-            "dataset on the same providers, with no search. Read only as that denominator."
+            "every sector, donor or recipient: all US aid for US health aid, all aid to Kenya "
+            "for US aid to Kenya. Counted from the part's own dataset, with no search. Read "
+            "only as that denominator."
         ),
     )
 
@@ -2297,10 +2311,13 @@ def whole_of_fault(
     it can or `whole` states none.
 
     The whole is compiled from the part's pin with only the part's scope
-    widened, so the part is another dataset requirement, itself no whole,
-    and the whole counts the part's parties. It follows its part wherever
-    the part is counted, so it is read only as the denominator of a share or
-    quotient of its part (`_whole_read_fault`).
+    widened, so the part is another dataset requirement, itself no whole.
+    A whole over every sector counts the part's parties. A whole over every
+    donor or recipient holds the part only where the part names a party on
+    that side: it states the part's other entities, and `across` the part's
+    words with one word for that side added (`_entity_whole_fault`). It
+    follows its part wherever the part is counted, so it is read only as
+    the denominator of a share or quotient of its part (`_whole_read_fault`).
     """
     if whole.whole_of is None:
         return None
@@ -2316,12 +2333,47 @@ def whole_of_fault(
             f"{whole.id!r} states whole_of part {part_id!r}, which is a whole itself; name the "
             "part both are counted from"
         )
-    if {*whole.entities, *whole.across} != {*part.entities, *part.across}:
+    if whole.whole_of.axis != "sector":
+        if fault := _entity_whole_fault(whole, part, whole.whole_of.axis):
+            return fault
+    elif {*whole.entities, *whole.across} != {*part.entities, *part.across}:
         return (
             f"{whole.id!r} is the whole of {part_id!r}, counted from its dataset for the same "
             "parties, so it states the same entities and `across`"
         )
     return _whole_read_fault(whole, part_id, requirements_by_id)
+
+
+def _entity_whole_fault(
+    whole: DatasetRequirement, part: DatasetRequirement, axis: str
+) -> str | None:
+    """Why `whole`, the whole of `part` over every `axis` (a donor or a recipient),
+    does not hold `part`, `None` when it does.
+
+    The part names a party on the side of the flow `axis` is on. The whole names
+    the part's other entities and none on that side, and states the part's
+    `across` words with one word for that side added, so it is the total over
+    every `axis` for the part's other parties.
+    """
+    side = role_party(axis)
+    named = [e for e in part.entities if e.role is not None and role_party(e.role) == side]
+    if not named:
+        return (
+            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and {part.id!r} names "
+            f"no {axis} to leave open; state the whole over another axis, or a total of its own "
+            "without `whole_of`"
+        )
+    others = {*part.entities} - {*named}
+    spans = any(across_party(word) == side for word in whole.across)
+    kept = {word for word in whole.across if across_party(word) != side}
+    if {*whole.entities} != others or not spans or kept != {*part.across}:
+        return (
+            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, so it states "
+            f"{part.id!r}'s entities without its {axis}s "
+            f"({', '.join(sorted(e.name for e in named))}), and `across` "
+            f"{part.id!r}'s words with {axis!r} added"
+        )
+    return None
 
 
 def _dataset_reach(

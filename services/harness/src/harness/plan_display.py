@@ -20,8 +20,9 @@ short label naming its work and the steps it reads, keeps the detail in its
 description, and marks the one step whose result answers (`answer_step`);
 `card_title` titles the card by that step's ask; `card_summary` says in one
 sentence what the answer counts, for whom, when and from which source;
-`card_decision_text` and `CHOICE_NAMES` give a decision's words; and
-`choice_id` gives a scope choice's row the id every switch keeps.
+`card_choice_text`, `card_decision_text` and `CHOICE_NAMES` give a
+decision's words; and `choice_id` gives a scope choice's row the id every
+switch keeps.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -51,7 +52,7 @@ import json
 import re
 import typing
 from collections import Counter
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 
 from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
@@ -105,6 +106,7 @@ from planner.records import (
     EvidenceIssue,
     GroupBy,
     GrowthChange,
+    Period,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -331,33 +333,21 @@ def _with_result(description: str, result: str | None) -> str:
     return description if result is None else f"{description} Result: {result}."
 
 
-def plan_words(plan: Plan, *, names: Mapping[str, str] | None = None) -> PlanWords:
+def plan_words(plan: Plan, *, shown_as: Plan | None = None) -> PlanWords:
     """How a sentence about `plan` names its requirements
     (`harness.sentences.refusal_sentence`), and the ids each reads (`inputs_of`).
 
-    A retrieval reads by `names`, the name the "Counted as" line gives what
-    it counts (`harness.turn_records.part_name`), else by its concept
-    (`_concept`). Retrievals named alike are told apart by the one facet that
-    differs (`_told_apart`), and keep the shared name when none does. Any
-    other requirement reads by the retrievals it reads (`_concept_of`):
-    "health as a share of official development assistance".
+    A retrieval reads by the name the card gives it (`_concepts`). Where
+    `shown_as`, the plan the card shows, is given, as for a revision that
+    failed to compile, a retrieval it holds with the same naming facets
+    (`_naming_facets`) reads by its name there (`_carried_names`), and any
+    other retrieval is named around those names. Any other requirement reads
+    by the retrievals it reads (`_concept_of`): "health as a share of
+    official development assistance".
     """
     shown = shown_plan(plan)
-    datasets = [r for r in shown.evidence_requirements if isinstance(r, DatasetRequirement)]
-    concepts = {
-        dataset.id: (names or {}).get(dataset.id) or _concept(dataset, shown)
-        for dataset in datasets
-    }
-    alike = _alike(concepts)
-    concepts |= {
-        dataset.id: _told_apart(
-            dataset,
-            [other for other in datasets if alike.get(other.id) == alike[dataset.id]],
-            concepts[dataset.id],
-        )
-        for dataset in datasets
-        if dataset.id in alike
-    }
+    carried = _carried_names(shown, shown_plan(shown_as)) if shown_as is not None else {}
+    concepts = _concepts(shown, carried=carried)
     return PlanWords(
         names={
             requirement.id: _concept_of(requirement, shown, concepts)
@@ -367,29 +357,6 @@ def plan_words(plan: Plan, *, names: Mapping[str, str] | None = None) -> PlanWor
             requirement.id: inputs_of(requirement) for requirement in shown.evidence_requirements
         },
     )
-
-
-# The word a retrieval's name takes before an entity only it names, by the
-# entity's role.
-_ROLE_PREPOSITIONS = {"recipient": "to", "donor": "from"}
-
-
-def _told_apart(
-    dataset: DatasetRequirement, namesakes: Sequence[DatasetRequirement], name: str
-) -> str:
-    """`name`, which `namesakes` (`dataset` among them) share, with the one
-    facet that sets `dataset` apart: the entities only it names ("health aid
-    to Ghana"), else its period ("health aid in 2023"), and `name` alone when
-    neither differs."""
-    shared = set.intersection(*({entity.name for entity in other.entities} for other in namesakes))
-    own = [entity for entity in dataset.entities if entity.name not in shared]
-    if own:
-        preposition = _ROLE_PREPOSITIONS.get(own[0].role or "", "for")
-        return f"{name} {preposition} {_joined([entity.name for entity in own])}"
-    if len({other.period for other in namesakes}) > 1 and dataset.period is not None:
-        start, end = dataset.period.start, dataset.period.end
-        return f"{name} in {start}" if start == end else f"{name} in {start}-{end}"
-    return name
 
 
 def answer_step(plan: Plan) -> str | None:
@@ -556,8 +523,10 @@ def _counted(requirement: DatasetRequirement, plan: Plan) -> _Counted:
 
     The basis is the one its basis decision chose, else its source's
     `measure_label`, else the planner's `measure`; the sector the one its
-    sector decision chose. The parties are those its source reads
-    (`_who`). The source is named by its provenance label.
+    sector decision governs (`_sector_concept`). The parties are those its
+    source reads (`_who`). The source is named by the tables Search says its
+    figures are published in (`SelectedSource.published_tables`), else by its
+    provenance label.
     """
     governing = _governing(requirement, plan)
     source = _selected_source(requirement.id, plan)
@@ -573,14 +542,25 @@ def _counted(requirement: DatasetRequirement, plan: Plan) -> _Counted:
     years = f"in {start}" if start == end else f"from {start} to {end}"
     if requirement.period_end_open:
         years += _FOLLOWING
-    provenance = source.provenance_label if source is not None else None
+    provenance = (source.published_tables or source.provenance_label) if source else None
     return _Counted(
         basis=measure,
-        sector=_without_codes(sector) if sector is not None else None,
+        sector=_sector_concept(sector, source),
         who=_who(requirement, plan),
         years=years,
         source=f"from the {provenance}" if provenance else None,
     )
+
+
+def _sector_concept(sector: Decision | None, source: SelectedSource | None) -> str | None:
+    """The sector a retrieval its `sector` decision governs counts, as `card_summary`
+    names it: Search's `concept_label` for its `source`, else the option the
+    decision holds, as Search labelled it; `None` where no sector decision governs."""
+    if sector is None:
+        return None
+    if source is not None and source.concept_label is not None:
+        return source.concept_label
+    return sector.chosen
 
 
 def _who(requirement: DatasetRequirement, plan: Plan) -> str:
@@ -649,118 +629,88 @@ CHOICE_NAMES: dict[str, str] = {
 _SLUG = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 
 
-def card_decision_text(text: str, plan: Plan) -> str:
-    """A decision's text as the card shows it.
+def card_choice_text(text: str, plan: Plan) -> str:
+    """An option a decision chose or offers, as the card shows it.
 
-    Each spec_id is named (`with_source_names`), a scope option's id the
-    planner wrote before the option's label ("sector:120+130 health") is
-    dropped, and a slug the planner wrote for an option ("crs_total") reads
-    as words ("crs total").
+    As `card_decision_text`, except that a text the planner opened with a
+    scope option's id ("sector:120+130 health") names only that option, so
+    the whole text reads as the option's label, the words Search gives it.
     """
     named = with_source_names(text, plan).strip()
-    option_ids = {
-        option.option_id
-        for decision in plan.decisions
-        if decision.scope is not None
-        for option in decision.scope.options
-    }
-    for option_id in option_ids:
-        if named.startswith(f"{option_id} "):
-            named = named.removeprefix(option_id).strip()
-            break
-    if _SLUG.fullmatch(named):
-        return named.replace("_", " ")
-    return named
+    if (labelled := _option_labelled(named, plan)) is not None:
+        return labelled[0]
+    return _unslugged(named)
 
 
-def _without_codes(decision: Decision) -> str:
-    """A sector decision's chosen label without the codes its option names
-    (`sector_words`)."""
-    return sector_words(decision.chosen, decision.active_option_id or "")
+def card_decision_text(text: str, plan: Plan) -> str:
+    """A decision's question, reason or caveat as the card shows it.
+
+    Each spec_id is named (`with_source_names`). A text the planner opened
+    with a scope option's id reads with that id as the option's label and
+    keeps the rest: "provider:inclusive because the user asked for it" reads
+    "<label> because the user asked for it". A slug the planner wrote for an
+    option ("crs_total") reads as words ("crs total").
+    """
+    named = with_source_names(text, plan).strip()
+    if (labelled := _option_labelled(named, plan)) is not None:
+        label, rest = labelled
+        return f"{label}{rest}"
+    return _unslugged(named)
 
 
-def sector_words(label: str, option_id: str) -> str:
-    """A sector option's `label` without the codes its id names, which the
-    card's Sector choice states: "health incl. population and reproductive
-    health (CRS 120 + 130)" reads "health incl. population and reproductive
-    health", "health, CRS 120 alone" reads "health". The codes are read off
-    `option_id` ("sector:120+130")."""
-    codes = option_id.partition(":")[2].split("+")
-    if not all(code.isdigit() for code in codes):
-        return label
-    stated = r"\s*\+\s*".join(re.escape(code) for code in codes)
-    pattern = rf"\s*(?:\(CRS\s+{stated}\)|,\s*CRS\s+{stated}(?:\s+alone)?)$"
-    return re.sub(pattern, "", label)
+def _option_labelled(text: str, plan: Plan) -> tuple[str, str] | None:
+    """The label of the scope option whose id `text` opens with, and the text
+    after that id; `None` when `text` opens with no option's id."""
+    for decision in plan.decisions:
+        if decision.scope is None:
+            continue
+        for option, label in zip(decision.scope.options, decision.options, strict=True):
+            if text == option.option_id or text.startswith(f"{option.option_id} "):
+                return label, text.removeprefix(option.option_id)
+    return None
 
 
-# A connective or bracket at either end of what `basis_free` leaves, which
-# makes it a fragment of the measure ("for official development assistance").
-_FRAGMENT_EDGE = re.compile(
-    r"^(?:(?:for|of|in|from|to|on|by|with|and|or)\b|[(\[)\],;:])"
-    r"|(?:\b(?:for|of|in|from|to|on|by|with|and|or)|[(\[)\],;:])$",
-    re.IGNORECASE,
-)
-
-
-def basis_free(measure: str, options: Iterable[str]) -> str:
-    """`measure` without the words of any of the basis `options`, so a planner's
-    "health gross disbursements" reads "health" whichever basis holds. An
-    option's words are its label up to its first comma ("gross
-    disbursements, current USD"), with and without a bracketed note
-    ("grant equivalents (OECD headline)"), each matched between non-word
-    characters so a label ending in a bracket is removed whole, and brackets the
-    removal empties go with it ("health ODA (grant equivalents)" reads
-    "health ODA"). A measure made
-    of basis words alone ("gross disbursements") keeps them all, since nothing
-    else names it, and so does one whose rest starts or ends with a connective or bracket
-    ("gross disbursements for official development assistance"), since the
-    rest is a fragment of it."""
-    phrases: set[str] = set()
-    for option in options:
-        words = option.split(",")[0].strip()
-        phrases.update({words, re.sub(r"\s*\(.*?\)", "", words).strip()})
-    free = measure
-    for phrase in sorted(filter(None, phrases), key=len, reverse=True):
-        free = re.sub(rf"(?<!\w){re.escape(phrase)}(?!\w)", "", free, flags=re.IGNORECASE)
-    free = " ".join(re.sub(r"\(\s*\)|\[\s*\]", "", free).split())
-    if not free or _FRAGMENT_EDGE.search(free):
-        return measure
-    return free
+def _unslugged(text: str) -> str:
+    """`text` as words when it is a slug the planner wrote ("crs_total")."""
+    return text.replace("_", " ") if _SLUG.fullmatch(text) else text
 
 
 def concept_name(
     measure: str,
     *,
+    concept_label: str | None,
     sector: str | None,
-    basis_options: Iterable[str] | None,
     measure_label: str | None,
 ) -> str:
     """What a retrieval fetches, in the reader's words: the one naming rule the
     plan card (`_concept`) and the caveats `propose_plan` writes
     (`submission.service._input_concept`) share.
 
-    The `sector` its sector choice holds, without its codes, where one does.
-    Where a basis choice offers `basis_options`, the planner's `measure`
-    without their words (`basis_free`), since Search's names for the measure
-    open with the basis and would contradict another basis the user picks.
-    Otherwise Search's `measure_label`, else the planner's `measure`.
+    Search's `concept_label` for the source ("health", "official development
+    assistance"), which states no basis, codes, provider scope or dataset.
+    A source stating none, as from a Search that predates the field or one
+    recorded before it, is named by the labels Search composed, as Search
+    wrote them: the `sector` option its sector choice holds, else its
+    `measure_label`. Otherwise the planner's `measure`.
     """
-    if sector is not None:
-        return sector
-    if basis_options is not None:
-        return basis_free(measure, basis_options)
-    return measure_label or measure
+    return concept_label or sector or measure_label or measure
 
 
-# What a declared whole fetches, by the axis it opens (`WholeOf.axis`).
-_WHOLE_NAMES = {"sector": "all sectors"}
+# What a declared whole fetches, by the axis it opens (`WholeOf.axis`), with the
+# preposition that sets it after a measure.
+_WHOLE_NAMES = {
+    "sector": ("in", "all sectors"),
+    "donor": ("from", "all donors"),
+    "recipient": ("to", "all recipients"),
+}
 
 
 def whole_name(axis: str, *, measure: str | None = None) -> str:
-    """What a declared whole leaving `axis` open fetches, as the card names it
-    ("all sectors"), on `measure` when given ("gross disbursements in all sectors")."""
-    name = _WHOLE_NAMES[axis]
-    return f"{measure} in {name}" if measure else name
+    """What a declared whole leaving `axis` open fetches ("all sectors", "all
+    donors"), on `measure` when given ("gross disbursements in all sectors",
+    "gross disbursements from all donors")."""
+    preposition, name = _WHOLE_NAMES[axis]
+    return f"{measure} {preposition} {name}" if measure else name
 
 
 def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
@@ -768,39 +718,87 @@ def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     (`concept_name`), read off the scope decisions it cites and its source.
 
     A declared whole (`DatasetRequirement.whole_of`) is its part with the
-    part's axis opened, so it is named by that axis ("all sectors") and
-    ignores the planner's `measure`."""
+    part's axis opened, and ignores the planner's `measure`. Over every
+    sector it is named by that axis ("all sectors"). Over every donor or
+    recipient it counts the part's concept, so it is named as its part is,
+    and the parties it reads (`_who`, `_parties`) name the population its
+    source holds there."""
     if requirement.whole_of is not None:
-        return whole_name(requirement.whole_of.axis)
-    governing = _governing(requirement, plan)
-    basis = governing.get("measure_basis")
+        part = plan.requirement(requirement.whole_of.part)
+        if requirement.whole_of.axis == "sector" or not isinstance(part, DatasetRequirement):
+            return whole_name(requirement.whole_of.axis)
+        return _concept(part, plan)
+    sector = _governing(requirement, plan).get("sector")
     source = _selected_source(requirement.id, plan)
     return concept_name(
         requirement.measure,
-        sector=_without_codes(governing["sector"]) if "sector" in governing else None,
-        basis_options=basis.options if basis is not None else None,
+        concept_label=source.concept_label if source is not None else None,
+        sector=sector.chosen if sector is not None else None,
         measure_label=source.measure_label if source is not None else None,
     )
 
 
-def _concepts(plan: Plan) -> dict[str, str]:
+def _concepts(plan: Plan, *, carried: Mapping[str, str] | None = None) -> dict[str, str]:
     """What each retrieval of `plan` is named by in the card's labels, by requirement id.
 
-    Its `_concept`. Retrievals named alike add the parties they read
-    (`_parties`), and any still alike their place among them, "(1)", "(2)".
+    Its `_concept`. Retrievals named alike add the parties they read, by the
+    side of the flow each is on (`_who`): "health from United States to
+    Kenya". Any still alike whose periods differ add their period, "health to
+    Kenya in 2023", and any still alike a number no other name holds, "(1)",
+    "(2)". A retrieval in `carried` keeps the name given there, and the
+    others are told apart from it as from each other.
     """
+    carried = carried or {}
     datasets = [r for r in _card_order(plan) if isinstance(r, DatasetRequirement)]
-    names = {dataset.id: _concept(dataset, plan) for dataset in datasets}
+    names = {dataset.id: carried.get(dataset.id) or _concept(dataset, plan) for dataset in datasets}
+    fresh = [dataset for dataset in datasets if dataset.id not in carried]
     alike = _alike(names)
-    for dataset in datasets:
-        if dataset.id in alike:
-            names[dataset.id] = f"{names[dataset.id]} for {_parties(dataset, plan)}"
-    alike = _alike(names)
-    for name in set(alike.values()):
-        namesakes = [rid for rid in names if names[rid] == name]
-        for number, rid in enumerate(namesakes, start=1):
-            names[rid] = f"{name} ({number})"
+    for dataset in fresh:
+        if dataset.id in alike and (who := _who(dataset, plan)):
+            names[dataset.id] = f"{names[dataset.id]} {who}"
+    for name in set(_alike(names).values()):
+        namesakes = [dataset for dataset in datasets if names[dataset.id] == name]
+        if len({dataset.period for dataset in namesakes}) > 1:
+            for dataset in namesakes:
+                if dataset.id not in carried:
+                    names[dataset.id] = f"{name} {_in_period(dataset)}"
+    for name in set(_alike(names).values()):
+        taken = set(names.values())
+        number = 0
+        for dataset in fresh:
+            if names[dataset.id] != name:
+                continue
+            number += 1
+            while f"{name} ({number})" in taken:
+                number += 1
+            names[dataset.id] = f"{name} ({number})"
     return names
+
+
+def _carried_names(revision: Plan, shown: Plan) -> dict[str, str]:
+    """The name the card gives each retrieval of `shown` (`_concepts`) that
+    `revision` holds with the same naming facets (`_naming_facets`), by
+    requirement id."""
+    names = _concepts(shown)
+    earlier = {r.id: r for r in shown.evidence_requirements if isinstance(r, DatasetRequirement)}
+    return {
+        dataset.id: names[dataset.id]
+        for dataset in revision.evidence_requirements
+        if isinstance(dataset, DatasetRequirement)
+        and dataset.id in earlier
+        and _naming_facets(dataset, revision) == _naming_facets(earlier[dataset.id], shown)
+    }
+
+
+def _naming_facets(dataset: DatasetRequirement, plan: Plan) -> tuple[str, str, Period]:
+    """What `_concepts` names `dataset` by: its concept, parties and period."""
+    return _concept(dataset, plan), _who(dataset, plan), dataset.period
+
+
+def _in_period(dataset: DatasetRequirement) -> str:
+    """The years `dataset` reads, as a name's tail: "in 2023", "in 2015-2023"."""
+    start, end = dataset.period.start, dataset.period.end
+    return f"in {start}" if start == end else f"in {start}-{end}"
 
 
 def _alike(names: Mapping[str, str]) -> dict[str, str]:

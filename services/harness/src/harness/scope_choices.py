@@ -47,9 +47,69 @@ from planner.records import OptionStatus, StrictModel
 from pydantic import Field, ValidationInfo, field_validator
 
 # Whose spending a provider option counts: bilateral flows alone, with imputed
-# shares of multilateral spending, or with core contributions to multilaterals
-# as a published donor total such as DAC1's counts them.
-ProviderScope = Literal["bilateral", "inclusive", "contributions"]
+# shares of multilateral spending, with core contributions to multilaterals as a
+# published donor total such as DAC1's counts them, or the core contributions
+# alone (`PROVIDER_STREAMS`).
+ProviderScope = Literal["bilateral", "inclusive", "contributions", "multilateral"]
+
+# A stream of a donor's aid a provider scope counts: its bilateral flows, its core
+# contributions to multilateral organisations in the year it pays them, or its
+# imputed share of what those organisations spend.
+ProviderStream = Literal["bilateral", "core_contributions", "imputed_multilateral"]
+
+# The streams each provider scope counts, the one statement of how scopes relate.
+# The scopes do not nest by name. Bilateral flows sit in three scopes, and the
+# multilateral scope holds none.
+PROVIDER_STREAMS: Mapping[ProviderScope, frozenset[ProviderStream]] = {
+    "bilateral": frozenset({"bilateral"}),
+    "inclusive": frozenset({"bilateral", "imputed_multilateral"}),
+    "contributions": frozenset({"bilateral", "core_contributions"}),
+    "multilateral": frozenset({"core_contributions"}),
+}
+
+# The money each stream counts. Core contributions and the imputed share count one
+# money, the donor's aid through multilaterals, as it is paid in and as the
+# multilaterals spend it. They differ in timing and amount, so neither stream holds
+# the other, yet two figures counting one each count that money twice.
+ProviderMoney = Literal["bilateral", "multilateral"]
+_STREAM_MONEY: Mapping[ProviderStream, ProviderMoney] = {
+    "bilateral": "bilateral",
+    "core_contributions": "multilateral",
+    "imputed_multilateral": "multilateral",
+}
+
+
+def holds_streams(scope: ProviderScope, other: ProviderScope) -> bool:
+    """Whether a figure counted on `scope` holds every stream one counted on `other`
+    counts (`PROVIDER_STREAMS`), as the inclusive and contributions scopes hold the
+    bilateral one and the contributions scope the multilateral one."""
+    return PROVIDER_STREAMS[other] <= PROVIDER_STREAMS[scope]
+
+
+# The money a reporter's own flows count, the bilateral stream of every scope: a
+# country's bilateral aid, a multilateral organisation's outflows, which spend the
+# core contributions its funders paid it, or either where the reporters are not known.
+BILATERAL_REPORTERS: frozenset[ProviderMoney] = frozenset({"bilateral"})
+MULTILATERAL_REPORTERS: frozenset[ProviderMoney] = frozenset({"multilateral"})
+ANY_REPORTERS: frozenset[ProviderMoney] = frozenset(get_args(ProviderMoney))
+
+
+def scope_money(
+    scope: ProviderScope | None, *, own_flows: frozenset[ProviderMoney] = BILATERAL_REPORTERS
+) -> frozenset[ProviderMoney]:
+    """The money a figure counted on provider scope `scope` counts (`PROVIDER_STREAMS`,
+    `_STREAM_MONEY`), its reporters' own flows, the bilateral stream, counting
+    `own_flows`: a multilateral's outflows count multilateral money. A scope that is
+    `None`, unstated, may count any money."""
+    if scope is None:
+        return ANY_REPORTERS
+    return frozenset(
+        money
+        for stream in PROVIDER_STREAMS[scope]
+        for money in (own_flows if stream == "bilateral" else {_STREAM_MONEY[stream]})
+    )
+
+
 DroppedCode = Literal["carried_choice_not_applied", "stated_choice_not_applied"]
 
 YearSpan = tuple[int, int]

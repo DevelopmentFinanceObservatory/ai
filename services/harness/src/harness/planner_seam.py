@@ -94,7 +94,6 @@ import json
 import logging
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -122,7 +121,6 @@ from planner.plan import (
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
-    DatasetRequirement,
     PinSource,
     Plan,
     PlanStatus,
@@ -144,12 +142,10 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
-    windowed_pins,
 )
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
-from pydantic import ValidationError
 from submission.service import (
     ALIGNED_PINS_STATE_KEY,
     SEARCHED_PINS_STATE_KEY,
@@ -171,7 +167,6 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    conversation_readings,
     store_search,
 )
 from harness.prefix_cache import PrefixCache
@@ -193,7 +188,6 @@ from harness.turn_records import (
     measure_choice_text,
     named_spec_ids,
     newest_per_spec_id,
-    part_name,
     render_readings,
 )
 from harness.usage import log_usage
@@ -842,7 +836,7 @@ class PlannerSeam:
         )
         store_aligned_readings(ctx, state)
         if recorded.get("outcome") != Outcome.OK.value:
-            return self._revision_refused(recorded, words=_plan_words(state, prior))
+            return self._revision_refused(recorded, words=plan_display.plan_words(prior))
         translation = await self._translate(ctx)
         referral = PlannerSeam._referral_dict(translation)
         if referral is not None:
@@ -850,7 +844,7 @@ class PlannerSeam:
                 PlannerSeam._closing_refusal(referral)
                 or _unanswered(referral)
                 or _not_ready(referral),
-                words=_plan_words(state, load_plan(state)),
+                words=_revision_words(load_plan(state), prior),
             )
         answer = declare_ready({**recorded, "translation": translation}, ctx)
         plan = load_plan(state)
@@ -858,7 +852,7 @@ class PlannerSeam:
             blocked = answer.get("submission") or answer.get("translation")
             return self._revision_refused(
                 cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer),
-                words=_plan_words(state, plan or prior),
+                words=_revision_words(plan, prior),
             )
         return {"plan": plan.model_dump(mode="json"), "summary": answer["summary"]}
 
@@ -1213,7 +1207,7 @@ class PlannerSeam:
     def _revision_refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
         """What `revise` answers for a refusal: `_refused`'s, with why alone
         as one sentence for the user (`harness.sentences.refusal_reason`),
-        naming requirements by `words` (`_plan_words`), under `reason`, which
+        naming requirements by `words` (`harness.plan_display.plan_words`), under `reason`, which
         a switch that did not apply shows under its choice."""
         answer = PlannerSeam._refused(refused)
         answer["refused"]["reason"] = refusal_reason(refused, words=words)
@@ -1413,33 +1407,13 @@ class PlannerSeam:
         )
 
 
-def _plan_words(state: SessionState, plan: Plan | None) -> PlanWords:
-    """How a sentence about `plan` names its requirements
-    (`harness.plan_display.plan_words`): a retrieval by the name the "Counted
-    as" line gives the newest reading of its pin (`harness.turn_records.
-    part_name`), a pin copied over its first years by its origin's."""
-    if plan is None:
-        return PlanWords()
-    to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
-    readings: dict[str, SearchReading] = {}
-    for raw in conversation_readings(state):
-        with suppress(ValidationError):
-            reading = SearchReading.model_validate(raw)
-            if reading.spec_id is not None and reading.scope is not None:
-                readings[reading.spec_id] = reading
-    blocks = {
-        **{spec_id: source.spec_block(spec_id) for spec_id, source in pin_sources(state).items()},
-        **(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
-    }
-    names: dict[str, str] = {}
-    for requirement in plan.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
-            continue
-        pin = to_origin.get(requirement.source_spec_id, requirement.source_spec_id)
-        reading = readings.get(pin)
-        if reading is not None:
-            names[requirement.id] = part_name(reading, blocks.get(pin))
-    return plan_display.plan_words(plan, names=names)
+def _revision_words(revision: Plan | None, prior: Plan) -> PlanWords:
+    """How a sentence about `revision`, which did not compile, names its
+    requirements (`harness.plan_display.plan_words`): each `prior`, the plan the
+    card shows, holds by its name there, and each new one by its own."""
+    if revision is None:
+        return plan_display.plan_words(prior)
+    return plan_display.plan_words(revision, shown_as=prior)
 
 
 def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:

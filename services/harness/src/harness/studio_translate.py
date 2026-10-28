@@ -1774,6 +1774,7 @@ class _Translator:
             questions = plan_display.card_questions(plan)
             scoped = {decision.slot: decision for decision in plan.decisions if decision.scope}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
+            option_named = functools.partial(plan_display.card_choice_text, plan=plan)
             revision = payload.get("revision")
             steps = [
                 PlanStep(
@@ -1836,9 +1837,9 @@ class _Translator:
                 PlanDecision(
                     id=decision.get("slot", f"d{index + 1}"),
                     question=questions[decision.get("slot", "")],
-                    chosen=named(decision.get("chosen", "")),
+                    chosen=option_named(decision.get("chosen", "")),
                     alternatives=(
-                        [named(option) for option in decision["options"]]
+                        [option_named(option) for option in decision["options"]]
                         if decision.get("options") is not None
                         else None
                     ),

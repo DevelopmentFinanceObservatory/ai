@@ -480,6 +480,11 @@ def _own_window_differs(summary: GroupSummary, period_label: str | None) -> bool
     return span_label((summary.time_period_min, summary.time_period_max)) != period_label
 
 
+def _rows(count: int) -> str:
+    """How many input rows a line's value sums or ranks over, as "1 row" or "3 rows"."""
+    return f"{count} row" if count == 1 else f"{count} rows"
+
+
 def _group_line(summary: GroupSummary, *, period_label: str | None) -> str:
     """One group's line. The group's own window shows unless it equals the
     call-wide `period_label` the header states."""
@@ -488,7 +493,7 @@ def _group_line(summary: GroupSummary, *, period_label: str | None) -> str:
     value_text = _format_number(summary.value)
     if summary.value_period is not None:
         value_text = f"{value_text} ({summary.value_period})"
-    return f"  {key_text} [{window}n={summary.row_count}]: {value_text}"
+    return f"  {key_text} [{window}{_rows(summary.row_count)}]: {value_text}"
 
 
 def render_aggregate_digest(
@@ -891,7 +896,7 @@ def _rank_line(rank: EntityRank, *, private: frozenset[tuple[str, str]]) -> str:
     tag = " (private)" if any(pair in private for pair in rank.entity_key) else ""
     return (
         f"  #{rank.rank} {key_text}{tag}: {_format_number(rank.value)} "
-        f"[n={rank.row_count}, coverage={rank.coverage_fraction:.0%}]"
+        f"[{_rows(rank.row_count)}, coverage={rank.coverage_fraction:.0%}]"
     )
 
 

@@ -1231,28 +1231,34 @@ def test_the_basis_line_states_a_composite_frame_from_its_served_components(
 
 
 @pytest.mark.parametrize(
-    ("contributions", "clause"),
+    ("published", "clause"),
     [
-        (False, "bilateral aid only"),
-        (True, f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+        (None, "bilateral aid only"),
+        ("contributions", f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+        ("multilateral", f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
     ],
-    ids=["bilateral-the-only-other", "a-contributions-total-offered-too"],
+    ids=[
+        "bilateral-the-only-other",
+        "a-contributions-total-offered-too",
+        "a-multilateral-total-offered-too",
+    ],
 )
 def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else_fits(
-    contributions: bool, clause: str
+    published: str | None, clause: str
 ) -> None:
     """An inclusive choice served with no imputed component: the figures are
     bilateral flows alone or a published total counting core contributions to
-    multilaterals, which the record does not tell apart. With only a
-    bilateral option besides, they read as it; with a contributions option
-    offered too, the choice says the figures differ from it."""
+    multilaterals, with or without bilateral flows, which the record does not
+    tell apart. With only a bilateral option besides, they read as it; with
+    such a total's option offered too, the choice says the figures differ
+    from it."""
     choice = copy.deepcopy(_INCLUSIVE)
-    if contributions:
+    if published is not None:
         choice["options"].append(
             {
-                "option_id": "provider:contributions",
-                "label": "with core contributions to multilaterals",
-                "binding": {"kind": "provider", "scope": "contributions"},
+                "option_id": f"provider:{published}",
+                "label": "core contributions to multilaterals",
+                "binding": {"kind": "provider", "scope": published},
                 "availability": {"status": "available"},
             }
         )
@@ -1269,13 +1275,14 @@ def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else
 
 def _total_block(spec_id: str, netting: str) -> dict[str, Any]:
     """The spec block Search returns for US ODA counted on `netting`, with
-    the label it names the measure by, as dfo-apis writes it."""
+    the labels it names the measure and the concept by, as dfo-apis writes it."""
     label = f"{netting.lower()} disbursements (official development assistance)"
     return {
         "spec_id": spec_id,
         "resolved": {
             "measure_label": f"{netting.lower()} disbursements",
             "shape": {"label": label},
+            "concept_label": "official development assistance",
         },
     }
 
@@ -1318,11 +1325,25 @@ def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_s
     )
 
 
-def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept() -> None:
+@pytest.mark.parametrize(
+    ("concept", "total_name"),
+    [
+        pytest.param(
+            "official development assistance", "official development assistance", id="concept"
+        ),
+        pytest.param(
+            None, "gross disbursements (official development assistance)", id="before-concepts"
+        ),
+    ],
+)
+def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
+    concept: str | None, total_name: str
+) -> None:
     """A share of health aid in all official development assistance. The total
-    was compiled again from its basis choice, so Search's label for its block
-    names it, "gross disbursements (official development assistance)": the
-    concept alone, since its measure is one of its clauses."""
+    was compiled again from its basis choice, so Search's names for its block
+    name it: its `concept_label`, which states no measure, since its measure is
+    one of its clauses; or, from a Search that sends none, its shape label as
+    written, "gross disbursements (official development assistance)"."""
     health = _example_part(sector="sector:120+130")
     scope = health["scope"]
     scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
@@ -1354,6 +1375,7 @@ def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
             "resolved": {
                 "measure_label": "gross disbursements",
                 "shape": {"label": "gross disbursements (official development assistance)"},
+                **({"concept_label": concept} if concept is not None else {}),
             },
         }
     }
@@ -1361,7 +1383,7 @@ def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
     assert basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[]) == (
         'Counted as: "health aid": health incl. population and reproductive health '
         "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
-        "official development assistance: gross disbursements, current USD."
+        f"{total_name}: gross disbursements, current USD."
     )
 
 
