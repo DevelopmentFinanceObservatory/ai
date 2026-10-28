@@ -94,6 +94,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -121,6 +122,7 @@ from planner.plan import (
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
+    DatasetRequirement,
     PinSource,
     Plan,
     PlanStatus,
@@ -142,10 +144,12 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    windowed_pins,
 )
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
+from pydantic import ValidationError
 from submission.service import (
     ALIGNED_PINS_STATE_KEY,
     SEARCHED_PINS_STATE_KEY,
@@ -157,7 +161,7 @@ from submission.service import (
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
-from translator.referral import USER_DECIDES
+from translator.referral import USER_DECIDES, ReferralKind
 from translator.tool import Translate, build_translate, permitted_repair
 
 from harness import plan_display
@@ -167,13 +171,16 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    conversation_readings,
     store_search,
 )
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
     TERMINAL_PROPOSE_CODES,
+    PlanWords,
     SeamCode,
     referral_sentence,
+    refusal_reason,
     refusal_sentence,
 )
 from harness.settings import Settings
@@ -186,6 +193,7 @@ from harness.turn_records import (
     measure_choice_text,
     named_spec_ids,
     newest_per_spec_id,
+    part_name,
     render_readings,
 )
 from harness.usage import log_usage
@@ -803,8 +811,15 @@ class PlannerSeam:
         replaces (`_RevisionSession`).
 
         Returns `{"plan", "summary"}` once the revised plan awaits approval,
-        or `{"refused": ...}` as `__call__` refuses, the revision recording
-        a version or not; the caller restores what it keeps.
+        or `{"refused": ...}` as `__call__` refuses, with `reason` beside
+        (`_revision_refused`), the revision recording
+        a version or not; the caller restores what it keeps. A translation
+        that refers the plan back refuses as an entry ending on that
+        referral does: on its closing refusal (`_closing_refusal`), on the
+        service that did not answer for a transient one, which no later round
+        proposes again (`_unanswered`), or as `SeamCode.PLAN_NOT_READY` with
+        the referral's reason (`_not_ready`), since no model is there to
+        settle it.
         """
         state = cast(SessionState, ctx.state)
         prior = Plan.model_validate(prior_plan)
@@ -827,13 +842,23 @@ class PlannerSeam:
         )
         store_aligned_readings(ctx, state)
         if recorded.get("outcome") != Outcome.OK.value:
-            return self._refused(recorded)
-        answer = declare_ready({**recorded, "translation": await self._translate(ctx)}, ctx)
+            return self._revision_refused(recorded, words=_plan_words(state, prior))
+        translation = await self._translate(ctx)
+        referral = PlannerSeam._referral_dict(translation)
+        if referral is not None:
+            return self._revision_refused(
+                PlannerSeam._closing_refusal(referral)
+                or _unanswered(referral)
+                or _not_ready(referral),
+                words=_plan_words(state, load_plan(state)),
+            )
+        answer = declare_ready({**recorded, "translation": translation}, ctx)
         plan = load_plan(state)
         if "summary" not in answer or plan is None:
             blocked = answer.get("submission") or answer.get("translation")
-            return self._refused(
-                cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer)
+            return self._revision_refused(
+                cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer),
+                words=_plan_words(state, plan or prior),
             )
         return {"plan": plan.model_dump(mode="json"), "summary": answer["summary"]}
 
@@ -1173,8 +1198,9 @@ class PlannerSeam:
     @staticmethod
     def _refused(refused: dict[str, Any]) -> dict[str, Any]:
         """What `__call__` answers for a refusal that ends the entry: its plain
-        sentence (`harness.sentences.refusal_sentence`), whether another plan
-        for the same ask could succeed, and its code."""
+        sentence (`harness.sentences.refusal_sentence`), which the planner and
+        the orchestrator read, whether another plan for the same ask could
+        succeed, and its code."""
         return {
             "refused": {
                 "text": refusal_sentence(refused),
@@ -1182,6 +1208,16 @@ class PlannerSeam:
                 "code": refused.get("code"),
             }
         }
+
+    @staticmethod
+    def _revision_refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
+        """What `revise` answers for a refusal: `_refused`'s, with why alone
+        as one sentence for the user (`harness.sentences.refusal_reason`),
+        naming requirements by `words` (`_plan_words`), under `reason`, which
+        a switch that did not apply shows under its choice."""
+        answer = PlannerSeam._refused(refused)
+        answer["refused"]["reason"] = refusal_reason(refused, words=words)
+        return answer
 
     @staticmethod
     def _is_terminal_refusal(tool_response: dict[str, Any] | None) -> bool:
@@ -1377,6 +1413,35 @@ class PlannerSeam:
         )
 
 
+def _plan_words(state: SessionState, plan: Plan | None) -> PlanWords:
+    """How a sentence about `plan` names its requirements
+    (`harness.plan_display.plan_words`): a retrieval by the name the "Counted
+    as" line gives the newest reading of its pin (`harness.turn_records.
+    part_name`), a pin copied over its first years by its origin's."""
+    if plan is None:
+        return PlanWords()
+    to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
+    readings: dict[str, SearchReading] = {}
+    for raw in conversation_readings(state):
+        with suppress(ValidationError):
+            reading = SearchReading.model_validate(raw)
+            if reading.spec_id is not None and reading.scope is not None:
+                readings[reading.spec_id] = reading
+    blocks = {
+        **{spec_id: source.spec_block(spec_id) for spec_id, source in pin_sources(state).items()},
+        **(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+    }
+    names: dict[str, str] = {}
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+            continue
+        pin = to_origin.get(requirement.source_spec_id, requirement.source_spec_id)
+        reading = readings.get(pin)
+        if reading is not None:
+            names[requirement.id] = part_name(reading, blocks.get(pin))
+    return plan_display.plan_words(plan, names=names)
+
+
 def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
     """What a refusal ending on `referral` carries for its sentence and its reader."""
     return {key: referral.get(key) for key in ("kind", "requirement_id", "reason", "constraint")}
@@ -1387,6 +1452,25 @@ def _not_ready(referral: Mapping[str, Any] | None) -> dict[str, Any]:
     return {
         "code": SeamCode.PLAN_NOT_READY,
         "detail": _referral_detail(referral) if referral is not None else {},
+    }
+
+
+def _unanswered(referral: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The refusal a revision ends on for a transient referral, or `None` for
+    any other: Search not answering as `SeamCode.DISCOVERY_UNAVAILABLE`, and
+    any other service, such as the calculation service, as
+    `ProblemCode.SURFACE_UNAVAILABLE`. Each carries the requirement the
+    referral is about and its reason."""
+    if referral.get("outcome") != Outcome.TRANSIENT.value:
+        return None
+    return {
+        "code": SeamCode.DISCOVERY_UNAVAILABLE
+        if referral.get("kind") == ReferralKind.DISCOVERY_UNAVAILABLE
+        else ProblemCode.SURFACE_UNAVAILABLE,
+        "detail": {
+            "requirement_id": referral.get("requirement_id"),
+            "reason": referral.get("reason"),
+        },
     }
 
 
@@ -1638,7 +1722,10 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     names yet joins this turn's readings through `store_search`, as the
     `switch` node stores a switched one: under the words of the reading it
     was compiled from, keeping that reading's asked, held-open and share
-    roles, with its compiled scope on `SearchReading.scope`. Its block marks
+    roles, with its compiled scope on `SearchReading.scope`. A declared
+    whole (`AlignedPin.whole_axis`) is no reading of its part's words, so
+    it is named as the plan card names it, on its measure
+    (`harness.plan_display.whole_name`). Its block marks
     the axes it was compiled on as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
     so the reading reads it in `SearchReading.planner_axes` and
     `harness.scope_choices.carried_entries` leaves that entry out.
@@ -1670,8 +1757,13 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
             (reading for reading in reversed(readings) if reading.spec_id == pin.origin), None
         )
         digest = copy.deepcopy(pin.digest)
-        if origin is not None:
-            (part,) = digest["part_digests"]
+        (part,) = digest["part_digests"]
+        if pin.whole_axis is not None:
+            measure = ((part.get("spec_block") or {}).get("resolved") or {}).get("measure_label")
+            part["variable"] = plan_display.whole_name(
+                pin.whole_axis, measure=measure if isinstance(measure, str) else None
+            )
+        elif origin is not None:
             part["variable"] = origin.text
         store_search(
             cast(SessionState, ctx.state),

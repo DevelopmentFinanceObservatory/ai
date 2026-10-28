@@ -15,10 +15,26 @@ and the plan compiles again. The node stores each new reading, so later
 searches carry the switch, and offers the revised plan back to `approve`
 with what else moved (`harness.scope_choices.moved_choices`).
 
+Each requirement the switch re-pins drops the source it stated
+(`source`, `source_ref`, `source_exclude`, and `source_code` unless the new
+dataset is exactly that series): the user chose the dataset, so its pin is
+the requirement's identity, and text left behind would have discovery,
+compile and the run's evidence check judge the new dataset against the old
+one's name.
+
+The card names a choice by its row's id (`harness.plan_display.choice_id`),
+which every switch of the conversation keeps.
+
 A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
-the unchanged plan again with a note saying so, and leaves the planner's
-drafting state as it was.
+the unchanged plan again with `switch_failed` naming the option, the
+refusal's code, one sentence saying why (`harness.sentences.
+refusal_reason` for a refused revision) and whether the same switch can
+succeed if asked again (`retryable`), and leaves the plan, the planner's
+drafting state and the turn's readings as they were (`_RESTORED_KEYS`). A
+switch the user stops (`SWITCH_STOP`, which the studio sets on a Stop
+while the switch runs) ends the same way under `SWITCH_CANCELLED`, so the
+card stays answerable.
 
 A chip under an answer applies one option the same way, with no plan
 (`apply_stored_choice`): the `seed` node posts the stored reading's base
@@ -32,9 +48,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 from compiler.sources import block_groups
 from compiler.surface import ToolSurface
@@ -46,25 +63,31 @@ from planner.plan import (
     SessionState,
     authored,
     earlier_block,
+    exact_codes,
     is_scope_choice,
     pin_sources,
     plan_revision,
+    repinned,
     save_pin_sources,
     windowed_pins,
 )
 from planner.plan import Plan as PlannerPlan
+from planner.tool_results import ProblemCode
 from pydantic import ValidationError
 from translator.discovery import DefinitionNotResolvedError, resolve_definition
 
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     conversation_readings,
     readable_plan,
     store_search,
 )
-from harness.plan_display import listed_together
+from harness.plan_display import choice_id as row_choice_id
+from harness.plan_display import chosen_scope_decision, listed_together, pinned_choice_id
 from harness.scope_choices import (
     PartScope,
     ScopeChoice,
@@ -72,17 +95,43 @@ from harness.scope_choices import (
     moved_choices,
     switch_entries,
 )
+from harness.sentences import SeamCode
 from harness.tool_contracts import resolver_digest
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, stored_choice
 
 logger = logging.getLogger(__name__)
 
 # The codes Search refuses a switch it cannot apply with (422).
-_SCOPE_REFUSALS = frozenset({"requested_option_unavailable", "conflicting_requested_options"})
+_OPTION_UNAVAILABLE = "requested_option_unavailable"
+_SCOPE_REFUSALS = frozenset({_OPTION_UNAVAILABLE, "conflicting_requested_options"})
+
+# The revision refusals a later switch to the same option can escape: the
+# request ran out of wall-clock time, a search could not reach Search, or a
+# compile could not reach the calculation service. Every other refusal of a
+# revision, which calls no model, repeats.
+_RETRYABLE_REVISION_CODES = frozenset(
+    {
+        SeamCode.TURN_WALL_TIME_SPENT.value,
+        SeamCode.DISCOVERY_UNAVAILABLE.value,
+        ProblemCode.SURFACE_UNAVAILABLE.value,
+    }
+)
 
 # The state the planner seam and the translator keep while drafting, which a
 # revision that fails leaves as it found.
 _DRAFTING_PREFIXES = ("planner:", "translator:")
+# The other state a revision writes, which a switch that fails or is stopped
+# puts back too: the plan, and the readings `store_search` stores for the
+# switched sources and for the pins the revision compiles
+# (`harness.planner_seam.store_aligned_readings`), with their blocks. Each
+# maps to the value it is put back as when unset, since the studio reads the
+# readings and blocks as a list and a mapping (`harness.studio`).
+_RESTORED_KEYS: Mapping[str, Any] = {
+    "plan": None,
+    ORCHESTRATOR_SEARCHES_KEY: [],
+    ORCHESTRATOR_SPECS_KEY: {},
+    ORCHESTRATOR_SPEC_WARNINGS_KEY: {},
+}
 
 
 # The tool name and step id the Activity feed shows a chip's application under.
@@ -90,10 +139,33 @@ APPLY_CHOICE_STEP_TOOL = "apply_choice"
 # The code that step fails with when the chip cannot be applied; its message
 # is the note `SwitchFailedError` carries.
 SCOPE_CHOICE_NOT_APPLIED = "scope_choice_not_applied"
+# The code of a switch the user stopped while it ran.
+SWITCH_CANCELLED = "switch_cancelled"
+
+# Set by the studio when the user stops the stream a plan-card switch runs
+# on (`harness.studio`): the `switch` node then abandons the revision and
+# offers the plan unchanged. `None` outside such a stream.
+SWITCH_STOP: ContextVar[asyncio.Event | None] = ContextVar("switch_stop", default=None)
+
+
+class _Pick(TypedDict):
+    """The option a chip picks: the choice and the option, as its step records them."""
+
+    choice_id: str
+    option_id: str
 
 
 class SwitchFailedError(Exception):
-    """A switch that cannot be applied; the message is the note the card shows."""
+    """A switch or chip that cannot be applied: `code` is the refusal's code,
+    `reason`, the message, the one sentence saying why that the card shows
+    under the choice, and `retryable` whether the same switch can succeed if
+    asked again."""
+
+    def __init__(self, reason: str, *, code: str, retryable: bool = False) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.code = code
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -119,34 +191,98 @@ def switch_node(
 
         One route out, `"offer"`, to the `approve` node: the revised plan
         with a new revision and `moved`, or the unchanged plan with a
-        `refusal_note`.
+        `switch_failed`, which the plan card shows on the row the user
+        switched (`harness.studio_translate`), so no chat message repeats it.
         """
         pick = node_input.get("switch") if isinstance(node_input, dict) else None
         pick = pick if isinstance(pick, dict) else {}
         plan = readable_plan(ctx, ctx.state.get("plan"))
         assert plan is not None, "approve routes a switch only for a plan it read"
         choice_id, option_id = str(pick.get("choice_id")), str(pick.get("option_id"))
+        # The state as it stood, which a switch that fails, is stopped or
+        # ends on any other error leaves as it found.
+        before = _restorable_state(ctx)
         try:
-            output = await _switched_plan(
+            output = await _unless_stopped(
                 ctx,
-                plan,
-                choice_id=choice_id,
-                option_id=option_id,
-                planner=planner,
-                surface=definition_surface,
+                _switched_plan(
+                    ctx,
+                    plan,
+                    choice_id=choice_id,
+                    option_id=option_id,
+                    planner=planner,
+                    surface=definition_surface,
+                ),
             )
         except SwitchFailedError as exc:
-            note = f"{exc} Version {plan.version} is still there to approve."
-            logger.info("plan switch not applied: choice_id=%s option_id=%s", choice_id, option_id)
+            _restore(ctx, before)
+            logger.info(
+                "plan switch not applied: choice_id=%s option_id=%s code=%s",
+                choice_id,
+                option_id,
+                exc.code,
+            )
             output = {
                 **plan.model_dump(mode="json"),
-                "summary": note,
+                "summary": exc.reason,
                 "revision": plan_revision(plan),
-                "refusal_note": note,
+                "switch_failed": {
+                    "choice_id": choice_id,
+                    "option_id": option_id,
+                    "code": exc.code,
+                    "reason": exc.reason,
+                    "retryable": exc.retryable,
+                },
             }
+        except BaseException:
+            _restore(ctx, before)
+            raise
         yield Event(output=output, route="offer")
 
     return switch
+
+
+async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+    """`revision`'s payload, unless the user stops the switch first (`SWITCH_STOP`).
+
+    A stopped revision is cancelled and awaited without taking its outcome, so
+    a revision that ends in any way once the Stop came, an error its cleanup
+    raises included, ends stopped, as does one that finishes in the same wait
+    as the Stop. The `switch` node puts the state it wrote back, so the plan
+    stands unchanged. A cancellation of the node itself,
+    while the revision unwinds, still cancels the node.
+
+    Raises:
+        SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
+            the switch, else as `revision` raises it.
+    """
+    stop = SWITCH_STOP.get()
+    running = asyncio.ensure_future(revision)
+    stopped = asyncio.ensure_future(stop.wait()) if stop is not None else None
+    finished: set[asyncio.Future[Any]] = set()
+    try:
+        finished, _ = await asyncio.wait(
+            {running, *([stopped] if stopped is not None else [])},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        unfinished = {
+            waiting for waiting in (running, stopped) if waiting is not None and not waiting.done()
+        }
+        for waiting in unfinished:
+            waiting.cancel()
+        if unfinished:
+            # Raises nothing the tasks raise. A cancellation of the node raises.
+            await asyncio.wait(unfinished)
+    if running in finished and stopped not in finished and not running.cancelled():
+        return running.result()
+    if not running.cancelled() and (error := running.exception()) is not None:
+        logger.info("stopped plan switch raised: %r", error)
+    raise SwitchFailedError(
+        "You stopped this change, so the plan is as it was.",
+        code=SWITCH_CANCELLED,
+        retryable=True,
+    )
 
 
 async def _switched_plan(
@@ -163,12 +299,11 @@ async def _switched_plan(
     Raises:
         SwitchFailedError: If the switch cannot be applied, with the note to show.
     """
-    clicked = next(
-        (d for d in plan.decisions if d.scope is not None and d.scope.choice_id == choice_id),
-        None,
-    )
+    clicked = chosen_scope_decision(plan, choice_id)
     if clicked is None or clicked.scope is None:
-        raise SwitchFailedError("That choice is no longer on the plan, so nothing changed.")
+        raise SwitchFailedError(
+            "That choice is no longer on the plan.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
     axis = clicked.scope.axis
     state = cast(SessionState, ctx.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
@@ -186,7 +321,7 @@ async def _switched_plan(
     )
     if any(not any(o.option_id == option_id for o in choice.options) for *_, choice in targets):
         raise SwitchFailedError(
-            f"Search does not offer {label} for this source, so nothing changed."
+            f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
         )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
@@ -207,7 +342,6 @@ async def _switched_plan(
             for pin, reading, scope, choice in targets
         )
     )
-    drafting = _drafting_state(ctx)
     moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
     save_pin_sources(
@@ -220,8 +354,11 @@ async def _switched_plan(
             },
         },
     )
+    codes = {
+        item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
+    }
     requirements = [
-        requirement.model_copy(update={"source_spec_id": moved_to[origin]}).model_dump(mode="json")
+        repinned(requirement, moved_to[origin], codes[moved_to[origin]]).model_dump(mode="json")
         for requirement in authored(plan).evidence_requirements
         if isinstance(requirement, DatasetRequirement)
         and (origin := to_origin.get(requirement.source_spec_id or "", requirement.source_spec_id))
@@ -234,10 +371,13 @@ async def _switched_plan(
         inherits={new: old for old, new in moved_to.items()},
     )
     if "plan" not in revised:
-        _restore(ctx, drafting)
-        logger.warning("plan switch not revised: %s", revised.get("refused"))
+        refused = revised.get("refused") or {}
+        logger.warning("plan switch not revised: %s", refused)
+        code = str(refused.get("code") or SCOPE_CHOICE_NOT_APPLIED)
         raise SwitchFailedError(
-            f"The plan could not be revised to count {label}, so nothing changed."
+            str(refused.get("reason") or f"The plan could not be revised to count {label}."),
+            code=code,
+            retryable=code in _RETRYABLE_REVISION_CODES,
         )
     revised_plan = PlannerPlan.model_validate(revised["plan"])
     ctx.state["plan"] = revised_plan.model_dump_json()
@@ -249,14 +389,6 @@ async def _switched_plan(
             held_open=[item.reading.open_roles],
             share_sides=[item.reading.share_over],
         )
-    moved: list[dict[str, str]] = []
-    for item in switched:
-        for entry in moved_choices(item.scope, item.after, switched=axis):
-            if not any(
-                (seen["from_label"], seen["to_label"]) == (entry["from_label"], entry["to_label"])
-                for seen in moved
-            ):
-                moved.append(entry)
     logger.info(
         "plan switched: choice_id=%s option_id=%s sources=%d version=%d",
         choice_id,
@@ -268,8 +400,60 @@ async def _switched_plan(
         **revised_plan.model_dump(mode="json"),
         "summary": revised["summary"],
         "revision": plan_revision(revised_plan),
-        "moved": moved,
+        "moved": _moved_entries(revised_plan, switched, axis=axis),
     }
+
+
+def _moved_entries(
+    plan: PlannerPlan, switched: Sequence[_Switched], *, axis: str
+) -> list[dict[str, str]]:
+    """Each other choice the switch on `axis` moved (`moved_choices`), once per card row.
+
+    A move is listed under its row's id (`_moved_row`), so one move across
+    several switched sources sharing a row, or showing none, is listed once.
+    """
+    pins = {item.spec_id for item in switched}
+    moved: dict[str, dict[str, str]] = {}
+    for item in switched:
+        for entry in moved_choices(item.scope, item.after, switched=axis):
+            row = _moved_row(plan, item, entry["choice_id"], switched=pins)
+            moved.setdefault(row, {**entry, "choice_id": row})
+    return list(moved.values())
+
+
+def _moved_row(plan: PlannerPlan, item: _Switched, moved: str, *, switched: Collection[str]) -> str:
+    """The card's id for the choice of `item`'s compiled scope Search names `moved`.
+
+    The id of `plan`'s row for it (`harness.plan_display.choice_id`); for a
+    choice the plan holds no decision for, so the card shows no row, the id
+    such a row would have over every switched source (`switched`,
+    `pinned_choice_id`), so the move is one entry of the card's `moved` list
+    on each axis whichever source Search moved. Search's own id when no
+    requirement pins a switched source either.
+    """
+    axis = next((choice.axis for choice in item.after.choices if choice.id == moved), None)
+    decision = next(
+        (
+            decision
+            for decision in plan.decisions
+            if decision.scope is not None
+            and decision.scope.axis == axis
+            and decision.fixes is not None
+            and decision.fixes.source_spec_id == item.spec_id
+        ),
+        None,
+    )
+    if decision is not None:
+        return row_choice_id(plan, decision)
+    if axis is None:
+        return moved
+    return pinned_choice_id(plan, switched, axis) or moved
+
+
+def _exact_codes(digest: Mapping[str, Any]) -> frozenset[str]:
+    """The publisher codes the dataset of `digest`'s one part is exactly, none when its block cannot be read."""
+    (part,) = digest["part_digests"]
+    return exact_codes(part["spec_block"])
 
 
 def _readings(ctx: Context) -> list[SearchReading]:
@@ -284,7 +468,10 @@ def _readings(ctx: Context) -> list[SearchReading]:
 
 
 def _target(
-    decision: Decision, *, to_origin: Mapping[str, str], readings: Sequence[SearchReading]
+    decision: Decision,
+    *,
+    to_origin: Mapping[str, str],
+    readings: Sequence[SearchReading],
 ) -> tuple[str, SearchReading, PartScope, ScopeChoice]:
     """The pin `decision` states, the newest reading of it with a scope, that scope and the choice on the decision's axis.
 
@@ -293,7 +480,9 @@ def _target(
             reading of its pin holds the choice.
     """
     if not is_scope_choice(decision) or decision.fixes is None or decision.scope is None:
-        raise SwitchFailedError("That choice is no longer on the plan, so nothing changed.")
+        raise SwitchFailedError(
+            "That choice is no longer on the plan.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
     pinned = decision.fixes.source_spec_id or ""
     pin = to_origin.get(pinned, pinned)
     for reading in readings:
@@ -302,7 +491,9 @@ def _target(
         choice = next((c for c in reading.scope.choices if c.axis == decision.scope.axis), None)
         if choice is not None:
             return pin, reading, reading.scope, choice
-    raise SwitchFailedError("Search's record of this source is gone, so nothing changed.")
+    raise SwitchFailedError(
+        "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
+    )
 
 
 def _source_block(source: PinSource | None, pin: str) -> Mapping[str, Any] | None:
@@ -344,22 +535,18 @@ async def _resubmit(
         )
     except DefinitionNotResolvedError as exc:
         logger.info("plan switch not compiled: pin=%s code=%s: %s", pin, exc.code, exc)
-        if exc.code in _SCOPE_REFUSALS:
-            raise SwitchFailedError(
-                f"Search cannot count {label} for this source, so nothing changed."
-            ) from exc
-        if exc.retryable or exc.refused:
-            raise SwitchFailedError(
-                f"Search could not count {label} just now, so nothing changed."
-            ) from exc
-        raise SwitchFailedError(
-            f"Search holds no data counted as {label} here, so nothing changed."
+        if exc.retryable or exc.not_issued:
+            failure = "unanswered"
+        elif exc.refused or exc.code in _SCOPE_REFUSALS:
+            failure = "refused"
+        else:
+            failure = "empty"
+        raise _compile_failed(
+            failure, label=label, code=exc.code or SCOPE_CHOICE_NOT_APPLIED
         ) from exc
     spec = part.get("spec") if part.get("status") == "definite" else None
     if not isinstance(spec, dict) or not spec.get("spec_id"):
-        raise SwitchFailedError(
-            f"Search holds no data counted as {label} here, so nothing changed."
-        )
+        raise _compile_failed("empty", label=label, code=SCOPE_CHOICE_NOT_APPLIED)
     resolved = spec.get("resolved")
     try:
         after = PartScope.from_search(
@@ -367,7 +554,7 @@ async def _resubmit(
         )
     except ValidationError as exc:
         raise SwitchFailedError(
-            f"Search's answer for {label} could not be read, so nothing changed."
+            f"Search's answer for {label} could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
         ) from exc
     return _Switched(
         pin=pin,
@@ -377,6 +564,23 @@ async def _resubmit(
         spec_id=str(spec["spec_id"]),
         after=after,
     )
+
+
+# How a switch's compile fails, by what Search did: the sentence the card
+# shows, worded for `{label}`, and whether the same switch can succeed if
+# asked again. Search not answering (unreachable, out of time) can;
+# Search refusing the option, or answering with no data, repeats.
+_COMPILE_FAILURES: dict[str, tuple[str, bool]] = {
+    "unanswered": ("Search could not count {label} just now.", True),
+    "refused": ("Search cannot count {label} for this source.", False),
+    "empty": ("Search holds no data counted as {label} here.", False),
+}
+
+
+def _compile_failed(failure: str, *, label: str, code: str) -> SwitchFailedError:
+    """The `SwitchFailedError` for a compile that failed as `failure` (`_COMPILE_FAILURES`)."""
+    sentence, retryable = _COMPILE_FAILURES[failure]
+    return SwitchFailedError(sentence.format(label=label), code=code, retryable=retryable)
 
 
 def _reading_digest(item: _Switched, *, axis: str) -> dict[str, Any]:
@@ -406,21 +610,21 @@ def _pin_source(
     return replaced.model_copy(update={"block": block, "earlier_turn": False})
 
 
-def _drafting_state(ctx: Context) -> dict[str, Any]:
-    """A copy of the planner's and translator's drafting state (`_DRAFTING_PREFIXES`)."""
-    return {
-        key: json.loads(json.dumps(value))
-        for key, value in ctx.state.to_dict().items()
-        if key.startswith(_DRAFTING_PREFIXES)
-    }
+def _restorable_state(ctx: Context) -> dict[str, Any]:
+    """A copy of the state a switch that fails, is stopped or raises puts back:
+    the drafting state (`_DRAFTING_PREFIXES`) and `_RESTORED_KEYS`."""
+    state = ctx.state.to_dict()
+    kept = {key: value for key, value in state.items() if key.startswith(_DRAFTING_PREFIXES)}
+    kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}
+    return json.loads(json.dumps(kept))
 
 
-def _restore(ctx: Context, drafting: Mapping[str, Any]) -> None:
-    """Put the drafting state back as `drafting` holds it, clearing any key written since."""
+def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
+    """Put the state back as `before` holds it, clearing any drafting key written since."""
     for key in ctx.state.to_dict():
-        if key.startswith(_DRAFTING_PREFIXES) and key not in drafting:
+        if key.startswith(_DRAFTING_PREFIXES) and key not in before:
             ctx.state[key] = None
-    for key, value in drafting.items():
+    for key, value in before.items():
         ctx.state[key] = value
 
 
@@ -455,27 +659,31 @@ async def apply_stored_choice(
     it), the option is not one Search can serve, or Search refuses or fails
     the resubmit, fetches nothing: the hand-back carries the note a plan-card
     switch shows, and the `APPLY_CHOICE_STEP_TOOL` step fails with it under
-    `SCOPE_CHOICE_NOT_APPLIED`.
+    the code the switch reports (`SwitchFailedError.code`), to be retried
+    after a delay where the same chip can succeed later
+    (`SwitchFailedError.retryable`) and otherwise not to be retried.
 
     Returns:
         `{"status", "text"}` for the `orchestrate` node.
     """
-    args = {"choice_id": choice_id, "option_id": option_id}
+    args = _Pick(choice_id=choice_id, option_id=option_id)
     reading, choice = stored_choice(conversation_readings(ctx.state), choice_id) or (None, None)
     option = next((o for o in choice.options if o.option_id == option_id), None) if choice else None
     label = option.label if option is not None else option_id
     try:
         if reading is None or choice is None:
-            raise SwitchFailedError("That choice is no longer on this answer, so nothing changed.")
+            raise SwitchFailedError(
+                "That choice is no longer on this answer.", code=SCOPE_CHOICE_NOT_APPLIED
+            )
         if reading.spec_id != spec_id:
-            raise SwitchFailedError(CHIP_STALE_NOTE)
+            raise SwitchFailedError(CHIP_STALE_NOTE, code=SCOPE_CHOICE_NOT_APPLIED)
         if (
             option is None
             or option_id == choice.active
             or option.availability.status == "unavailable"
         ):
             raise SwitchFailedError(
-                f"Search does not offer {label} for this source, so nothing changed."
+                f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
             )
         assert reading.scope is not None and reading.spec_id is not None
         pin = reading.spec_id
@@ -493,15 +701,20 @@ async def apply_stored_choice(
         )
     except SwitchFailedError as exc:
         note = str(exc)
-        logger.info("scope choice not applied: choice_id=%s option_id=%s", choice_id, option_id)
+        logger.info(
+            "scope choice not applied: choice_id=%s option_id=%s code=%s",
+            choice_id,
+            option_id,
+            exc.code,
+        )
         _apply_step(
             record_step,
             args=args,
             result={
                 "outcome": "refusal",
                 "refusal": {
-                    "code": SCOPE_CHOICE_NOT_APPLIED,
-                    "retry_mode": "do_not_retry",
+                    "code": exc.code,
+                    "retry_mode": "retry_after_delay" if exc.retryable else "do_not_retry",
                     "fix": None,
                     "message": note,
                 },
@@ -564,10 +777,13 @@ async def apply_stored_choice(
 
 
 def _apply_step(
-    record_step: Callable[..., None] | None, *, args: dict[str, Any], result: dict[str, Any]
+    record_step: Callable[..., None] | None, *, args: _Pick, result: dict[str, Any]
 ) -> None:
     """Record the `APPLY_CHOICE_STEP_TOOL` step, when the executor records steps."""
     if record_step is not None:
         record_step(
-            tool=APPLY_CHOICE_STEP_TOOL, args=args, result=result, step_id=APPLY_CHOICE_STEP_TOOL
+            tool=APPLY_CHOICE_STEP_TOOL,
+            args=dict(args),
+            result=result,
+            step_id=APPLY_CHOICE_STEP_TOOL,
         )

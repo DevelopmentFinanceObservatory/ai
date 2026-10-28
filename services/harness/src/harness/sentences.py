@@ -8,11 +8,15 @@ sentence fails `tests/test_sentences.py`:
   `requirement_needs_repair` referral names as its `constraint`;
 - `DECLINE_REASONS`, per `planner.plan.UnsupportedOperation`, the reason the
   plan card and `harness.graph.plan_done` give for an ask the plan declines;
-- `SEAM_SENTENCES`, per `SeamCode` and each `planner.tool_results.ProblemCode`
-  in `TERMINAL_PROPOSE_CODES`: the whole sentence `harness.planner_seam`
-  answers when an entry into the planner ends without a plan, which
-  `harness.graph.planning` hands the orchestrator to quote, and the final
-  message `harness.turn_budget` writes when a request spends a bound;
+- `SEAM_REASONS`, per `SeamCode` and `planner.tool_results.ProblemCode`: why
+  a revision in code was refused and nothing more, which
+  `harness.graph.switch` shows under the choice a switch did not apply to;
+- `SEAM_SENTENCES`, per `SeamCode` and `planner.tool_results.ProblemCode`:
+  the whole sentence `harness.planner_seam` answers when an entry into the
+  planner, or a revision in code (`PlannerSeam.revise`), ends without a
+  plan, which `harness.graph.planning` hands the orchestrator to quote and
+  `harness.graph.switch` shows on a switch that did not apply, and the
+  final message `harness.turn_budget` writes when a request spends a bound;
 - `FAILURE_CLASS`, per code a service, the executor, a direct calculation, the
   harness or a refused plan can fail a step with, naming one of the classes
   `FAILURE_SENTENCES` words. `CODE_SENTENCES` words a code the user can act
@@ -40,7 +44,7 @@ import logging
 import re
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -51,6 +55,7 @@ from planner.plan import MAX_PLAN_ROUNDS, UnsupportedOperation
 from planner.tool_results import ProblemCode
 from translator.referral import ReferralKind
 
+from harness.scope_choices import option_axis
 from harness.tool_contracts import HarnessCode
 from harness.wire import RetryMode
 
@@ -120,7 +125,7 @@ REFERRAL_REASONS: Mapping[ReferralKind, str] = {
     ReferralKind.REQUIREMENT_NEEDS_REPAIR: (
         "the plan asked for its data in a form the calculation cannot use"
     ),
-    ReferralKind.SURFACE_UNAVAILABLE: "the calculation service could not be reached",
+    ReferralKind.SURFACE_UNAVAILABLE: "a service the plan needs could not be reached",
     ReferralKind.INTERNAL_FAILURE: "a fault inside the system stopped the plan",
 }
 
@@ -219,10 +224,52 @@ DECLINE_REASONS: Mapping[UnsupportedOperation, str] = {
     UnsupportedOperation.BREAKDOWN_NOT_KEPT: _NO_BREAKDOWN,
 }
 
-# Filled by `refusal_sentence`: `about` names the requirement a refusal is
-# about ("the plan" when it names none), `at` is " for <about>" or nothing,
+# A problem the planner's model repairs within its entry, which ends a
+# revision in code (`harness.planner_seam.PlannerSeam.revise`), where no model
+# is there to repair it.
+_NOT_DRAFTED = (
+    "The plan could not be drafted{at}, a fault in the system rather than in the request, "
+    "so nothing was recorded."
+)
+_NOT_DRAFTED_CODES = frozenset(
+    {
+        ProblemCode.PLAN_MISSING,
+        ProblemCode.PLAN_NOT_DRAFT,
+        ProblemCode.WORKFLOW_MISSING,
+        ProblemCode.REFERRAL_PENDING,
+        ProblemCode.TRANSITION_REFUSED,
+        ProblemCode.REQUIREMENT_UNKNOWN,
+        ProblemCode.REQUIREMENT_NOT_A_DATASET,
+        ProblemCode.DECISION_UNKNOWN,
+        ProblemCode.INVALID_PLAN,
+        ProblemCode.INVALID_REFERRAL,
+        ProblemCode.INVALID_ARGUMENTS,
+        ProblemCode.COMPILE_FAILED,
+        ProblemCode.NO_CANDIDATES_RECORDED,
+        ProblemCode.SOURCE_NOT_OFFERED,
+        ProblemCode.COMBINATION_UNASKED,
+        ProblemCode.DECLINE_MISSING,
+        ProblemCode.DECLINE_UNEARNED,
+        ProblemCode.ASKS_UNACCOUNTED,
+        ProblemCode.ASK_ROLE_DROPPED,
+        ProblemCode.RESULT_SCOPE_UNSTATED,
+        ProblemCode.PERIOD_REDUCTION_UNSTATED,
+        ProblemCode.BASIS_UNKNOWN,
+        ProblemCode.MEASURE_FIXED_BY_PIN,
+    }
+)
+_DECISION_KEPT = (
+    "The plan would have changed a choice already made{at}, so nothing was recorded. Make "
+    "that choice again on the plan to change it."
+)
+
+# Filled by `refusal_sentence` for the planner and the orchestrator, which
+# repair a plan by its requirement ids: `about` names the requirement a refusal
+# is about by its id ("the plan" when it names none), `at` is " for <about>"
+# or nothing,
 # `why` the reason clause of the referral it ended on, `asks` the declined asks,
-# and `rounds`, `tool` and `reference` come straight from the refusal's detail.
+# `unsupported` why a calculation cannot be made, and `rounds`, `tool` and
+# `reference` come straight from the refusal's detail.
 SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
     SeamCode.TURN_MODEL_TIME_SPENT: (
         "This request used all the time it allows the model to work before it finished, so "
@@ -266,6 +313,106 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
     ProblemCode.NOTHING_TO_PLAN: (
         "This cannot be calculated by this system, so nothing was planned: {asks}."
     ),
+    ProblemCode.OPERATION_UNSUPPORTED: (
+        "This cannot be calculated as planned{at}, because {unsupported}, so nothing was recorded."
+    ),
+    ProblemCode.BASES_UNALIGNED: (
+        "The figures the plan combines{at} could not be put on one measure basis and provider "
+        "scope, so nothing was recorded."
+    ),
+    ProblemCode.WHOLE_IS_ITS_MEMBER: (
+        "A share{at} would divide by one of its own parts in place of their total, so nothing "
+        "was recorded."
+    ),
+    ProblemCode.SHARE_WHOLE_UNDERIVABLE: (
+        "A share{at} could not be divided by a total from the same dataset as its part, so "
+        "nothing was recorded."
+    ),
+    ProblemCode.PROVIDERS_UNALIGNED: (
+        "The figures the plan combines{at} count different providers' spending, so nothing "
+        "was recorded."
+    ),
+    ProblemCode.ASK_NOT_UNDERSTOOD: (
+        "Part of the request could not be matched to data{at}, so nothing was recorded."
+    ),
+    ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}, so nothing was recorded.",
+    ProblemCode.SURFACE_UNAVAILABLE: (
+        "A service the plan needs could not be reached{at}, so nothing was recorded. Try "
+        "again shortly."
+    ),
+    ProblemCode.RUN_WOULD_STOP: (
+        "The newest year the plan counts from could not be read{at}, so nothing was recorded."
+    ),
+    ProblemCode.PLAN_REJECTED: "The plan was rejected, so nothing was recorded.",
+    ProblemCode.APPROVAL_DECLINED: "The plan was not approved, so nothing was run.",
+    ProblemCode.USER_DECISION_CONTRADICTED: _DECISION_KEPT,
+    ProblemCode.USER_DECISION_DROPPED: _DECISION_KEPT,
+    ProblemCode.SHARED_DECISION_CONTRADICTED: _DECISION_KEPT,
+    **dict.fromkeys(_NOT_DRAFTED_CODES, _NOT_DRAFTED),
+}
+
+# Why a refusal ended a planner entry or a revision in code, as a clause with
+# no advice and no account of what was kept, filled as `SEAM_SENTENCES` is,
+# with `lead` "for <name>, " or nothing and `mixed` why a calculation cannot
+# be made. `refusal_reason` makes it a sentence.
+SEAM_REASONS: Mapping[SeamCode | ProblemCode, str] = {
+    SeamCode.TURN_MODEL_TIME_SPENT: "this request used all the time it allows the model to work",
+    SeamCode.TURN_MODEL_CALLS_SPENT: "this request took as many model steps as it allows",
+    SeamCode.TURN_WALL_TIME_SPENT: "this request ran for as long as one request may",
+    SeamCode.TRANSLATION_INTERNAL_FAILURE: "a fault inside the system stopped the plan",
+    SeamCode.TRANSLATION_REPEATED: "{lead}{why}, and it failed the same way twice",
+    SeamCode.DISCOVERY_UNAVAILABLE: "the data service did not answer while finding data for {about}",
+    SeamCode.PLANNER_TOOL_FAILED: "the planner's {tool} tool failed inside the system",
+    SeamCode.PLAN_NOT_READY: "{lead}{why}",
+    ProblemCode.QUESTION_FIXED: "the plan on record answers another question",
+    ProblemCode.BUDGET_EXHAUSTED: "this request has used its budget of {rounds} plan drafts",
+    ProblemCode.NOTHING_TO_PLAN: "this system cannot calculate what was asked",
+    ProblemCode.OPERATION_UNSUPPORTED: "{mixed}",
+    ProblemCode.BASES_UNALIGNED: (
+        "{lead}the figures the plan combines could not be put on one measure basis and "
+        "provider scope"
+    ),
+    ProblemCode.WHOLE_IS_ITS_MEMBER: (
+        "{lead}a share would divide by one of its own parts in place of their total"
+    ),
+    ProblemCode.SHARE_WHOLE_UNDERIVABLE: (
+        "{lead}a share could not be divided by a total from the same dataset as its part"
+    ),
+    ProblemCode.PROVIDERS_UNALIGNED: (
+        "{lead}the figures the plan combines count different providers' spending"
+    ),
+    ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
+    ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",
+    ProblemCode.SURFACE_UNAVAILABLE: "a service the plan needs could not be reached",
+    ProblemCode.RUN_WOULD_STOP: "the newest year the plan counts from could not be read{at}",
+    ProblemCode.PLAN_REJECTED: "the plan was rejected",
+    ProblemCode.APPROVAL_DECLINED: "the plan was not approved",
+    ProblemCode.USER_DECISION_CONTRADICTED: "the plan would have changed a choice already made{at}",
+    ProblemCode.USER_DECISION_DROPPED: "the plan would have changed a choice already made{at}",
+    ProblemCode.SHARED_DECISION_CONTRADICTED: (
+        "the plan would have changed a choice already made{at}"
+    ),
+    **dict.fromkeys(
+        _NOT_DRAFTED_CODES,
+        "the plan could not be drafted{at}, a fault in the system rather than in the request",
+    ),
+}
+
+# What an input that cannot be counted on its calculation's options would
+# then do beside the calculation's other inputs, by the axis of those options.
+_REALIGNED: Mapping[str | None, str] = {
+    "measure_basis": "be counted on a different measure basis from",
+    "provider": "count different providers' spending from",
+    None: "be counted on a different measure basis or provider scope from",
+}
+
+# Why a calculation cannot be made, for an `operation_unsupported` refusal
+# whose input cannot be counted on its calculation's basis or provider scope
+# (`detail.basis`), by the axis of the options it was wanted on.
+_UNALIGNED: Mapping[str | None, str] = {
+    "measure_basis": "its figures would be counted on different measure bases",
+    "provider": "its figures would count different providers' spending",
+    None: "its figures would be counted on different measure bases or provider scopes",
 }
 
 # The sentence for a code no table names: a refusal built outside this
@@ -308,38 +455,126 @@ def referral_sentence(
     return f"{reason[0].upper()}{reason[1:]}."
 
 
+@dataclass(frozen=True)
+class PlanWords:
+    """How the requirements of the plan a refusal is about read
+    (`harness.plan_display.plan_words`): `names`, each one's name on the plan
+    card, and `inputs`, the ids each one reads, by requirement id. A
+    requirement with no name is left unnamed, and its id reaches no reader."""
+
+    names: Mapping[str, str] = field(default_factory=dict)
+    inputs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+_NO_WORDS = PlanWords()
+
+
 def refusal_sentence(refused: Mapping[str, object]) -> str:
-    """The sentence a refusal that ends a planner entry becomes for the user.
+    """The sentence a refusal that ends a planner entry becomes for the
+    planner and the orchestrator, naming a requirement by its id, which a
+    repair cites.
 
     `refused` is `{"code", "detail"}`, the shape `harness.planner_seam` stamps
-    and `propose_plan` refuses with. A code in no table gives a plain sentence
-    that claims nothing about why.
+    and `propose_plan` refuses with. A code in no table gives a plain
+    sentence that claims nothing about why.
     """
     code = refused.get("code")
     template = SEAM_SENTENCES.get(code, _UNKNOWN_REFUSAL) if isinstance(code, str) else None
+    return (template or _UNKNOWN_REFUSAL).format_map(_refusal_fields(refused, None))
+
+
+def refusal_reason(refused: Mapping[str, object], *, words: PlanWords = _NO_WORDS) -> str:
+    """Why `refused` refused, as one sentence for the user (`SEAM_REASONS`),
+    naming the plan's requirements by `words`, since an id reads as a
+    fault. A code in no table gives a plain clause that claims nothing
+    about why."""
+    code = refused.get("code")
+    template = SEAM_REASONS.get(code, _STOPPED) if isinstance(code, str) else _STOPPED
+    reason = template.format_map(_refusal_fields(refused, words))
+    first = next(index for index, char in enumerate(reason) if char.isalpha())
+    return f"{reason[:first]}{reason[first].upper()}{reason[first + 1 :]}."
+
+
+def _refusal_fields(refused: Mapping[str, object], words: PlanWords | None) -> dict[str, object]:
     detail = refused.get("detail")
-    fields = _fields(detail) if isinstance(detail, Mapping) else _fields({})
-    return (template or _UNKNOWN_REFUSAL).format_map(fields)
+    return _fields(detail if isinstance(detail, Mapping) else {}, words)
 
 
-def _fields(detail: Mapping[Any, object]) -> dict[str, object]:
-    """What a `SEAM_SENTENCES` template reads, from a refusal's `detail`."""
-    requirement_id = detail.get("requirement_id")
-    about = f"requirement {requirement_id!r}" if requirement_id else None
+def _fields(detail: Mapping[Any, object], words: PlanWords | None) -> dict[str, object]:
+    """What a `SEAM_SENTENCES` or `SEAM_REASONS` template reads, from a
+    refusal's `detail`: a requirement by its reader's name in `words`, or by
+    its id when `words` is `None`."""
+    basis = detail.get("basis")
+    basis = basis if isinstance(basis, Mapping) else None
+    requirement_id = detail.get("requirement_id") or (basis or {}).get("requirement_id")
+    about = None
+    if isinstance(requirement_id, str) and requirement_id:
+        about = (
+            f"requirement {requirement_id!r}" if words is None else words.names.get(requirement_id)
+        )
+    words = words or _NO_WORDS
     declined = detail.get("declined")
+    unsupported = _unsupported_reason(detail.get("operation"), basis)
     return {
         "about": about or "the plan",
         "at": f" for {about}" if about else "",
+        "lead": f"for {about}, " if about else "",
+        "mixed": _realigned(basis, about, words)
+        if basis is not None
+        else f"{f'for {about}, ' if about else ''}{unsupported}",
         "why": referral_reason(detail.get("kind"), detail.get("constraint")),
         "asks": "; ".join(
             str(decline.get("ask"))
             for decline in (declined if isinstance(declined, list) else [])
             if isinstance(decline, Mapping)
         ),
+        "unsupported": unsupported,
         "rounds": detail.get("rounds", MAX_PLAN_ROUNDS),
         "tool": detail.get("tool"),
         "reference": detail.get("reference"),
     }
+
+
+def _realigned(basis: Mapping[Any, object], about: str | None, words: PlanWords) -> str:
+    """What the input `basis` names would then count beside its
+    calculation's other inputs, each by its name on the card: "official
+    development assistance would then count different providers' spending
+    from health aid"."""
+    requirement_id, step_id = basis.get("requirement_id"), basis.get("step_id")
+    others = [
+        words.names[input_id]
+        for input_id in (words.inputs.get(step_id, ()) if isinstance(step_id, str) else ())
+        if input_id != requirement_id and input_id in words.names
+    ]
+    return (
+        f"{about or 'one of its figures'} would then {_REALIGNED[_option_axis(basis)]} "
+        f"{' and '.join(others) or 'the other figures'}"
+    )
+
+
+def _option_axis(basis: Mapping[Any, object]) -> str | None:
+    """The one axis the options `basis` names are on, `None` for none or several."""
+    option_ids = basis.get("option_ids")
+    axes = {
+        option_axis(str(option)) for option in (option_ids if isinstance(option_ids, list) else [])
+    }
+    axis = next(iter(axes)) if len(axes) == 1 else None
+    return axis if axis in _REALIGNED else None
+
+
+def _unsupported_reason(operation: object, basis: Mapping[Any, object] | None) -> str:
+    """Why an `operation_unsupported` refusal's calculation cannot be made.
+
+    One whose input cannot be counted on its calculation's options (`basis`)
+    names the axis those options are on; any other reads the declined
+    operation it names.
+    """
+    if basis is not None:
+        return _UNALIGNED[_option_axis(basis)]
+    if isinstance(operation, str):
+        with suppress(ValueError):
+            return DECLINE_REASONS[UnsupportedOperation(operation)]
+    return _CANNOT_ANSWER
 
 
 class FailureClass(StrEnum):
@@ -461,6 +696,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.RUN_NOT_STARTED,
             ExecutorCode.LEDGER_UNAVAILABLE,
             SeamCode.DISCOVERY_UNAVAILABLE,
+            ProblemCode.SURFACE_UNAVAILABLE,
         }
     ),
     FailureClass.TOO_BIG: frozenset(
@@ -472,7 +708,13 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
         }
     ),
     FailureClass.EMPTY: frozenset(
-        {"empty_answer", "rows_empty", "no_data_at_source", HarnessCode.EMPTY_RESULT}
+        {
+            "empty_answer",
+            "rows_empty",
+            "no_data_at_source",
+            HarnessCode.EMPTY_RESULT,
+            ProblemCode.ASK_NOT_UNDERSTOOD,
+        }
     ),
     FailureClass.NOT_FOUND: frozenset({"entity_not_found", "entity_missing"}),
     FailureClass.AMBIGUOUS: frozenset({"entity_ambiguous", "entity_role_ambiguous"}),
@@ -500,6 +742,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN,
             HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW,
             HarnessCode.NO_SHARED_PERIOD,
+            ProblemCode.RUN_WOULD_STOP,
         }
     ),
     FailureClass.UNITS: frozenset(
@@ -536,6 +779,11 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "column_unbound",
             ExecutorCode.FAMILY_NOT_SUMMED,
             ProblemCode.NOTHING_TO_PLAN,
+            ProblemCode.OPERATION_UNSUPPORTED,
+            ProblemCode.BASES_UNALIGNED,
+            ProblemCode.WHOLE_IS_ITS_MEMBER,
+            ProblemCode.SHARE_WHOLE_UNDERIVABLE,
+            ProblemCode.PROVIDERS_UNALIGNED,
         }
     ),
     FailureClass.SOURCE_GONE: frozenset(
@@ -622,6 +870,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.PUBLICATION_ERROR,
             SeamCode.TRANSLATION_INTERNAL_FAILURE,
             SeamCode.PLANNER_TOOL_FAILED,
+            *_NOT_DRAFTED_CODES,
         }
     ),
     FailureClass.UNAVAILABLE: frozenset(
@@ -640,6 +889,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "not_approved",
             "authorisation_expired",
             HarnessCode.HAND_OFF_PENDING,
+            ProblemCode.PLAN_REJECTED,
+            ProblemCode.APPROVAL_DECLINED,
         }
     ),
     FailureClass.BUDGET_SPENT: frozenset(
@@ -671,6 +922,10 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             SeamCode.TRANSLATION_REPEATED,
             SeamCode.PLAN_NOT_READY,
             ProblemCode.QUESTION_FIXED,
+            ProblemCode.SEARCH_REFUSED,
+            ProblemCode.USER_DECISION_CONTRADICTED,
+            ProblemCode.USER_DECISION_DROPPED,
+            ProblemCode.SHARED_DECISION_CONTRADICTED,
         }
     ),
 }

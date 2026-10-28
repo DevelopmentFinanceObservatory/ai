@@ -27,6 +27,11 @@ MAX_ENTRY_ID_CHARS = 200
 
 ScopeAxis = Literal["sector", "region", "measure_basis", "provider"]
 
+# How a part's scope choice came to hold its active option: the user's
+# words, a choice carried from earlier in the conversation, or Search's
+# default.
+ChoiceProvenance = Literal["explicit", "carried", "default"]
+
 ScopeReasonCode = Literal[
     "provider_not_offered",
     "imputed_coverage",
@@ -36,6 +41,7 @@ ScopeReasonCode = Literal[
     "carried_choice_not_applied",
     "stated_choice_not_applied",
     "option_not_covered",
+    "contributions_counted",
 ]
 
 # "<axis>:<value>": `sector:120+130`, `region:members_and_residuals`,
@@ -96,4 +102,8 @@ REASON_COPY: dict[str, str] = {
     "carried_choice_not_applied": "an earlier choice did not apply here",
     "stated_choice_not_applied": "the option you asked for is not available here",
     "option_not_covered": "the data holds no series for this option",
+    "contributions_counted": (
+        "this total already counts core contributions to multilaterals as the donor's aid, "
+        "in place of an imputed share of their spending"
+    ),
 }

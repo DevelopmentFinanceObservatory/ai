@@ -144,10 +144,10 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
 ## The SSE stream
 
 Frames are SSE `data:` lines, one JSON object per frame, discriminated on
-`event` (`STUDIO_FRAME_ADAPTER`). Twelve frame types; at least one fixture
+`event` (`STUDIO_FRAME_ADAPTER`). Thirteen frame types; at least one fixture
 each in `wire_fixtures/studio/` (elicitation has three: the plain
 question, the skippable free-text question, and two questions in one
-pause).
+pause; `plan.proposed` has a second showing a failed switch).
 
 | `event`               | What it is                                                                                                                                  |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -155,6 +155,7 @@ pause).
 | `message.complete`    | final text for the turn's message                                                                                                           |
 | `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                        |
 | `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below) |
+| `plan.approved`       | the plan the user approved; sent once per interrupt, once the run has accepted the approval, and not on a retried resume (delta 22)         |
 | `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)        |
 | `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
 | `component.revised`   | new revision under the same `component_id`                                                                                                  |
@@ -490,6 +491,69 @@ An elicitation opened before this delta and still paused takes its one
 answer as `payload` (an offered option id, or free text). Any other
 elicitation refuses `payload`. `schema_version` stays 1.
 
+## Plan summary, answer step, failed switch and approval (delta 22, v1.7)
+
+Every addition is optional, so a client built against an earlier contract
+ignores it and an older harness omits it.
+
+- `PlanStep.gives_answer`: true on the one step whose result answers the
+  user's question; at most one step of a plan carries it. `label` stays
+  the short step label and `description` the detail shown when the step is
+  opened.
+- `PlanProposed.summary`: one plain sentence saying what is counted, for
+  whom, when and from which source.
+- `PlanProposed.switch_failed`: `{choice_id, option_id, code, reason}`,
+  set on the plan re-offered after a switch that did not apply.
+  `choice_id` and `option_id` name the option the user picked, `code` is
+  the refusal's code, and `reason` says in a reader's words why it failed.
+- `plan.approved`: `{plan_version_id, version, revision?, title, summary?, steps[], choices[]}`. Each step is `{label, gives_answer?}`;
+  each choice is `{question, chosen, changed_from?}`, where `question` is
+  the choice's short name (for example "Basis"), `chosen` the option label
+  and `changed_from` the label it held before the user switched it. The
+  harness sends it once, on the `approve` answer to
+  `/api/studio/interrupt`, before the first frame of the resumed run. The
+  client attaches it to the message that stream produces and keeps it in
+  the chat snapshot.
+
+`schema_version` stays 1.
+
+## Stable choice ids, a stopped switch and caveats (delta 23, v1.8)
+
+- `PlanDecision.choice_id` is `"<requirement id>:<axis>"`: the first
+  requirement pinning a source the row stands for, and the axis the
+  choice settles. A switch re-pins requirements and keeps their ids, so a
+  row keeps its `choice_id` on every plan of the conversation, and a switch
+  naming it resolves on any of them. `moved[].choice_id` and
+  `switch_failed.choice_id` use the same ids. A row whose sources no
+  requirement pins keeps Search's own id.
+- `PlanSwitchFailed.retryable`: whether the same switch can succeed if
+  asked again. The harness sets it from the failure: false when it will
+  repeat, such as an option Search cannot serve; true when Search or the
+  calculation service could not answer in time, and for a stopped switch.
+- A `/cancel` while a switch runs stops the switch. The
+  stream ends on `plan.proposed` re-offering the unchanged plan under a
+  fresh `interrupt_id`, with `switch_failed.code` `switch_cancelled`,
+  `retryable` true and the `reason` "You stopped this change, so the plan
+  is as it was.", and the turn stays paused on it. The user asked for
+  this outcome, so the client shows that reason as a quiet note on the
+  row, with no failure lead and no error styling. A second `/cancel`
+  before then, or 10 seconds with no re-offer, ends the stream with the
+  `cancelled` error frame. A switch
+  that fails before it can re-offer the plan ends the turn as any failed
+  stream does.
+- `plan.proposed.caveats` and `plan.approved.caveats`: the plan's
+  decisions that qualify the answer, such as a share whose two sides count
+  different providers or a total derived from its part's dataset, each one
+  reader sentence; empty when there are none. The card carries them, so
+  the user reads them before Approve, and `plan.approved` repeats the
+  approved card's sentences.
+- `plan.approved.choices[].changed_from` is the label the choice held on
+  the card the turn's first switch of it was made from, set when the
+  choice holds another label, whether the user switched it or a
+  switch moved it, across several switches.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -581,3 +645,12 @@ Fixture values that are samples:
    own options, free-text and skip flags; the frame keeps a whole-pause
    `skippable`. `interrupt.response` answers them with `answers` keyed by
    question id.
+1. `PlanStep` gains `gives_answer`; `plan.proposed` gains `summary` and
+   `switch_failed`; a new `plan.approved` frame carries the approved plan
+   on the approve answer, once the run has accepted it. All optional.
+1. `choice_id` is `"<requirement id>:<axis>"`, stable across switches;
+   `switch_failed` gains `retryable`; a `/cancel` during a switch
+   re-offers the unchanged plan on a live pause under `switch_cancelled`,
+   with a reason the client shows as a quiet note;
+   `plan.proposed` and `plan.approved` gain `caveats`, and `changed_from`
+   names the label before the turn's first switch.

@@ -2742,6 +2742,18 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
     assert (pending.questions, pending.legacy) == ((), False)
 
 
+def test_a_turns_choice_baseline_reloads_on_another_instance() -> None:
+    """The labels `plan.approved` names as `changed_from` are durable, so an
+    approve answered on another instance states them."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
+    reloaded = ConversationState(conversation_id=CONVERSATION)
+
+    studio_state._apply_delta(reloaded, studio_state._serialize_durable(state))
+
+    assert reloaded.turn_choice_baseline == state.turn_choice_baseline
+
+
 def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:
     """Its flat `option_ids` become question `q1`'s options with no labels,
     and the pause is skippable as a whole."""

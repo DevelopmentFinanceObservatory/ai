@@ -31,12 +31,13 @@ line's words for reason codes, the ones the search digest uses
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal, NamedTuple, get_args
 
 from common.composite import manifest_components, year_spans, years_of
 from data_mcp.scope import (
     REASON_COPY,
     ChoiceOrigin,
+    ChoiceProvenance,
     OptionId,
     ScopeAxis,
     ScopeEntry,
@@ -45,10 +46,38 @@ from data_mcp.scope import (
 from planner.records import OptionStatus, StrictModel
 from pydantic import Field, ValidationInfo, field_validator
 
-ChoiceProvenance = Literal["explicit", "carried", "default"]
+# Whose spending a provider option counts: bilateral flows alone, with imputed
+# shares of multilateral spending, or with core contributions to multilaterals
+# as a published donor total such as DAC1's counts them.
+ProviderScope = Literal["bilateral", "inclusive", "contributions"]
 DroppedCode = Literal["carried_choice_not_applied", "stated_choice_not_applied"]
 
 YearSpan = tuple[int, int]
+
+
+class BlockDataset(NamedTuple):
+    """The dataset a spec block counts from, as its `resolved.facets.provenance` names it:
+    `ref` (`provenance/OECDDAC1`) and `title` ("OECD DAC1"), each `None` when unstated."""
+
+    ref: str | None
+    title: str | None
+
+    @property
+    def name(self) -> str | None:
+        """The dataset's name for a reader: its title, else the last part of its ref
+        (`OECDDAC1`), `None` when the block states neither."""
+        return self.title or (self.ref.rsplit("/", 1)[-1] if self.ref else None)
+
+
+def block_dataset(block: Mapping[str, Any] | None) -> BlockDataset:
+    """The dataset `block`, a spec block, counts from (`BlockDataset`)."""
+    facets = ((block or {}).get("resolved") or {}).get("facets") or {}
+    provenance = facets.get("provenance") or {}
+    ref, title = provenance.get("ref"), provenance.get("label")
+    return BlockDataset(
+        ref if isinstance(ref, str) and ref else None,
+        title if isinstance(title, str) and title else None,
+    )
 
 
 def option_axis(option_id: str) -> str:
@@ -56,11 +85,12 @@ def option_axis(option_id: str) -> str:
     return option_id.split(":", 1)[0]
 
 
-# The axes and reason codes this release reads. Search's vocabularies are
-# open: a later release can add to either, and a record holding a value
-# outside them stays readable (`_on_known_axes`, `OptionAvailability.code`,
-# `DroppedEntry.code`).
+# The axes, provider scopes and reason codes this release reads. Search's
+# vocabularies are open: a later release can add to any, and a record holding
+# a value outside them stays readable (`_on_known_axes`, `_readable_choices`,
+# `OptionAvailability.code`, `DroppedEntry.code`).
 _KNOWN_AXES = frozenset(get_args(ScopeAxis))
+_KNOWN_PROVIDER_SCOPES = frozenset(get_args(ProviderScope))
 _KNOWN_REASONS = frozenset(get_args(ScopeReasonCode))
 
 
@@ -76,6 +106,65 @@ def _on_known_axes(items: Any, *path: str) -> Any:
         return not isinstance(item, str) or item in _KNOWN_AXES
 
     return [item for item in items if known(item)] if isinstance(items, list | tuple) else items
+
+
+def _named_provider_scope(option: Any) -> object:
+    """The provider scope a raw option from Search counts: its provider binding's
+    scope, or, for an option binding anything else, the value its id names on the
+    provider axis (`provider:bilateral` binding DAC1 bilateral ODA's code); `None`
+    for an option naming none."""
+    if not isinstance(option, Mapping):
+        return None
+    binding = option.get("binding")
+    if isinstance(binding, Mapping) and binding.get("kind") == "provider":
+        return binding.get("scope")
+    option_id = option.get("option_id")
+    if not isinstance(option_id, str):
+        return None
+    axis, _, value = option_id.partition(":")
+    return value if axis == "provider" else None
+
+
+def _readable_choices(items: Any) -> Any:
+    """`items`, a scope's raw choices from Search, without each choice on an axis this
+    release does not read (`_on_known_axes`), and each choice without its options of
+    a provider scope it does not read (`_named_provider_scope`). A choice holding
+    such an option active would hold nothing, so it is left out whole, and the
+    part's other choices stay.
+
+    An option holding no scope string is kept, so validation refuses it.
+    """
+    kept = _on_known_axes(items, "axis")
+    if not isinstance(kept, list):
+        return kept
+    readable = []
+    for choice in kept:
+        options = choice.get("options") if isinstance(choice, Mapping) else None
+        if not isinstance(options, list | tuple):
+            readable.append(choice)
+            continue
+        unread = {
+            option.get("option_id")
+            for option in options
+            if isinstance(scope := _named_provider_scope(option), str)
+            and scope not in _KNOWN_PROVIDER_SCOPES
+        }
+        if not unread:
+            readable.append(choice)
+            continue
+        if choice.get("active") in unread:
+            continue
+        readable.append(
+            {
+                **choice,
+                "options": [
+                    option
+                    for option in options
+                    if not isinstance(option, Mapping) or option.get("option_id") not in unread
+                ],
+            }
+        )
+    return readable
 
 
 class SlotBinding(StrictModel):
@@ -107,7 +196,7 @@ class ProviderBinding(StrictModel):
     """An option that sets whose spending the answer counts."""
 
     kind: Literal["provider"] = "provider"
-    scope: Literal["bilateral", "inclusive"]
+    scope: ProviderScope
 
 
 class OptionAvailability(StrictModel):
@@ -137,6 +226,19 @@ class Option(StrictModel):
         Field(discriminator="kind"),
     ]
     availability: OptionAvailability
+
+    @property
+    def provider_scope(self) -> ProviderScope | None:
+        """Whose spending this option counts, on the provider axis: its binding's
+        scope, or, for an option binding a slot, the scope its id names, as a
+        published total's sibling row (`provider:bilateral` binding DAC1 bilateral
+        ODA's code under DAC1 total ODA); `None` off the provider axis."""
+        if isinstance(self.binding, ProviderBinding):
+            return self.binding.scope
+        axis, _, value = self.option_id.partition(":")
+        if axis != "provider":
+            return None
+        return next((scope for scope in get_args(ProviderScope) if scope == value), None)
 
 
 class ScopeChoice(StrictModel):
@@ -225,11 +327,17 @@ class PartScope(StrictModel):
     compiled: CompiledScope
     ledger: tuple[LedgerStep, ...] = ()
 
-    @field_validator("entries", "choices", "ledger", mode="before")
+    @field_validator("entries", "ledger", mode="before")
     @classmethod
     def _known_axes(cls, items: object) -> object:
-        """Each choice, entry and switch on an axis this release reads; the others are left out."""
+        """Each entry and switch on an axis this release reads; the others are left out."""
         return _on_known_axes(items, "axis")
+
+    @field_validator("choices", mode="before")
+    @classmethod
+    def _known_choices(cls, items: object) -> object:
+        """Each choice this release reads (`_readable_choices`); the others are left out."""
+        return _readable_choices(items)
 
     @field_validator("dropped_entries", mode="before")
     @classmethod
@@ -246,7 +354,9 @@ class PartScope(StrictModel):
         part's scope choices readable. The record keeps the declared fields
         alone, and a stored one is read back with no field ignored. A value
         Search added to an open vocabulary degrades only what holds it: a
-        choice or entry on an unknown axis is left out, an unknown reason
+        choice or entry on an unknown axis is left out, as is an option of an
+        unknown provider scope, or the choice holding one active
+        (`_readable_choices`), an unknown reason
         code reads as none, a dropped entry's unknown code as the one its
         provenance gives, and a component keeps whatever role it names.
 

@@ -671,9 +671,19 @@ def test_a_dropped_entry_states_the_option_asked_for_and_why_in_text_and_structu
     ]
 
 
-def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_served_option() -> (
-    None
-):
+@pytest.mark.parametrize(
+    ("cause", "because"),
+    [
+        ("axis_absent", "this answer has no provider choice"),
+        ("cause_from_a_later_release", "Search could not apply it [cause_from_a_later_release]"),
+    ],
+    ids=["axis-absent", "unknown-cause"],
+)
+def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_served_option(
+    cause: str, because: str
+) -> None:
+    """A cause this release has no words for says only that Search could not
+    apply the entry, never that it conflicts with another choice."""
     spec = _scope_spec()
     spec["resolved"]["scope_choices"]["dropped_entries"] = [
         {
@@ -683,7 +693,7 @@ def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_se
                 "provenance": "carried",
                 "origin": {"kind": "choice", "choice_id": "earlier:provider"},
             },
-            "cause": "axis_absent",
+            "cause": cause,
         }
     ]
 
@@ -691,10 +701,58 @@ def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_se
 
     assert (
         "Scope choice provider not applied: asked for provider:inclusive (carried), "
-        "because this answer has no provider choice."
+        f"because {because}."
     ) in render_digest(envelope).splitlines()
     dropped = render_answer(envelope)["parts"][0]["specs"][0]["dropped_scope_entries"]
     assert dropped[0]["served"] is None
+
+
+@pytest.mark.parametrize(
+    ("availability", "because"),
+    [
+        (
+            {
+                "status": "unavailable",
+                "code": "conflicts_with",
+                "detail": {
+                    "entry": "measure_basis:net",
+                    "cause": "imputed_gross_disbursements_only",
+                },
+            },
+            "it conflicts with another choice [imputed_gross_disbursements_only]",
+        ),
+        (
+            {"status": "available", "detail": {}},
+            "Search could not apply it [imputed_gross_disbursements_only]",
+        ),
+        (
+            {"status": "unavailable", "code": "conflicts_with", "detail": "measure_basis:net"},
+            "Search could not apply it [imputed_gross_disbursements_only]",
+        ),
+    ],
+    ids=["declared-conflict", "no-conflict-stated", "detail-not-a-mapping"],
+)
+def test_a_dropped_entry_a_declared_conflict_kept_out_reads_as_a_conflict(
+    availability: dict[str, Any], because: str
+) -> None:
+    """An entry dropped under a declared conflict's own cause, which the option
+    it asked for names as the conflict blocking it, reads as a conflict; the
+    same cause on an option naming no conflict, or naming one in a `detail`
+    that is no mapping, says only that Search could not apply it."""
+    spec = _inclusive_request_served_bilateral()
+    scope = spec["resolved"]["scope_choices"]
+    (provider,) = [c for c in scope["choices"] if c["axis"] == "provider"]
+    provider["options"][1]["availability"] = availability
+    scope["dropped_entries"][0]["cause"] = "imputed_gross_disbursements_only"
+
+    envelope = _envelope("definite", spec=spec)
+
+    assert (
+        "Scope choice provider not applied: asked for bilateral plus imputed multilateral "
+        f"(explicit); served bilateral, because {because}."
+    ) in render_digest(envelope).splitlines()
+    dropped = render_answer(envelope)["parts"][0]["specs"][0]["dropped_scope_entries"]
+    assert dropped[0]["reason"] == because
 
 
 def test_no_dropped_entry_adds_no_line_and_no_answer_field() -> None:

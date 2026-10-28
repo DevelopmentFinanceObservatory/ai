@@ -43,6 +43,7 @@ straight off that answer, with nothing here to fetch it back a second time.
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -50,7 +51,9 @@ from typing import TYPE_CHECKING, Any, cast, override
 
 from compiler.sources import block_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
+from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.scope import ChoiceOrigin, ScopeEntry
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
 from google.adk.planners import BuiltInPlanner
@@ -83,13 +86,16 @@ from submission.service import (
     SearchedPin,
     Unpinned,
     aligned_pins,
+    axis_slot,
     basis_unservable,
     part_scope,
     realignments_wanted,
     save_aligned_pin,
     save_searched_pin,
+    share_whole_underivable,
     submit,
     unpinned_wanted,
+    unread_part,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import (
@@ -132,6 +138,7 @@ from planner.plan import (
     load_plan,
     pin_sources,
     plan_revision,
+    record_optional_decline,
     record_reduction_refused_asks,
     record_unsupported,
     save_full_history,
@@ -266,6 +273,20 @@ _PLANNING = (
     "in one unit, `quotient_of` only for one measure per unit of another, "
     'such as a per-head or per-capita figure or "divide one by the '
     'other", and `join` only across different measures.\n\n'
+    "When a share divides a sector's figure by the same party's total "
+    "across every sector, as US health aid over all US aid, state that "
+    "total as a dataset requirement with `whole_of` naming the part's "
+    "requirement and `axis='sector'`, the part's entities and `across`, and "
+    "no `source` or `source_spec_id`: it is counted from the part's own "
+    "dataset, on the same donors, measure basis and providers, and only "
+    "that share reads it. Leave "
+    "`whole_of` unset when the whole binds a sector itself, as health aid "
+    "does under malaria aid, when the share is one party's part of other "
+    "parties' total, as one donor's share of all aid to Kenya, or when the "
+    "question names another source for the total. Set "
+    "`accept_provider_difference` on a share only when the user asked for "
+    'another source\'s total, as "use the DAC1 total" does, with that total '
+    "pinned, and never to get past a refusal.\n\n"
     "An `axis` or a `denominator_axis` names a role its side's entities "
     "state, or `'country'` for places stating none. A family of StatVars "
     "is read summed or separately (see `stat_vars`).\n\n"
@@ -1156,6 +1177,10 @@ class ToolContextSession:
         """Record `operation` as answered `unsupported` in this planner entry."""
         record_unsupported(self.tool_context.state, operation)
 
+    def record_optional_decline(self, operation: UnsupportedOperation) -> None:
+        """Permit `operation` as an optional decline in this planner entry."""
+        record_optional_decline(self.tool_context.state, operation)
+
     def record_reduction_refused(self, asks: Iterable[int]) -> None:
         """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
         record_reduction_refused_asks(self.tool_context.state, asks)
@@ -1404,7 +1429,11 @@ async def compile_on_basis(
     answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
     `OPERATION_UNSUPPORTED` when it refuses the options or answers with no
     one dataset.
+
+    A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
+    if realignment.whole_axis is not None:
+        return await compile_whole(surface, realignment, state=state)
     sources = pin_sources(state)
     source = sources.get(realignment.spec_id)
     block = source.spec_block(realignment.spec_id) if source is not None else None
@@ -1416,7 +1445,10 @@ async def compile_on_basis(
 
     def unservable(reason: str) -> dict[str, object]:
         return basis_unservable(
-            **realignment._asdict(),
+            spec_id=realignment.spec_id,
+            option_ids=realignment.option_ids,
+            requirement_id=realignment.requirement_id,
+            step_id=realignment.step_id,
             reason=reason,
             record=lambda operation: record_unsupported(state, operation),
             proposer=PROPOSE_PLAN_PROPOSER,
@@ -1474,6 +1506,116 @@ async def compile_on_basis(
         ),
     )
     return None
+
+
+async def compile_whole(
+    surface: ToolSurface,
+    realignment: Realignment,
+    *,
+    state: SessionState,
+) -> dict[str, object] | None:
+    """Compile the declared whole `realignment` names from its part, and hold it as a pin.
+
+    The part is the pin `realignment.spec_id` and the axis left open
+    `realignment.whole_axis`. Posts the part's base identity with the slot
+    its choice on that axis binds (`submission.service.axis_slot`) set
+    unbound, under the spec_id that identity hashes to, the part's entity
+    groups, and one explicit entry from each of its other choices holding
+    its active option, with the concept of the part's entry on that axis.
+    Search then keeps the part's measure basis, provider scope and region,
+    which an option the whole cannot serve would otherwise leave to
+    Search's default. No model call is made. The planner is shown the answer
+    as a source of its own (the part's source holding the whole's block, as
+    `compile_on_basis` holds a realigned one). The whole takes its choices
+    from its part. Each carries the part's provenance, and the block marks
+    as the planner's (`harness.scope_choices.mark_planner_axes`) the axes
+    the part's block marks, so the whole reads as settled the way the part
+    was and a later search carries what the part's carries. It is held as a
+    `submission.service.AlignedPin` from the part on that axis, which every
+    whole declaring the part and the axis pins.
+
+    Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
+    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` under a cause
+    naming why: the part's pin is not among the datasets shown
+    (`part_not_shown`), is shown with no block (`part_block_missing`), holds
+    scope choices this release cannot read (`scope_unreadable`), or offers no
+    choice on the axis binding one slot (`axis_not_held`); or Search refuses
+    the whole (as `requested_option_unavailable` where it cannot hold an
+    option the part holds), or answers with no one dataset (`whole_refused`).
+    """
+    part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
+
+    def underivable(reason: str, cause: str = "whole_refused") -> dict[str, object]:
+        return share_whole_underivable(
+            whole_id=realignment.requirement_id, part_spec_id=part_pin, reason=reason, cause=cause
+        )
+
+    sources = pin_sources(state)
+    source = sources.get(part_pin)
+    block = source.spec_block(part_pin) if source is not None else None
+    scope = part_scope(part_pin, block)
+    slot = axis_slot(scope, axis) if scope is not None else None
+    if source is None or block is None or scope is None or slot is None:
+        return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
+    identity = copy.deepcopy(scope.base.identity)
+    for held in identity.get("slots") or ():
+        if held.get("property") == slot:
+            held["binding"] = {"state": "unbound"}
+    concepts = {entry.axis: entry.concept for entry in scope.entries}
+    entries = [
+        ScopeEntry(
+            axis=choice.axis,
+            option_id=choice.active,
+            provenance="explicit",
+            concept=concepts.get(choice.axis),
+            origin=ChoiceOrigin(choice_id=choice.id),
+        )
+        for choice in scope.choices
+        if choice.axis != axis
+    ]
+    try:
+        part = await resolve_definition(
+            surface,
+            spec_id=spec_id_for(canonicalize(identity)),
+            identity=identity,
+            groups=block_groups(block),
+            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
+        )
+    except DefinitionNotResolvedError as exc:
+        if exc.retryable:
+            return _basis_uncompiled(realignment, str(exc))
+        return underivable(
+            f"Search does not count {part_pin}'s dataset over every {axis} the way the part is "
+            f"counted ({exc.code or 'refused'}): {exc}"
+        )
+    spec = part.get("spec") if part.get("status") == "definite" else None
+    spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
+    if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
+        return underivable(f"Search holds no one dataset counting every {axis} of {part_pin}")
+    inherited: dict[str, str] = {
+        choice.axis: choice.provenance for choice in scope.choices if choice.axis != axis
+    }
+    digest = resolver_digest({"parts": [_with_provenance(part, inherited)]})
+    mark_planner_axes(digest, planner_axes(block) & inherited.keys())
+    whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
+    save_pin_sources(state, {**sources, spec_id: whole_source})
+    save_aligned_pin(
+        state,
+        AlignedPin(origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis),
+    )
+    return None
+
+
+def _with_provenance(part: Mapping[str, Any], provenance: Mapping[str, str]) -> dict[str, Any]:
+    """A copy of `part`, a `definite` Search part, whose scope choice on each axis of
+    `provenance` carries the provenance given for that axis (`compile_whole`)."""
+    copied = copy.deepcopy(dict(part))
+    resolved = copied["spec"].get("resolved")
+    scope = resolved.get("scope_choices") if isinstance(resolved, dict) else None
+    for choice in (scope or {}).get("choices") or ():
+        if isinstance(choice, dict) and choice.get("axis") in provenance:
+            choice["provenance"] = provenance[choice["axis"]]
+    return copied
 
 
 async def pin_by_search(
@@ -1589,12 +1731,15 @@ async def with_source_reads(
     stating no first year is held too, and the next refusal says so
     (`first_year_read_failed`). A calculation one of whose inputs pins no
     dataset while another carries a basis choice needs that input searched
-    for and pinned (`BASIS_UNKNOWN`, `pin_by_search`); a search held for the
-    requirement's content is made once. A calculation whose inputs are
+    for and pinned (`BASIS_UNKNOWN`, `pin_by_search`), as does the part of
+    a declared whole; a search held
+    for the requirement's content is made once. A calculation whose inputs are
     counted on different measure bases or provider scopes needs each input
     it names compiled on their shared options, every option of one input in
-    one compile (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
-    compiled on a set of options is asked for once, so a refusal naming one
+    one compile (`BASES_UNALIGNED`, `compile_on_basis`), and a declared
+    whole needs its part compiled with the axis left open (`compile_whole`);
+    a pin already compiled on a set of options, or a whole already compiled,
+    is asked for once, so a refusal naming one
     is answered as it stands, and inputs sharing a pin and a set of options
     compile it once (`_alignment_key`).
     """
@@ -1621,8 +1766,11 @@ async def with_source_reads(
                     return refused
             continue
         wanted = realignments_wanted(result)
-        done = {_alignment_key(pin.origin, pin.option_ids) for pin in aligned_pins(state)}
-        keys = [_alignment_key(item.spec_id, item.option_ids) for item in wanted]
+        done = {
+            _alignment_key(pin.origin, pin.option_ids, pin.whole_axis)
+            for pin in aligned_pins(state)
+        }
+        keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
         if not wanted or any(key in done for key in keys):
             return result
         for item, key in zip(wanted, keys, strict=True):
@@ -1634,13 +1782,15 @@ async def with_source_reads(
             done.add(key)
 
 
-def _alignment_key(spec_id: str, option_ids: Iterable[str]) -> tuple[str, tuple[str, ...]]:
-    """The compile that puts the pin `spec_id` on the options `option_ids`, as a key.
+def _alignment_key(
+    spec_id: str, option_ids: Iterable[str], whole_axis: str | None
+) -> tuple[str, tuple[str, ...], str | None]:
+    """The compile that puts the pin `spec_id` on the options `option_ids`, or leaves its choice on `whole_axis` open, as a key.
 
     The options are sorted and deduplicated, so one compile naming the same
     options in another order is the same work.
     """
-    return spec_id, tuple(sorted(set(option_ids)))
+    return spec_id, tuple(sorted(set(option_ids))), whole_axis
 
 
 def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:

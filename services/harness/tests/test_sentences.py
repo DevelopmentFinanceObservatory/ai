@@ -38,12 +38,14 @@ from harness.sentences import (
     MAX_SENTENCE_CHARS,
     REFERRAL_REASONS,
     RETRY_MODE_SENTENCES,
+    SEAM_REASONS,
     SEAM_SENTENCES,
-    TERMINAL_PROPOSE_CODES,
     FailureClass,
+    PlanWords,
     SeamCode,
     failure_sentence,
     referral_reason,
+    refusal_reason,
     refusal_sentence,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
@@ -60,9 +62,10 @@ from translator.referral import ReferralKind
         (REFERRAL_REASONS, set(ReferralKind)),
         (COMPILE_REASONS, set(CompileIssueCode)),
         (DECLINE_REASONS, set(UnsupportedOperation)),
-        (SEAM_SENTENCES, set(SeamCode) | TERMINAL_PROPOSE_CODES),
+        (SEAM_SENTENCES, set(SeamCode) | set(ProblemCode)),
+        (SEAM_REASONS, set(SeamCode) | set(ProblemCode)),
     ],
-    ids=["referral", "compile", "decline", "seam"],
+    ids=["referral", "compile", "decline", "seam", "seam-reason"],
 )
 def test_every_code_has_exactly_one_sentence(
     table: Mapping[StrEnum, str], codes: Collection[StrEnum]
@@ -78,7 +81,7 @@ def test_a_reason_is_a_clause_another_sentence_can_carry(clause: str) -> None:
     assert not clause.endswith(".")
 
 
-@pytest.mark.parametrize("code", [*SeamCode, *TERMINAL_PROPOSE_CODES])
+@pytest.mark.parametrize("code", [*SeamCode, *ProblemCode])
 def test_every_seam_sentence_fills_from_an_empty_detail(code: StrEnum) -> None:
     text = refusal_sentence({"code": code})
 
@@ -123,6 +126,107 @@ def test_a_plan_not_ready_sentence_carries_the_referral_it_ended_on() -> None:
 
     assert "'aid_by_donor'" in text
     assert COMPILE_REASONS[CompileIssueCode.FAMILY_UNSUMMABLE] in text
+
+
+_REQUIREMENT_ID = "total_aid_dac1"
+_STEP_ID = "share_health"
+
+
+@pytest.mark.parametrize("code", [*SeamCode, *ProblemCode])
+@pytest.mark.parametrize(
+    "where",
+    [
+        {"requirement_id": _REQUIREMENT_ID},
+        {"basis": {"requirement_id": _REQUIREMENT_ID, "step_id": _STEP_ID}},
+    ],
+    ids=["requirement", "basis"],
+)
+@pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
+def test_a_reason_names_a_requirement_by_its_readers_name_and_never_by_its_id(
+    code: StrEnum, where: dict[str, object], named: bool
+) -> None:
+    """A requirement the user's reason is about reads by the name the plan
+    card gives it, and with no name it goes unnamed: its id reads as a fault.
+    The planner's sentence keeps the id, which a repair cites."""
+    words = PlanWords(
+        names={_REQUIREMENT_ID: "official development assistance"} if named else {},
+        inputs={_STEP_ID: ("health_crs", _REQUIREMENT_ID)},
+    )
+
+    text = refusal_reason({"code": code, "detail": where}, words=words)
+
+    assert _REQUIREMENT_ID not in text
+    assert not {_STEP_ID, "health_crs"} & set(re.findall(r"[\w']+", text))
+    if named and any(f"{{{slot}}}" in SEAM_REASONS[code] for slot in ("at", "about", "lead")):
+        assert "official development assistance" in text
+
+
+@pytest.mark.parametrize("code", [*SeamCode, *ProblemCode])
+def test_a_reason_is_one_sentence_saying_why_alone(code: StrEnum) -> None:
+    reason = refusal_reason({"code": code})
+
+    assert "{" not in reason
+    assert reason[0].isupper()
+    assert reason.endswith(".")
+    assert ". " not in reason
+    assert "nothing was recorded" not in reason
+
+
+def test_a_reason_for_an_input_off_its_calculations_provider_scope_names_both_sides() -> None:
+    reason = refusal_reason(
+        {
+            "code": ProblemCode.OPERATION_UNSUPPORTED,
+            "detail": {
+                "operation": "unsupported_ask",
+                "basis": {
+                    "requirement_id": "total",
+                    "step_id": "share",
+                    "option_ids": ["provider:inclusive"],
+                },
+            },
+        },
+        words=PlanWords(
+            names={"total": "official development assistance", "health": "health aid"},
+            inputs={"share": ("health", "total")},
+        ),
+    )
+
+    assert reason == (
+        "Official development assistance would then count different providers' spending "
+        "from health aid."
+    )
+
+
+@pytest.mark.parametrize(
+    ("detail", "reason"),
+    [
+        (
+            {"operation": "unsupported_ask", "basis": {"option_ids": ["provider:inclusive"]}},
+            "count different providers' spending",
+        ),
+        (
+            {"operation": "unsupported_ask", "basis": {"option_ids": ["measure_basis:net"]}},
+            "counted on different measure bases",
+        ),
+        (
+            {"operation": "breakdown_not_kept"},
+            DECLINE_REASONS[UnsupportedOperation.BREAKDOWN_NOT_KEPT],
+        ),
+    ],
+    ids=["provider", "measure-basis", "declined-operation"],
+)
+def test_an_unsupported_calculation_says_why_it_cannot_be_made(
+    detail: dict[str, object], reason: str
+) -> None:
+    text = refusal_sentence(
+        {
+            "code": ProblemCode.OPERATION_UNSUPPORTED,
+            "detail": {**detail, "requirement_id": "total"},
+        }
+    )
+
+    assert text.startswith("This cannot be calculated as planned for requirement 'total'")
+    assert reason in text
 
 
 def test_the_budget_refusal_is_stated_as_a_per_entry_budget_in_the_user_s_terms() -> None:
@@ -180,7 +284,7 @@ _FAILURE_SOURCES: tuple[Collection[str], ...] = (
     _spec_kit_presentation_codes(),
     # The codes a refused plan's step is worded from.
     SeamCode,
-    TERMINAL_PROPOSE_CODES,
+    ProblemCode,
 )
 _TEXTS = {**{str(c): FAILURE_SENTENCES[FAILURE_CLASS[c]] for c in FAILURE_CLASS}, **CODE_SENTENCES}
 _MODES = (None, *RetryMode)
@@ -213,6 +317,7 @@ def test_a_failure_code_sits_in_one_class_and_in_no_other_table() -> None:
     assert classed & {str(code) for code in CompileIssueCode} == {
         "entity_ambiguous",
         "unknown_tool",
+        "requirement_unknown",
     }
 
 

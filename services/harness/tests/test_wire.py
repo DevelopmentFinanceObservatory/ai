@@ -47,6 +47,7 @@ from harness.wire import (
     OperationAxis,
     OperationVerb,
     OptionAnswer,
+    PlanApproved,
     PlanDecision,
     PlanOperation,
     PlanProposed,
@@ -84,6 +85,8 @@ EVENT_FIXTURES = {
     "event-13-elicitation-skippable.json": ElicitationRequest,
     "event-14-elicitation-questions.json": ElicitationRequest,
     "event-15-suggestions-apply-choice.json": Suggestions,
+    "event-16-plan-approved.json": PlanApproved,
+    "event-17-plan-proposed-switch-failed.json": PlanProposed,
 }
 
 REQUEST_FIXTURES = {

@@ -7,14 +7,28 @@ dependency on either, and neither do these tests.
 
 from __future__ import annotations
 
+import json
 import typing
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 from harness.plan_display import (
+    _card_label,
+    _concepts,
     _label,
+    basis_free,
+    card_decision_text,
+    card_questions,
+    card_rows,
+    card_summary,
+    card_title,
+    choice_id,
+    chosen_scope_decision,
+    listed_together,
     operation_rows,
+    plan_words,
     requirement_rows,
     share_wholes,
     shown_decisions,
@@ -58,6 +72,8 @@ from planner.plan import (
     ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
+    WholeOf,
+    frame_shapes,
     scope_choice_slot,
 )
 from planner.records import (
@@ -105,7 +121,7 @@ from .share_plan import (
     us_share_of_kenya_oda,
     us_share_per_recipient,
 )
-from .split_plan import SPEC_DEBT, stored_split_plan
+from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 
 # The `decision` fixture, from `services/harness/tests/conftest.py`. Annotated
 # structurally rather than imported, the same discipline `tests/planner/test_plan.py`
@@ -487,7 +503,9 @@ def test_sources_counted_alike_share_one_scope_row_and_others_keep_their_own(
 ) -> None:
     """Two pins whose sector choices are the same share one row, the user's;
     basis choices whose options are not equally available keep a row each.
-    Each requirement cites the row standing for its own decision."""
+    Each requirement cites the row standing for its own decision. A row's id
+    is the first requirement pinning one of its sources and the axis,
+    whichever decision of the row is listed, and names that decision."""
     sector_a = _scope_decision(_SPEC_A, "sector")
     sector_b = _scope_decision(_SPEC_B, "sector", resolved_by=ResolvedBy.USER)
     basis_a = _scope_decision(_SPEC_A, "measure_basis")
@@ -523,6 +541,108 @@ def test_sources_counted_alike_share_one_scope_row_and_others_keep_their_own(
         "aid_a": ["measure", sector_b.slot, basis_a.slot],
         "aid_b": ["measure", sector_b.slot, basis_b.slot],
     }
+    assert [choice_id(plan, d) for d in (sector_a, sector_b, basis_a, basis_b)] == [
+        "aid_a:sector",
+        "aid_a:sector",
+        "aid_a:measure_basis",
+        "aid_b:measure_basis",
+    ]
+    assert chosen_scope_decision(plan, "aid_a:sector") == sector_b
+    # A card sent before these ids names the listed row by Search's own id.
+    assert chosen_scope_decision(plan, f"{_SPEC_B}:sector") == sector_b
+    assert chosen_scope_decision(plan, f"{_SPEC_A}:sector") is None
+
+
+@pytest.mark.parametrize("merged", [False, True], ids=["apart", "merged"])
+def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
+    decision: DecisionFactory, merged: bool
+) -> None:
+    """The numerator's and the denominator's basis decisions on different
+    options are two rows, each with its own requirement's id. Switched to the
+    same option they become one row, which takes the first requirement's id
+    in plan order and stands for both, so a switch of it moves both; apart
+    again, each row has its own id back."""
+    numerator = _scope_decision(_SPEC_A, "measure_basis")
+    denominator = _scope_decision(_SPEC_B, "measure_basis")
+    if not merged:
+        denominator = denominator.model_copy(update={"chosen": "measure_basis:net label"})
+
+    def dataset(id: str, pin: str, cited: Decision) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure", cited.slot],
+            measure="aid",
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    plan = Plan(
+        question="US health aid as a share of US aid",
+        decisions=[decision(), numerator, denominator],
+        evidence_requirements=[
+            dataset("health_aid", _SPEC_A, numerator),
+            dataset("total_aid", _SPEC_B, denominator),
+        ],
+    )
+
+    rows = [d for d in shown_decisions(plan) if d.scope is not None]
+    ids = [choice_id(plan, row) for row in rows]
+    if merged:
+        assert ids == ["health_aid:measure_basis"]
+        (row,) = rows
+        assert chosen_scope_decision(plan, "health_aid:measure_basis") == row
+        assert listed_together(plan, row.slot) == (numerator, denominator)
+    else:
+        assert ids == ["health_aid:measure_basis", "total_aid:measure_basis"]
+        assert [chosen_scope_decision(plan, id) for id in ids] == [numerator, denominator]
+
+
+@pytest.mark.parametrize(
+    ("measure", "named"),
+    [
+        ("health gross disbursements", "health"),
+        ("Gross disbursements", "Gross disbursements"),
+        (
+            "gross disbursements for official development assistance",
+            "gross disbursements for official development assistance",
+        ),
+        (
+            "gross disbursements (official development assistance)",
+            "gross disbursements (official development assistance)",
+        ),
+        ("aid to health in gross disbursements", "aid to health in gross disbursements"),
+        ("official development assistance gross disbursements", "official development assistance"),
+        ("health grant equivalents (OECD headline)", "health"),
+        ("health grant equivalents", "health"),
+        ("health ODA (grant equivalents)", "health ODA"),
+    ],
+    ids=[
+        "basis-words-dropped",
+        "basis-words-alone-kept",
+        "dac1-measure-kept-whole",
+        "bracketed-rest-kept-whole",
+        "trailing-connective-kept-whole",
+        "leading-concept-kept",
+        "bracketed-label-dropped-whole",
+        "bracketed-label-without-its-note-dropped",
+        "brackets-emptied-by-the-removal-dropped",
+    ],
+)
+def test_a_measure_reads_without_its_basis_words_only_where_the_rest_names_it(
+    measure: str, named: str
+) -> None:
+    basis = _scope_decision(_SPEC_A, "measure_basis").model_copy(
+        update={
+            "options": (
+                "gross disbursements, current USD",
+                "net disbursements",
+                "grant equivalents (OECD headline)",
+            )
+        }
+    )
+
+    assert basis_free(measure, basis.options) == named
 
 
 def _one_requirement_compiled_plan(
@@ -2488,6 +2608,54 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
     ]
 
 
+def test_a_choice_row_names_its_input_as_the_card_labels_name_it(
+    decision: DecisionFactory,
+) -> None:
+    """`debt` and a health aid retrieval each pin a source whose basis choice offers
+    its options differently, so the card lists a Basis row for each, naming its
+    input. `debt`'s copy for the rolling growth is no row of the card, so `debt`
+    is named as its step label names it, with no party or number added."""
+    stored = split_draft(decision)
+    spec_health = "spec_" + "c" * 32
+    debt_basis = _scope_decision(SPEC_DEBT, "measure_basis")
+    health_basis = _scope_decision(spec_health, "measure_basis", other="unavailable")
+    pins = {"debt": SPEC_DEBT, "debt_history": SPEC_DEBT_HISTORY}
+    plan = Plan.model_validate(
+        {
+            **stored.model_dump(),
+            "decisions": [*stored.decisions, debt_basis, health_basis],
+            "evidence_requirements": [
+                *(
+                    requirement.model_copy(
+                        update={
+                            "decision_ids": (*requirement.decision_ids, debt_basis.slot),
+                            "source_spec_id": pins[requirement.id],
+                        }
+                    )
+                    if requirement.id in pins
+                    else requirement
+                    for requirement in stored.evidence_requirements
+                ),
+                DatasetRequirement(
+                    id="health",
+                    decision_ids=["measure", health_basis.slot],
+                    measure="health aid",
+                    entities=[Entity(name="Kenya", role="recipient")],
+                    period=Period(start=2015, end=2024),
+                    source_spec_id=spec_health,
+                ),
+            ],
+        }
+    )
+
+    questions = card_questions(plan)
+
+    assert (questions[debt_basis.slot], questions[health_basis.slot]) == (
+        "Basis: external debt service paid",
+        "Basis: health aid",
+    )
+
+
 @pytest.mark.parametrize(
     ("axes", "measure"),
     [
@@ -3052,3 +3220,404 @@ def test_a_numerator_population_is_the_denominators_by_its_identity_not_its_word
     wholes = share_wholes(plan)
 
     assert wholes == ({} if whole_words is None else {"share": whole_words})
+
+
+# Three plans a live harness proposed for US health aid, as the planner node's
+# payloads carried them: one retrieval and its total; a health share of all
+# US aid; and that share after the user switched its basis to net.
+_RECORDED_PLANS = Path(__file__).parent / "fixtures" / "plan_card_recorded.json"
+
+
+def _recorded_plan(name: str) -> Plan:
+    payload = json.loads(_RECORDED_PLANS.read_text())[name]
+    return Plan.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in ("summary", "revision", "moved")
+        }
+    )
+
+
+_HEALTH = "health incl. population and reproductive health"
+_LONG_LABELS = [
+    f"Fetch {_HEALTH} for United States",
+    f"Total {_HEALTH}",
+    "Fetch official development assistance for United States",
+    "Total official development assistance",
+    "Health incl. population and reproductive health as a share of official development assistance",
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "title", "summary", "labels"),
+    [
+        (
+            "short",
+            "Total health aid from the United States to Africa in 2024",
+            f"Gross disbursements, current USD, for {_HEALTH}, from United States to Africa "
+            "incl. regional and unspecified amounts, in 2024, from the OECD Creditor Reporting "
+            "System (CRS).",
+            [f"Fetch {_HEALTH} for United States and each member of Africa", f"Total {_HEALTH}"],
+        ),
+        (
+            "long",
+            "Health share of US ODA in 2023",
+            f"Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+            f"System (CRS): {_HEALTH} from United States to 129 recipients, as a share of the "
+            "total from United States to 152 recipients.",
+            _LONG_LABELS,
+        ),
+        (
+            "long_switched_to_net",
+            "Health share of US ODA in 2023",
+            f"Net disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+            f"System (CRS): {_HEALTH} from United States to 129 recipients, as a share of the "
+            "total from United States to 152 recipients.",
+            _LONG_LABELS,
+        ),
+    ],
+)
+def test_the_card_states_a_recorded_plan_once_in_short_labels(
+    name: str, title: str, summary: str, labels: list[str]
+) -> None:
+    """The card is titled by the ask and sums the plan up in one sentence;
+    each step label names what it fetches or computes in the reader's words,
+    leaving the basis and the sector codes to the summary and the choices,
+    so a one-year total says no "by year" and a switch to net leaves every
+    label as it was."""
+    plan = _recorded_plan(name)
+
+    rows = card_rows(plan)
+
+    assert card_title(plan) == title
+    assert card_summary(plan) == summary
+    assert [row["label"] for row in rows] == labels
+
+
+def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_measure() -> None:
+    """The recorded US health share with its total declared the health part over
+    every sector, under the planner's measure "Total aid to health": the whole's
+    labels name all sectors, the part's sector opened, and never that measure."""
+    plan = _recorded_plan("long")
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(
+                    update={
+                        "measure": "Total aid to health",
+                        "whole_of": WholeOf(part="us_health_aid_raw", axis="sector"),
+                    }
+                )
+                if r.id == "us_total_aid_raw"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+
+    labels = [row["label"] for row in card_rows(plan)]
+
+    assert labels == [
+        f"Fetch {_HEALTH} for United States",
+        f"Total {_HEALTH}",
+        "Fetch all sectors for United States",
+        "Total all sectors",
+        f"{_HEALTH[0].upper()}{_HEALTH[1:]} as a share of all sectors",
+    ]
+
+
+def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
+    decision: DecisionFactory,
+) -> None:
+    """US grant equivalents minus the UK's, both read from one DAC1 fetch of the
+    two donors: each side names the entity it narrows the fetch to, so the
+    card label, the step label, the sentence and the plan's words tell the two
+    sides apart."""
+    plan = Plan(
+        question="How much more grant-equivalent ODA did the US give than the UK in 2023?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="dac1",
+                decision_ids=["measure"],
+                measure="grant equivalents",
+                entities=[
+                    Entity(name="United States", role="donor"),
+                    Entity(name="United Kingdom", role="donor"),
+                ],
+                period=Period(start=2023, end=2023),
+            ),
+            ComparisonRequirement(
+                id="gap",
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="dac1", entity="United States"),
+                subtrahend=RequirementSide(input_id="dac1", entity="United Kingdom"),
+            ),
+        ],
+    )
+    gap = plan.requirement("gap")
+    us, uk = "grant equivalents for United States", "grant equivalents for United Kingdom"
+
+    card = _card_label(gap, plan, concepts=_concepts(plan), shapes=frame_shapes(plan))
+
+    assert card == f"Compare {us} to {uk}"
+    assert _label(gap, plan) == f"Compare {us} to {uk}"
+    (row,) = [row for row in requirement_rows(plan) if row["id"] == "gap"]
+    assert row["sentence"] == (
+        f"Grant equivalents for United States minus {uk}, at every period the two share."
+    )
+    assert plan_words(plan).names["gap"] == f"{us} against {uk}"
+
+
+@pytest.mark.parametrize(
+    ("donors", "labels"),
+    [
+        pytest.param(
+            ("United States", "United Kingdom"),
+            [
+                "Fetch grant equivalents for United States",
+                "Fetch grant equivalents for United Kingdom",
+            ],
+            id="parties-differ",
+        ),
+        pytest.param(
+            ("United States", "United States"),
+            [
+                "Fetch grant equivalents for United States (1)",
+                "Fetch grant equivalents for United States (2)",
+            ],
+            id="parties-equal",
+        ),
+    ],
+)
+def test_retrievals_named_alike_name_their_parties_once(
+    decision: DecisionFactory, donors: tuple[str, str], labels: list[str]
+) -> None:
+    """Two retrievals of one concept, as "compare US and UK health aid" plans
+    them: the concept names each one's parties, so the retrieval's label
+    adds them no second time."""
+    plan = Plan(
+        question="Compare US and UK grant equivalents in 2023.",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=f"dac1_{number}",
+                decision_ids=["measure"],
+                measure="grant equivalents",
+                entities=[Entity(name=donor, role="donor")],
+                period=Period(start=2023, end=2023),
+            )
+            for number, donor in enumerate(donors)
+        ],
+    )
+    concepts, shapes = _concepts(plan), frame_shapes(plan)
+
+    shown = [
+        _card_label(requirement, plan, concepts=concepts, shapes=shapes)
+        for requirement in plan.evidence_requirements
+    ]
+
+    assert shown == labels
+
+
+def test_a_card_answering_an_ask_of_only_whitespace_takes_the_plans_title() -> None:
+    plan = _recorded_plan("short")
+    plan = Plan.model_validate({**plan.model_dump(), "asks": [" \n "]})
+
+    assert card_title(plan) == "Research plan"
+
+
+@pytest.mark.parametrize("name", ["short", "long", "long_switched_to_net"])
+def test_the_one_step_answering_the_ask_gives_the_answer(name: str) -> None:
+    """Exactly one step gives the answer: the last step the ask's answer
+    names, whose description ends with the result's scope."""
+    plan = _recorded_plan(name)
+
+    rows = card_rows(plan)
+
+    answering = [row for row in rows if row["gives_answer"]]
+    assert [row["id"] for row in answering] == [plan.answered[-1].outputs[-1]]
+    assert str(answering[0]["description"]).endswith(
+        "Result: one figure, 2024." if name == "short" else "Result: one figure, 2023."
+    )
+
+
+def test_a_retrievals_description_is_searchs_account_of_its_source() -> None:
+    plan = _recorded_plan("long_switched_to_net")
+
+    fetch = card_rows(plan)[2]
+
+    assert fetch["description"] == (
+        "United States of America's net ODA disbursements to 152 recipients in 2023. "
+        "Current US dollars · OECD Creditor Reporting System (CRS)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("crs_total", "crs total"),
+        ("sector:120+130 health incl. population", "health incl. population"),
+        ("CRS total aid", "CRS total aid"),
+        ("gross disbursements, current USD", "gross disbursements, current USD"),
+    ],
+)
+def test_a_decision_shows_no_planner_slug_or_option_id(text: str, shown: str) -> None:
+    assert card_decision_text(text, _recorded_plan("long")) == shown
+
+
+@pytest.mark.parametrize(
+    ("ghana", "kenya", "names"),
+    [
+        (
+            ("Ghana", 2023, 2023),
+            ("Kenya", 2023, 2023),
+            ("health aid to Ghana", "health aid to Kenya"),
+        ),
+        (
+            ("Kenya", 2015, 2023),
+            ("Kenya", 2023, 2023),
+            ("health aid in 2015-2023", "health aid in 2023"),
+        ),
+        (("Kenya", 2023, 2023), ("Kenya", 2023, 2023), ("health aid", "health aid")),
+    ],
+    ids=["entity", "period", "alike"],
+)
+def test_requirements_a_sentence_names_alike_are_told_apart_by_the_facet_that_differs(
+    decision: Callable[..., Decision],
+    ghana: tuple[str, int, int],
+    kenya: tuple[str, int, int],
+    names: tuple[str, str],
+) -> None:
+    """Two retrievals named alike read with the one facet that sets each
+    apart, and a number tells none apart. A calculation reads by the names it
+    reads."""
+
+    def dataset(requirement_id: str, place: str, start: int, end: int) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="health aid",
+            entities=[Entity(name=place, role="recipient")],
+            period=Period(start=start, end=end),
+        )
+
+    plan = Plan(
+        question="Health aid to Ghana against Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("left", *ghana),
+            dataset("right", *kenya),
+            ComparisonRequirement(
+                id="both",
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="left"),
+                subtrahend=RequirementSide(input_id="right"),
+            ),
+        ],
+    )
+
+    words = plan_words(plan, names={"left": "health aid", "right": "health aid"})
+
+    assert (words.names["left"], words.names["right"]) == names
+    assert words.names["both"] == f"{names[0]} against {names[1]}"
+    assert words.inputs["both"] == ("left", "right")
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        AggregateRequirement(
+            id="over_share", input_id="health_share", reduction=Reduction.MEAN, group_by=[]
+        ),
+        GrowthRequirement(
+            id="over_share", input_id="health_share", window_start=2016, window_end=2020
+        ),
+        RankRequirement(
+            id="over_share",
+            input_id="health_share",
+            direction=RankDirection.HIGHEST_FIRST,
+            among=RankAmong.POPULATION,
+            reduction=Reduction.MEAN,
+        ),
+        FilterRequirement(
+            id="over_share", input_id="health_share", predicates=(ValueThreshold(op="gt", value=0),)
+        ),
+    ],
+    ids=["aggregate", "growth", "rank", "filter"],
+)
+def test_a_step_over_a_share_keeps_the_shares_summary(over: EvidenceRequirement) -> None:
+    """The answer is a total, growth, rank or filter over the recorded share: the
+    summary still says what the share divides, "as a share of" its denominator and
+    from which source."""
+    plan = _recorded_plan("long")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                *plan.evidence_requirements,
+                over.model_copy(update={"decision_ids": ("measure",)}),
+            ],
+            "answered": [plan.answered[0].model_copy(update={"outputs": ("over_share",)})],
+        }
+    )
+
+    assert card_summary(plan) == card_summary(_recorded_plan("long"))
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        ComparisonRequirement(
+            id="over_shares",
+            minuend=RequirementSide(input_id="health_share"),
+            subtrahend=RequirementSide(input_id="other_share"),
+        ),
+        SumOfRequirement(
+            id="over_shares",
+            left=RequirementSide(input_id="health_share"),
+            right=RequirementSide(input_id="other_share"),
+        ),
+    ],
+    ids=["comparison", "sum"],
+)
+def test_a_calculation_over_two_shares_has_no_summary(over: EvidenceRequirement) -> None:
+    """The answer is a comparison or sum of two shares: naming either share's
+    numerator alone would read as a plain amount, so the card shows its title only."""
+    plan = _recorded_plan("long")
+    share = plan.requirement("health_share")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                *plan.evidence_requirements,
+                share.model_copy(update={"id": "other_share"}),
+                over.model_copy(update={"decision_ids": ("measure",)}),
+            ],
+            "answered": [plan.answered[0].model_copy(update={"outputs": ("over_shares",)})],
+        }
+    )
+
+    assert card_summary(plan) is None
+
+
+def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> None:
+    """Both sides of the share total the same retrieval: the summary keeps
+    each side, joined by "as a share of", and does not read as one figure."""
+    plan = _recorded_plan("long")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                requirement.model_copy(update={"input_id": "us_health_aid_raw"})
+                if requirement.id == "us_total_aid_sum"
+                else requirement
+                for requirement in plan.evidence_requirements
+            ]
+        }
+    )
+
+    side = f"{_HEALTH} from United States to 129 recipients"
+    assert card_summary(plan) == (
+        "Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+        f"System (CRS): {side}, as a share of {side}."
+    )

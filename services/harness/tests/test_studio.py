@@ -23,6 +23,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -31,6 +32,8 @@ from typing import Any
 
 import anyio
 import harness.graph.execute as execute_module
+import harness.graph.planning as planning_module
+import harness.graph.switch as switch_module
 import harness.studio as studio_module
 import harness.studio_state as studio_state_module
 import httpx2
@@ -84,6 +87,7 @@ from harness.studio import (
 )
 from harness.studio_state import (
     ConversationState,
+    SegmentLost,
     StudioStore,
     _deserialize_pending,
     _PendingChoice,
@@ -105,6 +109,10 @@ from harness.wire import (
     ErrorCode,
     ErrorFrame,
     MessageDelta,
+    PlanApproved,
+    PlanDecision,
+    PlanDecisionOption,
+    PlanProposed,
     RetryMode,
     StepStatus,
     ToolError,
@@ -874,6 +882,17 @@ async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> Non
 
     events = _events(second)
     assert events[-1] == "done"
+    # The approved plan leads the resumed stream, once, as the card showed it.
+    assert events[0] == "plan.approved"
+    assert events.count("plan.approved") == 1
+    approved = _frame(second, "plan.approved")
+    assert approved["plan_version_id"] == plan["plan_version_id"]
+    assert approved["version"] == plan["version"]
+    assert approved["title"] == plan["title"]
+    assert approved["caveats"] == []
+    assert [step["label"] for step in approved["steps"]] == [
+        step["label"] for step in plan["steps"]
+    ]
     # The plan's own two steps ran through `tool_surface`, invisibly to this
     # `executor`: it saw the hand-back describe the plan's frame, then the chart.
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "write_component"]
@@ -1460,6 +1479,27 @@ async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running(
     assert conversation.turn_recorded is False  # the turn stays open for the takeover to finish
 
 
+async def test_an_approval_the_approve_node_refuses_sends_no_approved_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approve node takes no approval whose time it cannot read, and routes the
+    answer to the planner as an amendment: the stream offers the plan again and
+    names no approved plan."""
+    monkeypatch.setattr(planning_module, "_answered_at", lambda answer: None)
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    events = _events(second)
+    assert "plan.approved" not in events
+    assert events[-1] == "plan.proposed"
+
+
 async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
     executor = ScriptedExecutor()
     app = _app(
@@ -1479,6 +1519,7 @@ async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
 
         events = _events(second)
         assert events[-1] == "plan.proposed"
+        assert "plan.approved" not in events
         versioned = _frame(second, "plan.versioned")
         assert versioned["version"] == 2
         assert versioned["supersedes"] == plan_v1["plan_version_id"]
@@ -1492,6 +1533,8 @@ async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
         )
 
     assert _events(third)[-1] == "done"
+    assert _events(third).count("plan.approved") == 1
+    assert _frame(third, "plan.approved")["version"] == 2
     # The plan's own steps ran through `tool_surface`; `executor` only saw
     # the hand-back describe the plan's frame, then the chart.
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "write_component"]
@@ -2443,11 +2486,63 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
 
     assert _events(resumed)[-1] == "done"
     assert resumed[0]["seq"] >= saved_seq + 1000
+    # A's dead attempt sent the approved plan once the approve node took it.
+    assert "plan.approved" not in _events(resumed)
 
     reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert len(reloaded.approvals) == 1
     assert plan["interrupt_id"] not in reloaded.pending
+
+
+async def test_a_retry_after_an_attempt_that_died_before_the_approval_sends_it(
+    tmp_path: Path,
+) -> None:
+    """A's resume of a plan approval dies after `/interrupt`'s own save but before
+    the graph takes the approval, so it never sent `plan.approved`. B's retry of the
+    same answer, once A's segment expires, sends the approved plan once."""
+    clock = [1_000.0]
+    session_service = sqlite_session_service(tmp_path / "shared.db")
+    store_a = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    app_a = _app(*_plan(), session_service=session_service, store=store_a)
+    entered = asyncio.Event()
+
+    async def _dead(**_kwargs: Any) -> AsyncGenerator[Any]:
+        entered.set()
+        await asyncio.Event().wait()
+        yield  # an async generator that never yields a frame
+
+    async with _client(app_a) as client_a:
+        first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        app_a.state.studio._frames = _dead
+        attempt = asyncio.ensure_future(
+            _stream(
+                client_a, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        app_a.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+        cancel = await client_a.post(
+            "/api/studio/cancel",
+            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+            headers=AUTH,
+        )
+        assert cancel.status_code == 204
+        dead = await asyncio.wait_for(attempt, timeout=5)
+        assert "plan.approved" not in _events(dead)
+
+    clock[0] += studio_state_module.SEGMENT_TTL_S + 1  # A's segment has expired
+    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service, store=store_b)
+    async with _client(app_b) as client_b:
+        resumed = await _stream(
+            client_b, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    assert _events(resumed)[-1] == "done"
+    assert _events(resumed).count("plan.approved") == 1
+    assert _frame(resumed, "plan.approved")["revision"] == plan["revision"]
 
 
 class _CallingSurface(ScriptedSurface):
@@ -3139,6 +3234,133 @@ async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
 
     await asyncio.wait_for(closed.wait(), timeout=2)
     assert conversation.cancel_event is None  # disarmed on unwind
+
+
+async def test_a_switch_stream_arms_its_own_stop_and_clears_only_that_one() -> None:
+    """A stream running a switch arms `switch_stop` and the `SWITCH_STOP` its
+    frames read. Ending, it leaves alone a stop a later switch stream armed
+    meanwhile, so an earlier stream's unwind cannot disarm the next switch."""
+    seen: list[asyncio.Event | None] = []
+
+    async def segment():
+        seen.append(switch_module.SWITCH_STOP.get())
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    stream = _sse_stream(segment(), conversation=conversation, switch=True)
+    await anext(stream)
+    armed = conversation.switch_stop
+    later = conversation.switch_stop = asyncio.Event()
+    await stream.aclose()
+
+    assert armed is not None
+    assert seen == [armed]
+    assert conversation.switch_stop is later
+
+
+async def test_a_stopped_switch_still_sending_frames_ends_at_the_reoffer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A switch that goes on sending frames after the first Stop, faster than any
+    heartbeat wait: the stream still ends with `cancelled` once
+    `SWITCH_REOFFER_SECONDS` pass, so a Stop never leaves a stream open."""
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
+
+    async def segment():
+        yield _running_line(0)
+        await asyncio.sleep(0.05)  # idle while the Stop is read
+        seq = 1
+        while True:  # then each frame ready at once, so no wait times out
+            yield _running_line(seq)
+            seq += 1
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    conversation.begin_turn()
+    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    frames = _data_frames(sent)
+    assert frames[-1]["event"] == "error"
+    assert frames[-1]["error"]["error"] == "cancelled"
+
+
+async def test_a_segment_lost_as_the_reoffer_deadline_passes_keeps_the_turn_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped switch whose segment is taken over in the same wait in which
+    `SWITCH_REOFFER_SECONDS` pass: the stream ends on `transient_unavailable`
+    for the takeover, and leaves the turn open for the instance that took it."""
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
+    conversation = ConversationState(conversation_id=CONVERSATION)
+
+    async def segment():
+        yield _running_line(0)
+        await asyncio.sleep(0.05)  # idle while the Stop is read
+        # Blocks the loop past the deadline, so one wait sees both the
+        # deadline and the takeover the heartbeat records.
+        time.sleep(0.15)
+        _end_stream(conversation, "segment_lost")
+        yield _running_line(1)
+        await asyncio.Event().wait()
+
+    conversation.begin_turn()
+    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    frames = _data_frames(sent)
+    assert frames[-1]["error"]["error"] == "transient_unavailable"
+    assert not conversation.turn_recorded
+
+
+async def test_a_stopped_switch_that_reoffers_its_plan_keeps_the_turn_open_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A switch stopped once that offers its plan again, then takes longer than
+    `SWITCH_REOFFER_SECONDS` to unwind: the offered plan ends the deadline, so
+    the stream ends on it with no `cancelled` frame and the paused turn stays
+    open for the card the user now sees."""
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
+
+    async def segment():
+        yield _running_line(0)
+        await asyncio.sleep(0.05)  # idle while the Stop is read
+        yield PlanProposed(
+            event="plan.proposed",
+            seq=1,
+            interrupt_id="int_1",
+            plan_version_id="plan_1",
+            version=1,
+            title="Research plan",
+            steps=[],
+            actions=[],
+        )
+        await asyncio.sleep(0.3)  # the segment's teardown outlasts the deadline
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    conversation.begin_turn()
+    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    assert [frame["event"] for frame in _data_frames(sent)] == ["activity.step", "plan.proposed"]
+    assert not conversation.turn_recorded
 
 
 async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segment() -> None:
@@ -4491,7 +4713,8 @@ async def test_a_stale_approve_gets_the_current_card_and_the_shown_revision_appr
 async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None:
     """A switch the card offers resumes the turn with no approval record;
     the graph revises the plan and offers it on a fresh card. Here the plan
-    states no scope choice, so the same plan comes back with a note."""
+    states no scope choice, so the same plan comes back saying why on the
+    card, with no chat message."""
     app = _app(*_plan())
     async with _client(app) as client:
         plan = await _plan_with_a_choice(app, client)
@@ -4499,12 +4722,216 @@ async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None
 
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert conversation.approvals == []
-    assert _events(second)[-2:] == ["message.complete", "plan.proposed"]
+    assert "message.complete" not in _events(second)
+    assert _events(second)[-1] == "plan.proposed"
     again = _frame(second, "plan.proposed")
     assert again["interrupt_id"] != plan["interrupt_id"]
     assert again["revision"] == plan["revision"]
-    assert "nothing changed" in _frame(second, "message.complete")["text"]
+    assert again["switch_failed"]["reason"] == "That choice is no longer on the plan."
     assert conversation.turn_user_message.endswith("(then: count health and population)")
+
+
+@pytest.mark.parametrize(
+    ("stops", "deaf"),
+    [(1, False), (2, True), (1, True)],
+    ids=["one-stop", "a-second-stop", "no-offer-in-time"],
+)
+async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pause(
+    monkeypatch: pytest.MonkeyPatch, stops: int, deaf: bool
+) -> None:
+    """POST /cancel while the switch's revision runs: the stream reads on and
+    ends on the same plan re-offered under a fresh interrupt, carrying
+    `switch_failed` `switch_cancelled`, which asking again can get past; the
+    turn stays paused on it. A switch that does not hear the Stop ends as any
+    Stop ends a stream, on a second Stop or once `SWITCH_REOFFER_SECONDS`
+    pass with no offer."""
+    entered = asyncio.Event()
+
+    async def _revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        entered.set()
+        await asyncio.sleep(5)
+        raise AssertionError("a stopped revision is cancelled")
+
+    async def _deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
+        # A switch that does not hear the first Stop.
+        return await revision
+
+    monkeypatch.setattr(switch_module, "_switched_plan", _revising)
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.2 if stops == 1 else 4.0)
+    if deaf:
+        monkeypatch.setattr(switch_module, "_unless_stopped", _deaf)
+    app = _app(*_plan())
+    stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        resumed = asyncio.ensure_future(
+            _stream(client, "/api/studio/interrupt", _switch_body(plan))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        for _ in range(stops):
+            armed = conversation.cancel_event
+            assert armed is not None and not armed.is_set()
+            cancelled = await client.post("/api/studio/cancel", json=stop, headers=AUTH)
+            assert cancelled.status_code == 204
+            while conversation.cancel_event is armed:
+                await asyncio.sleep(0.01)
+        frames = await asyncio.wait_for(resumed, timeout=5)
+
+    if deaf:
+        assert _events(frames)[-1] == "error"
+        assert _frame(frames, "error")["error"]["error"] == "cancelled"
+        assert not conversation.pending
+        return
+    assert _events(frames)[-1] == "plan.proposed"
+    again = _frame(frames, "plan.proposed")
+    assert again["interrupt_id"] != plan["interrupt_id"]
+    assert again["revision"] == plan["revision"]
+    assert again["switch_failed"] == {
+        "choice_id": _CHOICE_ID,
+        "option_id": "sector:120+130",
+        "code": "switch_cancelled",
+        "reason": "You stopped this change, so the plan is as it was.",
+        "retryable": True,
+    }
+    assert list(conversation.pending) == [again["interrupt_id"]]
+    assert conversation.awaiting_answer
+    assert conversation.switch_stop is None
+
+
+@pytest.mark.parametrize("stops", [1, 2], ids=["one-stop", "a-second-stop"])
+async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stops: int
+) -> None:
+    """B POSTs `/cancel` while A's switch runs and the switch does not hear it:
+    A's heartbeat reads B's durable flag as the Stop of the switch and keeps
+    watching, so a second Stop from B ends A's stream with `cancelled` well
+    before `SWITCH_REOFFER_SECONDS`. One Stop alone lets the stream read on."""
+    monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 30.0)
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        entered.set()
+        await finish.wait()
+        raise switch_module.SwitchFailedError("r", code="c")
+
+    async def _deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
+        return await revision
+
+    monkeypatch.setattr(switch_module, "_switched_plan", _revising)
+    monkeypatch.setattr(switch_module, "_unless_stopped", _deaf)
+    session_service = sqlite_session_service(tmp_path / "shared.db")
+    app_a = _app(*_plan(), session_service=session_service)
+    app_b = _app(session_service=session_service)
+    stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+    async with _client(app_a) as client_a, _client(app_b) as client_b:
+        plan = await _plan_with_a_choice(app_a, client_a)
+        conversation = app_a.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        resumed = asyncio.ensure_future(
+            _stream(client_a, "/api/studio/interrupt", _switch_body(plan))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        switch_stop = conversation.switch_stop
+        assert switch_stop is not None
+        for _ in range(stops):
+            cancelled = await client_b.post("/api/studio/cancel", json=stop, headers=AUTH)
+            assert cancelled.status_code == 204
+            await asyncio.wait_for(switch_stop.wait(), timeout=5)
+        if stops == 1:
+            finish.set()
+        frames = await asyncio.wait_for(resumed, timeout=5)
+
+    if stops == 1:
+        assert _events(frames)[-1] == "plan.proposed"
+        return
+    assert _events(frames)[-1] == "error"
+    assert _frame(frames, "error")["error"]["error"] == "cancelled"
+
+
+async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_switch() -> None:
+    """Health counted as CRS 120, switched to CRS 120 and 130, then to CRS
+    130, then approved: `plan.approved` names CRS 120, the label on the card
+    the first switch was made from, as what the choice changed from."""
+    labels = {
+        "sector:120": "health (CRS 120)",
+        "sector:120+130": "health and population",
+        "sector:130": "population (CRS 130)",
+    }
+
+    async def _shows(app: FastAPI, interrupt_id: str, active: str) -> None:
+        # The card the pause holds shows the sector choice holding `active`.
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        pending = conversation.pending[interrupt_id]
+        decision = PlanDecision(
+            id="scope_sector",
+            question="Sector",
+            chosen=labels[active],
+            reason="",
+            resolved_by="user",
+            choice_id=_CHOICE_ID,
+            active_option_id=active,
+            options=[
+                PlanDecisionOption(option_id=option, label=label, status="available")
+                for option, label in labels.items()
+            ],
+        )
+        assert pending.card is not None
+        pending.card = pending.card.model_copy(update={"decisions": [decision]})
+        pending.choices = {
+            _CHOICE_ID: _PendingChoice(
+                active=active,
+                options={
+                    o: _PendingOption(label=lb, status="available") for o, lb in labels.items()
+                },
+            )
+        }
+        await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    async with _client(app) as client:
+        card = _frame(await _stream(client, "/api/studio/turn", _turn_body()), "plan.proposed")
+        await _shows(app, card["interrupt_id"], "sector:120")
+        for option, active in [("sector:120+130", "sector:120+130"), ("sector:130", "sector:130")]:
+            frames = await _stream(
+                client,
+                "/api/studio/interrupt",
+                _switch_body(card, option_id=option),
+            )
+            card = _frame(frames, "plan.proposed")
+            await _shows(app, card["interrupt_id"], active)
+        approved = await _stream(
+            client,
+            "/api/studio/interrupt",
+            {
+                **_interrupt_body(card["interrupt_id"], "approve"),
+                "plan_revision": card["revision"],
+            },
+        )
+
+    assert _frame(approved, "plan.approved")["choices"] == [
+        {"question": "Sector", "chosen": "population (CRS 130)", "changed_from": "health (CRS 120)"}
+    ]
+
+
+async def test_an_amendment_drops_the_labels_the_turns_switches_kept() -> None:
+    """An amendment drafts the plan again, possibly under the same
+    requirement ids, so the next `plan.approved` names no `changed_from`
+    the turn's switches kept before it."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        conversation.turn_choice_baseline = {_CHOICE_ID: "health (CRS 120)"}
+        await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan["interrupt_id"], "amend", "use commitments"),
+        )
+
+    assert conversation.turn_choice_baseline == {}
 
 
 async def test_a_switch_leaves_its_label_out_of_the_words_later_searches_send() -> None:
@@ -5817,9 +6244,9 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
     stalled = asyncio.Event()
     renew_a = store_a.renew
 
-    async def stalled_renew(*args: Any) -> Any:
+    async def stalled_renew(*args: Any, **kwargs: Any) -> Any:
         await stalled.wait()
-        return await renew_a(*args)
+        return await renew_a(*args, **kwargs)
 
     monkeypatch.setattr(store_a, "renew", stalled_renew)
     store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
@@ -6072,6 +6499,55 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
     assert error["error"] == "transient_unavailable"
     assert error["detail"] == classed_sentence(HarnessCode.STATE_NOT_SAVED, "retry_after_delay")
     assert is_user_sentence(error["detail"])
+
+
+@pytest.mark.parametrize(
+    ("failure", "relayed"),
+    [
+        pytest.param(SegmentLost("taken over"), ["plan.approved", "error"], id="segment-lost"),
+        pytest.param(
+            RuntimeError("db is down"),
+            ["plan.approved", "message.delta"],
+            id="other-failure",
+        ),
+    ],
+)
+async def test_a_lost_segment_after_plan_approved_ends_the_stream(
+    failure: Exception, relayed: list[str]
+) -> None:
+    """The save after `plan.approved` is sent fails. A lost segment ends the stream
+    with a stream-fatal error frame, as at every other checkpoint, since another
+    instance now owns the conversation; any other failure is logged and the stream
+    goes on."""
+    studio = _app().state.studio
+    conversation = await studio.store.create("u_a", CONVERSATION)
+    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
+
+    async def failing_checkpoint(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    studio.store.checkpoint = failing_checkpoint  # type: ignore[method-assign]
+
+    async def frames() -> Any:
+        yield PlanApproved(
+            event="plan.approved",
+            seq=0,
+            plan_version_id="plan_1",
+            version=1,
+            title="Research plan",
+            steps=[],
+            choices=[],
+        )
+        yield MessageDelta(event="message.delta", seq=1, text="next")
+
+    sent = [
+        frame.event
+        async for frame in studio._checkpointed(
+            "u_a", CONVERSATION, segment_id, conversation, frames()
+        )
+    ]
+
+    assert sent == relayed
 
 
 async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame_and_the_ledger(

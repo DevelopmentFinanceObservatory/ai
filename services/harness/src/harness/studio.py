@@ -73,6 +73,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
+from harness.graph.switch import SWITCH_STOP
 from harness.provenance import ProvenanceStore
 from harness.seeds import seeds_slot
 from harness.sentences import failure_sentence
@@ -96,6 +97,7 @@ from harness.studio_translate import (
     _stream_fatal,
     _Translator,
     failure_detail,
+    held_labels,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
@@ -118,6 +120,7 @@ from harness.wire import (
     InterruptResponse,
     MessageComplete,
     OptionAnswer,
+    PlanProposed,
     PlanRevisionStaleError,
     RetryMode,
     SkippedAnswer,
@@ -131,6 +134,9 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 5.0
 SSE_MEDIA_TYPE = "text/event-stream"
+# How long a stream a Stop reached while a plan-card switch ran waits for the
+# `switch` node to offer the plan again before it ends as any Stop does.
+SWITCH_REOFFER_SECONDS = 10.0
 
 # The wire decision on a plan interrupt, as the record `/interrupt` keeps of it.
 _APPROVAL_DECISION = {
@@ -510,6 +516,7 @@ async def _sse_stream(
     frames: AsyncGenerator[Any],
     *,
     conversation: ConversationState | None = None,
+    switch: bool = False,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
 ) -> AsyncIterator[str]:
     """Serialise frames as SSE `data:` lines, one loop owning all three
@@ -526,7 +533,18 @@ async def _sse_stream(
     `conversation.cancel_reason` (set alongside the event by whoever armed
     it, `POST /cancel` or `StudioRunner._locked`'s heartbeat). `"cancelled"`
     (a client's Stop, from this instance or another) closes the turn and
-    yields the stream-fatal `cancelled` error frame, same as always.
+    yields the stream-fatal `cancelled` error frame, except
+    on a stream running a plan-card switch (`switch`, which arms
+    `conversation.switch_stop` and `SWITCH_STOP` for the frames this stream
+    reads, and clears the one it armed when it ends): the first Stop there
+    sets `switch_stop` and the stream reads
+    on, ending on the `plan.proposed` the `switch` node offers with the
+    plan unchanged (`harness.graph.switch.SWITCH_STOP`). The cancel event
+    is armed again, so a second Stop ends the stream as any Stop does, and
+    so does the stream reaching `SWITCH_REOFFER_SECONDS` after the first
+    with no `plan.proposed`: a Stop never leaves a stream open. Once that
+    frame passes, the deadline is met, so a slow unwind after it leaves the
+    paused turn open.
     `"segment_lost"` (this stream's segment lease was taken over, or this
     instance's own renewal could not keep it alive) yields a stream-fatal
     `transient_unavailable` frame without closing the turn. Another
@@ -557,10 +575,19 @@ async def _sse_stream(
         conversation.in_turn_span() if conversation is not None else nullcontext()
     )
     cancel_wait: asyncio.Future[Any] | None = None
+    # The loop time by which a stopped switch must have ended the stream.
+    reoffer_by: float | None = None
+    loop = asyncio.get_running_loop()
     open_steps = _OpenSteps()
+    switch_stop: asyncio.Event | None = None
     if conversation is not None:
         conversation.cancel_event = asyncio.Event()
         cancel_wait = asyncio.ensure_future(conversation.cancel_event.wait())
+        if switch:
+            # Armed here, by the stream the switch runs on, so an earlier
+            # stream's `finally` cannot clear it.
+            switch_stop = conversation.switch_stop = asyncio.Event()
+            SWITCH_STOP.set(switch_stop)
     with turn_span:
         try:
             async with aclosing(frames) as source:
@@ -572,14 +599,45 @@ async def _sse_stream(
                             race = {next_frame, cancel_wait} if cancel_wait else {next_frame}
                             done, _ = await asyncio.wait(
                                 race,
-                                timeout=heartbeat_seconds,
+                                timeout=heartbeat_seconds
+                                if reoffer_by is None
+                                else max(0.0, min(heartbeat_seconds, reoffer_by - loop.time())),
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
-                            if next_frame in done:
+                            if (
+                                next_frame in done
+                                and next_frame.exception() is None
+                                and isinstance(next_frame.result(), PlanProposed)
+                            ):
+                                # The stopped switch offered its plan in time.
+                                reoffer_by = None
+                            # Checked on every frame too, since a stopped switch
+                            # that keeps sending frames is not idle.
+                            overdue = reoffer_by is not None and loop.time() >= reoffer_by
+                            if next_frame in done and not overdue:
                                 break
-                            if cancel_wait is not None and cancel_wait in done:
-                                await _unwind(next_frame)
+                            if overdue or (cancel_wait is not None and cancel_wait in done):
                                 assert conversation is not None
+                                if overdue and conversation.cancel_reason is None:
+                                    # The stopped switch offered nothing in
+                                    # time. A takeover recorded in the same
+                                    # wait keeps its own reason.
+                                    conversation.cancel_reason = "cancelled"
+                                stop = conversation.switch_stop
+                                if (
+                                    conversation.cancel_reason == "cancelled"
+                                    and stop is not None
+                                    and not stop.is_set()
+                                ):
+                                    stop.set()
+                                    reoffer_by = loop.time() + SWITCH_REOFFER_SECONDS
+                                    conversation.cancel_event = asyncio.Event()
+                                    conversation.cancel_reason = None
+                                    cancel_wait = asyncio.ensure_future(
+                                        conversation.cancel_event.wait()
+                                    )
+                                    continue
+                                await _unwind(next_frame)
                                 if conversation.cancel_reason == "segment_lost":
                                     # Another instance took the segment over.
                                     lost = failure_sentence(
@@ -660,6 +718,8 @@ async def _sse_stream(
             if conversation is not None:
                 conversation.cancel_event = None
                 conversation.cancel_reason = None
+                if conversation.switch_stop is switch_stop:
+                    conversation.switch_stop = None
             await flush_telemetry()
 
 
@@ -835,8 +895,13 @@ class StudioRunner:
         principal: str,
         conversation: ConversationState,
         message: types.Content,
+        approving: PlanProposed | None = None,
     ) -> AsyncGenerator[Any]:
         """Run one segment (fresh turn or resume) and yield wire frames.
+
+        `approving` is the plan card a first answer to its interrupt approves,
+        which `plan.approved` states once the graph takes the approval
+        (`_Translator`).
 
         Failures are serialised into the stream as a stream-fatal `error`
         frame. SSE headers are already on the wire, so an exception can't
@@ -847,6 +912,7 @@ class StudioRunner:
             conversation=conversation,
             recorder=self.recorder,
             surface_recorder=self.surface_recorder,
+            approving=approving,
         )
         try:
             async with aclosing(
@@ -889,6 +955,13 @@ class StudioRunner:
         with that reason. `_sse_stream`'s cancel branch turns it into the
         matching frame, one mechanism for every kind of mid-stream stop.
 
+        On a stream running a plan-card switch whose Stop has not come yet
+        (`conversation.switch_stop` armed and unset), the renewal clears the
+        flag it reports (`StudioStore.renew`'s `consume_cancel`) and the
+        heartbeat keeps watching: that first Stop only stops the switch
+        (`_sse_stream`), and a second one, from any instance, sets the flag
+        again and ends the stream.
+
         A `renew` call that raises is retried every interval until
         `SEGMENT_TTL_S - 10` seconds of the segment's own remaining life are
         left, then also ends the stream as lost: an instance this deaf to
@@ -897,8 +970,12 @@ class StudioRunner:
         """
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+            stop = conversation.switch_stop
+            switching = stop is not None and not stop.is_set()
             try:
-                result = await self.store.renew(principal, conversation_id, segment_id)
+                result = await self.store.renew(
+                    principal, conversation_id, segment_id, consume_cancel=switching
+                )
             except Exception:
                 logger.exception(
                     "studio segment heartbeat: conversation %s segment %s renewal failed",
@@ -915,6 +992,8 @@ class StudioRunner:
             if result == "ok":
                 continue
             _end_stream(conversation, "cancelled" if result == "cancelled" else "segment_lost")
+            if result == "cancelled" and switching:
+                continue
             return
 
     async def _checkpointed(
@@ -934,7 +1013,11 @@ class StudioRunner:
         on the same frame it reaches the ledger. A checkpoint that fails
         (the segment was taken over, or the write itself failed) yields a
         stream-fatal error frame instead of the pause or terminal frame it
-        would have carried, and ends the stream there. This is the one
+        would have carried, and ends the stream there. Once a `plan.approved`
+        frame is sent, the interrupt it answers records it
+        (`ConversationState.mark_approved_sent`) and is checkpointed: a lost
+        segment ends the stream the same way, and any other failure there is
+        logged alone. This is the one
         interception point for every route this runs under (`/turn`, its
         edit-card branch, and `/interrupt`)."""
         async for frame in frames:
@@ -956,6 +1039,28 @@ class StudioRunner:
                 if event == "done":
                     outgoing = frame.model_copy(update={"composition": conversation.composition})
             yield outgoing
+            if event == "plan.approved":
+                # Saved once sent, so a retry of the same answer after this
+                # segment dies does not send it again. A crash before the
+                # save sends it twice, which beats never.
+                conversation.mark_approved_sent(segment_id)
+                try:
+                    await self.store.checkpoint(principal, conversation_id, segment_id)
+                except SegmentLost as exc:
+                    logger.warning(
+                        "studio segment lost after plan.approved: conversation %s segment %s",
+                        conversation_id,
+                        segment_id,
+                    )
+                    yield _checkpoint_failed_frame(conversation, exc)
+                    return
+                except Exception:
+                    logger.warning(
+                        "studio checkpoint after plan.approved failed: conversation %s segment %s",
+                        conversation_id,
+                        segment_id,
+                        exc_info=True,
+                    )
 
     async def _locked(
         self,
@@ -1526,6 +1631,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # leaves it for this same retry path to pick back up.
             pending.answer = requested_answer
             pending.resuming_segment = segment_id
+            if body.decision is InterruptDecision.SWITCH and pending.card is not None:
+                # What each choice held before the turn's first switch of
+                # it, which `plan.approved` names as `changed_from`.
+                conversation.turn_choice_baseline = {
+                    **held_labels(pending.card),
+                    **conversation.turn_choice_baseline,
+                }
             if resuming:
                 # A retry resuming the same answer again: the dead attempt
                 # may already have sent frames the client saw, carrying a
@@ -1645,6 +1757,19 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])
+            # The approved plan goes out once per interrupt: a retry resuming
+            # the same answer sends it only when the dead attempt did not.
+            approving = (
+                pending.card
+                if body.decision is InterruptDecision.APPROVE and not pending.approved_sent
+                else None
+            )
+            frames = studio._frames(
+                principal=principal,
+                conversation=conversation,
+                message=message,
+                approving=approving,
+            )
             return StreamingResponse(
                 _sse_stream(
                     studio._locked(
@@ -1652,11 +1777,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         body.conversation_id,
                         conversation,
                         segment_id,
-                        studio._frames(
-                            principal=principal, conversation=conversation, message=message
-                        ),
+                        frames,
                     ),
                     conversation=conversation,
+                    switch=body.decision is InterruptDecision.SWITCH,
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )

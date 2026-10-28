@@ -19,6 +19,7 @@ import pytest
 from harness.plan_display import requirement_rows
 from harness.scope_choices import (
     REASON_COPY,
+    SERVED_OTHERWISE,
     ScopeReasonCode,
     ServedComponent,
     ServedRole,
@@ -35,6 +36,7 @@ from harness.turn_records import (
     chip_kept,
     loose_match_notes,
     open_prices,
+    part_name,
     render_readings,
     scope_chips,
 )
@@ -674,6 +676,40 @@ def test_a_reading_keeps_its_parts_scope_choices_and_a_reading_without_stores_no
     assert "scope" not in unscoped.model_dump(mode="json")
 
 
+@pytest.mark.parametrize("repinned", [False, True], ids=["searched", "compiled-again"])
+@pytest.mark.parametrize(
+    ("block", "name"),
+    [
+        pytest.param(
+            {"resolved": {"shape": {"label": "gross disbursements (health)"}}},
+            "gross disbursements (health)",
+            id="measure",
+        ),
+        pytest.param(
+            {"resolved": {"facets": {"provenance": {"label": "OECD DAC1"}}}},
+            "OECD DAC1",
+            id="dataset-title",
+        ),
+    ],
+)
+def test_a_part_with_no_words_of_its_own_is_named_by_what_it_counts_never_its_spec_id(
+    repinned: bool, block: dict[str, Any], name: str
+) -> None:
+    """A reading with no question text and no sentence, as Search answered it or
+    compiled again from a choice, is named by what its block measures, else by its
+    dataset's title, in the "Counted as" line and every sentence naming it."""
+    part = {**_scoped_part(), "variable": None}
+    if repinned:
+        part["scope"]["entries"][0]["origin"] = {"kind": "choice", "choice_id": "c"}
+    reading = SearchReading.from_part(part)
+    assert (reading.text, reading.sentence) == (None, None)
+
+    named = part_name(reading, block)
+
+    assert named == name
+    assert str(reading.spec_id) not in named
+
+
 def test_each_scope_choice_renders_one_line_that_sheds_its_label_with_the_detail() -> None:
     reading = SearchReading.from_part(_scoped_part())
     head = f'"health aid" definite {reading.spec_id}'
@@ -1194,19 +1230,60 @@ def test_the_basis_line_states_a_composite_frame_from_its_served_components(
     assert basis_line([reading.model_dump(mode="json")], specs={}, plans=[]) == line
 
 
+@pytest.mark.parametrize(
+    ("contributions", "clause"),
+    [
+        (False, "bilateral aid only"),
+        (True, f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+    ],
+    ids=["bilateral-the-only-other", "a-contributions-total-offered-too"],
+)
+def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else_fits(
+    contributions: bool, clause: str
+) -> None:
+    """An inclusive choice served with no imputed component: the figures are
+    bilateral flows alone or a published total counting core contributions to
+    multilaterals, which the record does not tell apart. With only a
+    bilateral option besides, they read as it; with a contributions option
+    offered too, the choice says the figures differ from it."""
+    choice = copy.deepcopy(_INCLUSIVE)
+    if contributions:
+        choice["options"].append(
+            {
+                "option_id": "provider:contributions",
+                "label": "with core contributions to multilaterals",
+                "binding": {"kind": "provider", "scope": "contributions"},
+                "availability": {"status": "available"},
+            }
+        )
+    part = _example_part()
+    part["scope"]["choices"].append(choice)
+    reading = SearchReading.from_part(part).with_fetch(
+        {"summary": "30 observations"}, served=served_facts(_manifest(_served_identity()))
+    )
+
+    line = basis_line([reading.model_dump(mode="json")], specs={}, plans=[])
+
+    assert line == _EXAMPLE_LINE.removesuffix(".") + f" \u00b7 {clause}."
+
+
 def _total_block(spec_id: str, netting: str) -> dict[str, Any]:
     """The spec block Search returns for US ODA counted on `netting`, with
     the label it names the measure by, as dfo-apis writes it."""
     label = f"{netting.lower()} disbursements (official development assistance)"
-    return {"spec_id": spec_id, "resolved": {"shape": {"label": label}}}
+    return {
+        "spec_id": spec_id,
+        "resolved": {
+            "measure_label": f"{netting.lower()} disbursements",
+            "shape": {"label": label},
+        },
+    }
 
 
 @pytest.mark.parametrize(
     ("switched", "total_name"),
     [
-        pytest.param(
-            True, "net disbursements (official development assistance)", id="switched-to-net"
-        ),
+        pytest.param(True, "official development assistance", id="switched-to-net"),
         pytest.param(False, '"ODA gross disbursements"', id="unswitched"),
     ],
 )
@@ -1238,6 +1315,53 @@ def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_s
         f"gross disbursements, current USD; {total_name}: health (CRS 120) and population "
         "and reproductive health (CRS 130) · Africa incl. regional buckets · "
         + ("net disbursements." if switched else "gross disbursements, current USD.")
+    )
+
+
+def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept() -> None:
+    """A share of health aid in all official development assistance. The total
+    was compiled again from its basis choice, so Search's label for its block
+    names it, "gross disbursements (official development assistance)": the
+    concept alone, since its measure is one of its clauses."""
+    health = _example_part(sector="sector:120+130")
+    scope = health["scope"]
+    scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
+    sector = next(c for c in scope["choices"] if c["axis"] == "sector")
+    next(o for o in sector["options"] if o["option_id"] == "sector:120+130")["label"] = (
+        "health incl. population and reproductive health (CRS 120 + 130)"
+    )
+    bilateral = copy.deepcopy(_INCLUSIVE)
+    bilateral["active"] = "provider:bilateral"
+    bilateral["options"][0]["label"] = "bilateral flows only"
+    scope["choices"].append(bilateral)
+
+    total = _example_part("ODA gross disbursements")
+    total["spec_id"] = "spec_total"
+    total_scope = total["scope"]
+    total_scope["choices"] = [c for c in total_scope["choices"] if c["axis"] == "measure_basis"]
+    (basis,) = total_scope["choices"]
+    total_scope["entries"] = [
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": basis["id"]},
+        }
+    ]
+    specs = {
+        "spec_total": {
+            "spec_id": "spec_total",
+            "resolved": {
+                "measure_label": "gross disbursements",
+                "shape": {"label": "gross disbursements (official development assistance)"},
+            },
+        }
+    }
+
+    assert basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[]) == (
+        'Counted as: "health aid": health incl. population and reproductive health '
+        "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
+        "official development assistance: gross disbursements, current USD."
     )
 
 
@@ -1294,6 +1418,7 @@ _CONTRACT_REASON_CODES = {
     "carried_choice_not_applied",
     "stated_choice_not_applied",
     "option_not_covered",
+    "contributions_counted",
 }
 
 

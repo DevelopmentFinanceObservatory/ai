@@ -242,3 +242,139 @@ class ProviderCompiles:
                 choice["provenance"] = "explicit"
         part = {"status": "definite", "spec": block}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+# Search's answers for the United States in 2023 as dev Search gave them: the CRS
+# bilateral health part, its inclusive form, the DAC1 total counted gross, the two
+# parts' wholes and a grants part with no sector choice, each a one-part
+# envelope's part, by name.
+US_2023: dict[str, dict[str, Any]] = json.loads(
+    (Path(__file__).parent / "fixtures" / "share_whole_us_2023.json").read_text()
+)
+
+
+def us_2023_block(name: str) -> dict[str, Any]:
+    """The spec block of `US_2023`'s part `name`."""
+    return US_2023[name]["spec"]
+
+
+def dac1_with_contributions() -> dict[str, Any]:
+    """`US_2023`'s DAC1 total counted gross with the provider choice dfo-apis gives a
+    DAC1 total (`search.scope.provider._published_table` there): core contributions
+    to multilaterals held, under the rule `contribution_total`; bilateral flows
+    available as DAC1 bilateral ODA, an option binding the `dac1AidType` slot to aid
+    type 1015 in place of a provider scope; and the inclusive scope unavailable with
+    `contributions_counted`."""
+    block = json.loads(json.dumps(us_2023_block("dac1_total_gross")))
+    scope = block["resolved"]["scope_choices"]
+    available = {"status": "available", "detail": {}}
+    scope["choices"].append(
+        {
+            "id": f"{scope['id']}:provider",
+            "axis": "provider",
+            "rule": "contribution_total",
+            "provenance": "default",
+            "active": "provider:contributions",
+            "options": [
+                {
+                    "option_id": "provider:bilateral",
+                    "label": "bilateral flows only",
+                    "binding": {
+                        "kind": "slot",
+                        "slot": "dac1AidType",
+                        "state": "value",
+                        "refs": ["DAC1AidType1015"],
+                    },
+                    "availability": available,
+                },
+                {
+                    "option_id": "provider:inclusive",
+                    "label": "bilateral plus imputed multilateral",
+                    "binding": {"kind": "provider", "scope": "inclusive"},
+                    "availability": {
+                        "status": "unavailable",
+                        "code": "contributions_counted",
+                        "detail": {"dataset": "provenance/OECDDAC1"},
+                    },
+                },
+                {
+                    "option_id": "provider:contributions",
+                    "label": "bilateral plus core contributions to multilaterals",
+                    "binding": {"kind": "provider", "scope": "contributions"},
+                    "availability": available,
+                },
+            ],
+        }
+    )
+    return block
+
+
+def total_without_bilateral() -> dict[str, Any]:
+    """`dac1_with_contributions` with its bilateral option unavailable
+    (`provider_not_offered`): a published total counting core contributions to
+    multilaterals that serves no other provider scope, so no input can be moved to
+    it on bilateral flows."""
+    block = dac1_with_contributions()
+    choice = block["resolved"]["scope_choices"]["choices"][-1]
+    bilateral = choice["options"][0]
+    bilateral["binding"] = {"kind": "provider", "scope": "bilateral"}
+    bilateral["availability"] = {
+        "status": "unavailable",
+        "code": "provider_not_offered",
+        "detail": {"why": "dataset"},
+    }
+    return block
+
+
+class WholeCompiles:
+    """A tool surface whose `resolve_definition` answers the whole of the US health
+    part as Search recorded it, `whole` for a bilateral provider entry and
+    `whole_inclusive` for an inclusive one, or refuses with `refusal` when given,
+    recording each call's arguments in `calls`. With `searched`, its `search`
+    answers that part of `US_2023`, and is recorded in `calls` as well. With
+    `opened`, the whole also carries the part's sector choice, which Search
+    may return on the axis the whole leaves open."""
+
+    def __init__(
+        self,
+        *,
+        refusal: Mapping[str, Any] | None = None,
+        searched: str | None = None,
+        opened: bool = False,
+    ) -> None:
+        self.calls: list[Mapping[str, Any]] = []
+        self.refusal = refusal
+        self.searched = searched
+        self.opened = opened
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        self.calls.append(arguments)
+        if self.searched is not None and tool.name == "search":
+            part = US_2023[self.searched]
+            return ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}}
+            )
+        assert tool.name == "resolve_definition", tool
+        if self.refusal is not None:
+            return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
+        (provider,) = [
+            e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"
+        ]
+        name = {"provider:bilateral": "whole", "provider:inclusive": "whole_inclusive"}[provider]
+        part = US_2023[name]
+        if self.opened:
+            part = json.loads(json.dumps(part))
+            scope = part["spec"]["resolved"]["scope_choices"]
+            (sector,) = [
+                c
+                for c in us_2023_block("health")["resolved"]["scope_choices"]["choices"]
+                if c["axis"] == "sector"
+            ]
+            scope["choices"] = [{**sector, "id": f"{scope['id']}:sector"}, *scope["choices"]]
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})

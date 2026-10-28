@@ -74,12 +74,17 @@ from harness.planner_seam import (
     _RunTracker,
 )
 from harness.scripted import use_compiled_proposals
-from harness.sentences import SeamCode, referral_sentence, refusal_sentence
+from harness.sentences import (
+    SeamCode,
+    referral_reason,
+    referral_sentence,
+    refusal_sentence,
+)
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
-from harness.turn_records import SearchReading
+from harness.turn_records import SearchReading, part_name
 from harness.wiring import handing_back_planner_failures
 from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
@@ -106,6 +111,7 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     RequirementSide,
     ResolvedBy,
     SessionState,
@@ -139,9 +145,10 @@ from planner.workflow import (
 )
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
-from submission.service import scope_choice_decisions
+from submission.service import AlignedPin, save_aligned_pin, scope_choice_decisions
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
+from translator.referral import ReferralKind
 
 from .basis_alignment import HEALTH, TOTAL, TOTAL_GROSS, TOTAL_NET, BasisCompiles, basis_block
 from .search_results import search_result_parts
@@ -4545,6 +4552,176 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
     assert result["summary"]["revision"] == plan_revision(revised)
 
 
+@pytest.mark.parametrize(
+    ("kind", "outcome", "code", "final", "reason", "retryable"),
+    [
+        (
+            ReferralKind.PINNED_SOURCE_NOT_FOUND,
+            "choice_required",
+            SeamCode.PLAN_NOT_READY,
+            False,
+            f'For "health aid", {referral_reason(ReferralKind.PINNED_SOURCE_NOT_FOUND)}.',
+            False,
+        ),
+        (
+            ReferralKind.DISCOVERY_UNAVAILABLE,
+            "transient",
+            SeamCode.DISCOVERY_UNAVAILABLE,
+            True,
+            'The data service did not answer while finding data for "health aid".',
+            True,
+        ),
+        (
+            ReferralKind.SURFACE_UNAVAILABLE,
+            "transient",
+            ProblemCode.SURFACE_UNAVAILABLE,
+            False,
+            "A service the plan needs could not be reached.",
+            True,
+        ),
+    ],
+    ids=["not_ready", "search_unanswered", "service_unanswered"],
+)
+async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_reason(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    kind: ReferralKind,
+    outcome: str,
+    code: str,
+    final: bool,
+    reason: str,
+    retryable: bool,
+) -> None:
+    """A translation that refers the revised plan back ends the revision as a
+    planner entry ending on that referral would. A pin the revision moved to
+    that was not found again ends on `plan_not_ready` and the referral's
+    reason, since no model is there to settle it, and a switch to the same
+    option repeats it. A transient referral, with time left, ends on the
+    service that did not answer, which a later switch can escape."""
+    old, new = "spec_" + "c" * 32, "spec_" + "d" * 32
+    scope = _switchable_scope()
+    shown = {
+        spec_id: PinSource(
+            block={"spec_id": spec_id, "resolved": {"scope_choices": s}}, settled=True
+        )
+        for spec_id, s in ((old, scope), (new, _sector_switched(scope)))
+    }
+    translated = _translated_plan(decision, requirement, derived_requirement)
+    dataset = next(r for r in translated.evidence_requirements if isinstance(r, DatasetRequirement))
+    plan = Plan.model_validate(
+        {
+            **translated.model_dump(),
+            "evidence_requirements": [
+                dataset.model_copy(update={"source_spec_id": old}) if r.id == dataset.id else r
+                for r in translated.evidence_requirements
+            ],
+        }
+    )
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return {
+            "kind": kind.value,
+            "outcome": outcome,
+            "requirement_id": dataset.id,
+            "reason": f"{dataset.id!r} pins {new!r}, which discovery did not find.",
+        }
+
+    seam = PlannerSeam(
+        settings=Settings(),
+        surface=FixtureSurface(schemas=[]),
+        translate=translate,
+        model=ScriptedPlannerLlm(script=[]),
+    )
+
+    reading = SearchReading.from_part(
+        {"variable": "health aid", "status": "definite", "spec_id": new, "scope": scope}
+    )
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        save_pin_sources(cast(SessionState, ctx.state), shown)
+        ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+        return await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[
+                dataset.model_copy(update={"source_spec_id": new}).model_dump(mode="json")
+            ],
+            inherits={new: old},
+        )
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="referred_wf", edges=[(START, node(_node, name="revise"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    (result,) = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+        )
+        if event.output is not None
+    ]
+
+    refused = result["refused"]
+    assert (refused["code"], refused["final"], refused["reason"]) == (code, final, reason)
+    assert (refused["code"] in switch._RETRYABLE_REVISION_CODES) is retryable
+    assert f"for requirement {dataset.id!r}" in refused["text"]
+
+
+def test_a_declared_wholes_reading_is_named_by_the_whole_not_its_parts_words() -> None:
+    """US health aid, whose only scope choice is its sector, and the whole of it
+    over every sector, compiled with no entries sent, so its scope holds no
+    choice entry naming where it came from: the whole's reading is named by
+    the whole, all sectors on the part's measure, and never "US health aid"."""
+    part_scope = _switchable_scope()
+    part_scope["entries"] = []
+    part_scope["dropped_entries"] = []
+    part_scope["choices"] = part_scope["choices"][:1]
+    whole_scope = {
+        **copy.deepcopy(part_scope),
+        "id": f"{TOTAL}_base",
+        "choices": [],
+    }
+    origin = SearchReading.from_part(
+        {"variable": "US health aid", "status": "definite", "spec_id": HEALTH, "scope": part_scope}
+    )
+    block = {
+        "spec_id": TOTAL,
+        "resolved": {
+            "scope_choices": whole_scope,
+            "measure_label": "gross disbursements",
+            "shape": {"label": "gross disbursements (official development assistance)"},
+        },
+    }
+    whole = AlignedPin(
+        origin=HEALTH,
+        option_ids=(),
+        spec_id=TOTAL,
+        digest={
+            "part_digests": [
+                {"variable": TOTAL, "status": "definite", "spec_id": TOTAL, "spec_block": block}
+            ]
+        },
+        whole_axis="sector",
+    )
+    ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: [origin.model_dump(mode="json")]})
+    planner_state: dict[str, Any] = {}
+    save_aligned_pin(cast(SessionState, planner_state), whole)
+
+    planner_seam.store_aligned_readings(cast(Any, ctx), cast(SessionState, planner_state))
+
+    stored = SearchReading.model_validate(ctx.state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert stored.spec_id == TOTAL
+    assert part_name(stored, block) == '"gross disbursements in all sectors"'
+
+
 async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(
     decision: Any,
 ) -> None:
@@ -4669,32 +4846,48 @@ _NET_SWITCH = basis_block(
 
 
 @pytest.mark.parametrize(
-    ("total_pin", "switched", "total_after", "tools"),
+    ("total_pin", "ratio", "switched", "total_after", "tools"),
     [
         (
             TOTAL,
+            ShareOfRequirement,
             _NET_SWITCH,
             TOTAL_NET,
             ["resolve_definition", "resolve_definition"],
         ),
         (
             TOTAL,
+            ShareOfRequirement,
             basis_block(_HEALTH_SWITCHED, narrow=True, active="measure_basis:gross"),
             TOTAL_GROSS,
             ["resolve_definition"],
         ),
         (
             None,
+            ShareOfRequirement,
+            _NET_SWITCH,
+            TOTAL_NET,
+            ["search", "resolve_definition", "resolve_definition"],
+        ),
+        (
+            None,
+            QuotientRequirement,
             _NET_SWITCH,
             TOTAL_NET,
             ["search", "resolve_definition", "resolve_definition"],
         ),
     ],
-    ids=["basis-moves-both-inputs", "sector-moves-health-alone", "unpinned-total-moves-too"],
+    ids=[
+        "basis-moves-both-inputs",
+        "sector-moves-health-alone",
+        "unpinned-share-total-moves-too",
+        "unpinned-quotient-total-moves-too",
+    ],
 )
 async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     decision: Any,
     total_pin: str | None,
+    ratio: type[ShareOfRequirement | QuotientRequirement],
     switched: dict[str, Any],
     total_after: str,
     tools: list[str],
@@ -4703,9 +4896,10 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     the health aid's gross basis. A switch of the health aid's basis to net
     compiles the total on net too; a switch of its sector alone leaves the
     total on the gross pin compiled for it. A total the planner pinned no
-    dataset for, as in a plan whose translator found it, is searched for in
-    the translator's words and pinned before the plan records, so the switch
-    moves it too, and the search joins the turn's readings."""
+    dataset for, of the United States as a donor in a share or as a country in
+    a quotient, such as its GDP, is searched for in the translator's words and
+    pinned before the plan records, so the switch moves it too, and the search
+    joins the turn's readings."""
 
     def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
         return DatasetRequirement(
@@ -4718,14 +4912,22 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         )
 
     health = dataset("health", HEALTH)
+    role = "donor" if ratio is ShareOfRequirement else None
     plan = Plan(
         question="What share of US aid went to health in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[decision()],
         evidence_requirements=[
             health,
-            dataset("total", TOTAL).model_copy(update={"source_spec_id": total_pin}),
-            ShareOfRequirement(
+            dataset("total", TOTAL).model_copy(
+                update={"source_spec_id": total_pin}
+                if total_pin is not None
+                else {
+                    "source_spec_id": None,
+                    "entities": (Entity(name="United States", role=role),),
+                }
+            ),
+            ratio(
                 id="share",
                 decision_ids=["measure"],
                 numerator=RequirementSide(input_id="health"),
@@ -4819,7 +5021,42 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     if total_pin is None:
         (part,) = surface.calls[0]["parts"]
         assert part["variable"] == "total"
-        assert part["entities"] == [{"text": "United States", "role": "donor"}]
+        assert part["entities"] == [{"text": "United States", **({"role": role} if role else {})}]
         assert TOTAL in result["read"]
     (health_basis, total_basis) = result["bases"]
     assert health_basis[1] == total_basis[1]
+
+
+def test_a_plan_sentence_names_a_pin_an_earlier_turn_read_by_its_earlier_block(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A pin an earlier turn read, whose block this turn holds through
+    `earlier_block` alone, and whose reading has no words of its own: a sentence
+    about the plan names it by what that block measures."""
+    scope = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp/tests/fixtures/scope_choices_us_health_africa.json"
+        ).read_text()
+    )
+    spec_id = scope["compiled"]["spec_id"]
+    reading = SearchReading.from_part({"status": "definite", "spec_id": spec_id, "scope": scope})
+    assert (reading.text, reading.sentence) == (None, None)
+    state = cast(SessionState, {ORCHESTRATOR_SEARCHES_KEY: [reading.model_dump(mode="json")]})
+    save_pin_sources(state, {spec_id: PinSource(settled=True, earlier_turn=True)})
+    plan = Plan(
+        question="health aid",
+        decisions=[decision()],
+        evidence_requirements=[
+            requirement(id="health", source_spec_id=spec_id),
+            derived_requirement(input_id="health"),
+        ],
+    )
+    earlier = {spec_id: {"resolved": {"shape": {"label": "gross disbursements (health)"}}}}
+    token = current_earlier_block.set(earlier.get)
+    try:
+        words = planner_seam._plan_words(state, plan)
+    finally:
+        current_earlier_block.reset(token)
+
+    assert words.names["health"] == "gross disbursements (health)"

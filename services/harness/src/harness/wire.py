@@ -1116,6 +1116,9 @@ class PlanStep(_WireModel):
     # to show more than the label. Optional; a step without it renders as it
     # did before v1.2.
     args: dict[str, Any] | None = None
+    # Delta 22 (v1.7): true on the one step whose result answers the user's
+    # question; at most one step of a plan carries it.
+    gives_answer: bool | None = None
 
 
 class DecisionResolvedBy(StrEnum):
@@ -1142,7 +1145,9 @@ class PlanDecision(_WireModel):
     A decision stating how Search counted a source carries the scope
     choice's id (`choice_id`), its active option (`active_option_id`) and
     every option (`options`), all three together. One without `choice_id`
-    is a planner decision.
+    is a planner decision. `choice_id` is `"<requirement id>:<axis>"`
+    (`harness.plan_display.choice_id`), the same on every plan of the
+    conversation that shows the choice, switches included.
     """
 
     id: str
@@ -1223,6 +1228,20 @@ class PlanAsk(_WireModel):
     not_computed: str | None = None
 
 
+class PlanSwitchFailed(_WireModel):
+    """A switch that did not apply: `choice_id` and `option_id` name the
+    option the user picked, `code` is the refusal's code, `reason` says,
+    in a reader's words, why it failed, and `retryable` whether the same
+    switch can succeed if asked again. A switch the user stopped carries
+    `code` `switch_cancelled` and `retryable` true (delta 23)."""
+
+    choice_id: str
+    option_id: str
+    code: str
+    reason: str
+    retryable: bool = False
+
+
 class PlanProposed(_WireModel):
     """The plan awaiting approval. The run is genuinely paused: nothing is
     retrieved or computed until an interrupt.response arrives, and this
@@ -1250,6 +1269,14 @@ class PlanProposed(_WireModel):
     asks: list[PlanAsk] | None = None
     # On the plan a switch offers: each other scope choice the switch moved.
     moved: list[PlanMoved] | None = None
+    # Delta 22 (v1.7): one plain sentence saying what is counted, for whom,
+    # when and from which source; `switch_failed` is set on the plan
+    # re-offered after a switch that did not apply.
+    summary: str | None = None
+    switch_failed: PlanSwitchFailed | None = None
+    # Delta 23 (v1.8): the plan's decisions that qualify the answer, one
+    # reader sentence each, which `plan.approved` carries once it is approved.
+    caveats: list[str] = []
 
 
 class PlanRevisionStaleError(ToolError):
@@ -1277,6 +1304,45 @@ class PlanVersioned(_WireModel):
     version: int = Field(ge=1)
     supersedes: str
     changed: list[str] | None = None
+
+
+class PlanApprovedStep(_WireModel):
+    """One step of the approved plan: its label, and whether its result
+    answers the user's question."""
+
+    label: str
+    gives_answer: bool | None = None
+
+
+class PlanApprovedChoice(_WireModel):
+    """One choice of the approved plan: its short name (`question`), the
+    option label it holds (`chosen`) and, when a switch of the turn changed
+    it, the label it held on the card the user first switched from
+    (`changed_from`)."""
+
+    question: str
+    chosen: str
+    changed_from: str | None = None
+
+
+class PlanApproved(_WireModel):
+    """The plan the user approved. Emitted once, on the approve answer to
+    POST /api/studio/interrupt, before the first frame of the resumed run
+    (delta 22). The client attaches it to the message that stream
+    produces. `caveats` are the plan's decisions that qualify the answer,
+    such as a share whose two sides count different providers, each one
+    sentence for a reader, as the approved card stated them (delta 23)."""
+
+    event: Literal["plan.approved"]
+    seq: int = Field(ge=0)
+    plan_version_id: str
+    version: int = Field(ge=1)
+    revision: str | None = None
+    title: str
+    summary: str | None = None
+    steps: list[PlanApprovedStep]
+    choices: list[PlanApprovedChoice]
+    caveats: list[str] = []
 
 
 class StepStatus(StrEnum):
@@ -1511,6 +1577,7 @@ StudioFrame = Annotated[
     | MessageComplete
     | PlanProposed
     | PlanVersioned
+    | PlanApproved
     | ActivityStep
     | ComponentCreated
     | ComponentRevised

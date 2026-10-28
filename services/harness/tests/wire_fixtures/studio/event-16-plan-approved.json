@@ -1,0 +1,35 @@
+{
+  "event": "plan.approved",
+  "seq": 1,
+  "plan_version_id": "plan_01j9ze2k7c",
+  "version": 1,
+  "revision": "rev_01j9ze2k7c",
+  "title": "Health aid to Ethiopia, 2016\u20132024",
+  "summary": "Gross disbursements for health to Ethiopia from all donors, 2016\u20132024, in constant 2023 US dollars, from OECD CRS.",
+  "steps": [
+    {
+      "label": "Find the health sector codes"
+    },
+    {
+      "label": "Fetch disbursements to Ethiopia"
+    },
+    {
+      "label": "Compare levels before and after 2021",
+      "gives_answer": true
+    }
+  ],
+  "choices": [
+    {
+      "question": "Basis",
+      "chosen": "Gross disbursements"
+    },
+    {
+      "question": "Prices",
+      "chosen": "Constant 2023 USD",
+      "changed_from": "Current USD"
+    }
+  ],
+  "caveats": [
+    "As asked, the inputs count different providers' spending: bilateral aid from the OECD CRS and all official development assistance from DAC1."
+  ]
+}

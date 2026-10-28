@@ -14,12 +14,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -66,6 +66,7 @@ from harness.chart_binding import (
     select_binding_ok,
 )
 from harness.graph import answer as answer_module
+from harness.graph import switch as switch_module
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
@@ -93,11 +94,18 @@ from harness.graph.state import (
     frame_id_for,
     frame_store_ref,
 )
-from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED
-from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
+from harness.graph.switch import (
+    SCOPE_CHOICE_NOT_APPLIED,
+    SWITCH_CANCELLED,
+    SWITCH_STOP,
+    SwitchFailedError,
+)
+from harness.planner_seam import PlannerSeam, store_aligned_readings
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
+from harness.settings import Settings
 from harness.studio_translate import _node_name
 from harness.tool_contracts import HarnessCode, reading_facts
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
@@ -116,10 +124,12 @@ from planner.plan import (
     PinSource,
     PlanStatus,
     ResolvedBy,
+    SessionState,
     WindowedPin,
     authored,
     open_window,
     plan_revision,
+    repinned,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -134,7 +144,11 @@ from planner.records import (
 )
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import ValidationError
-from submission.service import scope_choice_decisions
+from submission.service import (
+    AlignedPin,
+    save_aligned_pin,
+    scope_choice_decisions,
+)
 from translator.discovery import PartFault, PartNotResolvedError
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
@@ -3219,6 +3233,13 @@ def _scoped_plan(
     )
 
 
+def _row_id(plan: PlannerPlan, axis: str) -> str:
+    """The plan card's id for the row of `plan`'s one dataset's choice on `axis`
+    (`harness.plan_display.choice_id`)."""
+    (dataset,) = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
+    return f"{dataset.id}:{axis}"
+
+
 class _RevisingSeam(_Seam):
     """A `PlannerModel` drafting `plans` and answering each revision with `revised`."""
 
@@ -3233,6 +3254,68 @@ class _RevisingSeam(_Seam):
         return self._revised
 
 
+# The pin of the whole `_StoppedSeam` compiles over every sector of its part.
+_WHOLE_PIN = "spec_" + "7" * 32
+
+
+class _StoppedSeam(_RevisingSeam):
+    """A `_RevisingSeam` whose revision the user stops while it runs: it writes
+    drafting state, compiles a declared whole over every sector of the switched
+    source and stores its reading (`store_aligned_readings`), as a revision of a
+    share does, sets `SWITCH_STOP` as a Stop does, and waits to be cancelled."""
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        self.revisions.append(kwargs)
+        ctx = kwargs["ctx"]
+        ctx.state["planner:rounds"] = 1
+        (origin,) = {
+            r.source_spec_id
+            for r in authored(
+                PlannerPlan.model_validate(kwargs["prior_plan"])
+            ).evidence_requirements
+            if isinstance(r, DatasetRequirement)
+        }
+        block = {"spec_id": _WHOLE_PIN, "resolved": {"scope_choices": None}}
+        save_aligned_pin(
+            cast(SessionState, ctx.state),
+            AlignedPin(
+                origin=cast(str, origin),
+                option_ids=(),
+                spec_id=_WHOLE_PIN,
+                digest={
+                    "part_digests": [
+                        {
+                            "variable": _WHOLE_PIN,
+                            "status": "definite",
+                            "spec_id": _WHOLE_PIN,
+                            "spec_block": block,
+                        }
+                    ]
+                },
+                whole_axis="sector",
+            ),
+        )
+        store_aligned_readings(ctx, cast(SessionState, ctx.state))
+        stop = SWITCH_STOP.get()
+        assert stop is not None
+        stop.set()
+        return await self._stopped()
+
+    async def _stopped(self) -> dict[str, Any]:
+        """What the revision does once the Stop is set: waits to be cancelled."""
+        # Cancelled at once; the bound fails the test, not the suite, if not.
+        await asyncio.sleep(5)
+        raise AssertionError("a stopped revision is cancelled")
+
+
+class _FinishingStoppedSeam(_StoppedSeam):
+    """A `_StoppedSeam` whose revision finishes in the step the Stop comes in,
+    so the switch's wait sees both done."""
+
+    async def _stopped(self) -> dict[str, Any]:
+        return self._revised
+
+
 async def _switch_runner(
     real_schemas: list[ToolSchema],
     search: SearchStub,
@@ -3241,17 +3324,20 @@ async def _switch_runner(
     option_id: str = "sector:120+130",
     aligned: bool = False,
     entity_groups: dict[str, Any] | None = None,
+    seam_type: type[_RevisingSeam] = _RevisingSeam,
+    earlier_whole: AlignedPin | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
-    `aligned`) beside its block naming `entity_groups` when given, then
-    answered with a switch to `option_id`, by default its sector to CRS 120
-    and 130, through `search`. Returns the runner, the seam, the plan, the
-    scope and the resumed turn's events."""
+    `aligned`) beside its block naming `entity_groups` when given, held as the
+    whole `earlier_whole` an earlier plan compiled from its part when given,
+    then answered with a switch to `option_id`, by default its sector to CRS
+    120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
+    resumed turn's events."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     plan = _scoped_plan(pin, scope, schemas=real_schemas)
-    seam = _RevisingSeam(
+    seam = seam_type(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}],
         revised or {"refused": {"text": "unused"}},
     )
@@ -3272,6 +3358,11 @@ async def _switch_runner(
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+    if earlier_whole is not None:
+        save_aligned_pin(
+            cast(SessionState, _session_state(runner)),
+            earlier_whole.model_copy(update={"spec_id": pin}),
+        )
     if entity_groups is not None:
         _session_state(runner)[ORCHESTRATOR_SPECS_KEY] = {
             pin: {
@@ -3279,7 +3370,7 @@ async def _switch_runner(
                 "resolved": {"scope_choices": scope, "entity_groups": entity_groups},
             }
         }
-    choice_id = f"{scope['id']}:{option_id.split(':', maxsplit=1)[0]}"
+    choice_id = _row_id(plan, option_id.split(":", maxsplit=1)[0])
     events = await _resume(
         runner,
         APPROVE_INTERRUPT,
@@ -3288,13 +3379,15 @@ async def _switch_runner(
     return runner, seam, plan, scope, events
 
 
+@pytest.mark.parametrize("basis_row", [True, False], ids=["basis-row", "no-basis-row"])
 async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_moved(
-    real_schemas: list[ToolSchema],
+    real_schemas: list[ToolSchema], basis_row: bool
 ) -> None:
     """The switch node posts the scope's base identity with its entries and
     the switch, registers what Search compiles, re-pins the plan to it with
     no planner call, stores the new reading, and offers the revised plan
-    with the basis the switch moved."""
+    with the basis the switch moved, under the id its row has, or would have
+    on a plan showing no basis row."""
     scope = _hashed_scope()
     new_pin, envelope = _switched_answer(scope)
     revised = _scoped_plan(
@@ -3303,6 +3396,20 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
         schemas=real_schemas,
         version=2,
     )
+    if not basis_row:
+        basis = {d.slot for d in revised.decisions if d.scope and d.scope.axis == "measure_basis"}
+        revised = PlannerPlan.model_validate(
+            {
+                **revised.model_dump(),
+                "decisions": [d for d in revised.decisions if d.slot not in basis],
+                "evidence_requirements": [
+                    r.model_copy(
+                        update={"decision_ids": tuple(i for i in r.decision_ids if i not in basis)}
+                    )
+                    for r in revised.evidence_requirements
+                ],
+            }
+        )
     search = SearchStub(answer={scope["id"]: envelope})
 
     runner, seam, plan, scope, events = await _switch_runner(
@@ -3339,12 +3446,88 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
     assert offered["revision"] == plan_revision(revised)
     assert offered["moved"] == [
         {
-            "choice_id": f"{scope['id']}:measure_basis",
+            "choice_id": _row_id(revised, "measure_basis"),
             "from_label": "gross disbursements, current USD",
             "to_label": "grant equivalents",
             "reason": "It conflicts with another choice.",
         }
     ]
+
+
+def test_one_move_across_two_switched_sources_with_no_row_is_listed_once(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """Two switched sources, each pinned by a requirement of the plan and each
+    moved from gross disbursements to grant equivalents, with no basis row on
+    the card: the move is listed once, under the id a row over both would have."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    after = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
+
+    def source(prefix: str) -> Any:
+        before, answered = copy.deepcopy(scope), copy.deepcopy(after)
+        for raw in (before, answered):
+            raw["id"] = f"{prefix}_{raw['id']}"
+            for choice in raw["choices"]:
+                choice["id"] = f"{raw['id']}:{choice['axis']}"
+        return switch_module._Switched(
+            pin=f"{prefix}_pin",
+            reading=cast(Any, None),
+            scope=PartScope.from_search(before),
+            envelope={},
+            spec_id=f"{prefix}_spec",
+            after=PartScope.from_search(answered),
+        )
+
+    (dataset,) = [
+        r
+        for r in _seam_plan(schemas=real_schemas).evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ]
+    plan = SimpleNamespace(
+        decisions=(),
+        evidence_requirements=[
+            dataset.model_copy(update={"id": "first", "source_spec_id": "a_spec"}),
+            dataset.model_copy(update={"id": "second", "source_spec_id": "b_spec"}),
+        ],
+    )
+
+    moved = switch_module._moved_entries(cast(Any, plan), [source("a"), source("b")], axis="sector")
+
+    assert [entry["choice_id"] for entry in moved] == ["first:measure_basis"]
+
+
+async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The switched source was compiled for an earlier plan as a whole with its
+    sector left open, and the plan now pins it as a plain requirement with no
+    `whole_of`: it is no whole, so the user's pick of one sector is posted to
+    Search and the revised plan offered."""
+    scope = _hashed_scope()
+    new_pin, envelope = _switched_answer(scope)
+    revised = _scoped_plan(
+        new_pin,
+        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
+        schemas=real_schemas,
+        version=2,
+    )
+    search = SearchStub(answer={scope["id"]: envelope})
+    part = "spec_" + "4" * 32
+    whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
+
+    _, seam, _, _, events = await _switch_runner(
+        real_schemas,
+        search,
+        {"plan": revised.model_dump(mode="json"), "summary": {}},
+        earlier_whole=whole,
+    )
+
+    assert len(search.posted) == 1
+    assert len(seam.revisions) == 1
+    offered = _output_of(events, "switch")
+    assert "switch_failed" not in offered
+    assert offered["revision"] == plan_revision(revised)
 
 
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
@@ -3380,8 +3563,8 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
     """A reading the planner compiled to align a basis keeps that mark, on the
     new reading, its stored block and its pin's block, through a switch of its
     sector, since its basis entry is still the planner's, and the revised card
-    states that basis as the planner's; a switch of the basis is the user's and
-    drops it."""
+    states that basis as the planner's; a switch of the basis is the user's,
+    drops the mark, and the card states that basis as the user's."""
     scope = _hashed_scope()
     new_pin, envelope = _switched_answer(scope)
     answered = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
@@ -3421,27 +3604,42 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
     card = scope_choice_decisions({new_pin: PinSource(block=pinned, settled=True)}).get(new_pin, ())
     assert [
         d.resolved_by for d in card if d.scope is not None and d.scope.axis == "measure_basis"
-    ] == ([ResolvedBy.PLANNER_DEFAULT] if kept else [])
+    ] == ([ResolvedBy.PLANNER_DEFAULT] if kept else [ResolvedBy.USER])
 
 
-@pytest.mark.parametrize("refused_by", ["search", "revision"])
+@pytest.mark.parametrize(
+    ("refused_by", "code", "retryable"),
+    [
+        ("search", "requested_option_unavailable", False),
+        ("search", "transient_unavailable", True),
+        ("revision", "operation_unsupported", False),
+        ("revision", "discovery_unavailable", True),
+        ("revision", "surface_unavailable", True),
+    ],
+    ids=["search", "search-transient", "revision", "revision-transient", "revision-surface"],
+)
 async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
-    real_schemas: list[ToolSchema], refused_by: str
+    real_schemas: list[ToolSchema], refused_by: str, code: str, retryable: bool
 ) -> None:
     """Search refusing the switch (`requested_option_unavailable`), or the
-    revision failing, offers the same plan again with a note, leaves the
-    readings as they were and the planner's drafting state as it found it."""
+    revision failing, offers the same plan again with the failed switch, its
+    code, one sentence saying why and whether asking again can succeed, which
+    a Search that could not answer "just now" can,
+    leaves the readings as they were and the planner's drafting state as it
+    found it. A revision's refusal gives the reason its own
+    (`harness.sentences.refusal_reason`); only one Search could not answer
+    in time can succeed later."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = (
         SearchStub(
             refuse={
                 scope["id"]: {
-                    "code": "requested_option_unavailable",
+                    "code": code,
                     "title": "Requested Option Unavailable",
                     "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
                     "pointer": "/input/entries/0/scope_entries/1",
-                    "retryable": False,
+                    "retryable": retryable,
                 }
             }
         )
@@ -3449,14 +3647,35 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
         else SearchStub(answer={scope["id"]: envelope})
     )
 
-    runner, seam, plan, scope, events = await _switch_runner(real_schemas, search)
+    why = "Official development assistance would then count different providers' spending."
+    refused = {
+        "refused": {
+            "text": "This cannot be calculated as planned, so nothing was recorded.",
+            "reason": why,
+            "final": False,
+            "code": code,
+        }
+    }
+
+    runner, seam, plan, scope, events = await _switch_runner(real_schemas, search, refused)
 
     assert len(seam.calls) == 1
     assert len(seam.revisions) == (0 if refused_by == "search" else 1)
     offered = _output_of(events, "switch")
     assert offered["revision"] == plan_revision(plan)
-    assert "nothing changed" in offered["refusal_note"]
-    assert "still there to approve" in offered["refusal_note"]
+    assert "refusal_note" not in offered
+    assert offered["switch_failed"] == {
+        "choice_id": _row_id(plan, "sector"),
+        "option_id": "sector:120+130",
+        # A Search that did not answer states no code of its own.
+        "code": SCOPE_CHOICE_NOT_APPLIED if refused_by == "search" and retryable else code,
+        "reason": f"Search {'could not' if retryable else 'cannot'} count health (CRS 120) "
+        "and population and reproductive health (CRS 130) "
+        f"{'just now' if retryable else 'for this source'}."
+        if refused_by == "search"
+        else why,
+        "retryable": retryable,
+    }
     state = _session_state(runner)
     assert PlannerPlan.model_validate_json(state["plan"]) == plan
     assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
@@ -3466,6 +3685,321 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+@pytest.mark.parametrize(
+    "seam_type",
+    [_StoppedSeam, _FinishingStoppedSeam],
+    ids=["revision-cancelled", "revision-finishes-with-the-stop"],
+)
+async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again(
+    real_schemas: list[ToolSchema], seam_type: type[_StoppedSeam]
+) -> None:
+    """A Stop while the revision runs (`SWITCH_STOP`) cancels it and offers
+    the plan unchanged under `switch_cancelled`, which asking again can get
+    past, on a live pause, with the drafting state, the plan and the readings
+    the revision wrote put back, a declared whole's reading among them. A
+    revision that finishes in the same step as the Stop ends stopped too."""
+    scope = _hashed_scope()
+    new_pin, envelope = _switched_answer(scope)
+    revised = _scoped_plan(
+        new_pin,
+        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
+        schemas=real_schemas,
+        version=2,
+    )
+    token = SWITCH_STOP.set(asyncio.Event())
+    try:
+        runner, seam, plan, scope, events = await _switch_runner(
+            real_schemas,
+            SearchStub(answer={scope["id"]: envelope}),
+            {"plan": revised.model_dump(mode="json"), "summary": {}},
+            seam_type=seam_type,
+        )
+    finally:
+        SWITCH_STOP.reset(token)
+
+    assert len(seam.revisions) == 1
+    offered = _output_of(events, "switch")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"] == {
+        "choice_id": _row_id(plan, "sector"),
+        "option_id": "sector:120+130",
+        "code": SWITCH_CANCELLED,
+        "reason": "You stopped this change, so the plan is as it was.",
+        "retryable": True,
+    }
+    state = _session_state(runner)
+    assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
+        scope["compiled"]["spec_id"]
+    ]
+    assert state.get("planner:rounds") is None
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+class _RaisingSeam(_StoppedSeam):
+    """A `_StoppedSeam` whose revision, once it has written its state, raises an
+    error of its own with no Stop. `sessions` holds the session each revision ran in."""
+
+    sessions: ClassVar[list[Any]] = []
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        self.sessions.append(kwargs["ctx"].session)
+        token = SWITCH_STOP.set(asyncio.Event())
+        try:
+            return await super().revise(**kwargs)
+        finally:
+            SWITCH_STOP.reset(token)
+
+    async def _stopped(self) -> dict[str, Any]:
+        raise RuntimeError("revision broke")
+
+
+async def test_a_switch_whose_revision_raises_puts_the_state_back_and_raises(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A revision ending on an error other than `SwitchFailedError` ends the switch
+    with that error, once the drafting state, the plan and the readings it wrote,
+    a declared whole's reading among them, are put back for the next turn."""
+    scope = _hashed_scope()
+    new_pin, envelope = _switched_answer(scope)
+    revised = _scoped_plan(
+        new_pin,
+        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
+        schemas=real_schemas,
+        version=2,
+    )
+    _RaisingSeam.sessions.clear()
+
+    with pytest.raises(RuntimeError, match="revision broke"):
+        await _switch_runner(
+            real_schemas,
+            SearchStub(answer={scope["id"]: envelope}),
+            {"plan": revised.model_dump(mode="json"), "summary": {}},
+            seam_type=_RaisingSeam,
+        )
+
+    (session,) = _RaisingSeam.sessions
+    state = session.state
+    assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
+        scope["compiled"]["spec_id"]
+    ]
+    assert state.get("planner:rounds") is None
+
+
+def _unwinding_revision(
+    unwinding: asyncio.Event, *, error: type[BaseException], linger: float = 0
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """A revision that waits until cancelled, then sets `unwinding`, waits
+    `linger` seconds and raises `error` as its cleanup ends."""
+
+    async def revision() -> dict[str, Any]:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await asyncio.sleep(linger)
+            raise error from None
+        raise AssertionError("unreachable")
+
+    return revision
+
+
+_UNWIND_ERRORS = pytest.mark.parametrize(
+    "error", [asyncio.CancelledError, RuntimeError], ids=["clean-cancel", "cleanup-raises"]
+)
+
+
+@_UNWIND_ERRORS
+async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
+    error: type[BaseException],
+) -> None:
+    """A Stop cancels the revision, whose cleanup ends cleanly or raises an error of
+    its own: either way the user stopped the switch, so it ends under
+    `switch_cancelled`, which the `switch` node answers by putting the plan back."""
+    stop = asyncio.Event()
+    unwinding = asyncio.Event()
+    revision = _unwinding_revision(unwinding, error=error)
+    token = SWITCH_STOP.set(stop)
+    try:
+        switch = asyncio.ensure_future(switch_module._unless_stopped(cast(Any, None), revision()))
+    finally:
+        SWITCH_STOP.reset(token)
+    await asyncio.sleep(0)
+    stop.set()
+
+    with pytest.raises(SwitchFailedError) as stopped:
+        await asyncio.wait_for(switch, timeout=5)
+    assert stopped.value.code == SWITCH_CANCELLED
+
+
+@_UNWIND_ERRORS
+async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cancelled(
+    error: type[BaseException],
+) -> None:
+    """A Stop cancels the revision, and the switch itself is cancelled while the
+    revision's own cleanup still runs, which then ends cleanly or raises: the
+    switch ends cancelled, and offers no plan as if only the Stop had ended it."""
+    stop = asyncio.Event()
+    unwinding = asyncio.Event()
+    revision = _unwinding_revision(unwinding, error=error, linger=5)
+
+    token = SWITCH_STOP.set(stop)
+    try:
+        switch = asyncio.ensure_future(switch_module._unless_stopped(cast(Any, None), revision()))
+    finally:
+        SWITCH_STOP.reset(token)
+    await asyncio.sleep(0)
+    stop.set()
+    await asyncio.wait_for(unwinding.wait(), timeout=5)
+    switch.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(switch, timeout=5)
+
+
+# The source the planner wrote on the deployed plan's numerator, in the
+# question's words, and the provenance Search states for the composite of
+# bilateral and imputed multilateral aid the user switched it to.
+_STATED_SOURCE = "OECD Creditor Reporting System (CRS)"
+_INCLUSIVE_PROVENANCE = {
+    "ref": "provenance/CRSAndONEImputedMultilateralSectors",
+    "label": "CRS and ONE Imputed Multilateral Sectors",
+}
+
+
+class _TranslatingSeam(_Seam):
+    """A `PlannerModel` drafting `plans` and revising through the real
+    `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
+    translation's discovery and the compile, over `schemas`, with no model."""
+
+    def __init__(self, plans: list[dict[str, Any]], *, schemas: list[ToolSchema]) -> None:
+        super().__init__(plans)
+        self._seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=schemas))
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._seam.revise(**kwargs)
+
+
+async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The deployed failure: the planner stated the CRS as the health
+    numerator's source, and the user switched it to bilateral plus imputed
+    multilateral, a dataset Search names otherwise. The switch drops the
+    stated source with the pin it left, so the translation takes the new pin
+    with no search, the plan compiles, and its run accepts what the new
+    dataset returns."""
+    scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    new_pin, envelope = _switched_answer(scope)
+    block = envelope["parts"][0]["spec"]
+    block["resolved"] |= {
+        "coverage": {
+            "kind": "exact",
+            "has_data": True,
+            "window": {"start_year": 2015, "end_year": 2024},
+        },
+        "facets": {"provenance": _INCLUSIVE_PROVENANCE},
+        "entities": [{"role": "country", "ref": "country/KEN", "label": "Kenya"}],
+    }
+    scoped = _scoped_plan(pin, scope, schemas=real_schemas)
+    plan = PlannerPlan.model_validate(
+        {
+            **scoped.model_dump(),
+            "asks": [_BRIEF],
+            "answered": [{"ask": 0, "outputs": ["spending"]}],
+            "translation": None,
+            "workflow": None,
+            "evidence_requirements": [
+                r.model_copy(update={"source": _STATED_SOURCE})
+                for r in scoped.evidence_requirements
+                if isinstance(r, DatasetRequirement)
+            ],
+        }
+    )
+    seam = _TranslatingSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
+    )
+    search = SearchStub(answer={scope["id"]: envelope})
+    runner, _ = orchestrator_runner(
+        plan_call(_BRIEF),
+        planner=seam,
+        executor=ScriptedExecutor(),
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    await _start(runner)
+    reading = SearchReading.from_part(
+        {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
+    )
+    _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+
+    events = await _resume(
+        runner,
+        APPROVE_INTERRUPT,
+        {
+            "approved": None,
+            "switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"},
+        },
+    )
+
+    offered = _output_of(events, "switch")
+    assert "switch_failed" not in offered, offered.get("switch_failed")
+    revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
+    (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
+    assert (dataset.source_spec_id, dataset.source) == (new_pin, None)
+    assert revised.workflow is not None
+    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [new_pin]
+    approved = PlannerPlan.model_validate(
+        revised.model_dump()
+        | {
+            "status": "approved",
+            "approved_revision": plan_revision(revised),
+            "approved_at": datetime.now(UTC),
+        }
+    )
+    manifest = _get_data_manifest(spec_id=new_pin)
+    manifest["citation"]["sources"] = [_INCLUSIVE_PROVENANCE]
+    fetched = ToolCallResult(is_error=False, structured_content=manifest, text="fetched")
+
+    _, outcome = await execute_approved_plan(
+        approved,
+        surface=_fixture_surface(real_schemas, get_data_result=fetched),
+        fetch_series_stats=scripted_fetch_series_stats,
+    )
+
+    assert isinstance(outcome, Accepted), outcome
+
+
+@pytest.mark.parametrize(
+    ("exact_codes", "kept"), [(frozenset({"DT.ODA.ALLD.CD"}), True), (frozenset(), False)]
+)
+def test_a_repinned_requirement_keeps_its_series_code_only_where_the_new_dataset_is_it(
+    exact_codes: frozenset[str], kept: bool
+) -> None:
+    stated = DatasetRequirement(
+        id="aid",
+        decision_ids=["window"],
+        measure="aid",
+        entities=[Entity(name="Kenya", role="recipient")],
+        period=Period(start=2015, end=2024),
+        source="World Bank",
+        source_ref="provenance/WorldBank",
+        source_exclude=True,
+        source_code="DT.ODA.ALLD.CD",
+        source_spec_id="spec_" + "a" * 32,
+    )
+
+    moved = repinned(stated, "spec_" + "b" * 32, exact_codes)
+
+    assert (moved.source_spec_id, moved.source, moved.source_ref) == (
+        "spec_" + "b" * 32,
+        None,
+        None,
+    )
+    assert moved.source_exclude is False
+    assert moved.source_code == ("DT.ODA.ALLD.CD" if kept else None)
 
 
 # --- a chip under an answer, applied with no search ----------------------------
@@ -3623,16 +4157,29 @@ async def test_a_chip_whose_fetch_raises_answers_as_the_agents_own_fetch_would()
     assert HarnessCode.RAISED.value in first
 
 
-async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing() -> None:
+@pytest.mark.parametrize(
+    ("code", "retryable", "step_code", "retry_mode"),
+    [
+        ("requested_option_unavailable", False, "requested_option_unavailable", "do_not_retry"),
+        # A Search that did not answer states no code of its own.
+        ("transient_unavailable", True, SCOPE_CHOICE_NOT_APPLIED, "retry_after_delay"),
+    ],
+    ids=["refused", "transient"],
+)
+async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing(
+    code: str, retryable: bool, step_code: str, retry_mode: str
+) -> None:
+    """The chip's step fails with the code and retryability the plan card's
+    switch reports for the same refusal."""
     scope = _hashed_scope()
     search = SearchStub(
         refuse={
             scope["id"]: {
-                "code": "requested_option_unavailable",
+                "code": code,
                 "title": "Requested Option Unavailable",
                 "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
                 "pointer": "/input/entries/0/scope_entries/1",
-                "retryable": False,
+                "retryable": retryable,
             }
         }
     )
@@ -3640,14 +4187,15 @@ async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_no
     runner, model, executor, _ = await _chip_turn(search)
 
     note = (
-        "Search cannot count health (CRS 120) and population and reproductive health "
-        "(CRS 130) for this source, so nothing changed."
+        f"Search {'could not' if retryable else 'cannot'} count health (CRS 120) and "
+        "population and reproductive health (CRS 130) "
+        f"{'just now' if retryable else 'for this source'}."
     )
     assert note in request_text(model.requests[0])
     (step,) = executor.steps
     assert step["result"]["refusal"] == {
-        "code": SCOPE_CHOICE_NOT_APPLIED,
-        "retry_mode": "do_not_retry",
+        "code": step_code,
+        "retry_mode": retry_mode,
         "fix": None,
         "message": note,
     }

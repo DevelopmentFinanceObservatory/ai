@@ -50,7 +50,8 @@ def _strip_titles(schema: JsonSchemaValue) -> None:
 # A name a plan uses to refer to one of its own parts -- a decision's slot, a
 # requirement's id, an operation's id. Lower-case identifiers, so a reference
 # compares exactly.
-Identifier = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+MAX_IDENTIFIER_CHARS = 64
+Identifier = Annotated[str, Field(pattern=rf"^[a-z][a-z0-9_]{{0,{MAX_IDENTIFIER_CHARS - 1}}}$")]
 
 # The longest entity name and role phrase a plan or an operation states, and the
 # most entities one field lists. A name is the entity in the question's own words

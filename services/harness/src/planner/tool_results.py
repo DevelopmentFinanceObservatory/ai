@@ -104,6 +104,14 @@ class ProblemCode(StrEnum):
     # a basis choice, so the input is searched for before the plan records
     # (`submission.service._aligned_bases`).
     BASIS_UNKNOWN = "basis_unknown"
+    # A whole the planner declared (`planner.plan.DatasetRequirement.whole_of`)
+    # cannot be compiled from its part's own dataset with the axis left open
+    # (`submission.service.share_whole_underivable`).
+    SHARE_WHOLE_UNDERIVABLE = "share_whole_underivable"
+    # A comparison, share, quotient or sum reads an input its dataset does not serve on the
+    # provider scope of its other inputs, which the planner repairs
+    # (`submission.service._providers_unaligned`).
+    PROVIDERS_UNALIGNED = "providers_unaligned"
     MEASURE_FIXED_BY_PIN = "measure_fixed_by_pin"
 
 
