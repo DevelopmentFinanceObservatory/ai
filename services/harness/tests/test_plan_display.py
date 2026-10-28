@@ -3460,6 +3460,54 @@ def test_a_donor_whole_counted_on_another_series_is_named_by_its_own_concept(
     ]
 
 
+@pytest.mark.parametrize(
+    ("whole", "numerator", "concept"),
+    [
+        ({"measure_label": "total ODA"}, {"measure_label": "bilateral ODA"}, "total ODA"),
+        ({}, {"measure_label": "bilateral ODA"}, "bilateral ODA"),
+        ({"measure_label": "total ODA"}, {"concept_label": _ODA}, _ODA),
+        ({"concept_label": _ODA}, {"concept_label": "bilateral ODA"}, _ODA),
+    ],
+    ids=["own_measure_label", "parts_measure_label", "parts_concept", "own_concept"],
+)
+def test_a_donor_whole_is_named_alike_on_the_card_and_its_stored_reading(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    numerator: dict[str, Any],
+    concept: str,
+) -> None:
+    """A donor whole of the United States' ODA to Kenya, its source and its
+    part's stating a concept or only a measure label: the card's fetch and the
+    name its reading is stored under (`source_whole_name`, the "Counted as"
+    line) name it by one concept, with or without `concept_label`."""
+    plan = us_share_of_kenya_oda(
+        decision, whole={**DAC_DONORS, **whole}, numerator={**US_DONOR, **numerator}
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(update={"whole_of": WholeOf(part="us", axis="donor")})
+                if r.id == "all_oda"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+    assert plan.workflow is not None
+    steps = {binding.requirement_id: binding.step_id for binding in plan.workflow.evidence_bindings}
+    source, part = (plan.workflow.source_of(steps[key]) for key in ("all_oda", "us"))
+    assert source is not None
+
+    stored = plan_display.source_whole_name(
+        "donor", source=source, part=part, sector=None, measure=None
+    )
+
+    # The card adds the parties each reads only to retrievals named alike.
+    assert str(card_rows(plan)[1]["label"]).startswith(f"Fetch {concept} f")
+    assert stored == f"{concept} from official donors (DAC) to Kenya"
+
+
 def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
     decision: DecisionFactory,
 ) -> None:
@@ -3635,6 +3683,46 @@ def test_a_decisions_reason_keeps_its_words_after_the_option_id(text: str, shown
         }
     )
     assert card_decision_text(text, plan) == shown
+
+
+_RELABELLED_NET = "net flows, current USD"
+
+
+@pytest.mark.parametrize(
+    ("rendered", "label"),
+    [
+        (None, "net disbursements, current USD"),
+        ("scope_sector_spec_61d37f5bd032b8bba3d077187e627ded", "net disbursements, current USD"),
+        ("scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca", _RELABELLED_NET),
+    ],
+    ids=["no_decision", "another_decisions_option", "own_label"],
+)
+def test_an_option_id_two_decisions_label_apart_never_shows_raw(
+    rendered: str | None, label: str
+) -> None:
+    """The recorded plan's two basis decisions, the second relabelling
+    "measure_basis:net": a reason opening with that id reads the label of the
+    decision it is of where that decision offers it, else of the first
+    decision offering it in plan order, so the id never shows, including in
+    the reason of the sector decision, which offers no basis option."""
+    payload = _recorded_payload("long")
+    for held in payload["decisions"]:
+        if held["slot"] == "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca":
+            held["options"][1] = _RELABELLED_NET
+    plan = Plan.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in ("summary", "revision", "moved")
+        }
+    )
+    decision = next((held for held in plan.decisions if held.slot == rendered), None)
+
+    text = "measure_basis:net because the user asked for net flows"
+    assert card_decision_text(text, plan, decision=decision) == (
+        f"{label} because the user asked for net flows"
+    )
+    assert card_choice_text("measure_basis:net", plan, decision=decision) == label
 
 
 @pytest.mark.parametrize(

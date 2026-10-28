@@ -1644,7 +1644,11 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
     if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
         return underivable(f"Search holds no one dataset counting every {axis} of {part_pin}")
-    held = _parties_outside(scope, spec, column) if column is not None else _Containment()
+    held = (
+        _parties_outside(scope, spec, column, part_block=block)
+        if column is not None
+        else _Containment()
+    )
     if held.outside or held.unshown:
         return underivable(*_uncontained(part_pin, axis, held))
     answered = _answered_options(spec_id, spec)
@@ -1741,9 +1745,12 @@ _AXIS_ABSENT = "axis_absent"
 _NOT_A_PARTY_CLASS = "residual"
 
 
-def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> _Containment:
+def _parties_outside(
+    scope: PartScope, spec: Mapping[str, Any], column: str, *, part_block: Mapping[str, Any]
+) -> _Containment:
     """Whether the whole Search answered with, `spec`, holds each party the part
-    `scope` records names on the role `column` (`compile_whole`).
+    `scope` records names on the role `column` (`compile_whole`), `part_block`
+    the part's spec block.
 
     A whole binding nothing on `column` counts every party its dataset holds
     there, the part's own dataset, so it holds every party the part names.
@@ -1762,6 +1769,12 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
     outside `PartyClass`, every party it does not bind is unshown; a group on
     another role is not read. The part's parties are those it binds on
     `column` (`submission.service.bound_parties`), a choice's among them.
+
+    A party of the part the whole neither binds nor lists is read through the
+    part's own group on `column` where it is that group's total (the G7's): the
+    whole holds it where it holds every member Search lists for the group, does
+    not where one is outside, and nothing shows it does where Search lists no
+    members, or the part's group there is not readable.
     """
     definition = spec.get("definition")
     identity = definition.get("identity") if isinstance(definition, Mapping) else None
@@ -1775,19 +1788,42 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
     except ValueError:
         return _Containment(unshown=tuple(party for party in named if party not in bound))
     members = set(group.members) if group is not None else set()
+
+    def holds(party: str) -> bool | None:
+        """Whether the whole holds `party` as itself, `None` where nothing shows it."""
+        if party in bound or party in members:
+            return True
+        if group is not None and group.whole_of:
+            classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
+            return True if classes and classes <= set(group.whole_of) else None
+        if members or group is None or group.total not in bound:
+            return False
+        return None
+
+    try:
+        part_group = block_group(part_block, column)
+    except ValueError:
+        part_group, part_readable = None, False
+    else:
+        part_readable = True
     outside: list[str] = []
     unshown: list[str] = []
     for party in named:
-        if party in bound or party in members:
+        held = holds(party)
+        if held:
             continue
-        if group is not None and group.whole_of:
-            classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
-            if not classes or not classes <= set(group.whole_of):
-                unshown.append(party)
-        elif members or group is None or group.total not in bound:
-            outside.append(party)
-        else:
-            unshown.append(party)
+        if not part_readable:
+            # The party may be the total of a group nothing here reads.
+            held = None
+        elif part_group is not None and party == part_group.total:
+            each = [holds(member) for member in part_group.members]
+            if not each:
+                held = None
+            elif all(each):
+                continue
+            else:
+                held = False if False in each else None
+        (outside if held is False else unshown).append(party)
     return _Containment(outside=tuple(outside), unshown=tuple(unshown))
 
 

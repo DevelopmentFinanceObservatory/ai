@@ -640,10 +640,7 @@ def source_whole_name(
     """What a declared whole leaving the donor or recipient `axis` open
     fetches, named off the source Search answered for it alone, with no plan.
 
-    As the plan card names it (`_concept`), by `concept_name`'s rule: the
-    concept Search states for `source`, else for the part's source `part`,
-    else the `sector` option the whole was counted on, else the label Search
-    composed for `source`'s measure, else `part`'s, else `measure`. Then the
+    The concept as the plan card names it (`_entity_whole_concept`). Then the
     parties `source` binds, each side by the named set bound there, else its
     entities, else the members its open axis holds, and the opened side,
     still unnamed, as every party there: "official development assistance
@@ -651,12 +648,7 @@ def source_whole_name(
     assistance) from official donors (DAC) to Kenya". `None` where `axis` is
     on no side of a flow or nothing names the concept."""
     side = flow_side(axis)
-    concept = concept_name(
-        measure or "",
-        concept_label=source.concept_label or (part.concept_label if part is not None else None),
-        sector=sector,
-        measure_label=source.measure_label or (part.measure_label if part is not None else None),
-    )
+    concept = _entity_whole_concept(source=source, part=part, sector=sector, measure=measure or "")
     if side is None or not concept:
         return None
     sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
@@ -668,6 +660,30 @@ def source_whole_name(
     if not sides[side]:
         sides[side].append(whole_name(axis))
     return f"{concept} {_sides_phrase(sides)}"
+
+
+def _entity_whole_concept(
+    *,
+    source: SelectedSource | None,
+    part: SelectedSource | None,
+    sector: str | None,
+    measure: str,
+) -> str:
+    """What a declared whole leaving a donor or recipient axis open fetches,
+    the one rule the plan card (`_concept`) and its stored reading
+    (`source_whole_name`) share, by `concept_name`'s order: the concept
+    Search states for the whole's `source`, else for its part's `part`, else
+    the `sector` option the whole was counted on, else the label Search
+    composed for `source`'s measure, which differs from the part's where
+    Search counted the whole on another series, else `part`'s, else
+    `measure`."""
+    sources = [held for held in (source, part) if held is not None]
+    return concept_name(
+        measure,
+        concept_label=next((held.concept_label for held in sources if held.concept_label), None),
+        sector=sector,
+        measure_label=next((held.measure_label for held in sources if held.measure_label), None),
+    )
 
 
 def _joined(names: Sequence[str]) -> str:
@@ -720,12 +736,11 @@ def card_decision_text(text: str, plan: Plan, *, decision: Decision | None = Non
     Each spec_id is named (`with_source_names`). A text the planner opened
     with a scope option's id reads with that id as the option's label and
     the rest as the planner wrote it: "provider:inclusive because the user
-    asked for it" reads "<label> because the user asked for it". The label
-    is the one `decision`, the decision the text is of, gives the option
-    where it is a scope decision, since two sources can give one option id
-    different labels; for any other text it is the label every scope
-    decision of `plan` offering the option gives it, and the id stays where
-    they give it different ones. A slug the planner wrote for an option
+    asked for it" reads "<label> because the user asked for it". Two sources
+    can give one option id different labels, so the label is the one
+    `decision`, the decision the text is of, gives the option where it is a
+    scope decision offering it, else the one the first scope decision of
+    `plan` offering it gives. A slug the planner wrote for an option
     ("crs_total") reads as words ("crs total").
     """
     named = with_source_names(text, plan).strip()
@@ -738,22 +753,16 @@ def card_decision_text(text: str, plan: Plan, *, decision: Decision | None = Non
 def _option_labelled(text: str, plan: Plan, decision: Decision | None) -> tuple[str, str] | None:
     """The label of the scope option whose id `text` opens with, and the text
     after that id (`card_decision_text`); `None` when `text` opens with no
-    option's id, or with one the plan's decisions label differently."""
-    scoped = (
-        [decision]
-        if decision is not None and decision.scope is not None
-        else [held for held in plan.decisions if held.scope is not None]
-    )
-    found: dict[str, str] = {}
-    for held in scoped:
-        assert held.scope is not None
+    scope option's id. The label is the one `decision` gives the option,
+    where it is a scope decision offering it, else the one the first scope
+    decision of `plan` offering it gives."""
+    for held in (decision, *plan.decisions):
+        if held is None or held.scope is None:
+            continue
         for option, label in zip(held.scope.options, held.options, strict=True):
             if text == option.option_id or text.startswith(f"{option.option_id} "):
-                found[label] = text.removeprefix(option.option_id)
-    if len(found) != 1:
-        return None
-    ((label, rest),) = found.items()
-    return label, rest
+                return label, text.removeprefix(option.option_id)
+    return None
 
 
 def _unslugged(text: str) -> str:
@@ -811,20 +820,22 @@ def _concept(
     A declared whole (`DatasetRequirement.whole_of`) is its part with the
     part's axis opened, and ignores the planner's `measure`. Over every
     sector it is named by that axis ("all sectors"). Over every donor or
-    recipient it is named by the concept Search states for its own source,
-    which differs from the part's where Search counted the whole on another
-    series (bilateral ODA's whole on total ODA), else as its part is; the
-    parties it reads (`_who`, `_parties`) name the population its source
-    holds there. A plan not compiled reads its source off `sources`
-    (`_source`)."""
+    recipient it is named off its own source and its part's
+    (`_entity_whole_concept`), on the sector option the whole cites, else
+    its part's, else by its part's `measure`; the parties it reads (`_who`,
+    `_parties`) name the population its source holds there. A plan not
+    compiled reads its source off `sources` (`_source`)."""
     if requirement.whole_of is not None:
         part = plan.requirement(requirement.whole_of.part)
         if requirement.whole_of.axis == "sector" or not isinstance(part, DatasetRequirement):
             return whole_name(requirement.whole_of.axis)
-        own = _source(requirement.id, plan, sources)
-        if own is not None and own.concept_label:
-            return own.concept_label
-        return _concept(part, plan, sources=sources)
+        sector = _governing(requirement, plan).get("sector") or _governing(part, plan).get("sector")
+        return _entity_whole_concept(
+            source=_source(requirement.id, plan, sources),
+            part=_source(part.id, plan, sources),
+            sector=sector.chosen if sector is not None else None,
+            measure=part.measure,
+        )
     sector = _governing(requirement, plan).get("sector")
     source = _source(requirement.id, plan, sources)
     return concept_name(

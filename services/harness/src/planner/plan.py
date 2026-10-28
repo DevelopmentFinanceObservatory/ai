@@ -1678,12 +1678,13 @@ def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
     return (requirement.input_id,)
 
 
-def _find_cycle(requirements_by_id: dict[str, EvidenceRequirement]) -> tuple[str, ...] | None:
+def _find_cycle(requirements_by_id: Mapping[str, EvidenceRequirement]) -> tuple[str, ...] | None:
     """Return one cycle of requirement ids, if the requirements do not form a DAG.
 
     A depth-first search with a coloring scheme: white is unvisited, gray is
     on the current path, black is fully explored. Finding a gray node again
-    while walking `inputs_of` means the path back to it is a cycle.
+    while walking `inputs_of` means the path back to it is a cycle. An input
+    `requirements_by_id` does not hold reads nothing, so it closes no cycle.
     """
     white, gray, black = 0, 1, 2
     color: dict[str, int] = dict.fromkeys(requirements_by_id, white)
@@ -1693,9 +1694,9 @@ def _find_cycle(requirements_by_id: dict[str, EvidenceRequirement]) -> tuple[str
         color[requirement_id] = gray
         path.append(requirement_id)
         for input_id in inputs_of(requirements_by_id[requirement_id]):
-            if color[input_id] == gray:
+            if color.get(input_id) == gray:
                 return tuple(path[path.index(input_id) :])
-            if color[input_id] == white:
+            if color.get(input_id) == white:
                 found = visit(input_id)
                 if found is not None:
                     return found
@@ -2304,7 +2305,15 @@ def _check_reads_resolve(requirements_by_id: Mapping[str, EvidenceRequirement]) 
         raise ValueError(
             f"evidence requirements read requirements this plan does not state: {unknown_inputs!r}"
         )
-    cycle = _find_cycle(dict(requirements_by_id))
+    check_acyclic(requirements_by_id)
+
+
+def check_acyclic(requirements_by_id: Mapping[str, EvidenceRequirement]) -> None:
+    """Reject requirements reading in a cycle (`_find_cycle`), so a walk down what each
+    reads ends. An input `requirements_by_id` does not hold is left for
+    `_check_reads_resolve` to refuse.
+    """
+    cycle = _find_cycle(requirements_by_id)
     if cycle is not None:
         raise ValueError(f"evidence requirements do not form a DAG; cycle: {list(cycle)!r}")
 
@@ -2367,9 +2376,13 @@ def _entity_whole_fault(
     does not hold `part`, `None` when it does.
 
     The part names a party on the side of the flow `axis` is on. The whole names
-    the part's other entities and none on that side, and states the part's
-    `across` words with one word for that side added, so it is the total over
-    every `axis` for the part's other parties.
+    the part's other entities and states the part's `across` words with one word
+    for that side added, so it is the total over every `axis` for the part's
+    other parties. Where Search answers the whole with that side bound to one
+    group, as DAC1 binds DAC countries' total, the translator names the group on
+    the side in place of the word (`translator.discovery.name_pinned_groups`), so
+    a whole naming one entity on that side, other than the part's, and stating
+    only the part's `across` words holds the part too.
     """
     side = role_party(axis)
     named = [e for e in part.entities if e.role is not None and role_party(e.role) == side]
@@ -2382,7 +2395,10 @@ def _entity_whole_fault(
     others = {*part.entities} - {*named}
     spans = any(across_party(word) == side for word in whole.across)
     kept = {word for word in whole.across if across_party(word) != side}
-    if {*whole.entities} != others or not spans or kept != {*part.across}:
+    on_side = {e for e in whole.entities if e.role is not None and role_party(e.role) == side}
+    # The side spanned by `across`, or closed to one group other than the part's party.
+    opened = not on_side if spans else len(on_side) == 1 and not on_side & {*named}
+    if {*whole.entities} - on_side != others or not opened or kept != {*part.across}:
         return (
             f"{whole.id!r} is the whole of {part.id!r} over every {axis}, so it states "
             f"{part.id!r}'s entities without its {axis}s "

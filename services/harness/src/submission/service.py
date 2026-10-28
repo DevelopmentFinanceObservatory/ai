@@ -140,6 +140,7 @@ from planner.plan import (
     amendment_entry,
     authored,
     bound_fixes,
+    check_acyclic,
     check_wholes_span_their_totals,
     cut_user_text,
     dataset_roots,
@@ -486,8 +487,16 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     user_settled = _user_settled_measures(measures, view, pins)
     evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
+    stated_after = _requirements_after(
+        previous, evidence_requirements, removed_evidence_requirements
+    )
+    try:
+        # Every stage below walks what each requirement reads, down to its datasets.
+        check_acyclic({requirement.id: requirement for requirement in stated_after})
+    except ValueError as exc:
+        return _invalid_data(exc, proposer)
     realigned = _aligned_bases(
-        _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
+        stated_after,
         evidence_requirements,
         shown=pins,
         sources=sources,
@@ -4356,7 +4365,7 @@ def _aligned_bases(
     inputs = _read_inputs(aligning, sources=sources, origins=origins)
     by_axis = {axis: _input_bases(inputs, axis=axis) for axis in _ALIGNED_AXES}
     steps = [step for step in requirements if len(inputs_of(step)) >= 2]
-    groups = _input_groups(requirements, lambda pin: sources.get(origins.get(pin, pin)))
+    groups = _input_groups(requirements, source_of=lambda pin: sources.get(origins.get(pin, pin)))
     unpinned: dict[str, Unpinned] = {}
     for step in steps:
         under = set().union(*(group.members for group in groups[step.id]))
@@ -4419,7 +4428,8 @@ class _InputGroup(NamedTuple):
     leaves the group's provider scopes as they stand. `sides` are the
     derivations of the two sides of a comparison, sum, share or quotient
     (`_side_derivations`), for one reading its sides as one group, so alignment can
-    keep the two sides apart (`_sides_one_series`); `None` for any other group.
+    keep the two sides apart (`_sides_one_series`); `None` for any other group,
+    and for every group read without a source (`_input_groups`).
     """
 
     members: frozenset[str]
@@ -4614,11 +4624,15 @@ def _side_derivations(
 
 
 def _input_groups(
-    requirements: Sequence[EvidenceRequirement], source_of: Callable[[str], SelectedSource | None]
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    source_of: Callable[[str], SelectedSource | None] | None = None,
 ) -> dict[str, list[_InputGroup]]:
     """The groups of requirements each calculation of `requirements` reading two or
     more inputs counts on one option, by its id. `source_of` is the source of a
-    pin (`_passed_through`).
+    pin (`_passed_through`); a group reading its calculation's sides as one holds
+    their derivations (`_InputGroup.sides`) only where it is given, as alignment
+    reads them and nothing else does.
 
     A calculation reads one group: what it reads, and what a calculation it
     reads reads, down to a share or quotient, which it reads as one figure,
@@ -4675,7 +4689,9 @@ def _input_groups(
             groups[step.id] = [
                 _InputGroup(
                     frozenset(reached(step.id, {**cut, step.id: inputs})),
-                    sides=_side_derivations(step, by_id, source_of),
+                    sides=(
+                        _side_derivations(step, by_id, source_of) if source_of is not None else None
+                    ),
                 )
             ]
     return groups
@@ -5532,8 +5548,7 @@ def _whole_decisions(
                 resolved_by=ResolvedBy.PLANNER_DEFAULT,
                 rationale=_fitting_rationale(
                     *(
-                        f"The {divides} divides by the {total} from {source} {part_named}, so both "
-                        f"sides count {alike}"
+                        f"The {divides} divides by the {total} from {source} {part_named}{alike}"
                         for source, part_named in named
                     )
                 ),
@@ -5581,13 +5596,15 @@ def _whole_shares(
     whole_scope_held: PartScope | None,
 ) -> str:
     """What a whole over every `axis` and its part count alike, as the end of its
-    caveat's rationale: "the same donors, recipients, measure basis and providers."
-    `part_block` is the part's spec block, and `part_scope_held` and
-    `whole_scope_held` the scope records of the part and the whole. It names only
-    what the part's dataset has (`_dataset_holds`), so a DAC1 donor total names no
-    recipients or sectors, and the providers only where both hold the same provider
-    option. Where they hold different options, or one states none, it says what
-    each counts."""
+    caveat's rationale: ", so both sides count the same donors, recipients, measure
+    basis and providers." `part_block` is the part's spec block, and
+    `part_scope_held` and `whole_scope_held` the scope records of the part and the
+    whole. It names only what the part's dataset has (`_dataset_holds`), so a DAC1
+    donor total names no recipients or sectors, and the providers only where both
+    hold the same provider option. Where they hold different options, or one states
+    none, it says what each counts (`_providers_counted`), and where they share
+    nothing else it says they count different providers only where both state
+    one."""
     alike = [
         name for name in _WHOLE_ALIKE[axis] if _dataset_holds(part_block, part_scope_held, name)
     ]
@@ -5600,9 +5617,15 @@ def _whole_shares(
         alike.append("providers")
     named = ", ".join(alike[:-1]) + f" and {alike[-1]}" if len(alike) > 1 else "".join(alike)
     if same or (part is None and whole is None):
-        return f"the same {named}." if named else "alike."
-    shared = f"the same {named}." if named else "different providers."
-    return f"{shared} {_providers_counted(whole, part)}"
+        return (
+            f", so both sides count the same {named}." if named else ", so both sides count alike."
+        )
+    providers = _providers_counted(whole, part)
+    if named:
+        return f", so both sides count the same {named}. {providers}"
+    if part is not None and whole is not None:
+        return f", so both sides count different providers. {providers}"
+    return f". {providers}"
 
 
 def _providers_counted(whole: Option | None, part: Option | None) -> str:
@@ -5807,7 +5830,7 @@ def _difference_decisions(
         for requirement in requirements
         if isinstance(requirement, DatasetRequirement) and requirement.whole_of is not None
     }
-    groups = _input_groups(requirements, sources.get)
+    groups = _input_groups(requirements)
     decisions: dict[str, tuple[Decision, ...]] = {}
     for step in requirements:
         if not isinstance(step, _PROVIDER_ALIGNED):
