@@ -50,7 +50,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
-from compiler.sources import block_groups
+from compiler.sources import block_group, block_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -93,6 +93,7 @@ from submission.service import (
     aligned_pins,
     axis_slot,
     basis_unservable,
+    bound_parties,
     part_scope,
     realignments_wanted,
     save_aligned_pin,
@@ -1756,9 +1757,11 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
     residuals, nothing here says which class the party is, so it is unshown.
     Any other party is outside where Search binds parties or lists a total's
     members there, and unshown where the total it binds states neither its
-    members nor a whole class. Where Search's groups are not readable, as one
-    naming a class of party outside `PartyClass`, every party it does not bind
-    is unshown.
+    members nor a whole class. Where Search's group on `column` is not
+    readable (`compiler.sources.block_group`), as one naming a class of party
+    outside `PartyClass`, every party it does not bind is unshown; a group on
+    another role is not read. The part's parties are those it binds on
+    `column` (`submission.service.bound_parties`), a choice's among them.
     """
     definition = spec.get("definition")
     identity = definition.get("identity") if isinstance(definition, Mapping) else None
@@ -1766,12 +1769,11 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
     bound = entities.get(column) if isinstance(entities, Mapping) else None
     if not bound:
         return _Containment()
-    named = (scope.base.identity.get("entities") or {}).get(column) or ()
+    named = bound_parties(scope, column)
     try:
-        groups = block_groups(spec)
+        group = block_group(spec, column)
     except ValueError:
         return _Containment(unshown=tuple(party for party in named if party not in bound))
-    group = next((g for g in groups if g.role == column), None)
     members = set(group.members) if group is not None else set()
     outside: list[str] = []
     unshown: list[str] = []

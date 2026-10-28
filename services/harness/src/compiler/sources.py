@@ -1034,7 +1034,27 @@ def block_groups(
             of party outside `PartyClass`.
     """
     groups = _mapping(_mapping(block.get("resolved")).get("entity_groups"))
-    return _groups({role: group for role, group in groups.items() if role != leaving_out})
+    return tuple(
+        group
+        for role in groups
+        if role != leaving_out and (group := block_group(block, role)) is not None
+    )
+
+
+def block_group(block: Mapping[str, object], role: str) -> ResolvedGroup | None:
+    """The named set a spec block's `resolved.entity_groups` states on the role column
+    `role` (`block_groups`), `None` where it states none there or the set names nothing.
+    A set on another role is not read, so one there that is not readable does not
+    hide this one.
+
+    Raises:
+        ValueError: When the set on `role` is not readable, as one naming a class
+            of party outside `PartyClass`.
+    """
+    groups = _mapping(_mapping(block.get("resolved")).get("entity_groups"))
+    if role not in groups:
+        return None
+    return next(iter(_groups({role: groups[role]})), None)
 
 
 def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | None:

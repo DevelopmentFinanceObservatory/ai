@@ -28,7 +28,6 @@ from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
 
 from harness.tool_contracts import (
-    GROUP_FACTS_KEY,
     reading_facts,
 )
 from harness.turn_records import Origin, SearchReading, open_prices
@@ -385,9 +384,7 @@ def store_search(
     Each part's spec blocks, its own and its candidates', go under
     `ORCHESTRATOR_SPECS_KEY` and the part's warnings under
     `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch` finds them, and each part
-    joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`,
-    with the named sets the digest read from its block (`GROUP_FACTS_KEY`),
-    read from the block where the digest carries none.
+    joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
     `asked` holds each part's asked flow parties by position, and
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
@@ -405,13 +402,13 @@ def store_search(
         reading = {
             key: value
             for key, value in part.items()
-            if key not in ("spec_block", "candidate_blocks", GROUP_FACTS_KEY)
+            if key not in ("spec_block", "candidate_blocks")
         }
         blocks = dict(part.get("candidate_blocks") or {})
         facts: dict[str, Any] = {}
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
-            facts = reading_facts(part["spec_block"], groups=part.get(GROUP_FACTS_KEY))
+            facts = reading_facts(part["spec_block"])
             if prices := open_prices(
                 part["spec_block"],
                 window=part.get("window"),

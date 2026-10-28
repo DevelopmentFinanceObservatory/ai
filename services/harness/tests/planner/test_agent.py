@@ -5391,11 +5391,13 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
 
 
 def _from_donors(block: dict[str, Any], donors: list[str]) -> dict[str, Any]:
-    """`block` with its part's base identity bound to `donors`, countries, as its
-    origin, all providers when empty, each stated as Search states a bound country."""
+    """`block` with its part's base and compiled identities bound to `donors`,
+    countries, as their origin, all providers when empty, each stated as Search
+    states a bound country."""
     resolved = block["resolved"]
-    identity = resolved["scope_choices"]["base"]["identity"]
-    identity["entities"] = {"origin": donors} if donors else {}
+    scope = resolved["scope_choices"]
+    for identity in (scope["base"]["identity"], scope["compiled"]["identity"]):
+        identity["entities"] = {"origin": donors} if donors else {}
     resolved["entities"] = [
         {"ref": donor, "label": donor, "entity_type": "Country", "role": "origin"}
         for donor in donors
@@ -6607,7 +6609,8 @@ def _uk_total(spec_id: str) -> dict[str, Any]:
     block = json.loads(json.dumps(us_2023_block("dac1_total_gross")))
     block["spec_id"] = spec_id
     scope = block["resolved"]["scope_choices"]
-    scope["base"]["identity"]["entities"] = {"origin": ["country/GBR"]}
+    for identity in (scope["base"]["identity"], scope["compiled"]["identity"]):
+        identity["entities"] = {"origin": ["country/GBR"]}
     scope["entries"] = []
     return block
 
@@ -8714,16 +8717,48 @@ def test_a_recipient_a_part_binds_through_its_region_choice_alone_is_held_for_a_
     assert submission_service.whole_axis_held(scope, "recipient")
 
 
-def test_a_dac1_donor_whole_of_a_donor_outside_the_dac_is_refused() -> None:
+def _bound_through_a_choice(block: dict[str, Any], column: str) -> dict[str, Any]:
+    """A copy of `block` binding its parties on `column` only through the option a
+    choice holds active: in the identity its scope compiles to, not its base identity."""
+    copied = json.loads(json.dumps(block))
+    del copied["resolved"]["scope_choices"]["base"]["identity"]["entities"][column]
+    return copied
+
+
+def _unreadable_recipient_set(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block` stating a recipient set naming a class of party this release
+    does not know, beside whatever it states on its donor side."""
+    copied = json.loads(json.dumps(block))
+    groups = copied["resolved"].setdefault("entity_groups", {})
+    groups["destination"] = {"label": "Sovereign funds", "whole_of": ["sovereign_fund"]}
+    return copied
+
+
+@pytest.mark.parametrize(
+    ("part_of", "whole_of"),
+    [
+        pytest.param(None, None, id="bound-in-the-base-identity"),
+        # The Emirates bound only through a choice's option, as a region option binds
+        # its donors: the whole is still checked against them.
+        pytest.param(_bound_through_a_choice, None, id="bound-through-a-choice"),
+        # An unreadable set on the recipient side says nothing of the donor total.
+        pytest.param(None, _unreadable_recipient_set, id="unreadable-set-on-another-role"),
+    ],
+)
+def test_a_dac1_donor_whole_of_a_donor_outside_the_dac_is_refused(
+    part_of: Callable[[dict[str, Any], str], dict[str, Any]] | None,
+    whole_of: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> None:
     """The United Arab Emirates' DAC1 total over DAC countries' total, which Search
     binds for its whole and whose members it lists without the Emirates: the
     whole does not contain the part."""
     recorded = _DAC_DONOR_WHOLES["dac1_non_dac"]
-    part = recorded["part"]
+    part = recorded["part"] if part_of is None else part_of(recorded["part"], "origin")
+    whole = recorded["whole"] if whole_of is None else whole_of(recorded["whole"])
     scope = submission_service.part_scope(part["spec_id"], part)
     assert scope is not None
 
-    held = planner_agent._parties_outside(scope, recorded["whole"], "origin")
+    held = planner_agent._parties_outside(scope, whole, "origin")
 
     assert (held.outside, held.unshown) == (("country/ARE",), ())
 
@@ -8783,8 +8818,9 @@ def _beside_ida(block: dict[str, Any]) -> dict[str, Any]:
         if e["role"] == "origin"
     )
     resolved["entities"] = [*resolved["entities"], ida]
-    identity = resolved["scope_choices"]["base"]["identity"]
-    identity["entities"]["origin"] = [*identity["entities"]["origin"], ida["ref"]]
+    scope = resolved["scope_choices"]
+    for identity in (scope["base"]["identity"], scope["compiled"]["identity"]):
+        identity["entities"]["origin"] = [*identity["entities"]["origin"], ida["ref"]]
     return copied
 
 
@@ -8962,10 +8998,12 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
     [
         pytest.param(None, {"bilateral"}, id="readable-set"),
         pytest.param(["sovereign_fund"], {"bilateral", "multilateral"}, id="unreadable-set"),
+        # An unreadable set on the recipient side leaves the donor set readable.
+        pytest.param("destination", {"bilateral"}, id="unreadable-set-on-another-role"),
     ],
 )
 def test_a_donor_sets_marker_speaks_for_its_donors_only_where_the_set_is_readable(
-    whole_of: list[str] | None, money: set[str]
+    whole_of: list[str] | str | None, money: set[str]
 ) -> None:
     """DAC countries' bilateral ODA, whose donor set Search marks as holding no
     multilateral: its reporters' own flows count bilateral money. Where the set names
@@ -8973,12 +9011,28 @@ def test_a_donor_sets_marker_speaks_for_its_donors_only_where_the_set_is_readabl
     says nothing and the total reads as an unmarked organisation's, which may hold a
     multilateral."""
     block = json.loads(json.dumps(_SUM_BLOCKS["dac_countries_bilateral"]))
-    if whole_of is not None:
+    if whole_of == "destination":
+        block = _unreadable_recipient_set(block)
+    elif whole_of is not None:
         block["resolved"]["entity_groups"]["origin"]["whole_of"] = whole_of
     scope = submission_service.part_scope(block["spec_id"], block)
     assert scope is not None
 
     assert submission_service._own_flows(scope, block) == money
+
+
+def test_donors_a_part_binds_through_a_choice_alone_count_their_own_flows() -> None:
+    """IDA's health aid to Kenya, IDA bound only through the option a choice holds
+    active, as a region option binds its donors: the part's flows lie with IDA, and
+    its own flows count multilateral money, as IDA bound in the base identity does."""
+    block = _bound_through_a_choice(_SUM_BLOCKS["ida_health_to_kenya"], "origin")
+    scope = submission_service.part_scope(block["spec_id"], block)
+    assert scope is not None
+
+    assert submission_service._Flows.of(scope, block).donors == {
+        "InternationalDevelopmentAssociation"
+    }
+    assert submission_service._own_flows(scope, block) == {"multilateral"}
 
 
 def _searched_in_words(block: dict[str, Any], *, stated: bool = True) -> dict[str, Any]:
@@ -15368,8 +15422,10 @@ def _windowed(block: dict[str, Any], start: int, end: int) -> dict[str, Any]:
 
 
 def _to_recipients(block: dict[str, Any], recipients: list[str]) -> dict[str, Any]:
-    """`block` with its base identity bound to `recipients` as its destination."""
-    block["resolved"]["scope_choices"]["base"]["identity"]["entities"]["destination"] = recipients
+    """`block` with its base and compiled identities bound to `recipients` as its destination."""
+    scope = block["resolved"]["scope_choices"]
+    for identity in (scope["base"]["identity"], scope["compiled"]["identity"]):
+        identity["entities"]["destination"] = recipients
     return block
 
 

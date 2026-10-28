@@ -26,7 +26,6 @@ from compiler.sources import (
     total_reading,
 )
 from data_mcp.digest import source_codes
-from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
 
 from harness.scope_choices import PartScope, planner_axes
@@ -451,17 +450,7 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     first five and counts the rest, and each stored reading keeps the ids.
     A resolve that names none gives an empty list.
     """
-    digest, _ = _envelope_digest(envelope)
-    return digest
-
-
-def _envelope_digest(
-    envelope: dict[str, Any],
-) -> tuple[dict[str, Any], list[tuple[ResolvedGroup, ...] | None]]:
-    """`graph_envelope`'s digest, and each part's named sets as `_part_summary`
-    read them, by the part's position."""
-    digest, groups = _decision_digest(envelope)
-    return {**digest, "skills": _named_skills(envelope)}, groups
+    return {**_decision_digest(envelope), "skills": _named_skills(envelope)}
 
 
 def _named_skills(envelope: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -476,20 +465,16 @@ def _named_skills(envelope: Mapping[str, Any]) -> list[dict[str, str]]:
     ]
 
 
-def _decision_digest(
-    envelope: dict[str, Any],
-) -> tuple[dict[str, Any], list[tuple[ResolvedGroup, ...] | None]]:
-    """`graph_envelope`'s fields, every one but `skills`, and each part's named sets
-    (`_envelope_digest`)."""
+def _decision_digest(envelope: dict[str, Any]) -> dict[str, Any]:
+    """`graph_envelope`'s fields: every one but `skills`."""
     kind = str(envelope.get("kind") or "resolution")
     if kind != "resolution":
-        return _answer_kind_digest(envelope, kind), []
+        return _answer_kind_digest(envelope, kind)
     parts = list(envelope.get("parts") or [])
     count = len(parts) or 1
     digest = _part_digest(envelope, parts[0] if parts else {}, count)
-    summaries = [_part_summary(envelope, part) for part in parts]
-    digest["part_digests"] = [summary for summary, _ in summaries]
-    return digest, [groups for _, groups in summaries]
+    digest["part_digests"] = [_part_summary(envelope, part) for part in parts]
+    return digest
 
 
 def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -501,9 +486,7 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     candidate its digest offers keyed by its spec_id (`_offered_specs`).
     `harness.graph.state.store_search` stores them, so `fetch` and the
     planner's pins read a part's or a picked candidate's block with no
-    second `search` call. A `definite` part's digest also carries the named sets
-    its block states, read once, under `GROUP_FACTS_KEY` (`group_facts`), which
-    `store_search` hands to `reading_facts`. Each block a part carries holds the refs each
+    second `search` call. Each block a part carries holds the refs each
     of the part's entity rows bound (`compiler.sources.bound_refs`), one
     `BoundEntity` per row in row order, under `_bound_refs`, which
     `compiler.sources.source_from_spec_block` reads back, so a pin names
@@ -513,7 +496,7 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     when it states none. The skills it names for `get_skill` are
     `graph_envelope`'s own `skills`.
     """
-    digest, part_groups = _envelope_digest(envelope)
+    digest = graph_envelope(envelope)
     raw_parts = envelope.get("parts") or []
     raw_part = raw_parts[0] if raw_parts else {}
     digest["spec_block"] = (
@@ -521,13 +504,12 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
         if digest.get("status") == "definite"
         else None
     )
-    for part, summary, groups in zip(
-        raw_parts, digest.get("part_digests") or [], part_groups, strict=False
-    ):
-        definite = summary.get("status") == "definite"
-        summary["spec_block"] = _with_bound_refs(part, part.get("spec")) if definite else None
-        if definite:
-            summary[GROUP_FACTS_KEY] = group_facts(groups)
+    for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
+        summary["spec_block"] = (
+            _with_bound_refs(part, part.get("spec"))
+            if summary.get("status") == "definite"
+            else None
+        )
         summary["candidate_blocks"] = {
             spec["spec_id"]: _with_bound_refs(part, spec)
             for spec in _offered_specs(part)
@@ -561,9 +543,7 @@ def _offered_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return []
 
 
-def reading_facts(
-    spec: Mapping[str, Any], *, groups: Mapping[str, Any] | None = None
-) -> dict[str, Any]:
+def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     """What a stored search reading holds of a `definite` part's spec block beyond its summary.
 
     `coverage_kind` is `resolved.coverage.kind` (`exact`, `breadth`,
@@ -575,10 +555,8 @@ def reading_facts(
     are the named sets the part's places were asked for as
     (`compiler.sources.readable_groups`), which a later resubmit of the reading,
     such as a chip's, posts again. Where they are not readable they are none,
-    with a warning logged, and `entity_groups_unreadable` is true, which makes
-    a resubmit of the reading refuse. `groups` are
-    those two keys as `resolver_digest` read them from `spec` (`group_facts`),
-    read from `spec` here when not given. These are keys
+    with a warning logged, and `entity_groups_unreadable` is true, so that
+    resubmit refuses rather than post the part without them. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -589,6 +567,7 @@ def reading_facts(
     resolved = spec.get("resolved") or {}
     requested = _identity(spec).get("requested_window")
     facts = _wide_facts(spec)
+    groups = readable_groups(spec)
     return {
         "coverage_kind": (resolved.get("coverage") or {}).get("kind"),
         "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
@@ -596,20 +575,6 @@ def reading_facts(
         "open_entity_axes": facts["open_entity_axes"],
         "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
         "planner_axes": sorted(planner_axes(spec)),
-        **(groups if groups is not None else group_facts(readable_groups(spec))),
-    }
-
-
-# The key under which `resolver_digest` hands a `definite` part's named sets
-# (`group_facts`) to `harness.graph.state.store_search`.
-GROUP_FACTS_KEY = "group_facts"
-
-
-def group_facts(groups: tuple[ResolvedGroup, ...] | None) -> dict[str, Any]:
-    """`groups`, a block's `compiler.sources.readable_groups`, as a stored reading holds
-    them (`reading_facts`): `entity_groups` as JSON, and `entity_groups_unreadable` true
-    where they are `None`."""
-    return {
         "entity_groups": [group.model_dump(mode="json") for group in groups or ()],
         "entity_groups_unreadable": groups is None,
     }
@@ -653,13 +618,8 @@ def chosen_part(spec: Mapping[str, Any], *, variable: str | None) -> dict[str, A
     return summary
 
 
-def _part_summary(
-    envelope: dict[str, Any], part: dict[str, Any]
-) -> tuple[dict[str, Any], tuple[ResolvedGroup, ...] | None]:
-    """One search part, as `graph_envelope`'s `part_digests` names it, and, for a
-    `definite` part, the named sets its block states
-    (`compiler.sources.readable_groups`), read once; `None` for any other part
-    or where they are not readable."""
+def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, Any]:
+    """One search part, as `graph_envelope`'s `part_digests` names it."""
     digest = _part_digest(envelope, part, 1)
     resolved = ((part.get("spec") or {}).get("resolved") or {}).get("rendered_sentence")
     summary = {
@@ -697,16 +657,13 @@ def _part_summary(
     ]
     if departures:
         summary["departures"] = departures
-    if digest["status"] != "definite":
-        return summary, None
-    spec = part.get("spec") or {}
-    groups = readable_groups(spec)
-    if readings := _total_readings(spec, groups or ()):
+    if digest["status"] == "definite" and (readings := _total_readings(part.get("spec") or {})):
         summary["group_readings"] = readings
-    summary.update(measure_choice(spec))
-    if codes := source_codes(spec):
-        summary["source_codes"] = codes
-    return summary, groups
+    if digest["status"] == "definite":
+        summary.update(measure_choice(part.get("spec") or {}))
+        if codes := source_codes(part.get("spec") or {}):
+            summary["source_codes"] = codes
+    return summary
 
 
 def measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -738,14 +695,15 @@ def measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
     return {"counted_as": label, **choice}
 
 
-def _total_readings(spec: Mapping[str, Any], groups: tuple[ResolvedGroup, ...]) -> list[str]:
+def _total_readings(spec: Mapping[str, Any]) -> list[str]:
     """A sentence per named set `spec` binds as its published total (`compiler.sources.total_reading`).
 
     Search states no departure for a set read whole, so this is where the
     reading is said. A set read as its members has search's own
-    `group_read_as_members` departure. `groups` are the sets `spec` states
-    (`compiler.sources.readable_groups`), none where they are not readable.
+    `group_read_as_members` departure. A block whose sets are not readable
+    has none.
     """
+    groups = readable_groups(spec) or ()
     entities = (spec.get("resolved") or {}).get("entities") or ()
     labels = {
         str(entity["ref"]): str(entity["label"])
@@ -920,11 +878,9 @@ def _part_digest(envelope: dict[str, Any], part: dict[str, Any], count: int) -> 
 
 
 __all__ = [
-    "GROUP_FACTS_KEY",
     "ResolverError",
     "chosen_part",
     "graph_envelope",
-    "group_facts",
     "reading_facts",
     "series_description",
 ]

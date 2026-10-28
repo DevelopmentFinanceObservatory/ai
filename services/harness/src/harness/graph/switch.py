@@ -517,30 +517,32 @@ async def _resubmit(
     (`planner.agent.compile_on_basis`), through
     `translator.discovery.resolve_definition`: the part's entity groups
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
-    so Search names them again. They are the groups `reading` was resolved
-    with (`SearchReading.entity_groups`), or `block`'s for a reading stored
-    without them (`compiler.sources.block_groups`).
+    so Search names them again. They are `block`'s groups
+    (`compiler.sources.block_groups`) where `block` is at hand, read again so a
+    set this release learnt to read since the reading was stored posts, and
+    otherwise the groups `reading` was resolved with (`SearchReading.entity_groups`).
 
     Raises:
-        SwitchFailedError: If `reading`'s groups were not readable when it was
-            stored (`SearchReading.entity_groups_unreadable`, whatever `block`
-            holds) or `block`'s are not, since the switch would post the part
-            without them. Also if the call does not complete, Search refuses
-            it, or its answer is not one definite part with a scope.
+        SwitchFailedError: If `block`'s groups are not readable, or, with no
+            `block`, `reading`'s were not when it was stored
+            (`SearchReading.entity_groups_unreadable`), since the switch would
+            post the part without them. Also if the call does not complete,
+            Search refuses it, or its answer is not one definite part with a scope.
     """
     unreadable = SwitchFailedError(
         "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
     )
-    if reading.entity_groups_unreadable:
-        logger.warning("plan switch not compiled: pin=%s named sets were not readable", pin)
-        raise unreadable
-    groups = reading.entity_groups
-    if not groups and block is not None:
+    if block is not None:
         try:
             groups = block_groups(block)
         except ValueError as exc:
             logger.warning("plan switch not compiled: pin=%s named sets not readable: %s", pin, exc)
             raise unreadable from exc
+    elif reading.entity_groups_unreadable:
+        logger.warning("plan switch not compiled: pin=%s named sets were not readable", pin)
+        raise unreadable
+    else:
+        groups = reading.entity_groups
     try:
         part = await resolve_definition(
             surface,

@@ -3323,12 +3323,14 @@ async def _switch_runner(
     option_id: str = "sector:120+130",
     aligned: bool = False,
     entity_groups: dict[str, Any] | None = None,
+    stored_unreadable: bool = False,
     seam_type: type[_RevisingSeam] = _RevisingSeam,
     earlier_whole: AlignedPin | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
-    `aligned`) beside its block naming `entity_groups` when given, held as the
+    `aligned`, and as one whose sets were not readable when `stored_unreadable`)
+    beside its block naming `entity_groups` when given, held as the
     whole `earlier_whole` an earlier plan compiled from its part when given,
     then answered with a switch to `option_id`, by default its sector to CRS
     120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
@@ -3354,6 +3356,7 @@ async def _switch_runner(
             "spec_id": pin,
             "scope": scope,
             "planner_axes": ["measure_basis"] if aligned else [],
+            "entity_groups_unreadable": stored_unreadable,
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
@@ -3539,20 +3542,31 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "stored_unreadable", [False, True], ids=["stored-readable", "stored-unreadable"]
+)
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
     group: dict[str, Any],
     posted_groups: dict[str, Any],
+    stored_unreadable: bool,
 ) -> None:
     """The part's block names Africa as the set its recipients were asked for,
     with the total party Search states for it. The switch posts the set as a
     compile on another basis does (`compiler.sources.wire_groups`): its label
-    and ref, and no total, which Search recomputes."""
+    and ref, and no total, which Search recomputes. It reads the block again,
+    so a reading stored when an earlier release could not read the set switches
+    once this release can."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
 
-    await _switch_runner(real_schemas, search, entity_groups={"destination": group})
+    await _switch_runner(
+        real_schemas,
+        search,
+        entity_groups={"destination": group},
+        stored_unreadable=stored_unreadable,
+    )
 
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]

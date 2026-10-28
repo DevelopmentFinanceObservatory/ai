@@ -26,7 +26,6 @@ from common.auth import apply_gate
 from common.caller import conversation_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
-from compiler.sources import readable_groups
 from compiler.surface import ProgressReport
 from data_mcp import client_holder, stat_var_list
 from data_mcp.client import UpstreamClient
@@ -53,7 +52,7 @@ from harness.mcp_client import (
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
 from harness.settings import Settings
-from harness.tool_contracts import GROUP_FACTS_KEY, ResolverError, graph_envelope, group_facts
+from harness.tool_contracts import ResolverError, graph_envelope
 from harness.wire import FactSummary, usable_component
 from mcp import MCPError
 from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
@@ -1766,8 +1765,6 @@ async def test_the_resolver_reads_a_search_envelope_from_meta_whole(
     expected["spec_block"] = envelope["parts"][0]["spec"]
     for part, summary in zip(envelope["parts"], expected["part_digests"], strict=True):
         summary["spec_block"] = part.get("spec") if summary["status"] == "definite" else None
-        if summary["status"] == "definite":
-            summary[GROUP_FACTS_KEY] = group_facts(readable_groups(part["spec"]))
         summary["candidate_blocks"] = {
             spec["spec_id"]: spec for spec in (part.get("candidates") or {}).get("specs") or []
         }

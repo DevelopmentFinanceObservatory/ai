@@ -52,7 +52,7 @@ from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
     block_concept_label,
-    block_groups,
+    block_group,
     countries_apart,
     measure_named_by_query,
     open_entity_axes_of,
@@ -3896,10 +3896,6 @@ class _Reads(NamedTuple):
     def of(cls, requirement: DatasetRequirement, source: SelectedSource | None) -> _Reads:
         """What `requirement` reads, its names resolved against `source`, its pin's
         origin's source, `None` where its block is not held or not readable."""
-        # A breakdown is read separately, as the compiler reads it.
-        requested = (
-            StatVarReading.SEPARATE if requirement.breakdown is not None else requirement.stat_vars
-        )
         return cls(
             period=(requirement.period.model_dump_json(), requirement.period_end_open),
             entities=frozenset(
@@ -3910,18 +3906,28 @@ class _Reads(NamedTuple):
             ),
             across=frozenset(requirement.across),
             breakdown=requirement.breakdown,
-            stat_vars=requested
-            if source is None
-            else stat_var_reading(source, requested).stat_var_reading,
+            stat_vars=_reading(requirement, source),
         )
+
+
+def _reading(
+    requirement: DatasetRequirement, source: SelectedSource | None
+) -> StatVarReading | None:
+    """How a retrieval for `requirement` reads its StatVars, `source` its pin's source:
+    as the compiler settles it (`compiler.sources.stat_var_reading`), a breakdown read
+    separately, and as the plan states it where no source is held."""
+    requested = (
+        StatVarReading.SEPARATE if requirement.breakdown is not None else requirement.stat_vars
+    )
+    return requested if source is None else stat_var_reading(source, requested).stat_var_reading
 
 
 @dataclass(frozen=True)
 class _Flows:
     """Where one part's flows lie, as its scope record binds them.
 
-    `donors` and `recipients` are the entities the part's base identity binds
-    on its `origin` and `destination` roles, empty for a part counting every
+    `donors` and `recipients` are the parties the part binds on its `origin`
+    and `destination` roles (`bound_parties`), empty for a part counting every
     one. `sector` is the slot the part's sector choice binds (`axis_slot`)
     with every code it admits, the codes the code index widened its bound
     codes to included (`compiler.sources.slot_codes`), `None` when the part
@@ -3938,15 +3944,13 @@ class _Flows:
     @classmethod
     def of(cls, scope: PartScope, block: Mapping[str, Any] | None) -> _Flows:
         """The flows of the part `scope` records, `block` its spec block."""
-        identity = scope.base.identity
-        entities = identity.get("entities") or {}
         slot = axis_slot(scope, "sector")
         codes = (slot_codes((block or {}).get("resolved") or {}) or {}).get(slot or "")
-        window = identity.get("requested_window") or {}
+        window = scope.base.identity.get("requested_window") or {}
         start, end = window.get("start_year"), window.get("end_year")
         return cls(
-            donors=frozenset(entities.get("origin") or ()),
-            recipients=frozenset(entities.get("destination") or ()),
+            donors=frozenset(bound_parties(scope, "origin")),
+            recipients=frozenset(bound_parties(scope, "destination")),
             sector=(slot, frozenset(codes)) if slot is not None and codes is not None else None,
             years=(start, end)
             if window.get("kind") == "range" and isinstance(start, int)
@@ -4145,12 +4149,12 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
     (`role_axis_facts`). Search marks only parties the graph types `Organization`,
     so an unmarked country is none. Anything else states nothing: an unmarked
     organisation or total, or an open role stating nothing, may hold one, as an
-    unreadable axis counts as overlapping. Where Search's sets are not readable
-    (`compiler.sources.block_groups`), no set's marker is read, so each donor
+    unreadable axis counts as overlapping. Where Search's donor set is not readable
+    (`compiler.sources.block_group`), its marker is not read, so each donor
     counts what Search marks of it alone (`_donor_money`).
     """
     resolved = (block or {}).get("resolved") or {}
-    donors = (scope.base.identity.get("entities") or {}).get("origin") or ()
+    donors = bound_parties(scope, "origin")
     if not donors:
         fact = next(
             (
@@ -4165,10 +4169,9 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
             return ANY_REPORTERS if stated else BILATERAL_REPORTERS
         return ANY_REPORTERS
     try:
-        groups = block_groups(block or {})
+        group = block_group(block or {}, "origin")
     except ValueError:
-        groups = ()
-    group = next((group for group in groups if group.role == "origin"), None)
+        group = None
     marker = group.holds_multilaterals if group is not None else None
     named = {group.total, *group.members} - {None} if group is not None else set()
     entities = {
@@ -4353,7 +4356,7 @@ def _aligned_bases(
     inputs = _read_inputs(aligning, sources=sources, origins=origins)
     by_axis = {axis: _input_bases(inputs, axis=axis) for axis in _ALIGNED_AXES}
     steps = [step for step in requirements if len(inputs_of(step)) >= 2]
-    groups = _input_groups(requirements)
+    groups = _input_groups(requirements, lambda pin: sources.get(origins.get(pin, pin)))
     unpinned: dict[str, Unpinned] = {}
     for step in steps:
         under = set().union(*(group.members for group in groups[step.id]))
@@ -4445,7 +4448,9 @@ _READ_FIELDS = frozenset({"input_id", "left_id", "right_id"})
 
 
 def _derivation(
-    side: RequirementSide, requirements: Mapping[str, EvidenceRequirement]
+    side: RequirementSide,
+    requirements: Mapping[str, EvidenceRequirement],
+    source_of: Callable[[str], SelectedSource | None],
 ) -> _Derivation:
     """The derivation of `side` (`_Derivation`): the requirement it reads, narrowed
     to its entity, down to every dataset requirement beneath it.
@@ -4465,7 +4470,7 @@ def _derivation(
             pin = None if requirement is None else requirement.source_spec_id
             leaves.append((requirement_id, pin))
             return {"leaf": len(leaves) - 1}
-        if (through := _passed_through(requirement, requirements)) is not None:
+        if (through := _passed_through(requirement, requirements, source_of)) is not None:
             return read(through)
         return substituted(_canonical(requirement))
 
@@ -4500,10 +4505,13 @@ def _canonical(requirement: EvidenceRequirement) -> dict[str, JsonValue]:
 
 
 def _passed_through(
-    requirement: EvidenceRequirement, requirements: Mapping[str, EvidenceRequirement]
+    requirement: EvidenceRequirement,
+    requirements: Mapping[str, EvidenceRequirement],
+    source_of: Callable[[str], SelectedSource | None],
 ) -> str | None:
-    """The dataset requirement `requirement` reads, where the plan alone proves
-    it leaves that requirement's frame as it is; else `None`.
+    """The dataset requirement `requirement` reads, where the plan proves it leaves
+    that requirement's frame as it is; else `None`. `source_of` is the source
+    of a pin, `None` where none is held.
 
     Two steps are proved so, each reading a dataset requirement directly:
 
@@ -4526,7 +4534,7 @@ def _passed_through(
             requirement.reduction is Reduction.SUM
             and GroupBy.PERIOD in requirement.group_by
             and isinstance(dataset, DatasetRequirement)
-            and _one_series(dataset)
+            and _one_series(dataset, _source_of_pin(dataset, source_of))
         )
     elif isinstance(requirement, FilterRequirement):
         dataset = requirements.get(requirement.input_id)
@@ -4534,6 +4542,13 @@ def _passed_through(
     else:
         return None
     return requirement.input_id if kept else None
+
+
+def _source_of_pin(
+    dataset: DatasetRequirement, source_of: Callable[[str], SelectedSource | None]
+) -> SelectedSource | None:
+    """The source `dataset` pins (`source_of`), `None` where it pins none."""
+    return None if dataset.source_spec_id is None else source_of(dataset.source_spec_id)
 
 
 def _keeps_every_row(requirement: FilterRequirement, dataset: DatasetRequirement) -> bool:
@@ -4555,28 +4570,32 @@ def _keeps_every_row(requirement: FilterRequirement, dataset: DatasetRequirement
     return True
 
 
-def _one_series(dataset: DatasetRequirement) -> bool:
-    """Whether the plan shows `dataset` retrieves one series (one row a year).
+def _one_series(dataset: DatasetRequirement, source: SelectedSource | None) -> bool:
+    """Whether the plan shows `dataset` retrieves one series (one row a year),
+    `source` its pin's source.
 
     It covers no party whole (`across`) and breaks nothing down, reads its
-    StatVars as one measure, and names at most one entity per role, none of
-    them a set read member by member. This is the compiler's rule for a side
-    read whole (`compiler.compile._names_on_column`: one entity per role
-    column is one series) read from the plan alone, before any source
-    resolves the names.
+    StatVars as one measure, as the compiler reads them (`_reading`: a family
+    the plan leaves unset is read separately where the compiler's rule reads it
+    so), and names at most one entity per role, none of them a set read member
+    by member. This is the compiler's rule for a side read whole
+    (`compiler.compile._names_on_column`: one entity per role column is one
+    series) read from the plan, before any source resolves the names.
     """
     roles = [entity.role for entity in dataset.entities]
     return (
         not dataset.across
         and dataset.breakdown is None
-        and dataset.stat_vars is not StatVarReading.SEPARATE
+        and _reading(dataset, source) is not StatVarReading.SEPARATE
         and len(set(roles)) == len(roles)
         and not any(entity.members for entity in dataset.entities)
     )
 
 
 def _side_derivations(
-    step: EvidenceRequirement, requirements: Mapping[str, EvidenceRequirement]
+    step: EvidenceRequirement,
+    requirements: Mapping[str, EvidenceRequirement],
+    source_of: Callable[[str], SelectedSource | None],
 ) -> tuple[_Derivation, _Derivation] | None:
     """The derivations of the two sides of `step`, a comparison, sum, share or
     quotient (`_derivation`); `None` for any other."""
@@ -4588,12 +4607,18 @@ def _side_derivations(
         sides = step.numerator, step.denominator
     else:
         return None
-    return _derivation(sides[0], requirements), _derivation(sides[1], requirements)
+    return (
+        _derivation(sides[0], requirements, source_of),
+        _derivation(sides[1], requirements, source_of),
+    )
 
 
-def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list[_InputGroup]]:
+def _input_groups(
+    requirements: Sequence[EvidenceRequirement], source_of: Callable[[str], SelectedSource | None]
+) -> dict[str, list[_InputGroup]]:
     """The groups of requirements each calculation of `requirements` reading two or
-    more inputs counts on one option, by its id.
+    more inputs counts on one option, by its id. `source_of` is the source of a
+    pin (`_passed_through`).
 
     A calculation reads one group: what it reads, and what a calculation it
     reads reads, down to a share or quotient, which it reads as one figure,
@@ -4650,7 +4675,7 @@ def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list
             groups[step.id] = [
                 _InputGroup(
                     frozenset(reached(step.id, {**cut, step.id: inputs})),
-                    sides=_side_derivations(step, by_id),
+                    sides=_side_derivations(step, by_id, source_of),
                 )
             ]
     return groups
@@ -5782,7 +5807,7 @@ def _difference_decisions(
         for requirement in requirements
         if isinstance(requirement, DatasetRequirement) and requirement.whole_of is not None
     }
-    groups = _input_groups(requirements)
+    groups = _input_groups(requirements, sources.get)
     decisions: dict[str, tuple[Decision, ...]] = {}
     for step in requirements:
         if not isinstance(step, _PROVIDER_ALIGNED):
@@ -5968,16 +5993,22 @@ def axis_slot(scope: PartScope, axis: str) -> str | None:
 WHOLE_COLUMNS: Mapping[str, str] = {"donor": "origin", "recipient": "destination"}
 
 
+def bound_parties(scope: PartScope, column: str) -> tuple[str, ...]:
+    """The parties the part `scope` records binds on the role column `column`: those
+    of the identity its active options compile to (`PartScope.compiled`), so a party
+    a choice's option adds there (`EntitiesBinding`), as a region option adds its
+    donors, counts as the base identity's own do."""
+    return tuple((scope.compiled.identity.get("entities") or {}).get(column) or ())
+
+
 def whole_axis_held(scope: PartScope, axis: str) -> bool:
     """Whether the part `scope` records binds something on `axis` a declared whole can
     leave open: for the sector, a choice binding one slot (`axis_slot`); for a donor
-    or recipient, an entity on that role's column (`WHOLE_COLUMNS`) of the identity
-    its active options compile to (`PartScope.compiled`), so a party a choice's
-    option adds there (`EntitiesBinding`) counts as the base identity's own do."""
+    or recipient, a party on that role's column (`WHOLE_COLUMNS`, `bound_parties`)."""
     column = WHOLE_COLUMNS.get(axis)
     if column is None:
         return axis_slot(scope, axis) is not None
-    return bool((scope.compiled.identity.get("entities") or {}).get(column))
+    return bool(bound_parties(scope, column))
 
 
 def unread_part(

@@ -39,7 +39,6 @@ from harness.mcp_client import _refusal_outcome
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.seeds import SEED_STEP_TOOL, resolve_seed, take_seeds
 from harness.studio_translate import _node_name
-from harness.tool_contracts import GROUP_FACTS_KEY
 from planner.plan import SEEDS_STATE_KEY
 from translator.discovery import resolved_spec
 
@@ -213,8 +212,6 @@ async def test_a_seeded_turn_hands_the_agent_each_seed_as_a_definite_search_part
         ("definite", _KENYA["spec_id"], [_RANK]),
         ("definite", water["spec_id"], [_RANK]),
     ]
-    # The sets the digest read for the stored reading stay off the text the agent reads.
-    assert GROUP_FACTS_KEY not in turn.read
     assert turn.steps["seeds"]["summary"] == "received 2 of 2 dataset(s) from Search"
     assert turn.state[SEEDS_STATE_KEY] is None
     assert set(turn.state[ORCHESTRATOR_SPECS_KEY]) == {_KENYA["spec_id"], water["spec_id"]}
