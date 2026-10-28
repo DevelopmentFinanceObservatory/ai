@@ -248,7 +248,7 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
     A stopped revision is cancelled and awaited without taking its outcome, so
     a revision that ends in any way once the Stop came, an error its cleanup
     raises included, ends stopped, as does one that finishes in the same wait
-    as the Stop; the `switch` node puts the state it wrote back, so the plan
+    as the Stop. The `switch` node puts the state it wrote back, so the plan
     stands unchanged. A cancellation of the node itself,
     while the revision unwinds, still cancels the node.
 
@@ -272,7 +272,7 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
         for waiting in unfinished:
             waiting.cancel()
         if unfinished:
-            # Never raises what the tasks raise; a cancellation of the node does.
+            # Raises nothing the tasks raise. A cancellation of the node raises.
             await asyncio.wait(unfinished)
     if running in finished and stopped not in finished and not running.cancelled():
         return running.result()
@@ -661,7 +661,7 @@ async def apply_stored_choice(
     switch shows, and the `APPLY_CHOICE_STEP_TOOL` step fails with it under
     the code the switch reports (`SwitchFailedError.code`), to be retried
     after a delay where the same chip can succeed later
-    (`SwitchFailedError.retryable`) and never otherwise.
+    (`SwitchFailedError.retryable`) and otherwise not to be retried.
 
     Returns:
         `{"status", "text"}` for the `orchestrate` node.

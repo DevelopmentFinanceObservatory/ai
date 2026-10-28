@@ -530,7 +530,7 @@ ignores it and an older harness omits it.
   asked again. The harness sets it from the failure: false when it will
   repeat, such as an option Search cannot serve; true when Search or the
   calculation service could not answer in time, and for a stopped switch.
-- A `/cancel` while a switch runs stops the switch, not the stream. The
+- A `/cancel` while a switch runs stops the switch. The
   stream ends on `plan.proposed` re-offering the unchanged plan under a
   fresh `interrupt_id`, with `switch_failed.code` `switch_cancelled`,
   `retryable` true and the `reason` "You stopped this change, so the plan
@@ -549,7 +549,7 @@ ignores it and an older harness omits it.
   approved card's sentences.
 - `plan.approved.choices[].changed_from` is the label the choice held on
   the card the turn's first switch of it was made from, set when the
-  choice now holds another label, whether the user switched it or a
+  choice holds another label, whether the user switched it or a
   switch moved it, across several switches.
 
 `schema_version` stays 1.
@@ -651,6 +651,6 @@ Fixture values that are samples:
 1. `choice_id` is `"<requirement id>:<axis>"`, stable across switches;
    `switch_failed` gains `retryable`; a `/cancel` during a switch
    re-offers the unchanged plan on a live pause under `switch_cancelled`,
-   with a reason the client shows as a note, not an error;
+   with a reason the client shows as a quiet note;
    `plan.proposed` and `plan.approved` gain `caveats`, and `changed_from`
    names the label before the turn's first switch.

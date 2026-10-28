@@ -646,8 +646,7 @@ class DecisionScope(StrictModel):
     `choice_id` names the choice and `axis` the axis it settles. `options`
     holds one state per `Decision.options` label, in the same order.
     `provenance` is how the choice came to hold its option, `"default"` when
-    Search's default settled it; `None` on a decision recorded before it was
-    kept.
+    Search's default settled it, and `None` on a decision recorded without it.
     """
 
     choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
@@ -680,8 +679,8 @@ class Decision(_Choice):
     # the answer, whose `rationale` says how: a calculation whose inputs count
     # different providers (`providers_differ`) or a total compiled from its
     # part (`derived_whole`) (`submission.service._provider_difference_decisions`,
-    # `_whole_decisions`). Absent from `DecisionDraft`, so the planner never
-    # sets it.
+    # `_whole_decisions`). Absent from `DecisionDraft`, so the planner cannot
+    # set it.
     caveat: Annotated[DecisionCaveat | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda caveat: caveat is None
     )

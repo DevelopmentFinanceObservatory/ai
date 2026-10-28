@@ -380,7 +380,7 @@ whose code is `cancelled`. A stream running a plan-card `switch` is the
 exception: `/cancel` stops the switch, and the stream ends on a
 `plan.proposed` re-offering the unchanged plan with a fresh
 `interrupt_id` and `switch_failed.code` `switch_cancelled`. Keep reading
-the stream after the call; a second `/cancel`, or 10 seconds with no
+the stream after the call. A second `/cancel`, or 10 seconds with no
 re-offered plan, ends it with the `cancelled` error frame. The call is
 safe when nothing streams. A
 closed connection also stops the turn, but proxies can hide a closed
@@ -421,7 +421,7 @@ Notes on specific fields:
 - `plan.proposed.actions[]` lists `switch` only when some decision has a `choice_id` and an option other than its `active_option_id` that is `available` or `partial`. Offer those options as the switch; show an `unavailable` one disabled, with its `reason`.
 - `plan.proposed.moved[]`: `{choice_id, from_label, to_label, reason}`, set on the plan a switch offers. Each entry is another scope choice the switch moved, with the option it held, the one it holds now, and a sentence saying why.
 - `plan.proposed.summary`: one plain sentence saying what is counted, for whom, when and from which source. `plan.proposed.steps[].gives_answer` is true on the one step whose result answers the question.
-- `plan.proposed.switch_failed`: `{choice_id, option_id, code, reason, retryable}`, set on the plan re-offered after a switch that did not apply. Show `reason` on the row of the choice `choice_id` names. Offer the same switch again only when `retryable` is true. A switch the user stopped carries `code` `switch_cancelled`, `retryable` true and the reason "You stopped this change, so the plan is as it was." It is no error: show that reason as a quiet note on the row, with no "Could not switch" lead and no error styling.
+- `plan.proposed.switch_failed`: `{choice_id, option_id, code, reason, retryable}`, set on the plan re-offered after a switch that did not apply. Show `reason` on the row of the choice `choice_id` names. Offer the same switch again only when `retryable` is true. A switch the user stopped carries `code` `switch_cancelled`, `retryable` true and the reason "You stopped this change, so the plan is as it was." Show that reason as a quiet note on the row, with no "Could not switch" lead and no error styling.
 - `plan.proposed.caveats[]`: one sentence each for the plan's decisions that qualify the answer, such as a share whose two sides count different providers or a total derived from its part's dataset; empty when there are none. Show them on the card and in the full plan before Approve. `plan.approved.caveats[]` carries the same sentences once the plan is approved.
 - `plan.approved.steps[]`: `{label, gives_answer?}`. `plan.approved.choices[]`: `{question, chosen, changed_from?}`, each choice's short name, the option label it holds, and, when a switch of the turn changed it, the label it held on the card the first switch was made from. `plan.approved.caveats[]`: one sentence each for the plan's decisions that qualify the answer, such as a share whose two sides count different providers, as the approved card stated them; show them with the approved plan.
 - `plan.proposed.requirements[]`: `{id, kind, sentence, decision_ids}`. It

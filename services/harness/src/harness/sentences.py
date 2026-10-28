@@ -485,8 +485,8 @@ def refusal_sentence(refused: Mapping[str, object]) -> str:
 
 def refusal_reason(refused: Mapping[str, object], *, words: PlanWords = _NO_WORDS) -> str:
     """Why `refused` refused, as one sentence for the user (`SEAM_REASONS`),
-    naming the plan's requirements by `words` and never by id, which reads
-    as a fault. A code in no table gives a plain clause that claims nothing
+    naming the plan's requirements by `words`, since an id reads as a
+    fault. A code in no table gives a plain clause that claims nothing
     about why."""
     code = refused.get("code")
     template = SEAM_REASONS.get(code, _STOPPED) if isinstance(code, str) else _STOPPED

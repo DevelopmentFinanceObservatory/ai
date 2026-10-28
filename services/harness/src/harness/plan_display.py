@@ -275,8 +275,8 @@ def card_rows(plan: Plan) -> list[dict[str, object]]:
     and the concepts it reads: "Total health", "Health as a share of
     official development assistance". A switch re-pins a retrieval and
     leaves every label true. A reduction says what its result keeps one
-    figure per, read off the result's shape, so a total of one year says no
-    "by year".
+    figure per, read off the result's shape, so a total of one year reads
+    without "by year".
 
     A retrieval's description is Search's account of its source
     (`SelectedSource.sentence`), else the requirement in words; any other
@@ -379,7 +379,7 @@ def _told_apart(
 ) -> str:
     """`name`, which `namesakes` (`dataset` among them) share, with the one
     facet that sets `dataset` apart: the entities only it names ("health aid
-    to Ghana"), else its period ("health aid in 2023"); `name` alone when
+    to Ghana"), else its period ("health aid in 2023"), and `name` alone when
     neither differs."""
     shared = set.intersection(*({entity.name for entity in other.entities} for other in namesakes))
     own = [entity for entity in dataset.entities if entity.name not in shared]
@@ -417,7 +417,7 @@ def _answer_step(plan: Plan, shown: Plan) -> str | None:
 
 def _answer_requirement(plan: Plan, shown: Plan) -> str | None:
     """The requirement `answer_step` carries out, in `_card_order` of `shown`, `plan`
-    folded (`shown_plan`); `None` before compile."""
+    folded (`shown_plan`), or `None` before compile."""
     if plan.translation is None or plan.workflow is None:
         return None
     answering = answering_results(plan)
@@ -451,7 +451,7 @@ def card_summary(plan: Plan) -> str | None:
 
     Read off the retrievals the answering requirement reads (`datasets_of`),
     each as `_Counted` states it. A share names its numerator's retrievals,
-    then "as a share of" its denominator's; a quotient "divided by". So does
+    then "as a share of" its denominator's, and a quotient "divided by". So does
     a step reading one input over a share or quotient, such as a rank of
     shares or a total of quotients (`_ratio_beneath`). `None` too where the
     answer is a comparison, sum or join over ratios (`_reads_ratio`): the
@@ -652,9 +652,9 @@ _SLUG = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 def card_decision_text(text: str, plan: Plan) -> str:
     """A decision's text as the card shows it.
 
-    Each spec_id is named (`with_source_names`); a scope option's id the
+    Each spec_id is named (`with_source_names`), a scope option's id the
     planner wrote before the option's label ("sector:120+130 health") is
-    dropped; and a slug the planner wrote for an option ("crs_total") reads
+    dropped, and a slug the planner wrote for an option ("crs_total") reads
     as words ("crs total").
     """
     named = with_source_names(text, plan).strip()
@@ -766,8 +766,8 @@ def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     (`concept_name`), read off the scope decisions it cites and its source.
 
     A declared whole (`DatasetRequirement.whole_of`) is its part with the
-    part's axis opened, so it is named by that axis ("all sectors"), and never
-    by the planner's `measure`."""
+    part's axis opened, so it is named by that axis ("all sectors") and
+    ignores the planner's `measure`."""
     if requirement.whole_of is not None:
         return whole_name(requirement.whole_of.axis)
     governing = _governing(requirement, plan)
@@ -784,7 +784,7 @@ def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
 def _concepts(plan: Plan) -> dict[str, str]:
     """What each retrieval of `plan` is named by in the card's labels, by requirement id.
 
-    Its `_concept`; retrievals named alike add the parties they read
+    Its `_concept`. Retrievals named alike add the parties they read
     (`_parties`), and any still alike their place among them, "(1)", "(2)".
     """
     datasets = [r for r in _card_order(plan) if isinstance(r, DatasetRequirement)]

@@ -3227,9 +3227,9 @@ _ALIGNED_REASONS: dict[str, str] = {
 }
 
 # The rationale of a scope decision Search's default settled. The planner
-# reads it; the plan card shows no reason for a decision whose choice
-# Search's default settled (`DecisionScope.provenance`), since it says only
-# that nobody chose (`harness.studio_translate`).
+# reads it. The plan card hides the reason of such a decision
+# (`DecisionScope.provenance`), since it says only that nobody chose
+# (`harness.studio_translate`).
 SEARCH_DEFAULT_RATIONALE = "Search's default for this question."
 
 # What each scope decision asks, by the axis its choice settles.
@@ -3252,7 +3252,7 @@ def scope_choice_decisions(
     (`_scope_decision`), when it states one; a choice on an axis the block
     marks as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`)
     is the planner's decision. The pin of a declared whole (`wholes`, by
-    spec_id, `_whole_only_pins`) states none: its choices hold its part's
+    spec_id, `_whole_only_pins`) states none. Its choices hold its part's
     options, so the part's rows move both, and any one option on the axis
     it leaves open would count a single slice of what the whole counts in
     full. A pin a plain requirement shares with a declared whole is no
@@ -3392,7 +3392,7 @@ def _scope_decisions(
     one `previous` carries, cites the decisions it states
     (`_provider_difference_decisions`), restated where their words changed,
     and one citing such a decision it no longer states has that citation
-    dropped; a carried calculation whose citations change is patched. A
+    dropped. A carried calculation whose citations change is patched. A
     decision whose slot is
     new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
     past that it is neither written nor cited, and the basis line still
@@ -3431,8 +3431,8 @@ def _scope_decisions(
     known = {decision.slot: decision for decision in (*carried, *decisions)}
     stated = {decision.slot for decision in decisions}
     restated = {requirement.id for requirement in evidence_requirements}
-    # A calculation the plan carries states its decisions again too: an input
-    # re-pinned under it can change what they say.
+    # A calculation the plan carries states its decisions again too, since an
+    # input re-pinned under it can change what they say.
     own = len(evidence_requirements)
     evidence_requirements = [
         *evidence_requirements,
@@ -3845,8 +3845,8 @@ def _aligned_bases(
     A whole the planner declared (`DatasetRequirement.whole_of`) is pinned
     to its part's dataset with the declared axis left open, compiled with
     no search and whatever pin the planner wrote on it (`_declared_wholes`).
-    A part with no pin is searched for first. A declared whole is never
-    aligned: its calculation's other inputs are aligned among themselves
+    A part with no pin is searched for first. A declared whole is left
+    out of alignment. Its calculation's other inputs are aligned among themselves
     first, and the whole is then compiled from its part's final pin, the
     one alignment moved the part to, so it follows its part by construction.
     Nothing reads a whole but the denominator of a share or quotient of its
@@ -3854,7 +3854,7 @@ def _aligned_bases(
     through another input. A whole not compiled yet answers `BASES_UNALIGNED` naming it
     (`Realignment.whole_axis`), and a part Search cannot leave the axis open
     on answers `SHARE_WHOLE_UNDERIVABLE`. A share
-    declaring nothing is never rewritten: its inputs are aligned as any
+    declaring nothing is left as written, and its inputs are aligned as any
     calculation's are.
 
     A calculation reading several inputs (a comparison, sum, share, quotient
@@ -3943,7 +3943,7 @@ def _aligned_bases(
     compiled = {
         (pin.origin, pin.option_ids): pin.spec_id for pin in aligned if pin.whole_axis is None
     }
-    # Alignment never moves a declared whole; it is compiled from its part's
+    # Alignment leaves a declared whole alone. It is compiled from its part's
     # final pin below.
     whole_ids = {whole.id for whole, _, _ in declared}
     aligning = [requirement for requirement in requirements if requirement.id not in whole_ids]
@@ -4268,7 +4268,7 @@ def _reads_on(step: EvidenceRequirement, axis: str) -> bool:
     """Whether `step` reads its inputs' options on `axis`: every calculation on the
     measure basis, and on the provider scope a comparison, share, quotient or
     sum (`_PROVIDER_ALIGNED`), whether it aligns them (`_aligns`) or accepts a
-    provider difference, where a sum still refuses counting flows twice and the
+    provider difference, where a sum refuses counting flows twice and the
     difference is stated (`_provider_difference_decisions`)."""
     return axis != _PROVIDER_AXIS or isinstance(step, _PROVIDER_ALIGNED)
 
@@ -4384,8 +4384,8 @@ def _declared_wholes(
 
 def _whole_slot(requirement_id: str) -> str:
     """The `Decision.slot` of the decision the whole `requirement_id`, compiled from
-    its part, states (`_whole_decisions`). Nothing reads it back: such a decision is
-    known by its `caveat`."""
+    its part, states (`_whole_decisions`). Nothing reads the slot back, since such a
+    decision is known by its `caveat`."""
     return _derived_slot("share_whole_", requirement_id)
 
 
@@ -4397,7 +4397,7 @@ def _compiled_wholes(
 
     A requirement stating no `whole_of` is no whole, though it pins a whole an
     earlier plan compiled: the rules for wholes read the plan as it stands,
-    and the compiled pins only for what they record."""
+    and use the compiled pins only for what they record."""
     compiled = {pin.spec_id: pin for pin in aligned if pin.whole_axis is not None}
     return {
         requirement.id: compiled[requirement.source_spec_id]
@@ -4434,12 +4434,12 @@ def _without_replaced_whole_decisions(
     and those citations.
 
     A planner decision fixing a total's measure chose the dataset it reads,
-    and the total is now compiled from its part's own dataset, so the
+    and the total is compiled from its part's own dataset, so the
     decision can say something false of the plan, as "Source for total aid
     denominator: dac1 total aid" over a CRS whole. `_whole_decisions` states
     the whole in its place. A planner fixes no provider scope, measure basis
-    or sector: Search's choices state those, and the scope decisions written
-    for them are never removed here. Any other decision, such as the year a
+    or sector, since Search's choices state those, and the scope decisions
+    written for them stay. Any other decision, such as the year a
     whole reads, stays cited by the whole, as do a user's decision and one a
     requirement other than those wholes cites. Citations are
     read over `after`, the plan's requirements once the patch applies, so a
@@ -4580,7 +4580,7 @@ _PROVIDER_DIFFERENCE_PREFIX = "providers_differ_"
 def _provider_difference_slot(step_id: str) -> str:
     """The `Decision.slot` of the decision the calculation `step_id` states when its
     inputs may count different providers (`_provider_difference_decisions`). Nothing
-    reads it back: such a decision is known by its `caveat`."""
+    reads the slot back, since such a decision is known by its `caveat`."""
     return _derived_slot(_PROVIDER_DIFFERENCE_PREFIX, step_id)
 
 
@@ -4618,7 +4618,7 @@ def _provider_difference_decisions(
     (`Decision.caveat` `providers_differ`), and is cited by the calculation
     (`_scope_decisions`).
     """
-    # An input the plan does not state reads nothing here; `Plan` refuses it.
+    # An input the plan does not state reads nothing here, and `Plan` refuses it.
     reads: dict[str, Sequence[str]] = {
         input_id: () for requirement in requirements for input_id in inputs_of(requirement)
     }
@@ -4685,7 +4685,7 @@ def _provider_difference_decisions(
 def _fitting_rationale(*forms: str) -> str:
     """The first of `forms`, a caveat's rationale from its fullest form to its
     shortest, within `MAX_DECISION_RATIONALE_CHARS`, else the last, so a
-    caveat is stated in the shortest form rather than dropped."""
+    caveat too long for its fullest form takes the shortest and stays."""
     return next((form for form in forms if len(form) <= MAX_DECISION_RATIONALE_CHARS), forms[-1])
 
 

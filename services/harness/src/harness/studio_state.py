@@ -495,7 +495,7 @@ class ConversationState:
     cancel_reason: str | None = None
     # Armed while a plan-card switch streams (`harness.graph.switch.
     # SWITCH_STOP`): a Stop sets it, and the switch offers the plan
-    # unchanged instead of the stream ending. Reset to `None` when the
+    # unchanged and the stream ends on it. Reset to `None` when the
     # stream ends.
     switch_stop: asyncio.Event | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.

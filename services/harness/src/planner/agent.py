@@ -1524,13 +1524,13 @@ async def compile_whole(
     its active option, with the concept of the part's entry on that axis.
     Search then keeps the part's measure basis, provider scope and region,
     which an option the whole cannot serve would otherwise leave to
-    Search's default. No model call is made. The answer is shown to the
-    planner as a source of its own, the part's source holding the whole's
-    block, as `compile_on_basis` holds a realigned one, whose choices the
-    whole takes from its part: each carries the part's provenance, and the block marks as the
-    planner's (`harness.scope_choices.mark_planner_axes`) the axes the
-    part's block marks, so the whole reads as the part was settled and a
-    later search carries what the part's carries. It is held as a
+    Search's default. No model call is made. The planner is shown the answer
+    as a source of its own (the part's source holding the whole's block, as
+    `compile_on_basis` holds a realigned one). The whole takes its choices
+    from its part. Each carries the part's provenance, and the block marks
+    as the planner's (`harness.scope_choices.mark_planner_axes`) the axes
+    the part's block marks, so the whole reads as settled the way the part
+    was and a later search carries what the part's carries. It is held as a
     `submission.service.AlignedPin` from the part on that axis, which every
     whole declaring the part and the axis pins.
 

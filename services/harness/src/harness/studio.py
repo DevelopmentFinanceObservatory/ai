@@ -533,7 +533,7 @@ async def _sse_stream(
     `conversation.cancel_reason` (set alongside the event by whoever armed
     it, `POST /cancel` or `StudioRunner._locked`'s heartbeat). `"cancelled"`
     (a client's Stop, from this instance or another) closes the turn and
-    yields the stream-fatal `cancelled` error frame, same as always, except
+    yields the stream-fatal `cancelled` error frame, except
     on a stream running a plan-card switch (`switch`, which arms
     `conversation.switch_stop` and `SWITCH_STOP` for the frames this stream
     reads, and clears the one it armed when it ends): the first Stop there
@@ -611,8 +611,8 @@ async def _sse_stream(
                             ):
                                 # The stopped switch offered its plan in time.
                                 reoffer_by = None
-                            # Checked on every frame too: a stopped switch
-                            # still sending frames is never idle.
+                            # Checked on every frame too, since a stopped switch
+                            # that keeps sending frames is not idle.
                             overdue = reoffer_by is not None and loop.time() >= reoffer_by
                             if next_frame in done and not overdue:
                                 break
@@ -620,7 +620,7 @@ async def _sse_stream(
                                 assert conversation is not None
                                 if overdue and conversation.cancel_reason is None:
                                     # The stopped switch offered nothing in
-                                    # time; a takeover recorded in the same
+                                    # time. A takeover recorded in the same
                                     # wait keeps its own reason.
                                     conversation.cancel_reason = "cancelled"
                                 stop = conversation.switch_stop
