@@ -903,10 +903,10 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     classes of party, totals aside, the dataset publishes on such a set's side,
     absent for any other set and from a Search that predates it. `members` are
     the parties a bound total holds where Search lists them. `left_out` and
-    `sum_differs` are, for a set read as its members, the residuals its total
-    counts that the members leave out, `None` where the group states nothing
-    (an empty list states that none is), and whether the source publishes its
-    own figure for it, absent from a Search that predates them.
+    `sum_differs` are, for a set read as its members, the residuals its
+    published total counts that the members leave out, which Search sends only
+    where there are some, and whether the source publishes its own figure for
+    it, which Search sends only where it does.
     `holds_multilaterals` is whether a donor set read as a total or a whole
     population holds a multilateral organisation, absent where Search states
     nothing. A class outside
@@ -926,11 +926,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     whole_of=_party_classes(group.get("whole_of")),
                     side_classes=_party_classes(group.get("side_classes")),
                     members=tuple(_strings(group.get("members"))),
-                    left_out=(
-                        None
-                        if group.get("left_out") is None
-                        else tuple(_strings(group.get("left_out")))
-                    ),
+                    left_out=tuple(_strings(group.get("left_out"))),
                     sum_differs=_flag(group.get("sum_differs")) is True,
                     holds_multilaterals=_flag(group.get("holds_multilaterals")),
                 )
@@ -1169,8 +1165,8 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     the group sits on is not known. An answer combining the members leaves
     out the residuals Search says the group's total counts beside them
     (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"), named
-    as Search names them; where Search states that none is, the sentence
-    states none (`_left_out`).
+    as Search names them (`_left_out`). Where Search names none, as for a
+    set with no published total, the sentence names none.
     Where Search says the source publishes its own figure for the group
     (`ResolvedGroup.sum_differs`), a second sentence says that figure can
     differ, so the residuals' list ends with the first.
@@ -1178,10 +1174,7 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     if group.reads_total:
         return None
     if answer is None:
-        return (
-            f"The figures for {group.label} are its members' figures, not a total the source "
-            "publishes for the group."
-        )
+        return f"The figures for {group.label} come from its members' figures."
     if answer is MembersAnswer.EACH:
         return f"The figures for {group.label} are its members' figures, each on its own."
     published = (
@@ -1197,28 +1190,21 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
 
 
 def _left_out(group: ResolvedGroup) -> str:
-    """The clause naming what `group`'s members leave out of its published total.
+    """The clause naming what `group`'s members leave out of its published total,
+    empty where Search names nothing left out (`ResolvedGroup.left_out`).
 
     On the recipient side the residuals are the money the data allocates to no
     single country ("Africa, unallocated by country (DAC)"); on any other side
-    they are named as what the group's total counts beside its members. Where
-    Search states nothing on a flow side, the clause says the members leave
-    such amounts out on the recipient side and may on the donor side; where it
-    states that none is, there is no clause.
+    they are named as what the group's total counts beside its members.
     """
-    unallocated = group.role == "destination"
-    if group.left_out:
-        what = (
-            "what the data allocates to no single country"
-            if unallocated
-            else f"what the source's total for {group.label} counts beside them"
-        )
-        return f" and leaves out {what}: " + "; ".join(group.left_out)
-    if group.left_out is None and group.role in FLOW_ROLE_COLUMNS:
-        if unallocated:
-            return " and leaves out amounts the data allocates to no single country"
-        return f" and may leave out amounts the source's total for {group.label} counts beside them"
-    return ""
+    if not group.left_out:
+        return ""
+    what = (
+        "what the data allocates to no single country"
+        if group.role == "destination"
+        else f"what the source's total for {group.label} counts beside them"
+    )
+    return f" and leaves out {what}: " + "; ".join(group.left_out)
 
 
 def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:

@@ -3543,7 +3543,7 @@ def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
     gap = plan.requirement("gap")
     us, uk = "grant equivalents for United States", "grant equivalents for United Kingdom"
 
-    card = _card_label(gap, plan, concepts=_concepts(plan), shapes=frame_shapes(plan))
+    card = _card_label(gap, plan, concepts=_concepts(plan).names, shapes=frame_shapes(plan))
 
     assert card == f"Compare {us} to {uk}"
     assert _label(gap, plan) == f"Compare {us} to {uk}"
@@ -3595,7 +3595,7 @@ def test_retrievals_named_alike_name_their_parties_once(
             for number, donor in enumerate(donors)
         ],
     )
-    concepts, shapes = _concepts(plan), frame_shapes(plan)
+    concepts, shapes = _concepts(plan).names, frame_shapes(plan)
 
     shown = [
         _card_label(requirement, plan, concepts=concepts, shapes=shapes)
@@ -3791,6 +3791,100 @@ def test_requirements_a_sentence_names_alike_are_told_apart_by_the_facet_that_di
 
 
 @pytest.mark.parametrize(
+    ("measure", "axis", "held", "names"),
+    [
+        (
+            "health",
+            "provider",
+            ("bilateral flows only", "bilateral plus imputed multilateral"),
+            (
+                "health from United States to Kenya, bilateral flows only",
+                "health from United States to Kenya, bilateral plus imputed multilateral",
+            ),
+        ),
+        (
+            "official development assistance",
+            "measure_basis",
+            ("net", "grant equivalent"),
+            (
+                "official development assistance from United States to Kenya, net",
+                "official development assistance from United States to Kenya, grant equivalent",
+            ),
+        ),
+    ],
+    ids=["crs_bilateral_vs_inclusive", "dac1_net_vs_grant_equivalent"],
+)
+def test_namesakes_holding_different_scope_options_are_told_apart_by_the_option(
+    decision: DecisionFactory,
+    measure: str,
+    axis: typing.Literal["provider", "measure_basis"],
+    held: tuple[str, str],
+    names: tuple[str, str],
+) -> None:
+    """Two retrievals whose concept, parties and period match, pinned to
+    sources holding different options on the provider or measure-basis axis,
+    read by the option each holds, as the source labels it, before any
+    number. The card's plan and the caveats `propose_plan` writes
+    (`_card_names`) name them alike, and both report that each name states
+    the option on that axis (`PlanWords.options`)."""
+    pins = (_SPEC_A, _SPEC_B)
+    scopes = {
+        pin: Decision(
+            slot=scope_choice_slot(pin, axis),
+            description=f"How {axis} is counted.",
+            options=held,
+            chosen=chosen,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT,
+            rationale="Search's default for this question.",
+            fixes=DecisionFixes(source_spec_id=pin),
+            scope=DecisionScope(
+                choice_id=f"{pin}:{axis}",
+                axis=axis,
+                options=(
+                    ScopeOptionState(option_id=f"{axis}:first", status="available"),
+                    ScopeOptionState(option_id=f"{axis}:second", status="available"),
+                ),
+            ),
+        )
+        for pin, chosen in zip(pins, held, strict=True)
+    }
+    datasets = [
+        DatasetRequirement(
+            id=f"r{index}",
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[
+                Entity(name="United States", role="donor"),
+                Entity(name="Kenya", role="recipient"),
+            ],
+            period=Period(start=2023, end=2023),
+            source_spec_id=pin,
+        )
+        for index, pin in enumerate(pins)
+    ]
+    plan = Plan(
+        question=f"{measure} from the United States to Kenya, both ways",
+        decisions=[decision(), *scopes.values()],
+        evidence_requirements=[
+            dataset.model_copy(update={"decision_ids": (*dataset.decision_ids, scopes[pin].slot)})
+            for dataset, pin in zip(datasets, pins, strict=True)
+        ],
+    )
+
+    caveat = _card_names(
+        datasets,
+        decisions=[decision()],
+        scope_decisions={pin: [scope] for pin, scope in scopes.items()},
+        sources=SourceReadings(lambda _: None),
+    )
+    words = plan_words(plan)
+
+    assert (words.names["r0"], words.names["r1"]) == names
+    assert (caveat.names["r0"], caveat.names["r1"]) == names
+    assert words.options == caveat.options == {"r0": {axis}, "r1": {axis}}
+
+
+@pytest.mark.parametrize(
     ("measure", "name"),
     [("health aid", "health aid to Kenya (1)"), ("aid for health", "aid for health")],
     ids=["unchanged", "measure_changed"],
@@ -3969,7 +4063,7 @@ def test_a_revision_not_compiled_names_what_the_card_holds_by_the_cards_names() 
 
     words = plan_words(revision, shown_as=prior)
 
-    card = _concepts(shown_plan(prior))
+    card = _concepts(shown_plan(prior)).names
     assert card == {
         "us_health_aid_raw": "health",
         "us_total_aid_raw": "official development assistance",
@@ -4115,7 +4209,7 @@ def test_namesakes_are_numbered_as_the_plan_states_them_before_and_after_compile
         decisions=draft.decisions,
         scope_decisions={},
         sources=SourceReadings(lambda _: None),
-    )
+    ).names
     revision = plan_words(uncompiled).names
     card = plan_words(compiled).names
 
@@ -4158,7 +4252,7 @@ def test_namesakes_are_numbered_in_card_order_whatever_the_hash_order(
         "from harness.plan_display import _concepts\n"
         "from planner.plan import Plan\n"
         "plan = Plan.model_validate_json(sys.stdin.read())\n"
-        "print(json.dumps(list(_concepts(plan).values())))\n"
+        "print(json.dumps(list(_concepts(plan).names.values())))\n"
     )
 
     ran = subprocess.run(

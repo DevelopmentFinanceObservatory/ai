@@ -1086,12 +1086,12 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
     assert members_reading(union, answer=MembersAnswer.SUMMED) is None
 
 
-# DAC members summed on the donor side, where Search states that nothing is
-# left out, names residuals, or states nothing, and Africa's countries summed on the recipient side, where Search
-# names the residuals Africa's published total counts beside them, or states
-# nothing, as a Search that predates the field does. The G7's published
-# total is a figure of its own, which can differ from its members' sum, and is
-# said in a sentence of its own, so the residuals' list ends before it.
+# Sets summed as their members, as Search states them: `left_out` names the
+# residuals the set's published total counts beside the members, absent where
+# the members leave none out and for a set with no published total, such as
+# the G7 read as its members. `sum_differs` says the source publishes its own
+# figure for the set, which can differ from the members' sum, in a sentence of
+# its own, so the residuals' list ends before it.
 _AFRICA_LEFT_OUT = (
     " and leaves out what the data allocates to no single country: "
     "Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC)."
@@ -1106,12 +1106,16 @@ _PUBLISHED = (
     ("group", "tail"),
     [
         (
-            {"origin": {"ref": "DAC", "label": "DAC members", "total": None, "left_out": []}},
+            {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
             ".",
         ),
         (
             {"destination": {"ref": "africa", "label": "Africa", "total": None}},
-            " and leaves out amounts the data allocates to no single country.",
+            ".",
+        ),
+        (
+            {"origin": {"ref": None, "label": "G7", "total": None}},
+            ".",
         ),
         (
             {
@@ -1123,21 +1127,12 @@ _PUBLISHED = (
                         "Africa, unallocated by country (DAC)",
                         "North of Sahara, unallocated by country (DAC)",
                     ],
-                    "sum_differs": False,
                 }
             },
             _AFRICA_LEFT_OUT,
         ),
         (
-            {
-                "origin": {
-                    "ref": None,
-                    "label": "G7",
-                    "total": None,
-                    "left_out": [],
-                    "sum_differs": True,
-                }
-            },
+            {"origin": {"ref": None, "label": "G7", "total": None, "sum_differs": True}},
             "." + _PUBLISHED.format(label="G7"),
         ),
         (
@@ -1167,19 +1162,15 @@ _PUBLISHED = (
             " and leaves out what the source's total for DAC members counts beside them: "
             "DAC donors, unspecified.",
         ),
-        (
-            {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
-            " and may leave out amounts the source's total for DAC members counts beside them.",
-        ),
     ],
     ids=[
         "donor-members-leave-nothing-out",
-        "recipient-members-search-states-nothing",
+        "recipient-members-leave-nothing-out",
+        "donor-set-with-no-published-total",
         "recipient-members-leave-out-residuals",
         "donor-total-differs-from-its-members-sum",
         "residuals-end-before-the-published-figure",
         "donor-members-leave-out-residuals",
-        "donor-members-search-states-nothing",
     ],
 )
 def test_summed_members_state_only_the_residuals_search_names(
@@ -1192,9 +1183,12 @@ def test_summed_members_state_only_the_residuals_search_names(
     )
 
 
-def test_a_stored_set_keeps_search_stating_nothing_apart_from_stating_none() -> None:
+def test_a_stored_set_reads_the_residuals_it_was_stored_with() -> None:
     stated = {"ref": "africa", "label": "Africa", "total": None}
-    blocks = [{"destination": stated}, {"destination": {**stated, "left_out": []}}]
+    blocks = [
+        {"destination": stated},
+        {"destination": {**stated, "left_out": ["Africa, unallocated by country (DAC)"]}},
+    ]
     stored = [
         SelectedSource.model_validate(
             source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=block)).model_dump(
@@ -1207,9 +1201,9 @@ def test_a_stored_set_keeps_search_stating_nothing_apart_from_stating_none() -> 
     assert [
         members_reading(source.groups[0], answer=MembersAnswer.SUMMED) for source in stored
     ] == [
-        "The figure for Africa adds up its members' figures and leaves out amounts the data "
-        "allocates to no single country.",
         "The figure for Africa adds up its members' figures.",
+        "The figure for Africa adds up its members' figures and leaves out what the data "
+        "allocates to no single country: Africa, unallocated by country (DAC).",
     ]
 
 

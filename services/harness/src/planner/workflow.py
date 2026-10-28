@@ -92,11 +92,11 @@ class ResolvedGroup(StrictModel):
     (DAC countries' total lists the DAC members); empty where it lists none.
     For a set read as its members, `left_out` labels the residuals the set's
     published total counts that the members leave out ("Africa, unallocated
-    by country (DAC)"): empty where Search states that nothing is left out,
-    and `None` where it states nothing, as a Search that predates the field
-    and a set saved before it do. `sum_differs` says the source publishes its
-    own figure for the set, which can differ from the members' sum; false
-    where Search states nothing. `holds_multilaterals` says, for a donor set read
+    by country (DAC)"). It is empty where Search names none, as for a set whose
+    members leave nothing out of its total and for one with no published total.
+    `sum_differs` says the source publishes its own figure for the set, which
+    can differ from the members' sum, and is false where Search does not say
+    so. `holds_multilaterals` says, for a donor set read
     as a published total or a whole population, whether that population holds a
     multilateral organisation; `None` where Search states nothing.
     A requirement's `Entity` naming the label, case-folded, on the set's side
@@ -125,8 +125,8 @@ class ResolvedGroup(StrictModel):
     members: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
         default=(), exclude_if=lambda members: not members
     )
-    left_out: Annotated[tuple[str, ...] | None, HASHED_WHEN_SET] = Field(
-        default=None, exclude_if=lambda labels: labels is None
+    left_out: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda labels: not labels
     )
     sum_differs: Annotated[bool, HASHED_WHEN_SET] = Field(
         default=False, exclude_if=lambda differs: not differs

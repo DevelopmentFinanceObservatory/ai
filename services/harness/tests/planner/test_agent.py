@@ -7625,20 +7625,19 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
     assert names[_PART] != "health", names
     for requirement_id in (_PART, inclusive):
         name = names[requirement_id]
-        subject = f"{name[:1].upper()}{name[1:]} counts "
+        subject = f"{name[:1].upper()}{name[1:]} comes from "
         assert subject in stated.rationale, (subject, stated.rationale)
 
 
-async def test_a_provider_difference_numbers_namesake_inputs_in_the_order_the_plan_states(
+async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_counts_once(
     decision: DecisionFactory,
 ) -> None:
     """The comparison of `test_a_provider_difference_names_inputs_of_one_concept_as_
     the_card_does` over two CRS totals named alike, one counting bilateral flows and
-    the other, declared first, imputed multilateral ones too. The card numbers
-    the two "official development assistance" inputs in the order the plan states
-    them, whatever order its workflow runs them in, which the compiler sets by
-    requirement id (`compiler.compile._canonical_key`), so the stated difference
-    numbers them in that order too."""
+    the other imputed multilateral ones too. The card names each "official
+    development assistance" input by the provider scope it counts, so the stated
+    difference names each as the card does and says only where it comes from,
+    stating each scope once."""
     ctx = _FakeToolContext()
     inclusive = _another_part(_search_labelled("whole"))
     provider = next(
@@ -7694,15 +7693,82 @@ async def test_a_provider_difference_numbers_namesake_inputs_in_the_order_the_pl
     plan = plan.with_translation(translation=translation, workflow=compiled.workflow)
     pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks.values()}
     names = plan_words(plan, pinned=pinned).names
-    assert names[_WHOLE].endswith("(1)"), names
     for requirement_id, block in blocks.items():
         (choice,) = [
             c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "provider"
         ]
         (label,) = [o["label"] for o in choice["options"] if o["option_id"] == choice["active"]]
         name = names[requirement_id]
-        sentence = f"{name[:1].upper()}{name[1:]} counts {label}"
+        assert name.endswith(f", {label}"), names
+        tables = block["resolved"]["published_tables"]
+        sentence = f"{name[:1].upper()}{name[1:]} comes from {tables}."
         assert sentence in stated.rationale, (sentence, stated.rationale)
+        assert stated.rationale.count(label) == 1, (label, stated.rationale)
+
+
+async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_counted_on_once(
+    decision: DecisionFactory,
+) -> None:
+    """US total ODA counted net set against the same total counted in grant
+    equivalents, both bases in the user's words. The card names each input by
+    the basis it is counted on, so the stated basis difference names each as the
+    card does and states each basis once."""
+    ctx = _FakeToolContext()
+    blocks = {
+        "net": basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit"),
+        "grant_equivalent": _another_part(
+            basis_block(
+                TOTAL,
+                narrow=False,
+                active="measure_basis:grant_equivalent",
+                provenance="explicit",
+            )
+        ),
+    }
+    _show_blocks(ctx, *blocks.values())
+    datasets = [
+        DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="US total ODA",
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=block["spec_id"],
+        )
+        for requirement_id, block in blocks.items()
+    ]
+
+    result = await _tools_reading(BasisCompiles())["propose_plan"].func(
+        question="How does US net ODA compare with US ODA in grant equivalents?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            *datasets,
+            ComparisonRequirement(
+                id=_COMPARE,
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="net"),
+                subtrahend=RequirementSide(input_id="grant_equivalent"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (stated,) = [d for d in plan.decisions if d.caveat == "bases_differ"]
+    pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks.values()}
+    words = plan_words(plan, pinned=pinned)
+    for requirement_id, block in blocks.items():
+        (choice,) = [
+            c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "measure_basis"
+        ]
+        (label,) = [o["label"] for o in choice["options"] if o["option_id"] == choice["active"]]
+        name = words.names[requirement_id]
+        assert name.endswith(f", {label}"), words.names
+        assert f"{name[:1].upper()}{name[1:]}" in stated.rationale, (name, stated.rationale)
+        assert "is counted as" not in stated.rationale, stated.rationale
 
 
 @pytest.mark.parametrize(

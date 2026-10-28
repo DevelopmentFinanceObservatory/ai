@@ -84,6 +84,7 @@ from harness.scope_choices import (
     planner_axes,
     scope_money,
 )
+from harness.sentences import PlanWords
 from planner.parties import (
     PARTY_ROLES,
     FlowSide,
@@ -5696,8 +5697,8 @@ def _card_names(
     decisions: Sequence[Decision],
     scope_decisions: Mapping[str, Sequence[Decision]],
     sources: SourceReadings,
-) -> dict[str, str]:
-    """What the plan card names each retrieval of `requirements` by, by requirement
+) -> PlanWords:
+    """How the plan card names each retrieval of `requirements`, by requirement
     id (`harness.plan_display.plan_words`), read off the plan they state once this
     call lands, not compiled yet: `decisions`, and each retrieval citing the scope
     decisions its pin states (`scope_decisions`, `scope_choice_decisions`), as
@@ -5731,7 +5732,7 @@ def _card_names(
         decisions=(*decisions, *(d for held in scope_decisions.values() for d in held)),
         evidence_requirements=tuple(datasets),
     )
-    return dict(plan_words(draft, pinned=pinned_sources(datasets, sources)).names)
+    return plan_words(draft, pinned=pinned_sources(datasets, sources))
 
 
 class _Difference(NamedTuple):
@@ -5835,7 +5836,7 @@ def _difference_decisions(
         for block in [sources.block(requirement.source_spec_id)]
     ]
     # The card's names are read only once a difference needs its inputs named.
-    names: dict[str, str] | None = None
+    words: PlanWords | None = None
     whole_parts = {
         requirement.id: requirement.whole_of.part
         for requirement in requirements
@@ -5872,8 +5873,8 @@ def _difference_decisions(
             inputs = [entry for entry in held if entry[0].id in differing]
             if not inputs:
                 continue
-            if names is None:
-                names = _card_names(
+            if words is None:
+                words = _card_names(
                     requirements,
                     decisions=plan_decisions,
                     scope_decisions=scope_decisions or {},
@@ -5893,14 +5894,19 @@ def _difference_decisions(
                                 (
                                     lead,
                                     *(
-                                        _difference_sentence(
-                                            difference,
-                                            names[requirement.id],
-                                            block,
-                                            option,
-                                            titled=titled,
-                                        )
+                                        sentence
                                         for requirement, block, option in inputs
+                                        if (
+                                            sentence := _difference_sentence(
+                                                difference,
+                                                words.names[requirement.id],
+                                                block,
+                                                option,
+                                                named=axis in words.options.get(requirement.id, ()),
+                                                titled=titled,
+                                            )
+                                        )
+                                        is not None
                                     ),
                                 )
                             )
@@ -5940,16 +5946,21 @@ def _difference_sentence(
     block: Mapping[str, Any] | None,
     option: Option | None,
     *,
+    named: bool = False,
     titled: bool = True,
-) -> str:
+) -> str | None:
     """One sentence saying what an input counts on `difference`'s axis: "<name>
     counts <provider label>, from <dataset>." with `name` the input's name on the
     plan card (`_card_names`) and `option` the option its pin holds active, or that
     its dataset does not say. The dataset is left out where Search names none
     (`_dataset_title`), or without `titled`, the short form a long rationale falls
-    back to."""
+    back to. Where `named`, the card's name already states the option on this
+    axis (`PlanWords.options`), so the sentence says only where the input comes
+    from, "<name> comes from <dataset>.", and is `None` where that is left out."""
     concept = f"{name[:1].upper()}{name[1:]}"
     title = _dataset_title(block) if titled else None
+    if named:
+        return None if title is None else f"{concept} comes from {title}."
     if option is None:
         if title is None:
             return f"{concept} {difference.unstated}."

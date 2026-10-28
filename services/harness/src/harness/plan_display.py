@@ -291,7 +291,7 @@ def card_rows(plan: Plan) -> list[dict[str, object]]:
     assert plan.workflow is not None, "card_rows needs a plan carrying a workflow"
     shapes = frame_shapes(plan)
     shown = shown_plan(plan)
-    concepts = _concepts(shown)
+    concepts = _concepts(shown).names
     answer = _answer_step(plan, shown)
     rows: list[dict[str, object]] = []
     for step, requirement, result in _stepped(plan, shown):
@@ -352,21 +352,24 @@ def plan_words(
     there (`_carried_names`), and any other retrieval is named around those
     names. Any other requirement reads by the retrievals it reads
     (`_concept_of`): "health as a share of official development assistance".
+    Each retrieval whose name states the option it holds on a scope axis
+    lists that axis in `PlanWords.options`.
     """
     shown = shown_plan(plan)
     prior = shown_plan(shown_as) if shown_as is not None else None
     sources = _pinned_sources(shown, shown_as=prior, pinned=pinned or {})
     namings = _namings(shown, sources=sources)
-    carried = _carried_names(namings, prior) if prior is not None else {}
-    concepts = _concepts(shown, carried=carried, namings=namings)
+    carried = _carried_names(namings, prior) if prior is not None else None
+    card = _concepts(shown, carried=carried, namings=namings)
     return PlanWords(
         names={
-            requirement.id: _concept_of(requirement, shown, concepts)
+            requirement.id: _concept_of(requirement, shown, card.names)
             for requirement in shown.evidence_requirements
         },
         inputs={
             requirement.id: inputs_of(requirement) for requirement in shown.evidence_requirements
         },
+        options=card.options,
     )
 
 
@@ -857,41 +860,65 @@ def _concept(
     )
 
 
+class _CardNames(typing.NamedTuple):
+    """What `_concepts` names each retrieval by, by requirement id (`names`), and
+    the axes of `_NAMING_AXES` whose option each name states (`options`)."""
+
+    names: dict[str, str]
+    options: dict[str, frozenset[str]]
+
+
 def _concepts(
     plan: Plan,
     *,
-    carried: Mapping[str, str] | None = None,
+    carried: _CardNames | None = None,
     sources: Mapping[str, SelectedSource] | None = None,
     namings: Mapping[str, _Naming] | None = None,
-) -> dict[str, str]:
-    """What each retrieval of `plan` is named by in the card's labels, by requirement id.
+) -> _CardNames:
+    """What each retrieval of `plan` is named by in the card's labels, by requirement id,
+    and the axes whose option each name states.
 
     Its `_concept`. Retrievals named alike add the parties they read, by the
     side of the flow each is on (`_who`): "health from United States to
     Kenya". Any still alike whose periods differ add their period, "health to
-    Kenya in 2023", and any still alike a number no other name holds, "(1)",
+    Kenya in 2023". Any still alike that hold different options on the
+    provider axis, then on the measure-basis axis (`_NAMING_AXES`), add the
+    option each holds, as the source labels it: "health to Kenya, bilateral
+    flows only". Any still alike add a number no other name holds, "(1)",
     "(2)", each set of namesakes in the order the plan states them
-    (`_card_order`). A retrieval in `carried` keeps the name given there;
-    namesakes are found by these facets, carried
-    or not, so the others are told apart from it as from each other. The names are read off each retrieval's naming facets,
-    `namings` where given, else read by `_namings`, a plan not compiled
-    reading its sources off `sources` (`_source`).
+    (`_card_order`). A retrieval in `carried` keeps the name, and the axes it
+    states, given there. Namesakes are found by these facets, carried or not,
+    so the others are told apart from it as from each other. The names are
+    read off each retrieval's naming facets, `namings` where given, else read
+    by `_namings`, a plan not compiled reading its sources off `sources`
+    (`_source`).
     """
-    carried = carried or {}
+    carried = carried or _CardNames({}, {})
     namings = namings if namings is not None else _namings(plan, sources=sources)
     datasets = [r for r in _card_order(plan) if isinstance(r, DatasetRequirement)]
     stems = {dataset.id: namings[dataset.id].concept for dataset in datasets}
     for rid in _alike(stems):
         if who := namings[rid].who:
             stems[rid] = f"{stems[rid]} {who}"
-    names = {dataset.id: carried.get(dataset.id) or stems[dataset.id] for dataset in datasets}
-    fresh = [dataset for dataset in datasets if dataset.id not in carried]
+    names = {dataset.id: carried.names.get(dataset.id) or stems[dataset.id] for dataset in datasets}
+    options = {dataset.id: carried.options.get(dataset.id, frozenset()) for dataset in datasets}
+    fresh = [dataset for dataset in datasets if dataset.id not in carried.names]
     for stem in dict.fromkeys(_alike(stems).values()):
         namesakes = [dataset for dataset in datasets if stems[dataset.id] == stem]
         if len({dataset.period for dataset in namesakes}) > 1:
             for dataset in namesakes:
-                if dataset.id not in carried:
+                if dataset.id not in carried.names:
                     names[dataset.id] = f"{stem} {_in_period(dataset)}"
+    for index, axis in enumerate(_NAMING_AXES):
+        for name in dict.fromkeys(_alike(names).values()):
+            namesakes = [dataset for dataset in datasets if names[dataset.id] == name]
+            if len({namings[dataset.id].options[index] for dataset in namesakes}) < 2:
+                continue
+            for dataset in namesakes:
+                held = namings[dataset.id].options[index]
+                if dataset.id not in carried.names and held is not None:
+                    names[dataset.id] = f"{name}, {held}"
+                    options[dataset.id] |= {axis}
     for name in dict.fromkeys(_alike(names).values()):
         taken = set(names.values())
         number = 0
@@ -902,44 +929,62 @@ def _concepts(
             while f"{name} ({number})" in taken:
                 number += 1
             names[dataset.id] = f"{name} ({number})"
-    return names
+    return _CardNames(names, options)
 
 
-def _carried_names(namings: Mapping[str, _Naming], shown: Plan) -> dict[str, str]:
-    """The name the card gives each retrieval of `shown` (`_concepts`) that a
-    revision, `namings` its retrievals' naming facets (`_namings`), holds with
-    the same facets, by requirement id."""
+def _carried_names(namings: Mapping[str, _Naming], shown: Plan) -> _CardNames:
+    """The name the card gives each retrieval of `shown` (`_concepts`), and the
+    axes it states, that a revision, `namings` its retrievals' naming facets
+    (`_namings`), holds with the same facets, by requirement id."""
     earlier = _namings(shown)
-    names = _concepts(shown, namings=earlier)
-    return {
-        requirement_id: names[requirement_id]
-        for requirement_id, naming in namings.items()
-        if earlier.get(requirement_id) == naming
-    }
+    card = _concepts(shown, namings=earlier)
+    kept = [rid for rid, naming in namings.items() if earlier.get(rid) == naming]
+    return _CardNames(
+        {rid: card.names[rid] for rid in kept}, {rid: card.options[rid] for rid in kept}
+    )
+
+
+# The scope axes whose options tell apart retrievals otherwise named alike
+# (`_concepts`), in the order their options are added to a name.
+_NAMING_AXES = ("provider", "measure_basis")
 
 
 class _Naming(typing.NamedTuple):
-    """What `_concepts` names a retrieval by: its concept, parties and period."""
+    """What `_concepts` names a retrieval by: its concept, parties and period,
+    and the option it holds on each of `_NAMING_AXES`, `None` where no scope
+    decision it cites settles that axis."""
 
     concept: str
     who: str
     period: Period
+    options: tuple[str | None, ...]
 
 
 def _namings(
     plan: Plan, *, sources: Mapping[str, SelectedSource] | None = None
 ) -> dict[str, _Naming]:
     """The naming facets of each retrieval of `plan`, by requirement id, each
-    read once (`_concept`, `_who`). A plan not compiled reads its sources off
-    `sources` (`_source`)."""
+    read once (`_concept`, `_who`, `_held_options`). A plan not compiled reads
+    its sources off `sources` (`_source`)."""
     return {
         dataset.id: _Naming(
             _concept(dataset, plan, sources=sources),
             _who(dataset, plan, sources=sources),
             dataset.period,
+            _held_options(dataset, plan),
         )
         for dataset in _datasets(plan).values()
     }
+
+
+def _held_options(requirement: DatasetRequirement, plan: Plan) -> tuple[str | None, ...]:
+    """The option `requirement` holds on each of `_NAMING_AXES`: the label the
+    scope decision it cites there chose, `None` where it cites none."""
+    governing = _governing(requirement, plan)
+    return tuple(
+        decision.chosen if (decision := governing.get(axis)) is not None else None
+        for axis in _NAMING_AXES
+    )
 
 
 def _pinned_sources(
@@ -1152,7 +1197,9 @@ def card_questions(plan: Plan) -> dict[str, str]:
     """
     rows = [decision for decision in shown_decisions(plan) if decision.caveat is None]
     axes = Counter(decision.scope.axis for decision in rows if decision.scope is not None)
-    concepts = _concepts(shown_plan(plan)) if any(count > 1 for count in axes.values()) else {}
+    concepts = (
+        _concepts(shown_plan(plan)).names if any(count > 1 for count in axes.values()) else {}
+    )
     questions: dict[str, str] = {}
     for decision in rows:
         name = CHOICE_NAMES.get(decision.scope.axis) if decision.scope is not None else None

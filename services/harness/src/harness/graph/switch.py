@@ -518,9 +518,8 @@ async def _resubmit(
     `translator.discovery.resolve_definition`: the part's entity groups
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
     so Search names them again. They are `block`'s groups
-    (`compiler.sources.block_groups`) where `block` is at hand and they read, so a
-    set this release learnt to read since the reading was stored posts, and
-    otherwise the groups `reading` was resolved with (`SearchReading.entity_groups`).
+    (`compiler.sources.block_groups`) where `block` is at hand and they read,
+    else the groups `reading` was resolved with (`SearchReading.entity_groups`).
 
     Raises:
         SwitchFailedError: If neither reads: `block`'s groups are not readable
