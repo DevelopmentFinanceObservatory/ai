@@ -8120,9 +8120,10 @@ async def test_a_donor_whole_of_an_inclusive_part_is_counted_on_the_scope_search
     health aid: Search offers the inclusive scope on no total naming no donor, so
     the whole posts the part's scope as a carried entry and Search counts it on
     bilateral flows. The part keeps its scope, the whole's caveat says what each
-    side counts, and the share states no provider difference beside it. The entry
-    the harness posted and Search dropped is not held as a choice that did not
-    apply, which the whole's basis line would state; every other dropped entry is."""
+    side counts, and the share states no provider difference beside it. The whole
+    counts another provider option than the part, so the entry Search dropped stays
+    beside every other dropped entry, and the whole's reading says it did not
+    apply."""
     block = us_2023_block("health_inclusive")
     surface = _NoInclusiveWithoutDonor(block)
     ctx = _FakeToolContext()
@@ -8145,7 +8146,8 @@ async def test_a_donor_whole_of_an_inclusive_part_is_counted_on_the_scope_search
     # What the whole's reading stores and its basis line states as not applied.
     dropped = reading_facts(whole_block)["scope"]["dropped_entries"]
     assert [(d["entry"]["option_id"], d["entry"]["origin"]) for d in dropped] == [
-        (d["entry"]["option_id"], d["entry"]["origin"]) for d in _OTHER_DROPPED
+        (provider["option_id"], provider["origin"]),
+        *((d["entry"]["option_id"], d["entry"]["origin"]) for d in _OTHER_DROPPED),
     ]
     plan = load_plan(ctx.state)
     assert plan is not None
@@ -8197,6 +8199,21 @@ _DAC_COUNTRIES = _DAC_DONOR_WHOLES["dac1"]["whole"]["resolved"]["entity_groups"]
             _OFFICIAL_DONORS,
             "whole_members_unstated",
             id="whole-class-beside-another",
+        ),
+        # The same total stating no classes for its side, so nothing says the side
+        # holds official donors alone.
+        pytest.param(
+            ["DACOfficialDonors"],
+            {k: v for k, v in _OFFICIAL_DONORS.items() if k != "side_classes"},
+            "whole_members_unstated",
+            id="whole-class-side-unstated",
+        ),
+        # The same total stating residuals alone for its side, which is no class of party.
+        pytest.param(
+            ["DACOfficialDonors"],
+            {**_OFFICIAL_DONORS, "side_classes": ["residual"]},
+            "whole_members_unstated",
+            id="whole-class-side-residuals-only",
         ),
         # The same total where the side publishes no class besides official donors and
         # residuals: every party there is of its class.
@@ -8262,7 +8279,7 @@ class _RecordedWhole:
 
 
 @pytest.mark.parametrize(
-    ("name", "total", "alike"),
+    ("name", "total", "alike", "dropped"),
     [
         # The US DAC1 total over DAC countries' total, on the part's own provider scope.
         # DAC1 has no recipient or sector, so the caveat names neither.
@@ -8270,36 +8287,45 @@ class _RecordedWhole:
             "dac1",
             "total for DAC countries",
             "the same measure basis and providers.",
+            [],
             id="dac1",
         ),
         # US bilateral ODA over DAC countries' total, where that total holds no
-        # bilateral ODA: Search counts it on total ODA, and the caveat says so.
+        # bilateral ODA: Search drops the carried bilateral entry and counts the whole
+        # on total ODA. The caveat says what each side counts, and the dropped entry
+        # stays, so the whole's reading says the part's scope did not apply.
         pytest.param(
             "dac1_bilateral_uncovered",
             "total for DAC countries",
             "the same measure basis. The total counts bilateral plus core contributions "
             "to multilaterals, the part bilateral flows only.",
+            ["provider:bilateral"],
             id="dac1-bilateral-over-total-oda",
         ),
         # US ODA to Kenya on DAC2a over every donor's: Search binds no donor and offers
-        # no provider axis there, so the caveat names no provider.
+        # no provider axis there, so it drops the carried entry as `axis_absent`, which
+        # changed nothing and is not held. The caveat says the total states no
+        # provider scope.
         pytest.param(
             "dac2a",
             "total over every donor",
-            "the same recipients and measure basis.",
+            "the same recipients and measure basis. The total does not say which "
+            "providers it counts, and the part counts bilateral flows only.",
+            [],
             id="dac2a",
         ),
     ],
 )
 async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
-    decision: DecisionFactory, name: str, total: str, alike: str
+    decision: DecisionFactory, name: str, total: str, alike: str, dropped: list[str]
 ) -> None:
     """A donor's DAC1 or DAC2a part as a share of its whole over every donor, Search
     answering the resubmit `compile_whole` posts as dfo-apis's engine answered it:
     DAC1 binds DAC countries' total and lists its members, the US among them, and
-    DAC2a binds no donor. The caveat names the total and what both sides count
-    alike, and the provider entry Search dropped is not held as a choice that did
-    not apply."""
+    DAC2a binds no donor. The caveat names the total, what both sides count alike
+    and, where the provider options differ or one side states none, what each
+    counts. A carried entry Search dropped stays only where the whole counts
+    another option (`dropped`)."""
     surface = _RecordedWhole(name)
     ctx = _FakeToolContext()
     block = json.loads(json.dumps(surface.recorded["part"]))
@@ -8311,13 +8337,46 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
     whole_block = pin_sources(ctx.state)[whole_pin].spec_block(whole_pin)
     assert whole_block is not None
-    assert reading_facts(whole_block)["scope"]["dropped_entries"] == []
+    held = reading_facts(whole_block)["scope"]["dropped_entries"]
+    assert [d["entry"]["option_id"] for d in held] == dropped
     plan = load_plan(ctx.state)
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat is not None]
     assert stated.caveat == "derived_whole"
     assert stated.chosen.endswith(total), stated.chosen
     assert stated.rationale.endswith(f"count {alike}"), stated.rationale
+
+
+def test_a_wholes_caveat_reads_each_blocks_scope_record_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caveat on US bilateral ODA's whole over every donor, DAC countries' total
+    ODA, reads the part's and the whole's scope records once each, whatever it
+    states from them."""
+    recorded = _DAC_DONOR_WHOLES["dac1_bilateral_uncovered"]
+    part, whole_block = recorded["part"], recorded["whole"]
+    read: list[str] = []
+    parse = submission_service.part_scope
+
+    def counted(spec_id: str, block: Mapping[str, Any] | None) -> Any:
+        read.append(spec_id)
+        return parse(spec_id, block)
+
+    monkeypatch.setattr(submission_service, "part_scope", counted)
+    whole = AlignedPin(
+        origin=part["spec_id"],
+        option_ids=(),
+        spec_id=whole_block["spec_id"],
+        digest={"spec_block": whole_block},
+        whole_axis="donor",
+    )
+
+    (stated,) = submission_service._whole_decisions(
+        {_WHOLE: whole}, [], shown={part["spec_id"]: PinSource(block=part, settled=True)}
+    )[_WHOLE]
+
+    assert sorted(read) == sorted([part["spec_id"], whole_block["spec_id"]])
+    assert stated.rationale.endswith("the part bilateral flows only."), stated.rationale
 
 
 def test_a_dac1_donor_whole_of_a_donor_outside_the_dac_is_refused() -> None:

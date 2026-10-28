@@ -1325,25 +1325,40 @@ def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_s
     )
 
 
+_BEFORE_CONCEPTS = {
+    "measure_label": "gross disbursements",
+    "shape": {"label": "gross disbursements (official development assistance)"},
+}
+
+
 @pytest.mark.parametrize(
-    ("concept", "total_name"),
+    ("resolved", "total_name"),
     [
         pytest.param(
-            "official development assistance", "official development assistance", id="concept"
+            {**_BEFORE_CONCEPTS, "concept_label": "official development assistance"},
+            "official development assistance",
+            id="concept",
         ),
+        pytest.param(_BEFORE_CONCEPTS, "official development assistance", id="before-concepts"),
         pytest.param(
-            None, "gross disbursements (official development assistance)", id="before-concepts"
+            json.loads(
+                (Path(__file__).parent / "fixtures" / "seed_education_aid_kenya.json").read_text()
+            )["spec"]["resolved"],
+            "education, official development assistance",
+            id="before-concepts-bracketed",
         ),
     ],
 )
 def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
-    concept: str | None, total_name: str
+    resolved: dict[str, object], total_name: str
 ) -> None:
     """A share of health aid in all official development assistance. The total
     was compiled again from its basis choice, so Search's names for its block
     name it: its `concept_label`, which states no measure, since its measure is
-    one of its clauses; or, from a Search that sends none, its shape label as
-    written, "gross disbursements (official development assistance)"."""
+    one of its clauses; or, from a Search that sends none, its shape label,
+    "gross disbursements (official development assistance)", less the measure
+    Search composed it from. A measure label with its own bracket, as Search
+    recorded "gross disbursements (nominal)", holds the qualifiers inside it."""
     health = _example_part(sector="sector:120+130")
     scope = health["scope"]
     scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
@@ -1369,16 +1384,7 @@ def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
             "origin": {"kind": "choice", "choice_id": basis["id"]},
         }
     ]
-    specs = {
-        "spec_total": {
-            "spec_id": "spec_total",
-            "resolved": {
-                "measure_label": "gross disbursements",
-                "shape": {"label": "gross disbursements (official development assistance)"},
-                **({"concept_label": concept} if concept is not None else {}),
-            },
-        }
-    }
+    specs = {"spec_total": {"spec_id": "spec_total", "resolved": resolved}}
 
     assert basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[]) == (
         'Counted as: "health aid": health incl. population and reproductive health '

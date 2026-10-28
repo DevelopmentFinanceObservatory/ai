@@ -65,6 +65,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTIO
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
 from harness.scope_choices import (
+    PROVIDER_AXIS,
     EntitiesBinding,
     PartScope,
     ScopeChoice,
@@ -1591,7 +1592,7 @@ async def compile_whole(
             axis=choice.axis,
             option_id=choice.active,
             provenance="carried"
-            if column is not None and choice.axis == _PROVIDER_AXIS
+            if column is not None and choice.axis == PROVIDER_AXIS
             else "explicit",
             concept=concepts.get(choice.axis),
             origin=ChoiceOrigin(choice_id=choice.id),
@@ -1626,7 +1627,7 @@ async def compile_whole(
         for choice in choices
         if answered.get(choice.axis) == choice.active
     }
-    digest = resolver_digest({"parts": [_as_whole(part, inherited, entries)]})
+    digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
     whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
     save_pin_sources(state, {**sources, spec_id: whole_source})
@@ -1676,10 +1677,6 @@ def _opened(
     )
 
 
-# The scope axis of whose spending a part counts (`compile_whole`).
-_PROVIDER_AXIS = "provider"
-
-
 def _answered_options(spec: Mapping[str, Any]) -> dict[str, str]:
     """The option each scope choice of `spec`, a Search spec block, holds active, by
     axis (`compile_whole`)."""
@@ -1723,6 +1720,9 @@ def _uncontained(part_pin: str, axis: str, held: _Containment) -> tuple[str, str
     )
 
 
+# Search's cause for an entry dropped because the part has no choice on its axis.
+_AXIS_ABSENT = "axis_absent"
+
 # The class of party a total holding a whole population can leave out and still
 # hold every party the part names: a residual names no party (`common.place_type`).
 _NOT_A_PARTY_CLASS = "residual"
@@ -1740,10 +1740,11 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
     population (`ResolvedGroup.whole_of`) holds every party of its classes,
     so it holds the part's party where those are every class the side
     publishes (`ResolvedGroup.side_classes`), residuals aside; where the side
-    publishes another class, nothing here says which class the party is, so
-    it is unshown. Any other party is outside where Search binds parties or
-    lists a total's members there, and unshown where the total it binds
-    states neither its members nor a whole class.
+    publishes another class, or Search states no classes for the side but
+    residuals, nothing here says which class the party is, so it is unshown.
+    Any other party is outside where Search binds parties or lists a total's
+    members there, and unshown where the total it binds states neither its
+    members nor a whole class.
     """
     definition = spec.get("definition")
     identity = definition.get("identity") if isinstance(definition, Mapping) else None
@@ -1760,7 +1761,8 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
         if party in bound or party in members:
             continue
         if group is not None and group.whole_of:
-            if not set(group.side_classes) - {_NOT_A_PARTY_CLASS} <= set(group.whole_of):
+            classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
+            if not classes or not classes <= set(group.whole_of):
                 unshown.append(party)
         elif members or group is None or group.total not in bound:
             outside.append(party)
@@ -1770,16 +1772,24 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
 
 
 def _as_whole(
-    part: Mapping[str, Any], provenance: Mapping[str, str], posted: Iterable[ScopeEntry]
+    part: Mapping[str, Any],
+    provenance: Mapping[str, str],
+    posted: Iterable[ScopeEntry],
+    answered: Mapping[str, str],
 ) -> dict[str, Any]:
     """A copy of `part`, the `definite` Search part answering a whole, whose scope
     choice on each axis of `provenance` carries the provenance given for that axis,
     and whose dropped entries leave out each carried entry of `posted`, the entries
-    the whole was posted with (`compile_whole`).
+    the whole was posted with, that changed nothing (`compile_whole`). `answered` is
+    the option the whole holds on each axis (`_answered_options`).
 
-    Search drops a donor or recipient whole's carried provider entry where the
-    whole does not offer the part's scope. The harness posted it, so no choice of
-    the user's failed to apply, and the whole's caveat says what each side counts
+    A carried entry the harness posted changed nothing where the whole holds its
+    option all the same, or where Search dropped it because the whole has no
+    choice on its axis (`axis_absent`), as a DAC2a total naming no donor has no
+    provider axis, so the user chose nothing there that failed to apply. One Search
+    dropped for a whole that counts another option, as DAC countries' total ODA
+    beside a part on bilateral ODA, stays, so the whole's reading says it did not
+    apply. The whole's caveat says what each side counts
     (`submission.service._whole_shares`). Any other dropped entry stays."""
     copied = copy.deepcopy(dict(part))
     resolved = copied["spec"].get("resolved")
@@ -1796,20 +1806,31 @@ def _as_whole(
     }
     if carried and isinstance(scope.get("dropped_entries"), list):
         scope["dropped_entries"] = [
-            dropped for dropped in scope["dropped_entries"] if not _posted_carried(dropped, carried)
+            dropped
+            for dropped in scope["dropped_entries"]
+            if not _changed_nothing(dropped, carried, answered)
         ]
     return copied
 
 
-def _posted_carried(dropped: object, carried: Collection[tuple[str, str, str]]) -> bool:
+def _changed_nothing(
+    dropped: object, carried: Collection[tuple[str, str, str]], answered: Mapping[str, str]
+) -> bool:
     """Whether `dropped`, one of Search's dropped entries, is a carried entry the
-    harness posted, `carried` keying each by axis, option and choice (`_as_whole`)."""
-    entry = dropped.get("entry") if isinstance(dropped, Mapping) else None
+    harness posted, `carried` keying each by axis, option and choice, that changed
+    nothing because the whole holds its option on its axis (`answered`) or has no
+    choice there (`_as_whole`)."""
+    if not isinstance(dropped, Mapping):
+        return False
+    entry = dropped.get("entry")
     if not isinstance(entry, Mapping) or entry.get("provenance") != "carried":
         return False
     origin = entry.get("origin")
     choice_id = origin.get("choice_id") if isinstance(origin, Mapping) else None
-    return (entry.get("axis"), entry.get("option_id"), choice_id) in carried
+    axis, option_id = entry.get("axis"), entry.get("option_id")
+    if (axis, option_id, choice_id) not in carried:
+        return False
+    return dropped.get("cause") == _AXIS_ABSENT or answered.get(str(axis)) == option_id
 
 
 async def pin_by_search(

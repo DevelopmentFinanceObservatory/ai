@@ -46,6 +46,9 @@ from data_mcp.scope import (
 from planner.records import OptionStatus, StrictModel
 from pydantic import Field, ValidationInfo, field_validator
 
+# The scope axis of whose spending a part counts.
+PROVIDER_AXIS = "provider"
+
 # Whose spending a provider option counts: bilateral flows alone, with imputed
 # shares of multilateral spending, with core contributions to multilaterals as a
 # published donor total such as DAC1's counts them, or the core contributions
@@ -95,7 +98,7 @@ ANY_REPORTERS: frozenset[ProviderMoney] = frozenset(get_args(ProviderMoney))
 
 
 def scope_money(
-    scope: ProviderScope | None, *, own_flows: frozenset[ProviderMoney] = BILATERAL_REPORTERS
+    scope: ProviderScope | None, *, own_flows: frozenset[ProviderMoney]
 ) -> frozenset[ProviderMoney]:
     """The money a figure counted on provider scope `scope` counts (`PROVIDER_STREAMS`,
     `_STREAM_MONEY`), its reporters' own flows, the bilateral stream, counting
@@ -182,7 +185,7 @@ def _named_provider_scope(option: Any) -> object:
     if not isinstance(option_id, str):
         return None
     axis, _, value = option_id.partition(":")
-    return value if axis == "provider" else None
+    return value if axis == PROVIDER_AXIS else None
 
 
 def _readable_choices(items: Any) -> Any:
@@ -296,7 +299,7 @@ class Option(StrictModel):
         if isinstance(self.binding, ProviderBinding):
             return self.binding.scope
         axis, _, value = self.option_id.partition(":")
-        if axis != "provider":
+        if axis != PROVIDER_AXIS:
             return None
         return next((scope for scope in get_args(ProviderScope) if scope == value), None)
 
@@ -648,7 +651,7 @@ class ServedScope(StrictModel):
         if years.keys() == {"bilateral", "imputed"}:
             held = sorted(years["bilateral"] | years["imputed"])
             served_years = f", {_years_text(held)}" if held else ""
-            return "provider", f"bilateral plus imputed multilateral{served_years}"
+            return PROVIDER_AXIS, f"bilateral plus imputed multilateral{served_years}"
         if years.keys() and years.keys() <= {"headline_net", "headline_ge"}:
             pieces = []
             if net := years.get("headline_net"):

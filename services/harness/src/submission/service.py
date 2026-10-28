@@ -50,6 +50,7 @@ from typing import Annotated, Any, NamedTuple, Protocol, cast, get_args
 from compiler.evidence import named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
+    block_concept_label,
     block_groups,
     countries_apart,
     measure_named_by_query,
@@ -64,6 +65,7 @@ from harness.scope_choices import (
     ANY_REPORTERS,
     BILATERAL_REPORTERS,
     MULTILATERAL_REPORTERS,
+    PROVIDER_AXIS,
     PROVIDER_STREAMS,
     Option,
     PartScope,
@@ -3562,7 +3564,6 @@ ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 _NARROWING_SLOTS = frozenset({"crsPurpose", "crsTypeOfFinance", "crsCooperationModality"})
 
 _BASIS_AXIS = "measure_basis"
-_PROVIDER_AXIS = "provider"
 # The graph type of a country, which Search never marks a multilateral (`_own_flows`).
 _COUNTRY_TYPE = "Country"
 # What a sum's double-count refusal calls each money two inputs can both count
@@ -3575,10 +3576,10 @@ _MONEY_WORDS: Mapping[ProviderMoney, str] = {
 # The axes a calculation's inputs are counted on one option of (`_aligned_bases`),
 # and what figures counted on different options of each mix, or of either for an
 # input with no pin to name an option on.
-_ALIGNED_AXES = (_BASIS_AXIS, _PROVIDER_AXIS)
+_ALIGNED_AXES = (_BASIS_AXIS, PROVIDER_AXIS)
 _MIXED: dict[str | None, str] = {
     _BASIS_AXIS: "counted on different measure bases",
-    _PROVIDER_AXIS: "counting different providers' spending",
+    PROVIDER_AXIS: "counting different providers' spending",
     None: "counted on different measure bases or provider scopes",
 }
 
@@ -3774,7 +3775,8 @@ class _InputBasis:
     and the origin's block does not mark the axis as the planner's
     (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `rank` is how narrow the origin's part is (`_part_rank`).
     `flows` is where the origin's part's flows lie (`_Flows`). `own_flows` is
-    the money its reporters' own flows count (`_own_flows`).
+    the money its reporters' own flows count (`_own_flows`), read on the
+    provider axis alone and `None` on any other.
     """
 
     requirement_id: str
@@ -3784,7 +3786,7 @@ class _InputBasis:
     stated: bool
     rank: int
     flows: _Flows
-    own_flows: frozenset[ProviderMoney] = BILATERAL_REPORTERS
+    own_flows: frozenset[ProviderMoney] | None
 
     def label(self, option_id: str) -> str:
         """The reader's label of `option_id` on this input, or the id when the choice lists none."""
@@ -3905,7 +3907,7 @@ def _input_bases(
             stated=choice.provenance != "default" and axis not in planner_axes(block),
             rank=_part_rank(scope.base.identity),
             flows=_Flows.of(scope, block),
-            own_flows=_own_flows(scope, block),
+            own_flows=_own_flows(scope, block) if axis == PROVIDER_AXIS else None,
         )
     return bases
 
@@ -4263,7 +4265,7 @@ def _alignment_targets(
                 ]
                 if len(inputs) < 2:
                     continue
-                aligns = _aligns(step, axis) and not (axis == _PROVIDER_AXIS and group.accepted)
+                aligns = _aligns(step, axis) and not (axis == PROVIDER_AXIS and group.accepted)
                 own = _shared_basis(inputs) if aligns else None
                 if own is not None:
                     aligning.append((step, inputs, own))
@@ -4307,7 +4309,7 @@ def _refuse_double_count(
         _Unservable: When two such inputs, on scopes counting one money
             (`_shared_money`), can count one flow (`_Flows.meet`).
     """
-    if axis != _PROVIDER_AXIS or not isinstance(step, SumOfRequirement):
+    if axis != PROVIDER_AXIS or not isinstance(step, SumOfRequirement):
         return
     pair = _double_counted([basis for basis in inputs if basis.stated] if aligns else inputs)
     if pair is None:
@@ -4328,7 +4330,7 @@ def _refuse_double_count(
             "multilateral organisations, whose outflows spend the core contributions "
             "their funders paid them"
             for basis in (first, other)
-            if "multilateral" in basis.own_flows
+            if "multilateral" in (basis.own_flows or ANY_REPORTERS)
             and "multilateral" in money
             and "bilateral" in _streams(basis)
         ),
@@ -4379,7 +4381,7 @@ def _claim(
     held_target, held_by = targets.setdefault((basis.requirement_id, axis), (target, step.id))
     option = next((o for o in basis.choice.options if o.option_id == target), None)
     unserved = option is None or option.availability.status == "unavailable"
-    if held_target == target and unserved and axis == _PROVIDER_AXIS:
+    if held_target == target and unserved and axis == PROVIDER_AXIS:
         raise _Unservable(
             _providers_unaligned(step, basis, target, permit=view.record_optional_decline)
         )
@@ -4540,9 +4542,10 @@ def _shared_money(first: _InputBasis, other: _InputBasis) -> frozenset[ProviderM
 def _money(basis: _InputBasis) -> frozenset[ProviderMoney]:
     """The money `basis` counts on the provider option it holds active
     (`harness.scope_choices.scope_money`), its reporters' own flows counting what
-    its donors are (`_InputBasis.own_flows`); any money where the option states no
-    scope."""
-    return scope_money(_active_scope(basis), own_flows=basis.own_flows)
+    its donors are (`_InputBasis.own_flows`), any money where those are unread;
+    any money where the option states no scope."""
+    own = basis.own_flows if basis.own_flows is not None else ANY_REPORTERS
+    return scope_money(_active_scope(basis), own_flows=own)
 
 
 def _active_scope(basis: _InputBasis) -> ProviderScope | None:
@@ -4571,7 +4574,7 @@ def _reads_on(step: EvidenceRequirement, axis: str) -> bool:
     sum (`_PROVIDER_ALIGNED`), whether it aligns them (`_aligns`) or accepts a
     provider difference, where a sum refuses counting flows twice and the
     difference is stated (`_provider_difference_decisions`)."""
-    return axis != _PROVIDER_AXIS or isinstance(step, _PROVIDER_ALIGNED)
+    return axis != PROVIDER_AXIS or isinstance(step, _PROVIDER_ALIGNED)
 
 
 def _aligns(step: EvidenceRequirement, axis: str) -> bool:
@@ -4579,7 +4582,7 @@ def _aligns(step: EvidenceRequirement, axis: str) -> bool:
     on the measure basis, and on the provider scope a comparison, share,
     quotient or sum (`_PROVIDER_ALIGNED`), unless the user asked for its inputs as each dataset
     counts them (`accept_provider_difference`)."""
-    if axis != _PROVIDER_AXIS:
+    if axis != PROVIDER_AXIS:
         return True
     return isinstance(step, _PROVIDER_ALIGNED) and not step.accept_provider_difference
 
@@ -4831,16 +4834,18 @@ def _whole_decisions(
         )
         part_block = _pin_block(origin, shown)
         whole_block = whole.digest.get("spec_block")
+        part_held, whole_held = _block_scope(part_block), _block_scope(whole_block)
         dataset = _dataset_title(part_block)
         axis = cast(str, whole.whole_axis)
         total = _whole_total(axis, whole_block)
-        alike = _whole_shares(axis, part_block, whole_block)
+        alike = _whole_shares(axis, part_block, part_held, whole_held)
         chosen = f"the {dataset} {total}" if dataset is not None else f"the {total}"
         if len(chosen) > MAX_OPTION_CHARS:
             chosen = f"the {total}"
 
         # The dataset and the part's name, from the fullest to the shortest.
-        titled_side, side = _side_name(part_block), _side_name(part_block, titled=False)
+        titled_side = _side_name(part_block, part_held)
+        side = _side_name(part_block, part_held, titled=False)
         named = (
             (
                 f"the {dataset}, the same dataset as"
@@ -4899,32 +4904,52 @@ def _whole_total(axis: str, block: Mapping[str, Any] | None) -> str:
 
 
 def _whole_shares(
-    axis: str, part_block: Mapping[str, Any] | None, whole_block: Mapping[str, Any] | None
+    axis: str,
+    part_block: Mapping[str, Any] | None,
+    part_scope_held: PartScope | None,
+    whole_scope_held: PartScope | None,
 ) -> str:
-    """What a whole over every `axis` and its part, `whole_block` and `part_block`
-    their spec blocks, count alike, as the end of its caveat's rationale: "the same
-    donors, recipients, measure basis and providers." It names only what the part's
-    dataset has (`_dataset_holds`), so a DAC1 donor total names no recipients or
-    sectors, and the providers only where both state the same provider option.
-    Where Search counts the whole on another provider option than the part's, it
-    says which each counts."""
-    alike = [name for name in _WHOLE_ALIKE[axis] if _dataset_holds(part_block, name)]
-    part, whole = _provider_option(part_block), _provider_option(whole_block)
-    differ = part is not None and whole is not None and part.option_id != whole.option_id
-    if part is not None and whole is not None and not differ:
+    """What a whole over every `axis` and its part count alike, as the end of its
+    caveat's rationale: "the same donors, recipients, measure basis and providers."
+    `part_block` is the part's spec block, and `part_scope_held` and
+    `whole_scope_held` the scope records of the part and the whole. It names only
+    what the part's dataset has (`_dataset_holds`), so a DAC1 donor total names no
+    recipients or sectors, and the providers only where both hold the same provider
+    option. Where they hold different options, or one states none, it says what
+    each counts."""
+    alike = [
+        name for name in _WHOLE_ALIKE[axis] if _dataset_holds(part_block, part_scope_held, name)
+    ]
+    part, whole = _provider_option(part_scope_held), _provider_option(whole_scope_held)
+    same = part is not None and whole is not None and part.option_id == whole.option_id
+    if same:
         alike.append("providers")
     named = ", ".join(alike[:-1]) + f" and {alike[-1]}" if len(alike) > 1 else "".join(alike)
-    if not differ:
+    if same or (part is None and whole is None):
         return f"the same {named}." if named else "alike."
-    assert part is not None and whole is not None
     shared = f"the same {named}." if named else "different providers."
-    return f"{shared} The total counts {whole.label}, the part {part.label}."
+    return f"{shared} {_providers_counted(whole, part)}"
 
 
-def _dataset_holds(block: Mapping[str, Any] | None, name: str) -> bool:
-    """Whether the dataset of `block`, a part's spec block, has what `name` of
-    `_WHOLE_ALIKE` counts: a party side the part names parties on or Search
-    states open (`resolved.role_axis_facts`), or a scope axis the part's
+def _providers_counted(whole: Option | None, part: Option | None) -> str:
+    """The sentence saying which providers a whole and its part count, `whole` and
+    `part` the provider options they hold, `None` for one that states none."""
+    if whole is None:
+        return (
+            f"The total does not say which providers it counts, and the part counts "
+            f"{cast(Option, part).label}."
+        )
+    if part is None:
+        return (
+            f"The total counts {whole.label}, and the part does not say which providers it counts."
+        )
+    return f"The total counts {whole.label}, the part {part.label}."
+
+
+def _dataset_holds(block: Mapping[str, Any] | None, scope: PartScope | None, name: str) -> bool:
+    """Whether the dataset of `block`, a part's spec block, `scope` its scope record,
+    has what `name` of `_WHOLE_ALIKE` counts: a party side the part names parties on
+    or Search states open (`resolved.role_axis_facts`), or a scope axis the part's
     records hold a choice on."""
     column = _ALIKE_COLUMNS.get(name)
     if column is not None:
@@ -4934,7 +4959,6 @@ def _dataset_holds(block: Mapping[str, Any] | None, name: str) -> bool:
         return bool(entities.get(column)) or any(
             isinstance(fact, Mapping) and fact.get("role") == column for fact in facts
         )
-    scope = part_scope(str((block or {}).get("spec_id")), block)
     return scope is not None and any(c.axis == _ALIKE_AXES[name] for c in scope.choices)
 
 
@@ -4995,7 +5019,7 @@ def _provider_difference_decisions(
     what it and its part count (`_whole_shares`).
     """
     pinned = [
-        (requirement, block, _provider_option(block))
+        (requirement, block, _provider_option(_block_scope(block)))
         for requirement in requirements
         if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
         for block in [_pin_block(requirement.source_spec_id, shown)]
@@ -5104,30 +5128,30 @@ def _provider_sentence(
 def _input_concept(requirement: DatasetRequirement, block: Mapping[str, Any] | None) -> str:
     """What `requirement` fetches in the reader's words, named by the plan card's
     rule (`harness.plan_display.concept_name`) over its pin's block and scope
-    record: what Search says the series count (`resolved.concept_label`), else
-    the option its sector choice holds, else what Search says the dataset
+    record: what Search says the series count (`compiler.sources.block_concept_label`),
+    else the option its sector choice holds, else what Search says the dataset
     measures (`resolved.shape.label`, the field `SelectedSource.measure_label`
     copies)."""
     resolved = (block or {}).get("resolved") or {}
     label = (resolved.get("shape") or {}).get("label")
-    held = _held_sector(block)
+    held = _held_sector(_block_scope(block))
     return concept_name(
         requirement.measure,
-        concept_label=_concept_label(block),
+        concept_label=block_concept_label(block),
         sector=held.label if held is not None else None,
         measure_label=label if isinstance(label, str) and label else None,
     )
 
 
-def _concept_label(block: Mapping[str, Any] | None) -> str | None:
-    """What Search says `block`'s series count (`resolved.concept_label`), `None` when it states none."""
-    label = ((block or {}).get("resolved") or {}).get("concept_label")
-    return label if isinstance(label, str) and label else None
+def _block_scope(block: Mapping[str, Any] | None) -> PartScope | None:
+    """The scope record `block`, a spec block, states (`part_scope`), `None` where it
+    states none this release reads."""
+    return part_scope(str((block or {}).get("spec_id")), block)
 
 
-def _held_sector(block: Mapping[str, Any] | None) -> Option | None:
-    """The option `block`'s scope record holds on its sector choice, `None` where it states none."""
-    scope = part_scope(str((block or {}).get("spec_id")), block)
+def _held_sector(scope: PartScope | None) -> Option | None:
+    """The option `scope`, a part's scope record, holds on its sector choice, `None`
+    where it states none."""
     if scope is None:
         return None
     return next((c.active_option for c in scope.choices if c.axis == _SECTOR_AXIS), None)
@@ -5143,24 +5167,26 @@ def _dataset_title(block: Mapping[str, Any] | None) -> str | None:
     return block_dataset(block).name
 
 
-def _side_name(block: Mapping[str, Any] | None, *, titled: bool = True) -> str | None:
-    """A share side's name for the reader: what Search says its series count
-    (`resolved.concept_label`), else the option its scope's sector choice holds,
-    else, with `titled`, the dataset it counts from (`_dataset_title`), `None` when
-    none is stated."""
-    held = _held_sector(block)
-    named = _concept_label(block) or (held.label if held is not None else None)
+def _side_name(
+    block: Mapping[str, Any] | None, scope: PartScope | None, *, titled: bool = True
+) -> str | None:
+    """A share side's name for the reader, `block` its spec block and `scope` its
+    scope record: what Search says its series count (`compiler.sources.block_concept_label`),
+    else the option its scope's sector choice holds, else, with `titled`, the dataset
+    it counts from (`_dataset_title`), `None` when none is stated."""
+    held = _held_sector(scope)
+    named = block_concept_label(block) or (held.label if held is not None else None)
     if named is not None:
         return named
     return _dataset_title(block) if titled else None
 
 
-def _provider_option(block: Mapping[str, Any] | None) -> Option | None:
-    """The provider option `block`'s scope records hold active, `None` where they state none."""
-    scope = part_scope(str((block or {}).get("spec_id")), block)
+def _provider_option(scope: PartScope | None) -> Option | None:
+    """The provider option `scope`, a part's scope record, holds active, `None` where
+    it states none."""
     if scope is None:
         return None
-    return next((c.active_option for c in scope.choices if c.axis == _PROVIDER_AXIS), None)
+    return next((c.active_option for c in scope.choices if c.axis == PROVIDER_AXIS), None)
 
 
 def _pin_block(pin: str, shown: Mapping[str, PinSource]) -> Mapping[str, Any] | None:

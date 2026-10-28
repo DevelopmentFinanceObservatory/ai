@@ -406,7 +406,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             confidence=_text(resolved.get("confidence")),
             has_data=_flag(coverage.get("has_data")),
             measure_label=_text(shape.get("label")),
-            concept_label=_text(resolved.get("concept_label")),
+            concept_label=block_concept_label(block),
             published_tables=_text(resolved.get("published_tables")),
             elected_measure=_elected_measure(resolved),
             stat_var_member_count=_count(stat_vars.get("member_count")),
@@ -985,6 +985,12 @@ def _axis_values(values: object) -> dict[str, str | None]:
         for entry in _sequence(values)
         if (axis := _text(entry.get("axis"))) is not None
     }
+
+
+def block_concept_label(block: Mapping[str, object] | None) -> str | None:
+    """What Search says a spec block's series count (`resolved.concept_label`), `None`
+    when it states none (`SelectedSource.concept_label`)."""
+    return _text(_mapping(_mapping(block).get("resolved")).get("concept_label"))
 
 
 def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:

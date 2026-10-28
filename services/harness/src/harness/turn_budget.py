@@ -197,6 +197,7 @@ async def bounded(
         delivered = False
         delivered_text = False
         delivered_thought = False
+        streamed = 0.0
         gaps: list[float] = []
         cut: SeamCode | None = None
         retry = False
@@ -235,6 +236,7 @@ async def bounded(
                     finally:
                         budget.model_time_spent += budget.clock() - before
                     waited = round(budget.clock() - before, 3)
+                    streamed += waited
                     if not delivered:
                         _record_first_chunk(span, seconds=waited)
                     else:
@@ -242,10 +244,10 @@ async def bounded(
                     delivered = True
                     if not delivered_thought and _has_thought(response):
                         delivered_thought = True
-                        _record_since_opened(span, "dfo.model.first_thought_s", budget, opened)
+                        _record_streamed(span, "dfo.model.first_thought_s", seconds=streamed)
                     if not delivered_text and _has_text(response):
                         delivered_text = True
-                        _record_since_opened(span, "dfo.model.first_text_s", budget, opened)
+                        _record_streamed(span, "dfo.model.first_text_s", seconds=streamed)
                     _record_thoughts_tokens(span, response)
                     yield response
         except asyncio.CancelledError:
@@ -304,14 +306,17 @@ def _has_thought(response: LlmResponse) -> bool:
     return any(part.text and part.thought for part in parts)
 
 
-def _record_since_opened(span: trace.Span, key: str, budget: TurnBudget, opened: float) -> None:
-    """Stamp `key` on `span` with the seconds since the call was opened at `opened`.
+def _record_streamed(span: trace.Span, key: str, *, seconds: float) -> None:
+    """Stamp `key` on `span` with `seconds`, the time this attempt waited on
+    the stream up to the chunk at hand.
 
-    `dfo.model.first_thought_s` and `dfo.model.first_text_s` set beside
+    Measured as `dfo.model.first_chunk_s` is, on the waits alone, so time ADK
+    spends at the generator's yield is left out and the three compare.
+    `dfo.model.first_thought_s` and `dfo.model.first_text_s` beside
     `dfo.model.first_chunk_s` tell a model thinking apart from a provider
     queueing before it sends anything."""
     if span.is_recording():
-        span.set_attribute(key, round(budget.clock() - opened, 3))
+        span.set_attribute(key, round(seconds, 3))
 
 
 def _record_thoughts_tokens(span: trace.Span, response: LlmResponse) -> None:

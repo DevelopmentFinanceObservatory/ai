@@ -117,6 +117,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     Unit,
+    WholeOf,
     amendment_entry,
     current_discovery_time_left,
     current_earlier_block,
@@ -4889,6 +4890,122 @@ def test_a_declared_wholes_reading_is_named_by_the_whole_not_its_parts_words(
     stored = SearchReading.model_validate(ctx.state[ORCHESTRATOR_SEARCHES_KEY][-1])
     assert stored.spec_id == TOTAL
     assert part_name(stored, block) == f'"{named}"'
+
+
+@pytest.mark.parametrize("axis", ["donor", "recipient"])
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+def test_a_donor_or_recipient_wholes_reading_is_named_as_the_card_names_it(
+    decision: Callable[..., Decision],
+    caplog: pytest.LogCaptureFixture,
+    axis: str,
+    pinned: bool,
+) -> None:
+    """US health aid to Kenya and its whole over every donor or recipient, with
+    the plan that declares the whole in the planner's state: the whole's
+    reading is named as the card names it, the part's concept with the
+    population Search bound on the opened side. A block not readable as a
+    source changes nothing when the plan does not pin it. When the plan pins
+    it, the warning names its spec_id and the part reads by its composed
+    label, the measure the plan states."""
+    kept = (
+        Entity(name="Kenya", role="recipient")
+        if axis == "donor"
+        else Entity(name="United States", role="donor")
+    )
+    part_scope = _switchable_scope()
+    part_scope["entries"] = []
+    part_scope["dropped_entries"] = []
+    part_scope["choices"] = []
+    bound = "official donors (DAC)" if axis == "donor" else "ODA-eligible recipients"
+    block = {
+        "spec_id": TOTAL,
+        "resolved": {
+            "scope_choices": {**copy.deepcopy(part_scope), "id": f"{TOTAL}_base"},
+            "measure_label": "gross disbursements",
+            "concept_label": "health",
+            "entity_groups": {axis: {"label": bound}},
+        },
+    }
+    whole = AlignedPin(
+        origin=HEALTH,
+        option_ids=(),
+        spec_id=TOTAL,
+        digest={
+            "part_digests": [
+                {"variable": TOTAL, "status": "definite", "spec_id": TOTAL, "spec_block": block}
+            ]
+        },
+        whole_axis=axis,
+    )
+    part_block = {"spec_id": HEALTH, "resolved": {"concept_label": "health"}}
+    plan = Plan(
+        question="What share of US health aid to Kenya is it?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="part",
+                decision_ids=["measure"],
+                measure="health aid",
+                entities=[
+                    Entity(name="United States", role="donor"),
+                    Entity(name="Kenya", role="recipient"),
+                ],
+                period=Period(start=2023, end=2023),
+                source_spec_id=HEALTH,
+            ),
+            DatasetRequirement(
+                id="whole",
+                decision_ids=["measure"],
+                measure="health aid",
+                entities=[kept],
+                across=[axis],
+                period=Period(start=2023, end=2023),
+                source_spec_id=TOTAL,
+                whole_of=WholeOf(part="part", axis=axis),
+            ),
+            AggregateRequirement(
+                id="whole_total",
+                input_id="whole",
+                reduction=Reduction.SUM,
+                group_by=[GroupBy.PERIOD],
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id="whole_total"),
+            ),
+        ],
+    )
+    ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: []})
+    planner_state: dict[str, Any] = {}
+    save_plan(cast(SessionState, planner_state), plan)
+    # An entity with no ref is not readable as a source.
+    unread = HEALTH if pinned else "spec_unpinned"
+    unreadable = {
+        "spec_id": unread,
+        "resolved": {"entities": [{"role": "recipient", "label": "Kenya"}]},
+    }
+    shown = {HEALTH: part_block} | {unread: unreadable}
+    save_pin_sources(
+        cast(SessionState, planner_state),
+        {spec_id: PinSource(block=block, settled=True) for spec_id, block in shown.items()},
+    )
+    save_aligned_pin(cast(SessionState, planner_state), whole)
+
+    with caplog.at_level(logging.WARNING, logger=planner_seam.logger.name):
+        planner_seam.store_aligned_readings(cast(Any, ctx), cast(SessionState, planner_state))
+
+    stored = SearchReading.model_validate(ctx.state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    concept = "health aid" if pinned else "health"
+    assert stored.text == (
+        f"{concept} from official donors (DAC) to Kenya"
+        if axis == "donor"
+        else f"{concept} from United States to ODA-eligible recipients"
+    )
+    assert [(record.levelno, record.args) for record in caplog.records] == (
+        [(logging.WARNING, (HEALTH,))] if pinned else []
+    )
 
 
 async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(

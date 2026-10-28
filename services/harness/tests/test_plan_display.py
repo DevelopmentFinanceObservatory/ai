@@ -8,12 +8,16 @@ dependency on either, and neither do these tests.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import typing
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from compiler.sources import source_from_spec_block
 from harness.plan_display import (
     _card_label,
     _concepts,
@@ -3225,6 +3229,8 @@ _CRS_TABLES = "OECD Creditor Reporting System (CRS)"
 _HEALTH = "health"
 # The sector option the recorded plans hold, as Search labelled it without its codes.
 _RECORDED_SECTOR = "health incl. population and reproductive health"
+# The option label Search gave the recorded plan's sector choice "sector:120+130".
+_RECORDED_SECTOR_LABEL = f"{_RECORDED_SECTOR} (CRS 120 + 130)"
 _LONG_LABELS = [
     f"Fetch {_HEALTH} for United States",
     f"Total {_HEALTH}",
@@ -3559,20 +3565,70 @@ def test_a_choice_shows_no_planner_slug_or_option_id(text: str, shown: str) -> N
 
 
 @pytest.mark.parametrize(
-    ("text", "shown"),
+    ("label", "text", "shown"),
     [
         (
+            _RECORDED_SECTOR_LABEL,
             "measure_basis:net because the user asked for net flows",
             "net disbursements, current USD because the user asked for net flows",
         ),
-        ("sector:130", "population policy, programme, and reproductive health, CRS 130 alone"),
-        ("crs_total", "crs total"),
+        (
+            _RECORDED_SECTOR_LABEL,
+            "sector:130",
+            "population policy, programme, and reproductive health, CRS 130 alone",
+        ),
+        (_RECORDED_SECTOR_LABEL, "crs_total", "crs total"),
+        (_RECORDED_SECTOR_LABEL, "sector:120+130 health incl. population", _RECORDED_SECTOR_LABEL),
+        (
+            _RECORDED_SECTOR_LABEL,
+            "sector:120+130 Health incl. population is the sector the user asked for",
+            f"{_RECORDED_SECTOR_LABEL} is the sector the user asked for",
+        ),
+        (
+            _RECORDED_SECTOR_LABEL,
+            "sector:120+130 health matters most here",
+            f"{_RECORDED_SECTOR_LABEL} matters most here",
+        ),
+        (
+            _RECORDED_SECTOR_LABEL,
+            f"sector:120+130 {_RECORDED_SECTOR_LABEL}.",
+            f"{_RECORDED_SECTOR_LABEL}.",
+        ),
+        (
+            _RECORDED_SECTOR_LABEL,
+            "sector:120+130 health incl. population, the sector asked for",
+            f"{_RECORDED_SECTOR_LABEL}, the sector asked for",
+        ),
+        (
+            _RECORDED_SECTOR_LABEL,
+            f"sector:120+130 {_RECORDED_SECTOR} (CRS 120+130) is asked",
+            f"{_RECORDED_SECTOR_LABEL} is asked",
+        ),
+        (
+            "multisector aid n.e.s.",
+            "sector:120+130 multisector aid n.e.s., chosen",
+            "multisector aid n.e.s., chosen",
+        ),
     ],
 )
-def test_a_decisions_reason_keeps_its_words_after_the_option_id(text: str, shown: str) -> None:
+def test_a_decisions_reason_keeps_its_words_after_the_option_id(
+    label: str, text: str, shown: str
+) -> None:
     """A reason, question or caveat opening with an option's id reads that id
-    as the option's label and keeps the planner's words after it."""
-    assert card_decision_text(text, _recorded_plan("long")) == shown
+    as the option's label and keeps the planner's words after it, less any
+    words that open the label, which the label already says."""
+    payload = _recorded_payload("long")
+    for decision in payload["decisions"]:
+        if (decision.get("scope") or {}).get("axis") == "sector":
+            decision["options"][0] = decision["chosen"] = label
+    plan = Plan.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in ("summary", "revision", "moved")
+        }
+    )
+    assert card_decision_text(text, plan) == shown
 
 
 @pytest.mark.parametrize(
@@ -3719,6 +3775,107 @@ def test_a_revisions_changed_retrieval_is_told_apart_from_a_name_the_card_holds(
         "health aid to Kenya (2)",
         "health aid to Kenya (3)",
     ]
+
+
+def test_a_revision_not_compiled_names_what_the_card_holds_by_the_cards_names() -> None:
+    """The recorded plan, compiled, and an amendment of it that did not compile
+    and so holds no workflow, here one rewording the question: each retrieval
+    it holds unchanged reads the source the card's was compiled from, so it
+    keeps the card's name."""
+    prior = _recorded_plan("long")
+    revision = prior.amend(question=f"{prior.question} Show it as a share.")
+    assert revision.workflow is None
+
+    words = plan_words(revision, shown_as=prior)
+
+    card = _concepts(shown_plan(prior))
+    assert card == {
+        "us_health_aid_raw": "health",
+        "us_total_aid_raw": "official development assistance",
+    }
+    assert {rid: words.names[rid] for rid in card} == card
+
+
+@pytest.mark.parametrize(
+    ("concept", "name"),
+    [("health care", "health care"), (None, _RECORDED_SECTOR_LABEL)],
+    ids=["concept_label", "no_concept_label"],
+)
+def test_a_retrieval_a_revision_repins_is_named_by_searchs_answer_for_its_pin(
+    concept: str | None, name: str
+) -> None:
+    """A revision, not compiled, that pins the recorded plan's health retrieval
+    to another dataset is named by the concept Search's answer for that pin
+    states, and with none stated by the sector option's label."""
+    prior = _recorded_plan("long")
+    moved = f"spec_{'e' * 32}"
+    revision = prior.model_copy(
+        update={
+            "translation": None,
+            "workflow": None,
+            "evidence_requirements": [
+                r.model_copy(update={"source_spec_id": moved}) if r.id == "us_health_aid_raw" else r
+                for r in prior.evidence_requirements
+            ],
+        }
+    )
+    block = {
+        "spec_id": moved,
+        "resolved": {"concept_label": concept} if concept is not None else {},
+    }
+
+    words = plan_words(revision, shown_as=prior, pinned={moved: source_from_spec_block(block)})
+
+    assert words.names["us_health_aid_raw"] == name
+    assert words.names["us_total_aid_raw"] == "official development assistance"
+
+
+# `_concepts` numbers the namesakes "aid" and "aid (1)" in card order, the "aid"
+# pair first, so the numbers it gives depend on no hash order.
+_NAMESAKES_BY_CARD_ORDER = ["aid (2)", "aid (3)", "aid (1) (1)", "aid (1) (2)"]
+
+
+@pytest.mark.parametrize("seed", ["0", "1"])
+def test_namesakes_are_numbered_in_card_order_whatever_the_hash_order(
+    decision: DecisionFactory, seed: str
+) -> None:
+    """Two retrievals named "aid" and two named "aid (1)": numbering one pair
+    can take a name the other holds, so the names depend on which pair is
+    numbered first. Each pair is numbered in card order. Run in a fresh
+    interpreter per hash seed, since the two seeds order a set of the two
+    names each way. Each run takes about a second."""
+    plan = Plan(
+        question="Aid",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=f"r{index}",
+                decision_ids=["measure"],
+                measure=measure,
+                across=["recipient"],
+                period=Period(start=2023, end=2023),
+            )
+            for index, measure in enumerate(["aid", "aid", "aid (1)", "aid (1)"])
+        ],
+    )
+    script = (
+        "import json, sys\n"
+        "from harness.plan_display import _concepts\n"
+        "from planner.plan import Plan\n"
+        "plan = Plan.model_validate_json(sys.stdin.read())\n"
+        "print(json.dumps(list(_concepts(plan).values())))\n"
+    )
+
+    ran = subprocess.run(
+        [sys.executable, "-c", script],
+        input=plan.model_dump_json(),
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONHASHSEED": seed},
+    )
+
+    assert json.loads(ran.stdout) == _NAMESAKES_BY_CARD_ORDER
 
 
 @pytest.mark.parametrize(

@@ -333,21 +333,31 @@ def _with_result(description: str, result: str | None) -> str:
     return description if result is None else f"{description} Result: {result}."
 
 
-def plan_words(plan: Plan, *, shown_as: Plan | None = None) -> PlanWords:
+def plan_words(
+    plan: Plan,
+    *,
+    shown_as: Plan | None = None,
+    pinned: Mapping[str, SelectedSource] | None = None,
+) -> PlanWords:
     """How a sentence about `plan` names its requirements
     (`harness.sentences.refusal_sentence`), and the ids each reads (`inputs_of`).
 
-    A retrieval reads by the name the card gives it (`_concepts`). Where
-    `shown_as`, the plan the card shows, is given, as for a revision that
-    failed to compile, a retrieval it holds with the same naming facets
-    (`_naming_facets`) reads by its name there (`_carried_names`), and any
-    other retrieval is named around those names. Any other requirement reads
-    by the retrievals it reads (`_concept_of`): "health as a share of
-    official development assistance".
+    A retrieval reads by the name the card gives it (`_concepts`), read off
+    the source it was compiled from. A plan not compiled, such as a revision
+    that failed to compile, reads each retrieval off the source it pins
+    (`_pinned_sources`): the one the card's plan `shown_as` reads where the
+    card's retrieval reads the same, else the one Search answered for its
+    pin (`pinned`, by spec_id). Where `shown_as` is given, a retrieval it
+    holds with the same naming facets (`_naming_facets`) reads by its name
+    there (`_carried_names`), and any other retrieval is named around those
+    names. Any other requirement reads by the retrievals it reads
+    (`_concept_of`): "health as a share of official development assistance".
     """
     shown = shown_plan(plan)
-    carried = _carried_names(shown, shown_plan(shown_as)) if shown_as is not None else {}
-    concepts = _concepts(shown, carried=carried)
+    prior = shown_plan(shown_as) if shown_as is not None else None
+    sources = _pinned_sources(shown, shown_as=prior, pinned=pinned or {})
+    carried = _carried_names(shown, prior, sources=sources) if prior is not None else {}
+    concepts = _concepts(shown, carried=carried, sources=sources)
     return PlanWords(
         names={
             requirement.id: _concept_of(requirement, shown, concepts)
@@ -563,7 +573,12 @@ def _sector_concept(sector: Decision | None, source: SelectedSource | None) -> s
     return sector.chosen
 
 
-def _who(requirement: DatasetRequirement, plan: Plan) -> str:
+def _who(
+    requirement: DatasetRequirement,
+    plan: Plan,
+    *,
+    sources: Mapping[str, SelectedSource] | None = None,
+) -> str:
     """The parties `requirement` reads, by the side of the flow each is on.
 
     "from United States to 129 recipients": the entities it names; a set's
@@ -571,16 +586,17 @@ def _who(requirement: DatasetRequirement, plan: Plan) -> str:
     named set its source binds on a side it names nobody on
     (`SelectedSource.groups`); and on a side still empty, how many members
     the source holds on its open axis there. Entities on no side of a flow
-    read "for Kenya".
+    read "for Kenya". A plan not compiled reads its source off `sources`
+    (`_source`).
     """
     region = _governing(requirement, plan).get("region")
-    source = _selected_source(requirement.id, plan)
+    source = _source(requirement.id, plan, sources)
     sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
     for entity in requirement.entities:
         side = flow_side(entity.role) if entity.role else None
         name = region.chosen if entity.members and region is not None else entities_phrase([entity])
         sides[side].append(name)
-    for side, label in _side_groups(requirement, plan):
+    for side, label in _side_groups(requirement, plan, sources=sources):
         if not sides[side]:
             sides[side].append(label)
     if source is not None:
@@ -654,7 +670,7 @@ def card_decision_text(text: str, plan: Plan) -> str:
     named = with_source_names(text, plan).strip()
     if (labelled := _option_labelled(named, plan)) is not None:
         label, rest = labelled
-        return f"{label}{rest}"
+        return f"{label}{_after_label(rest, label)}"
     return _unslugged(named)
 
 
@@ -668,6 +684,34 @@ def _option_labelled(text: str, plan: Plan) -> tuple[str, str] | None:
             if text == option.option_id or text.startswith(f"{option.option_id} "):
                 return label, text.removeprefix(option.option_id)
     return None
+
+
+def _after_label(rest: str, label: str) -> str:
+    """`rest`, the text after an option's id, less the words it opens with that
+    open the option's `label`, since a planner that wrote the id often went on
+    with the option's name: "health incl. population is the sector asked for"
+    after the label "health incl. population and reproductive health
+    (CRS 120 + 130)" leaves " is the sector asked for".
+
+    The label is matched character by character as a prefix of `rest`,
+    ignoring case and whitespace on both sides, so "(CRS 120+130)" echoes
+    "(CRS 120 + 130)". The echo ends after the last label word matched in full
+    where `rest` does not go on with a letter or digit. Punctuation the planner
+    added after it stays ("n.e.s., chosen" after a label ending "n.e.s."
+    leaves ", chosen"). The rest keeps the planner's spacing.
+    """
+    end = 0
+    at = 0
+    for word in label.split():
+        for char in word:
+            while at < len(rest) and rest[at].isspace():
+                at += 1
+            if at == len(rest) or rest[at].casefold() != char.casefold():
+                return rest[end:]
+            at += 1
+        if at == len(rest) or not rest[at].isalnum():
+            end = at
+    return rest[end:]
 
 
 def _unslugged(text: str) -> str:
@@ -713,7 +757,12 @@ def whole_name(axis: str, *, measure: str | None = None) -> str:
     return f"{measure} {preposition} {name}" if measure else name
 
 
-def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
+def _concept(
+    requirement: DatasetRequirement,
+    plan: Plan,
+    *,
+    sources: Mapping[str, SelectedSource] | None = None,
+) -> str:
     """What `requirement` fetches, in the reader's words, as `_concepts` names it
     (`concept_name`), read off the scope decisions it cites and its source.
 
@@ -722,14 +771,15 @@ def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     sector it is named by that axis ("all sectors"). Over every donor or
     recipient it counts the part's concept, so it is named as its part is,
     and the parties it reads (`_who`, `_parties`) name the population its
-    source holds there."""
+    source holds there. A plan not compiled reads its source off `sources`
+    (`_source`)."""
     if requirement.whole_of is not None:
         part = plan.requirement(requirement.whole_of.part)
         if requirement.whole_of.axis == "sector" or not isinstance(part, DatasetRequirement):
             return whole_name(requirement.whole_of.axis)
-        return _concept(part, plan)
+        return _concept(part, plan, sources=sources)
     sector = _governing(requirement, plan).get("sector")
-    source = _selected_source(requirement.id, plan)
+    source = _source(requirement.id, plan, sources)
     return concept_name(
         requirement.measure,
         concept_label=source.concept_label if source is not None else None,
@@ -738,31 +788,41 @@ def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     )
 
 
-def _concepts(plan: Plan, *, carried: Mapping[str, str] | None = None) -> dict[str, str]:
+def _concepts(
+    plan: Plan,
+    *,
+    carried: Mapping[str, str] | None = None,
+    sources: Mapping[str, SelectedSource] | None = None,
+) -> dict[str, str]:
     """What each retrieval of `plan` is named by in the card's labels, by requirement id.
 
     Its `_concept`. Retrievals named alike add the parties they read, by the
     side of the flow each is on (`_who`): "health from United States to
     Kenya". Any still alike whose periods differ add their period, "health to
     Kenya in 2023", and any still alike a number no other name holds, "(1)",
-    "(2)". A retrieval in `carried` keeps the name given there, and the
-    others are told apart from it as from each other.
+    "(2)", each set of namesakes in card order. A retrieval in `carried`
+    keeps the name given there, and the others are told apart from it as
+    from each other. A plan not compiled reads its sources off `sources`
+    (`_source`).
     """
     carried = carried or {}
     datasets = [r for r in _card_order(plan) if isinstance(r, DatasetRequirement)]
-    names = {dataset.id: carried.get(dataset.id) or _concept(dataset, plan) for dataset in datasets}
+    names = {
+        dataset.id: carried.get(dataset.id) or _concept(dataset, plan, sources=sources)
+        for dataset in datasets
+    }
     fresh = [dataset for dataset in datasets if dataset.id not in carried]
     alike = _alike(names)
     for dataset in fresh:
-        if dataset.id in alike and (who := _who(dataset, plan)):
+        if dataset.id in alike and (who := _who(dataset, plan, sources=sources)):
             names[dataset.id] = f"{names[dataset.id]} {who}"
-    for name in set(_alike(names).values()):
+    for name in dict.fromkeys(_alike(names).values()):
         namesakes = [dataset for dataset in datasets if names[dataset.id] == name]
         if len({dataset.period for dataset in namesakes}) > 1:
             for dataset in namesakes:
                 if dataset.id not in carried:
                     names[dataset.id] = f"{name} {_in_period(dataset)}"
-    for name in set(_alike(names).values()):
+    for name in dict.fromkeys(_alike(names).values()):
         taken = set(names.values())
         number = 0
         for dataset in fresh:
@@ -775,24 +835,71 @@ def _concepts(plan: Plan, *, carried: Mapping[str, str] | None = None) -> dict[s
     return names
 
 
-def _carried_names(revision: Plan, shown: Plan) -> dict[str, str]:
+def _carried_names(
+    revision: Plan, shown: Plan, *, sources: Mapping[str, SelectedSource]
+) -> dict[str, str]:
     """The name the card gives each retrieval of `shown` (`_concepts`) that
-    `revision` holds with the same naming facets (`_naming_facets`), by
+    `revision`, its retrievals' sources read off `sources` where it is not
+    compiled, holds with the same naming facets (`_naming_facets`), by
     requirement id."""
     names = _concepts(shown)
-    earlier = {r.id: r for r in shown.evidence_requirements if isinstance(r, DatasetRequirement)}
+    earlier = _datasets(shown)
     return {
         dataset.id: names[dataset.id]
-        for dataset in revision.evidence_requirements
-        if isinstance(dataset, DatasetRequirement)
-        and dataset.id in earlier
-        and _naming_facets(dataset, revision) == _naming_facets(earlier[dataset.id], shown)
+        for dataset in _datasets(revision).values()
+        if dataset.id in earlier
+        and _naming_facets(dataset, revision, sources=sources)
+        == _naming_facets(earlier[dataset.id], shown)
     }
 
 
-def _naming_facets(dataset: DatasetRequirement, plan: Plan) -> tuple[str, str, Period]:
+def _naming_facets(
+    dataset: DatasetRequirement,
+    plan: Plan,
+    *,
+    sources: Mapping[str, SelectedSource] | None = None,
+) -> tuple[str, str, Period]:
     """What `_concepts` names `dataset` by: its concept, parties and period."""
-    return _concept(dataset, plan), _who(dataset, plan), dataset.period
+    return (
+        _concept(dataset, plan, sources=sources),
+        _who(dataset, plan, sources=sources),
+        dataset.period,
+    )
+
+
+def _pinned_sources(
+    plan: Plan, *, shown_as: Plan | None, pinned: Mapping[str, SelectedSource]
+) -> dict[str, SelectedSource]:
+    """The source each retrieval of `plan` reads, by requirement id, where
+    `plan` is not compiled. A compiled plan names its own, so the result is
+    empty.
+
+    A retrieval the card's plan `shown_as` holds as it stands, or pinned to
+    the same spec_id, reads the source the card's retrieval was compiled
+    from, so the card's names carry (`_carried_names`). Any other pinned
+    retrieval reads the source Search answered for its pin (`pinned`, by
+    spec_id). One pinning nothing `pinned` holds reads none."""
+    if plan.workflow is not None:
+        return {}
+    earlier = _datasets(shown_as) if shown_as is not None else {}
+    sources: dict[str, SelectedSource] = {}
+    for dataset in _datasets(plan).values():
+        prior = earlier.get(dataset.id)
+        spec_id = dataset.source_spec_id
+        same = prior is not None and (
+            prior == dataset or (spec_id is not None and prior.source_spec_id == spec_id)
+        )
+        source = _selected_source(dataset.id, shown_as) if same and shown_as is not None else None
+        if source is None and spec_id is not None:
+            source = pinned.get(spec_id)
+        if source is not None:
+            sources[dataset.id] = source
+    return sources
+
+
+def _datasets(plan: Plan) -> dict[str, DatasetRequirement]:
+    """The retrievals of `plan`, by requirement id."""
+    return {r.id: r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)}
 
 
 def _in_period(dataset: DatasetRequirement) -> str:
@@ -1769,12 +1876,17 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     return f"Fetch {measure} for {_parties(requirement, plan)}"
 
 
-def _side_groups(requirement: DatasetRequirement, plan: Plan) -> list[tuple[str, str]]:
+def _side_groups(
+    requirement: DatasetRequirement,
+    plan: Plan,
+    *,
+    sources: Mapping[str, SelectedSource] | None = None,
+) -> list[tuple[str, str]]:
     """Each named set `requirement`'s selected source binds on a side of the
     flow (`SelectedSource.groups`), as that side and the set's label, in the
-    source's order; empty before compile. `_parties` and `_who` name a side
-    by it."""
-    source = _selected_source(requirement.id, plan)
+    source's order; empty before compile unless `sources` holds its source
+    (`_source`). `_parties` and `_who` name a side by it."""
+    source = _source(requirement.id, plan, sources)
     return [
         (side, group.label)
         for group in (source.groups if source is not None else ())
@@ -1978,6 +2090,18 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
         _FOLLOWING if requirement.period_end_open else ""
     )
     return ", ".join([f"Retrieves {requirement.measure} for {parties}", period, *clauses]) + "."
+
+
+def _source(
+    requirement_id: str, plan: Plan, sources: Mapping[str, SelectedSource] | None
+) -> SelectedSource | None:
+    """The source the compiled plan retrieves `requirement_id` from
+    (`_selected_source`), else, for a plan not compiled, the one `sources`
+    holds for it (`_pinned_sources`)."""
+    source = _selected_source(requirement_id, plan)
+    if source is None and plan.workflow is None:
+        source = (sources or {}).get(requirement_id)
+    return source
 
 
 def _selected_source(requirement_id: str, plan: Plan) -> SelectedSource | None:

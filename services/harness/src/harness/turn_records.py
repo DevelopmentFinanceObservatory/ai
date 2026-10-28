@@ -29,7 +29,7 @@ from typing import Any, Literal, NamedTuple, cast
 
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
-from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
+from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count
 from data_mcp.scope import ScopeAxis
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles
@@ -1376,18 +1376,33 @@ def _unworded_name(block: Mapping[str, Any] | None) -> str:
 
 
 def _served_name(block: Mapping[str, Any] | None) -> str | None:
-    """Search's name for what `block` counts: `resolved.concept_label`, which
-    states no basis, since the basis line states the measure as a clause, else
+    """Search's name for what `block` counts, which states no basis, since the
+    basis line states the measure as a clause: `resolved.concept_label`, else
     `resolved.shape.label`, the `measure` the search digest shows the model
-    (`data_mcp.digest`), as Search composed it. `None` when the block states
-    neither.
+    (`data_mcp.digest`).
+
+    Search composes that label as the block's `measure_label` followed by its
+    qualifiers in brackets ("gross disbursements (official development
+    assistance)"), or inside the measure label's own closing bracket when it
+    has one ("gross disbursements (nominal, education, official development
+    assistance)"), so a label composed either way gives the qualifiers alone.
+    `None` when the block states neither.
     """
-    resolved = (block or {}).get("resolved") or {}
-    concept = resolved.get("concept_label")
-    if isinstance(concept, str) and concept:
+    concept = block_concept_label(block)
+    if concept:
         return concept
+    resolved = (block or {}).get("resolved") or {}
     label = (resolved.get("shape") or {}).get("label")
-    return label if isinstance(label, str) and label else None
+    if not isinstance(label, str) or not label:
+        return None
+    measure = resolved.get("measure_label")
+    if not isinstance(measure, str) or not label.endswith(")"):
+        return label
+    if label.startswith(f"{measure} ("):
+        return label[len(measure) + 2 : -1]
+    if measure.endswith(")") and label.startswith(f"{measure[:-1]}, "):
+        return label[len(measure) + 1 : -1]
+    return label
 
 
 def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
