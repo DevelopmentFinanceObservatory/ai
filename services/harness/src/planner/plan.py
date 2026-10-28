@@ -2324,20 +2324,11 @@ def whole_of_fault(
     return _whole_read_fault(whole, part_id, requirements_by_id)
 
 
-def _whole_read_fault(
-    whole: DatasetRequirement,
-    part_id: str,
+def _dataset_reach(
     requirements_by_id: Mapping[str, EvidenceRequirement],
-) -> str | None:
-    """Why `whole`, the whole of `part_id`, is read other than as the denominator of a
-    share or quotient of its part, `None` when it is read only so.
-
-    The whole is read directly or through calculations over it alone, such
-    as the whole summed by year. Each such read ends in a share or quotient
-    whose denominator reads it and whose numerator reads no dataset but the
-    part, directly or summed the same way. Anything else reading it, and a
-    read that ends unread, takes a plain total of its own.
-    """
+) -> Callable[[str], set[str]]:
+    """The dataset requirements a requirement or input reads, directly or through
+    the calculations between, by its id."""
     reads: dict[str, Sequence[str]] = {
         input_id: ()
         for requirement in requirements_by_id.values()
@@ -2352,7 +2343,34 @@ def _whole_read_fault(
             if isinstance(requirements_by_id.get(rid), DatasetRequirement)
         }
 
-    over_whole = {rid for rid in requirements_by_id if datasets(rid) == {whole.id}}
+    return datasets
+
+
+def requirements_over(
+    whole_id: str, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> set[str]:
+    """The ids of the whole `whole_id` and of every calculation over it alone, such as
+    the whole summed by year: the reads that end in a divisor of the part."""
+    datasets = _dataset_reach(requirements_by_id)
+    return {rid for rid in requirements_by_id if datasets(rid) == {whole_id}}
+
+
+def _whole_read_fault(
+    whole: DatasetRequirement,
+    part_id: str,
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> str | None:
+    """Why `whole`, the whole of `part_id`, is read other than as the denominator of a
+    share or quotient of its part, `None` when it is read only so.
+
+    The whole is read directly or through calculations over it alone, such
+    as the whole summed by year. Each such read ends in a share or quotient
+    whose denominator reads it and whose numerator reads no dataset but the
+    part, directly or summed the same way. Anything else reading it, and a
+    read that ends unread, takes a plain total of its own.
+    """
+    datasets = _dataset_reach(requirements_by_id)
+    over_whole = requirements_over(whole.id, requirements_by_id)
     readers: dict[str, list[EvidenceRequirement]] = {rid: [] for rid in over_whole}
     for reader in requirements_by_id.values():
         for input_id in inputs_of(reader):

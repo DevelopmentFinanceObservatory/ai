@@ -149,6 +149,7 @@ from planner.plan import (
     pin_sources,
     reached,
     repinned,
+    requirements_over,
     roles_not_kept,
     scope_choice_slot,
     search_pin_slot,
@@ -3540,6 +3541,8 @@ _NARROWING_SLOTS = frozenset({"crsPurpose", "crsTypeOfFinance", "crsCooperationM
 
 _BASIS_AXIS = "measure_basis"
 _PROVIDER_AXIS = "provider"
+# The provider option counting bilateral flows alone; every other holds them.
+_BILATERAL_OPTION = "provider:bilateral"
 
 # The axes a calculation's inputs are counted on one option of (`_aligned_bases`),
 # and what figures counted on different options of each mix, or of either for an
@@ -4077,6 +4080,7 @@ def _refuse_double_count(
     if pair is None:
         return
     first, other = pair
+    wider = first if other.choice.active == _BILATERAL_OPTION else other
     raise _Unservable(
         _basis_unservable(
             view,
@@ -4088,9 +4092,9 @@ def _refuse_double_count(
             reason=(
                 f"{step.id!r} adds {first.requirement_id!r}, counted as "
                 f"{first.label(first.choice.active)}, to {other.requirement_id!r}, "
-                f"counted as {other.label(other.choice.active)}, and a figure "
-                "including imputed multilateral flows already holds the bilateral "
-                "ones and the sum counts them twice"
+                f"counted as {other.label(other.choice.active)}, and the figure "
+                f"counted as {wider.label(wider.choice.active)} already holds the "
+                "bilateral ones and the sum counts them twice"
             ),
         )
     )
@@ -4520,11 +4524,12 @@ def _whole_decisions(
             if isinstance(part, DatasetRequirement) and part.source_spec_id is not None
             else whole.origin
         )
+        over_whole = requirements_over(requirement_id, by_id)
         divides = (
             "quotient"
             if any(
                 isinstance(reader, QuotientRequirement)
-                and reader.denominator.input_id == requirement_id
+                and reader.denominator.input_id in over_whole
                 for reader in requirements
             )
             else "share"

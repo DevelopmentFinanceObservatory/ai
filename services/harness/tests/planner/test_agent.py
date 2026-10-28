@@ -5980,6 +5980,7 @@ def _us_2023(
     share: bool = True,
     source: str | None = None,
     quotient: bool = False,
+    summed_whole: bool = False,
     accept: bool = False,
     denominator: Decision | None = None,
     extra: Sequence[EvidenceRequirement] = (),
@@ -5990,7 +5991,8 @@ def _us_2023(
     `declared`, the whole declares itself the part over every sector (`whole_of`);
     the whole's source written as `source`; with `quotient`, the part summed by year
     is divided by the whole as a `quotient_of`, as the planner wrote the share in a
-    recorded Studio run; with `accept`, the share accepts a provider difference;
+    recorded Studio run; with `summed_whole`, the whole too is summed by year and
+    the part summed by year is a `share_of` it, or a `quotient_of` it with `quotient`; with `accept`, the share accepts a provider difference;
     with `denominator`, a decision of the planner's the whole alone cites; `extra`
     is proposed after the rest; `own` are further decisions the part cites."""
 
@@ -6014,7 +6016,8 @@ def _us_2023(
         )
 
     summed: list[EvidenceRequirement] = []
-    if quotient:
+    if quotient or summed_whole:
+        denominator_id = "whole_by_year" if summed_whole else _WHOLE
         summed = [
             AggregateRequirement(
                 id="health_by_year",
@@ -6022,10 +6025,22 @@ def _us_2023(
                 reduction=Reduction.SUM,
                 group_by=(GroupBy.PERIOD,),
             ),
-            QuotientRequirement(
+            *(
+                [
+                    AggregateRequirement(
+                        id="whole_by_year",
+                        input_id=_WHOLE,
+                        reduction=Reduction.SUM,
+                        group_by=(GroupBy.PERIOD,),
+                    )
+                ]
+                if summed_whole
+                else []
+            ),
+            (QuotientRequirement if quotient else ShareOfRequirement)(
                 id=_SHARE,
                 numerator=RequirementSide(input_id="health_by_year"),
-                denominator=RequirementSide(input_id=_WHOLE),
+                denominator=RequirementSide(input_id=denominator_id),
                 accept_provider_difference=accept,
             ),
         ]
@@ -6181,6 +6196,38 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     whole_requirement = plan.requirement(_WHOLE)
     assert isinstance(whole_requirement, DatasetRequirement)
     assert stated.slot in whole_requirement.decision_ids
+
+
+@pytest.mark.parametrize(
+    ("quotient", "divides"),
+    [(True, "quotient"), (False, "share")],
+    ids=["quotient", "share"],
+)
+async def test_a_wholes_caveat_names_the_calculation_that_reads_it_through_a_sum(
+    decision: DecisionFactory, quotient: bool, divides: str
+) -> None:
+    """The part summed by year over the declared whole summed by year, as a
+    `quotient_of` or a `share_of`: the caveat on the whole says which calculation
+    divides by it, not always a share."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), us_2023_block("dac1_total_gross"))
+
+    result = await _us_2023(
+        _tools_reading(WholeCompiles())["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="dac1_total_gross",
+        declared=True,
+        quotient=quotient,
+        summed_whole=True,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (stated,) = [d for d in plan.decisions if d.caveat == "derived_whole"]
+    assert stated.description == f"Which total the {divides} divides by."
 
 
 @pytest.mark.parametrize(
@@ -12734,3 +12781,35 @@ def test_an_entity_referral_leaves_a_kept_pin_as_it_is(
 def test_source_modifiers_without_wording_are_refused(requirement, modifier):
     with pytest.raises(ValidationError, match="require source wording"):
         requirement(**modifier)
+
+
+async def test_a_double_count_refusal_names_the_wider_figure_by_its_label(
+    decision: DecisionFactory,
+) -> None:
+    """Bilateral CRS health aid plus the DAC1 total counting core contributions to
+    multilaterals, the sum accepting a provider difference: the refusal names the
+    total by the count it carries, whose cause is not imputed multilateral flows."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
+    summed = SumOfRequirement(
+        id=_SUM,
+        decision_ids=["measure"],
+        left=RequirementSide(input_id=_PART),
+        right=RequirementSide(input_id=_WHOLE),
+        accept_provider_difference=True,
+    )
+
+    refused = await _us_2023(
+        _tools_reading(WholeCompiles())["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="dac1_contributions",
+        accept=True,
+        extra=[summed],
+    )
+
+    assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
+    assert refused["detail"]["basis"]["step_id"] == _SUM
+    # Once naming the input, once as the figure that holds the bilateral flows.
+    assert refused["message"].count("bilateral plus core contributions to multilaterals") == 2
