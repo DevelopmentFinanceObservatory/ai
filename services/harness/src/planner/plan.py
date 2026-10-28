@@ -1604,11 +1604,11 @@ class FilterRequirement(TaggedModel):
         resolve to one entity, which only the sources show, and the
         compiler refuses those (`compiler.arguments.op_spec_errors`).
         """
-        _reject_repeats((_predicate_key(p) for p in self.predicates), what="predicate")
+        _reject_repeats((predicate_key(p) for p in self.predicates), what="predicate")
         return self
 
 
-def _predicate_key(predicate: Predicate) -> str:
+def predicate_key(predicate: Predicate) -> str:
     """`predicate` in a form two statements of it share, its names in any order."""
     if isinstance(predicate, EntityIn):
         predicate = predicate.model_copy(update={"names": tuple(sorted(set(predicate.names)))})

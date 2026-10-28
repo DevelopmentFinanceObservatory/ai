@@ -47,6 +47,7 @@ from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast, get_args
 
+import rfc8785
 from compiler.evidence import named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
@@ -113,6 +114,7 @@ from planner.plan import (
     Decline,
     Entity,
     EvidenceRequirement,
+    FilterRequirement,
     FirstYear,
     FixDisagreement,
     FullHistory,
@@ -122,6 +124,7 @@ from planner.plan import (
     QuotientRequirement,
     RankRequirement,
     RecordedDefinition,
+    RequirementSide,
     ResolvedBy,
     ScopeOptionState,
     SessionState,
@@ -162,6 +165,7 @@ from planner.plan import (
     period_window,
     pin_slot_moves,
     pin_sources,
+    predicate_key,
     reached,
     repinned,
     requirements_over,
@@ -180,12 +184,15 @@ from planner.records import (
     MAX_IDENTIFIER_CHARS,
     AmbiguousEntityReading,
     EntityCandidate,
+    EntityIn,
     EntityKey,
     GroupBy,
     Identifier,
     OpenPeriodFault,
+    Reduction,
     RollingIssue,
     RollingPlanError,
+    StatVarReading,
     StrictModel,
     Year,
 )
@@ -4220,15 +4227,182 @@ class _InputGroup(NamedTuple):
     `members` are requirement ids, the datasets among them the inputs.
     `accepted` says a ratio beneath the calculation supplying a member accepts a
     provider difference (`accept_provider_difference`), so the calculation
-    leaves the group's provider scopes as they stand. `sides` are the members
-    each side of a comparison, sum, share or quotient reads, for one reading
-    its sides as one group, so alignment can keep the two sides apart
-    (`_sides_one_series`); `None` for any other group.
+    leaves the group's provider scopes as they stand. `sides` are the
+    derivations of the two sides of a comparison, sum, share or quotient
+    (`_side_derivations`), for one reading its sides as one group, so alignment can
+    keep the two sides apart (`_sides_one_series`); `None` for any other group.
     """
 
     members: frozenset[str]
     accepted: bool = False
-    sides: tuple[frozenset[str], frozenset[str]] | None = None
+    sides: tuple[_Derivation, _Derivation] | None = None
+
+
+class _Derivation(NamedTuple):
+    """What one side of a calculation computes, from its sources up (`_derivation`).
+
+    `shape` is the canonical JSON of every operation between the sources and
+    the calculation, except the steps `_passed_through` drops, with its
+    parameters and entity selectors, each source written as its position in
+    `leaves`. `leaves` are the dataset requirements read, in that order, each
+    with the spec_id it pins. Two sides of one `shape` read one series where
+    each pair of leaves at one position does.
+    """
+
+    shape: bytes
+    leaves: tuple[tuple[str, str | None], ...]
+
+
+# The fields through which a derived requirement names a requirement it reads
+# (`planner.plan.inputs_of`).
+_READ_FIELDS = frozenset({"input_id", "left_id", "right_id"})
+
+
+def _derivation(
+    side: RequirementSide, requirements: Mapping[str, EvidenceRequirement]
+) -> _Derivation:
+    """The derivation of `side` (`_Derivation`): the requirement it reads, narrowed
+    to its entity, down to every dataset requirement beneath it.
+
+    A derived requirement is its every field but its id and decisions, each
+    requirement it reads replaced by that requirement's own derivation, and
+    each list whose order computes nothing in one order (`_canonical`). A step
+    that leaves its input's frame as it is (`_passed_through`) is its input's
+    derivation. A dataset requirement, or one the plan does not state, is a
+    leaf.
+    """
+    leaves: list[tuple[str, str | None]] = []
+
+    def read(requirement_id: str) -> JsonValue:
+        requirement = requirements.get(requirement_id)
+        if requirement is None or isinstance(requirement, DatasetRequirement):
+            pin = None if requirement is None else requirement.source_spec_id
+            leaves.append((requirement_id, pin))
+            return {"leaf": len(leaves) - 1}
+        if (through := _passed_through(requirement, requirements)) is not None:
+            return read(through)
+        return substituted(_canonical(requirement))
+
+    def substituted(value: JsonValue) -> JsonValue:
+        if isinstance(value, dict):
+            return {
+                key: read(held)
+                if key in _READ_FIELDS and isinstance(held, str)
+                else substituted(held)
+                for key, held in value.items()
+            }
+        if isinstance(value, list):
+            return [substituted(held) for held in value]
+        return value
+
+    shape = rfc8785.dumps({"entity": side.entity, "reads": read(side.input_id)})
+    return _Derivation(shape, tuple(leaves))
+
+
+def _canonical(requirement: EvidenceRequirement) -> dict[str, JsonValue]:
+    """`requirement`'s fields but its id and decisions, each list whose order
+    computes nothing sorted. These are a filter's predicates, each entity list
+    among them too (`planner.plan.predicate_key`), since a row survives every
+    predicate in any order, and an aggregate's `group_by`, whose order sets
+    only the order of the result's columns."""
+    fields = requirement.model_dump(mode="json", exclude={"id", "decision_ids"})
+    if isinstance(requirement, FilterRequirement):
+        fields["predicates"] = sorted(predicate_key(held) for held in requirement.predicates)
+    if isinstance(requirement, AggregateRequirement):
+        fields["group_by"] = sorted(held.value for held in requirement.group_by)
+    return fields
+
+
+def _passed_through(
+    requirement: EvidenceRequirement, requirements: Mapping[str, EvidenceRequirement]
+) -> str | None:
+    """The dataset requirement `requirement` reads, where the plan alone proves
+    it leaves that requirement's frame as it is; else `None`.
+
+    Two steps are proved so, each reading a dataset requirement directly:
+
+    - A filter whose every predicate is an `entity_in` over a dataset
+      requirement that covers no party whole (`across`), each predicate naming
+      every entity, and only those, that the dataset states under the
+      predicate's role. A predicate naming no role passes only where the
+      dataset states every entity under one role. The frame's column for that
+      role holds the entities the dataset states, each resolved as the filter
+      resolves it, so every row matches.
+    - An aggregate summing grouped by period over a dataset requirement holding
+      one series (`_one_series`): each year holds one row, which its sum is.
+
+    Every other step is kept, such as a sum by period folding several
+    recipients, an across party or a breakdown into one figure a year.
+    """
+    if isinstance(requirement, AggregateRequirement):
+        dataset = requirements.get(requirement.input_id)
+        kept = (
+            requirement.reduction is Reduction.SUM
+            and GroupBy.PERIOD in requirement.group_by
+            and isinstance(dataset, DatasetRequirement)
+            and _one_series(dataset)
+        )
+    elif isinstance(requirement, FilterRequirement):
+        dataset = requirements.get(requirement.input_id)
+        kept = isinstance(dataset, DatasetRequirement) and _keeps_every_row(requirement, dataset)
+    else:
+        return None
+    return requirement.input_id if kept else None
+
+
+def _keeps_every_row(requirement: FilterRequirement, dataset: DatasetRequirement) -> bool:
+    """Whether `requirement`, a filter reading `dataset`, keeps every row of it
+    (`_passed_through`)."""
+    if dataset.across:
+        return False
+    roles = {entity.role for entity in dataset.entities}
+    for predicate in requirement.predicates:
+        if not isinstance(predicate, EntityIn) or (predicate.role is None and len(roles) != 1):
+            return False
+        named = {
+            entity.name
+            for entity in dataset.entities
+            if predicate.role is None or entity.role == predicate.role
+        }
+        if set(predicate.names) != named:
+            return False
+    return True
+
+
+def _one_series(dataset: DatasetRequirement) -> bool:
+    """Whether the plan shows `dataset` retrieves one series (one row a year).
+
+    It covers no party whole (`across`) and breaks nothing down, reads its
+    StatVars as one measure, and names at most one entity per role, none of
+    them a set read member by member. This is the compiler's rule for a side
+    read whole (`compiler.compile._names_on_column`: one entity per role
+    column is one series) read from the plan alone, before any source
+    resolves the names.
+    """
+    roles = [entity.role for entity in dataset.entities]
+    return (
+        not dataset.across
+        and dataset.breakdown is None
+        and dataset.stat_vars is not StatVarReading.SEPARATE
+        and len(set(roles)) == len(roles)
+        and not any(entity.members for entity in dataset.entities)
+    )
+
+
+def _side_derivations(
+    step: EvidenceRequirement, requirements: Mapping[str, EvidenceRequirement]
+) -> tuple[_Derivation, _Derivation] | None:
+    """The derivations of the two sides of `step`, a comparison, sum, share or
+    quotient (`_derivation`); `None` for any other."""
+    if isinstance(step, ComparisonRequirement):
+        sides = step.minuend, step.subtrahend
+    elif isinstance(step, SumOfRequirement):
+        sides = step.left, step.right
+    elif isinstance(step, ShareOfRequirement | QuotientRequirement):
+        sides = step.numerator, step.denominator
+    else:
+        return None
+    return _derivation(sides[0], requirements), _derivation(sides[1], requirements)
 
 
 def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list[_InputGroup]]:
@@ -4267,6 +4441,7 @@ def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list
         chain = all(len(reads[other]) == 1 for other in below - found)
         return next(iter(found)) if len(found) == 1 and chain else None
 
+    by_id = {requirement.id: requirement for requirement in requirements}
     groups: dict[str, list[_InputGroup]] = {}
     for step in requirements:
         inputs = inputs_of(step)
@@ -4286,13 +4461,11 @@ def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list
                 for position in (0, 1)
             ]
         else:
-            sides = (
-                (frozenset(reached(inputs[0], cut)), frozenset(reached(inputs[1], cut)))
-                if isinstance(step, ComparisonRequirement | SumOfRequirement) or step.id in ratios
-                else None
-            )
             groups[step.id] = [
-                _InputGroup(frozenset(reached(step.id, {**cut, step.id: inputs})), sides=sides)
+                _InputGroup(
+                    frozenset(reached(step.id, {**cut, step.id: inputs})),
+                    sides=_side_derivations(step, by_id),
+                )
             ]
     return groups
 
@@ -4314,10 +4487,11 @@ def _alignment_targets(
 
     Alignment keeps the two sides of a comparison, sum, share or quotient on
     different series, whichever calculation moves them. Once an axis's options
-    are chosen, a calculation whose sides each read an input of one part that
-    alignment has put on one series (`_sides_one_series`) has every group that
-    moved one of those inputs left unaligned on that axis, and the options are
-    chosen again until no group changes. The axis is what the calculation
+    are chosen, a calculation whose two sides alignment has put on one series,
+    each computed alike from inputs on one part and options
+    (`_sides_one_series`), has every group that moved one of those inputs left
+    unaligned on that axis, and the options are chosen again until no group
+    changes. The axis is what the calculation
     contrasts, as "what share of US ODA goes to multilaterals" reads US
     multilateral ODA over US total ODA, and counting the total on the
     multilateral row, whether for the share or for a comparison of the total
@@ -4363,9 +4537,7 @@ def _alignment_targets(
             moved = {
                 move
                 for candidate in candidates
-                for move in _sides_one_series(
-                    candidate.group, candidate.inputs, axis, targets, counted
-                )
+                for move in _sides_one_series(candidate.group, bases, axis, targets, counted)
             }
             # The inputs of a calculation kept apart stay on their own options.
             aligned = [candidate for candidate, _ in aligning]
@@ -4459,50 +4631,71 @@ def _chosen_options(
 
 def _sides_one_series(
     group: _InputGroup,
-    inputs: Sequence[_InputBasis],
+    bases: Mapping[str, _InputBasis],
     axis: str,
     targets: Mapping[tuple[str, str], tuple[str, str]],
     counted: Mapping[str, Collection[str]],
 ) -> frozenset[tuple[str, str]]:
-    """The moves alignment on `axis` makes that put an input of each side of
-    `group`, a comparison's, sum's, share's or quotient's, on one series: each
-    input moved and the option it moves to.
+    """The moves alignment on `axis` makes that put the two sides of `group`, a
+    comparison's, sum's, share's or quotient's, on one series: each input moved
+    and the option it moves to.
 
-    `counted` holds every option any aligning group counts an input on, so a pair
-    is caught on whichever group moves it, in any step order. Two inputs read one
-    series where their origins share a part (`_InputBasis.part`) and hold one
-    option on every axis (`_InputBasis.actives`), which on `axis` is an option
-    `counted` gives or the input's own, and on an earlier axis the one in
-    `targets`. A part
-    and its options are what a pin compiles to. Two inputs on one series before
-    alignment moves either are left alone, since alignment did not put them
-    there. A group with no sides (`_InputGroup.sides`) has none to keep apart.
+    Two sides read one series where their derivations (`_side_derivations`)
+    hold one shape and each pair of leaves at one position reads one series, so
+    a total compared with an average of one series reads two, and a total by
+    year over the series itself reads one. Two leaves read one series where
+    both have a choice on `axis` (`bases`), share a part (`_InputBasis.part`)
+    and hold one option on every axis (`_InputBasis.actives`), which on `axis`
+    is an option `counted` gives or the input's own, and on an earlier axis the
+    one in `targets`, or where neither has a choice on `axis` and both pin one
+    spec_id. A part and its options are what a pin compiles to. `counted`
+    holds every option any aligning group counts an input on, so a pair is
+    caught on whichever group moves it, in any step order. Two sides on one
+    series before alignment moves an input are left alone, since alignment did
+    not put them there. A group with no sides (`_InputGroup.sides`) has none
+    to keep apart.
     """
     if group.sides is None:
         return frozenset()
+    first, second = group.sides
+    if first.shape != second.shape:
+        return frozenset()
 
-    def readings(basis: _InputBasis) -> list[tuple[str, tuple[str, dict[str, str]]]]:
-        """Each option `basis` can be counted on along `axis`, with the series it reads there."""
+    def readings(leaf: tuple[str, str | None]) -> list[tuple[str | None, object]]:
+        """Each option `leaf` can be counted on along `axis`, with the series it reads there."""
+        requirement_id, pin = leaf
+        basis = bases.get(requirement_id)
+        if basis is None:
+            return [(None, pin)]
         others = {
-            held: targets.get((basis.requirement_id, held), (active, ""))[0]
+            held: targets.get((requirement_id, held), (active, ""))[0]
             for held, active in basis.actives
             if held != axis
         }
-        options = {basis.choice.active, *counted.get(basis.requirement_id, ())}
+        options = {basis.choice.active, *counted.get(requirement_id, ())}
         return [(option, (basis.part, {**others, axis: option})) for option in sorted(options)]
 
-    first, second = (
-        [basis for basis in inputs if basis.requirement_id in side] for side in group.sides
-    )
+    pairs = list(zip(first.leaves, second.leaves, strict=True))
+
+    def matched(
+        position: int, chosen: dict[str, tuple[str | None, object]]
+    ) -> Iterable[dict[str, tuple[str | None, object]]]:
+        """Each reading of every leaf, extending `chosen`, under which the pairs from `position` on read one series."""
+        if position == len(pairs):
+            yield chosen
+            return
+        one, other = pairs[position]
+        for one_reading in [chosen[one[0]]] if one[0] in chosen else readings(one):
+            held = {**chosen, one[0]: one_reading}
+            for other_reading in [held[other[0]]] if other[0] in held else readings(other):
+                if one_reading[1] == other_reading[1]:
+                    yield from matched(position + 1, {**held, other[0]: other_reading})
+
     return frozenset(
-        (basis.requirement_id, option)
-        for one in first
-        for other in second
-        for one_option, one_series in readings(one)
-        for other_option, other_series in readings(other)
-        if one_series == other_series
-        for basis, option in ((one, one_option), (other, other_option))
-        if option != basis.choice.active
+        (requirement_id, option)
+        for chosen in matched(0, {})
+        for requirement_id, (option, _) in chosen.items()
+        if option is not None and option != bases[requirement_id].choice.active
     )
 
 

@@ -150,6 +150,7 @@ from planner.records import (
     AmbiguousSourceReading,
     DenominatorScope,
     EntityCandidate,
+    EntityIn,
     EntityKey,
     EvidenceIssue,
     EvidenceIssueCode,
@@ -8876,6 +8877,22 @@ def _added(left: str, right: str) -> SumOfRequirement:
     )
 
 
+def _reduced(
+    requirement_id: str,
+    input_id: str,
+    reduction: Reduction,
+    group_by: tuple[GroupBy, ...] = (),
+) -> AggregateRequirement:
+    """`input_id` reduced by `reduction` over `group_by`."""
+    return AggregateRequirement(
+        id=requirement_id,
+        decision_ids=["measure"],
+        input_id=input_id,
+        reduction=reduction,
+        group_by=group_by,
+    )
+
+
 _US_MULTILATERAL = _searched_in_words(_SUM_BLOCKS["dac_countries_multilateral"])
 _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
 
@@ -8984,6 +9001,19 @@ _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
             [_SUM, _SHARE],
             id="a-share-of-a-sum-moves-a-sum-input",
         ),
+        # Multilateral ODA summed by year over the DAC1 total. The aggregate only
+        # reduces rows, so counting the total as multilateral ODA would still divide
+        # one series by itself.
+        pytest.param(
+            {"first": _US_MULTILATERAL, "second": _US_TOTAL},
+            [
+                _reduced("by_year", "first", Reduction.SUM, (GroupBy.PERIOD,)),
+                _share("by_year", "second"),
+            ],
+            None,
+            [_SHARE],
+            id="multilateral-by-year-over-total",
+        ),
         # US bilateral health aid over the DAC1 total. Different parts, so the total
         # moves to the narrower part's scope.
         pytest.param(
@@ -9039,6 +9069,181 @@ def test_two_sides_never_read_one_series(
     assert [
         step_id for step_id in caveated if differ & set(plan.requirement(step_id).decision_ids)
     ] == caveated
+
+
+# The US donor total under a second spec_id, on `TOTAL`'s part, counted net by default.
+_TOTAL_NET_DEFAULT = f"spec_{'7' * 32}"
+
+
+def _recipients(requirement_id: str, input_id: str, *names: str) -> FilterRequirement:
+    """`input_id`'s rows to the recipients `names`."""
+    return FilterRequirement(
+        id=requirement_id,
+        decision_ids=["measure"],
+        input_id=input_id,
+        predicates=(EntityIn(names=names, role="recipient"),),
+    )
+
+
+_BY_PERIOD_AND_ENTITY = (GroupBy.PERIOD, GroupBy.ENTITY)
+
+
+@pytest.mark.parametrize(
+    ("steps", "realigned"),
+    [
+        # A total of gross disbursements less an average of net ones: the two sides
+        # differ by their operation, so aligning the net input on gross reads no one
+        # series twice, and the comparison counts both on gross.
+        pytest.param(
+            [
+                _reduced("one", "first", Reduction.SUM),
+                _reduced("two", "second", Reduction.MEAN),
+                _difference("one", "two"),
+            ],
+            "measure_basis:gross",
+            id="total-less-average",
+        ),
+        # A total less a total. Aligned, the sides would read one series and the
+        # difference would be 0, so each keeps its own basis.
+        pytest.param(
+            [
+                _reduced("one", "first", Reduction.SUM),
+                _reduced("two", "second", Reduction.SUM),
+                _difference("one", "two"),
+            ],
+            None,
+            id="total-less-total",
+        ),
+        # The peak year's share of the total. The peak is a figure of its own, so
+        # the net input is counted on gross.
+        pytest.param(
+            [
+                _reduced("one", "first", Reduction.MAX),
+                _reduced("two", "second", Reduction.SUM),
+                _share("one", "two"),
+            ],
+            "measure_basis:gross",
+            id="peak-year-over-total",
+        ),
+        # Aid to each recipient summed by year over all aid summed by year: the
+        # denominator's sum folds Ghana and Kenya into one figure a year, so the two
+        # sides read different data and the net input is counted on gross.
+        pytest.param(
+            [
+                _reduced("one", "first", Reduction.SUM, _BY_PERIOD_AND_ENTITY),
+                _reduced("two", "second", Reduction.SUM, (GroupBy.PERIOD,)),
+                _share("one", "two"),
+            ],
+            "measure_basis:gross",
+            id="each-recipient-over-recipients-summed",
+        ),
+        # Each recipient's share of the yearly sum over both, keyed by recipient.
+        pytest.param(
+            [
+                _reduced("two", "second", Reduction.SUM, (GroupBy.PERIOD,)),
+                ShareOfRequirement(
+                    id=_SHARE,
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="first"),
+                    denominator=RequirementSide(input_id="two"),
+                    axis="recipient",
+                    denominator_scope=DenominatorScope.POOLED,
+                ),
+            ],
+            "measure_basis:gross",
+            id="keyed-share-of-recipients-summed",
+        ),
+        # The same totals grouped by their columns in another order.
+        pytest.param(
+            [
+                _reduced("one", "first", Reduction.SUM, _BY_PERIOD_AND_ENTITY),
+                _reduced("two", "second", Reduction.SUM, _BY_PERIOD_AND_ENTITY[::-1]),
+                _difference("one", "two"),
+            ],
+            None,
+            id="group-by-in-another-order",
+        ),
+        # The same recipients kept on each side, named in another order.
+        pytest.param(
+            [
+                _recipients("one", "first", "Ghana", "Kenya"),
+                _recipients("two", "second", "Kenya", "Ghana"),
+                _difference("one", "two"),
+            ],
+            None,
+            id="recipients-in-another-order",
+        ),
+        # A filter keeping every recipient its input names keeps every row, so the
+        # filtered side reads what the bare side reads.
+        pytest.param(
+            [_recipients("two", "second", "Ghana", "Kenya"), _difference("first", "two")],
+            None,
+            id="filter-keeping-every-row",
+        ),
+        # A filter keeping one of the two recipients reads another series.
+        pytest.param(
+            [_recipients("two", "second", "Ghana"), _difference("first", "two")],
+            "measure_basis:gross",
+            id="filter-keeping-one-recipient",
+        ),
+    ],
+)
+def test_sides_read_one_series_only_through_one_derivation(
+    decision: DecisionFactory, steps: list[EvidenceRequirement], realigned: str | None
+) -> None:
+    """Two inputs on one part, US aid to Ghana and Kenya, the first stated gross and
+    the second left on net, each read through `steps` and compared. Alignment keeps
+    two sides apart only where their whole derivations, from source to comparison,
+    would read one series: every operation, parameter and entity selector alike, in
+    any order that computes the same, and a filter keeping every row read as its
+    input."""
+    gross = basis_block(TOTAL, narrow=False, active="measure_basis:gross", provenance="explicit")
+    net = json.loads(
+        json.dumps(
+            basis_block(_TOTAL_NET_DEFAULT, narrow=False, active="measure_basis:net")
+        ).replace(f"{_TOTAL_NET_DEFAULT}_base", f"{TOTAL}_base")
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, gross, net)
+    question = "How does US gross ODA over 2015-2023 compare with its yearly average?"
+    ctx.state[ASKS_STATE_KEY] = [question]
+    ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = [0]
+
+    def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="US total ODA",
+            entities=[
+                Entity(name="United States", role="donor"),
+                Entity(name="Ghana", role="recipient"),
+                Entity(name="Kenya", role="recipient"),
+            ],
+            period=Period(start=2015, end=2023),
+            source_spec_id=pin,
+        )
+
+    result = _tools_by_name()["propose_plan"].func(
+        question=question,
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        answered=[AskAnswer(ask=0, outputs=(steps[-1].id,))],
+        evidence_requirements=[
+            dataset("first", TOTAL),
+            dataset("second", _TOTAL_NET_DEFAULT),
+            *steps,
+        ],
+        tool_context=ctx,
+    )
+
+    if realigned is not None:
+        assert result.get("code") == ProblemCode.BASES_UNALIGNED.value, result
+        assert [(r["spec_id"], r["option_ids"]) for r in result["detail"]["realign"]] == [
+            (_TOTAL_NET_DEFAULT, [realigned])
+        ]
+        return
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [("first", TOTAL), ("second", _TOTAL_NET_DEFAULT)]
 
 
 # --- a pin whose identity a search recorded, over the requirement's period ----------
