@@ -7013,6 +7013,53 @@ async def test_a_plan_at_the_decision_cap_still_carries_its_caveats(
 
 
 @pytest.mark.parametrize(
+    ("whole", "declared", "caveat"),
+    [
+        pytest.param("dac1_total_gross", True, "derived_whole", id="derived-whole"),
+        pytest.param("dac1_contributions", False, "providers_differ", id="providers-differ"),
+    ],
+)
+async def test_a_caveat_survives_a_revision_restating_its_slot(
+    decision: DecisionFactory, whole: str, declared: bool, caveat: str
+) -> None:
+    """A share whose plan states that the total is compiled from the part, or that
+    the inputs count different providers. A revision restating that decision's slot
+    in the planner's words leaves code's decision standing, so the answer keeps its
+    qualification."""
+    tools = _tools_reading(WholeCompiles())
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), _us_block(whole))
+    first = await _us_2023(
+        tools["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=whole,
+        declared=declared,
+        accept=not declared,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (noted,) = [d for d in plan.decisions if d.caveat == caveat]
+
+    second = await tools["propose_plan"].func(
+        decisions=drafts(
+            [noted.model_copy(update={"rationale": "Planner rewording.", "caveat": None})]
+        ),
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (kept,) = [d for d in plan.decisions if d.slot == noted.slot]
+    assert kept == noted
+    assert any(noted.slot in r.decision_ids for r in plan.evidence_requirements)
+
+
+@pytest.mark.parametrize(
     ("whole", "whole_counts"),
     [
         pytest.param("whole", None, id="one-scope"),
@@ -7200,6 +7247,56 @@ def test_a_provider_difference_over_four_inputs_is_stated_within_the_rationale_l
         assert stated.rationale == f"{lead} The calculation reads 4 inputs."
     else:
         assert stated.rationale.count(" counts ") == 4
+
+
+@pytest.mark.parametrize(
+    ("b_counts", "accept", "differs"),
+    [
+        pytest.param("provider:inclusive", False, True, id="set-apart"),
+        pytest.param("provider:inclusive", True, True, id="accepted"),
+        pytest.param("provider:bilateral", False, False, id="one-scope"),
+    ],
+)
+def test_a_sum_states_the_provider_difference_of_its_inputs_beside_one_with_no_record(
+    b_counts: str, accept: bool, differs: bool
+) -> None:
+    """US aid a, set to bilateral flows, plus b, set to `b_counts`, plus the DAC1
+    total c, whose dataset states no provider scope: (a + b) + c. Where a and b
+    count different providers, the outer sum states so as the inner one does,
+    whether or not it accepts the difference; c's missing record does not hide
+    it. Where a and b match, c alone states nothing on a sum not accepting it."""
+    a = provider_block(
+        f"spec_{'a' * 32}", narrow=False, active="provider:bilateral", provenance="explicit"
+    )
+    b = provider_block(f"spec_{'b' * 32}", narrow=False, active=b_counts, provenance="explicit")
+    c = us_2023_block("dac1_total_gross")
+    requirements: list[EvidenceRequirement] = [
+        DatasetRequirement(
+            id=input_id,
+            measure=f"US aid {input_id}",
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=block["spec_id"],
+        )
+        for input_id, block in (("a", a), ("b", b), ("c", c))
+    ]
+    requirements += [
+        SumOfRequirement(
+            id="ab", left=RequirementSide(input_id="a"), right=RequirementSide(input_id="b")
+        ),
+        SumOfRequirement(
+            id="abc",
+            left=RequirementSide(input_id="ab"),
+            right=RequirementSide(input_id="c"),
+            accept_provider_difference=accept,
+        ),
+    ]
+    shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in (a, b, c)}
+
+    stated = submission_service._provider_difference_decisions(requirements, shown=shown)
+
+    assert [d.caveat for d in stated["abc"]] == ["providers_differ"] * differs
+    assert [d.caveat for d in stated["ab"]] == ["providers_differ"] * differs
 
 
 def test_a_share_over_the_dac1_total_moves_it_to_bilateral_oda(decision: DecisionFactory) -> None:

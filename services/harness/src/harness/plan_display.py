@@ -803,9 +803,7 @@ def _concepts(plan: Plan) -> dict[str, str]:
 
 def _alike(names: Mapping[str, str]) -> dict[str, str]:
     """The entries of `names` whose name another entry shares."""
-    counts: dict[str, int] = {}
-    for name in names.values():
-        counts[name] = counts.get(name, 0) + 1
+    counts = Counter(names.values())
     return {rid: name for rid, name in names.items() if counts[name] > 1}
 
 

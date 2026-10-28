@@ -3408,7 +3408,9 @@ def _scope_decisions(
     decision, is swept and not counted. The count never falls short of the
     plan's own, so the cap never refuses. One `previous` records as Search's
     default is restated when Search now says otherwise, unless this call
-    states its slot; a user's stands.
+    states its slot; a user's stands. Code writes the decisions of `wholes`
+    and `calculations`, so a decision of this call's on one of their slots is
+    dropped and code's is written or kept.
 
     Args:
         decisions: This call's decisions, the measure decisions included.
@@ -3428,13 +3430,21 @@ def _scope_decisions(
         `evidence_requirements` citing them, with each carried calculation
         whose citations changed.
     """
+    # Code writes the decisions qualifying the answer, so a draft of the
+    # planner's restating one of their slots gives way to code's.
+    derived_slots = {
+        derived.slot
+        for stated_by in (*wholes.values(), *calculations.values())
+        for derived in stated_by
+    }
+    decisions = [decision for decision in decisions if decision.slot not in derived_slots]
     carried = previous.decisions if previous is not None else ()
     known = {decision.slot: decision for decision in (*carried, *decisions)}
     stated = {decision.slot for decision in decisions}
     restated = {requirement.id for requirement in evidence_requirements}
     # A calculation the plan carries states its decisions again too, since an
     # input re-pinned under it can change what they say.
-    own = len(evidence_requirements)
+    own_count = len(evidence_requirements)
     evidence_requirements = [
         *evidence_requirements,
         *(
@@ -3523,7 +3533,7 @@ def _scope_decisions(
                 cited.append(derived.slot)
         if tuple(cited) != requirement.decision_ids:
             patched.append(requirement.model_copy(update={"decision_ids": tuple(cited)}))
-        elif index < own:
+        elif index < own_count:
             patched.append(requirement)
     return [*decisions, *written], patched
 
@@ -4612,10 +4622,11 @@ def _provider_difference_decisions(
     input's scope record holds a provider scope and all match
     (`Option.provider_scope` of each active option): an input whose record
     states none may count other providers, since nothing says what it
-    counts. Any other states one when every such record holds a provider
-    scope and they differ, as when the user set its inputs to different
-    scopes (`_aligned_bases`). The decision says so in reader words, one
-    sentence per input naming what it counts, or that its dataset does not
+    counts. Any other states one when two inputs' records hold different
+    provider scopes, as when the user set its inputs to different scopes
+    (`_aligned_bases`), whatever an input with no such record counts. The
+    decision says so in reader words, one sentence per input naming what it
+    counts, or that its dataset does not
     say (`_provider_sentence`); where that passes the rationale's limit,
     each input is named without its dataset title, and where that still
     does, the first sentence is followed by how many inputs the calculation
@@ -4643,7 +4654,7 @@ def _provider_difference_decisions(
             for block in [_pin_block(requirement.source_spec_id, shown)]
         ]
         scopes = {provider.provider_scope if provider else None for _, _, provider in inputs}
-        differ = step.accept_provider_difference if None in scopes else len(scopes) > 1
+        differ = len(scopes - {None}) > 1 or (step.accept_provider_difference and None in scopes)
         if not differ:
             continue
         lead = (
