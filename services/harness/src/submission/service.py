@@ -48,7 +48,7 @@ from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast, get_args
 
 import rfc8785
-from compiler.evidence import named_refs, open_axes_for
+from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
     block_concept_label,
@@ -169,6 +169,7 @@ from planner.plan import (
     predicate_key,
     reached,
     repinned,
+    requirement_step_order,
     requirements_over,
     roles_not_kept,
     scope_choice_slot,
@@ -3789,8 +3790,10 @@ class _InputBasis:
     provider axis alone and `None` on any other. `part` is the spec_id of the
     origin's part before any choice (`PartScope.base`) and `actives` the option
     each of its choices holds, by axis. The two together are what the origin
-    compiles to, so two inputs holding one `part` and one option on every axis
-    read one series.
+    compiles to. `reads` is what the requirement reads of it (`_Reads`), which
+    alignment sees before `_window_pins` puts each pin on its own period, so two
+    inputs holding one `part`, one option on every axis and one `reads` read one
+    series.
     """
 
     requirement_id: str
@@ -3803,12 +3806,41 @@ class _InputBasis:
     own_flows: frozenset[ProviderMoney] | None
     part: str
     actives: tuple[tuple[str, str], ...]
+    reads: _Reads
 
     def label(self, option_id: str) -> str:
         """The reader's label of `option_id` on this input, or the id when the choice lists none."""
         return next(
             (option.label for option in self.choice.options if option.option_id == option_id),
             option_id,
+        )
+
+
+class _Reads(NamedTuple):
+    """What one dataset requirement reads of the part its pin compiles to (`_InputBasis.reads`).
+
+    `period` is the requirement's period and whether its end is open.
+    `entities` holds each entity it names as the refs of the members its pin's
+    source resolves the name to (`compiler.evidence.named_members`), so
+    "United States" and "United States of America" bound to one ref read
+    alike, or as its case-folded name where the source resolves none.
+    """
+
+    period: tuple[str, bool]
+    entities: frozenset[frozenset[tuple[str, str]] | str]
+
+    @classmethod
+    def of(cls, requirement: DatasetRequirement, block: Mapping[str, Any] | None) -> _Reads:
+        """What `requirement` reads, its names resolved against `block`, its pin's origin's spec block."""
+        source = readable_source(block) if block is not None else None
+        return cls(
+            period=(requirement.period.model_dump_json(), requirement.period_end_open),
+            entities=frozenset(
+                frozenset((member.role, member.ref) for member in members)
+                if source is not None and (members := named_members(entity, source))
+                else entity.name.casefold()
+                for entity in requirement.entities
+            ),
         )
 
 
@@ -3927,6 +3959,7 @@ def _input_bases(
             own_flows=_own_flows(scope, block) if axis == PROVIDER_AXIS else None,
             part=scope.base.spec_id,
             actives=tuple((held.axis, held.active) for held in scope.choices),
+            reads=_Reads.of(requirement, block),
         )
     return bases
 
@@ -3962,10 +3995,11 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
 
     Search states it on the donor side. Each donor bound there counts what the set
     naming it states (`entity_groups.origin.holds_multilaterals`), where it is that
-    set's total or one of its members, or where the set names neither; any other
-    donor counts `multilateral` where Search marks it one (`_donor_money`). The part
-    counts every money any of its donors counts, so DAC countries' total beside IDA
-    counts both. For a donor role left open, the donors there state it
+    set's total or one of its members, or where the set names neither and Search
+    does not mark the donor a multilateral; any other donor counts `multilateral`
+    where Search marks it one (`_donor_money`), as IDA bound beside a set of DAC
+    members does. The part counts every money any of its donors counts, so DAC
+    countries' total beside IDA counts both. For a donor role left open, the donors there state it
     (`role_axis_facts`). Search marks only parties the graph types `Organization`,
     so an unmarked country is none. Anything else states nothing: an unmarked
     organisation or total, or an open role stating nothing, may hold one, as an
@@ -3997,10 +4031,14 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
     }
     money: set[ProviderMoney] = set()
     for donor in donors:
-        if isinstance(marker, bool) and (not named or donor in named):
+        entity = entities.get(donor)
+        # A set naming no one speaks for every donor but one Search marks a
+        # multilateral of its own, bound beside the set.
+        covered = donor in named or (not named and (entity or {}).get("multilateral") is not True)
+        if isinstance(marker, bool) and covered:
             money |= ANY_REPORTERS if marker else BILATERAL_REPORTERS
         else:
-            money |= _donor_money(entities.get(donor))
+            money |= _donor_money(entity)
     return frozenset(money)
 
 
@@ -4638,7 +4676,8 @@ def _sides_one_series(
     hold one shape and each pair of leaves at one position reads one series, so
     a total compared with an average of one series reads two, and a total by
     year over the series itself reads one. Two leaves read one series where
-    both have a choice on `axis` (`bases`), share a part (`_InputBasis.part`)
+    both have a choice on `axis` (`bases`), share a part (`_InputBasis.part`),
+    read it over one period and one set of entities (`_InputBasis.reads`),
     and hold one option on every axis (`_InputBasis.actives`), which on `axis`
     is an option `counted` gives or the input's own, and on an earlier axis the
     one in `targets`, or where neither has a choice on `axis` and both pin one
@@ -4667,7 +4706,10 @@ def _sides_one_series(
             if held != axis
         }
         options = {basis.choice.active, *counted.get(requirement_id, ())}
-        return [(option, (basis.part, {**others, axis: option})) for option in sorted(options)]
+        return [
+            (option, (basis.part, basis.reads, {**others, axis: option}))
+            for option in sorted(options)
+        ]
 
     pairs = list(zip(first.leaves, second.leaves, strict=True))
 
@@ -4685,12 +4727,18 @@ def _sides_one_series(
                 if one_reading[1] == other_reading[1]:
                     yield from matched(position + 1, {**held, other[0]: other_reading})
 
-    return frozenset(
-        (requirement_id, option)
+    moves = [
+        {
+            (requirement_id, option)
+            for requirement_id, (option, _) in chosen.items()
+            if option is not None and option != bases[requirement_id].choice.active
+        }
         for chosen in matched(0, {})
-        for requirement_id, (option, _) in chosen.items()
-        if option is not None and option != bases[requirement_id].choice.active
-    )
+    ]
+    # A reading moving nothing is the two sides on one series before alignment.
+    if not all(moves):
+        return frozenset()
+    return frozenset().union(*moves)
 
 
 def _counted_on(basis: _InputBasis, option_id: str) -> _InputBasis:
@@ -5425,7 +5473,15 @@ def _card_names(
     `_scope_decisions` cites them, since its sector decision names it where Search
     states no concept. Each retrieval the card's plan `previous` holds alike keeps
     its name there, and any other reads the source of the block its pin was shown
-    with (`shown`)."""
+    with (`shown`). Retrievals named alike are numbered in the order the compiled
+    plan's workflow runs them (`planner.plan.requirement_step_order`), the card's
+    order, whatever order the plan states them in."""
+    order = {
+        requirement_id: at
+        for at, requirement_id in enumerate(
+            requirement_step_order({requirement.id: requirement for requirement in requirements})
+        )
+    }
     datasets = [
         requirement.model_copy(
             update={
@@ -5440,7 +5496,7 @@ def _card_names(
         )
         if requirement.source_spec_id is not None
         else requirement
-        for requirement in requirements
+        for requirement in sorted(requirements, key=lambda held: order[held.id])
         if isinstance(requirement, DatasetRequirement)
     ]
     # The card names a retrieval off the retrievals and decisions alone. The
@@ -5804,10 +5860,25 @@ def share_whole_underivable(
     choice on, or pin a total of the whole's own and drop `whole_of`.
     `part_spec_id` is the part's pin, `None` where it has none, `reason`
     says why no whole was compiled, as a clause, and `cause` names that
-    reason as a code: `part_unpinned`, `part_not_shown`, `part_block_missing`,
-    `scope_unreadable`, `axis_not_held`, or `whole_refused` when Search
-    refuses the whole (`planner.agent.compile_whole`). `detail.requirement_id`
-    names the whole for the refusal's sentence (`harness.sentences`).
+    reason as a code:
+
+    - `part_unpinned`: the part has no pin.
+    - `part_not_shown`, `part_block_missing`, `scope_unreadable`,
+      `axis_not_held`: the part's pin gives no choice on the axis to leave
+      open (`unread_part`).
+    - `groups_unreadable`: the part names a set on a role the whole keeps that
+      this release cannot read.
+    - `whole_refused`: Search refuses the whole, its code in `reason`
+      (`requested_option_unavailable` where it cannot hold an option the part
+      holds), or answers with no one dataset.
+    - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
+      hold, or does not show it holds, a party the part names
+      (`planner.agent._uncontained`).
+
+    `_declared_wholes` answers the first two kinds, and
+    `planner.agent.compile_whole` every kind but the first.
+    `detail.requirement_id` names the whole for the refusal's sentence
+    (`harness.sentences`).
     """
     return problem(
         ProblemCode.SHARE_WHOLE_UNDERIVABLE,

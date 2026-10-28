@@ -1012,15 +1012,27 @@ def block_concept_label(block: Mapping[str, object] | None) -> str | None:
     return _text(_mapping(_mapping(block).get("resolved")).get("concept_label"))
 
 
-def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
-    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`)."""
-    return _groups(_mapping(_mapping(block.get("resolved")).get("entity_groups")))
+def block_groups(
+    block: Mapping[str, object], *, leaving_out: str | None = None
+) -> tuple[ResolvedGroup, ...]:
+    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`),
+    skipping the set on the role column `leaving_out`, which is not read.
+
+    Raises:
+        ValueError: When a set it reads is not readable, as one naming a class
+            of party outside `PartyClass`.
+    """
+    groups = _mapping(_mapping(block.get("resolved")).get("entity_groups"))
+    return _groups({role: group for role, group in groups.items() if role != leaving_out})
 
 
 def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     """The named sets `block` states (`block_groups`), none with a warning logged
     where they are not readable, as a set naming a class of party outside
-    `PartyClass`, for a caller that reads or posts them and goes on without."""
+    `PartyClass`, for a caller that only reads them and goes on without. A
+    resubmit posting them reads `block_groups` and refuses where they are not
+    readable, since a definition posted without its sets can bind another
+    population."""
     try:
         return block_groups(block)
     except ValueError as exc:
@@ -1133,7 +1145,8 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"), named
     as Search names them; where Search states none, the sentence states none.
     Where Search says the source publishes its own figure for the group
-    (`ResolvedGroup.sum_differs`), the sentence says that figure can differ.
+    (`ResolvedGroup.sum_differs`), a second sentence says that figure can
+    differ, so the residuals' list ends with the first.
     """
     if group.reads_total:
         return None
@@ -1149,14 +1162,14 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
         if group.left_out
         else ""
     )
-    if group.sum_differs:
-        left_out += (
-            ", and the source publishes its own figure for the group, "
-            "which can differ from one built from its members"
-        )
-    if answer is MembersAnswer.SUMMED:
-        return f"The figure for {group.label} adds up its members' figures{left_out}."
-    return f"The figure for {group.label} is computed from its members' figures{left_out}."
+    published = (
+        f" The source publishes its own figure for {group.label}, "
+        "which can differ from one built from its members."
+        if group.sum_differs
+        else ""
+    )
+    built = "adds up" if answer is MembersAnswer.SUMMED else "is computed from"
+    return f"The figure for {group.label} {built} its members' figures{left_out}.{published}"
 
 
 def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:

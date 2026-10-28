@@ -12,12 +12,14 @@ import os
 import subprocess
 import sys
 import typing
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from compiler.sources import source_from_spec_block
+from harness import plan_display
 from harness.plan_display import (
     _card_label,
     _concepts,
@@ -3779,6 +3781,49 @@ def test_a_revisions_changed_retrieval_is_told_apart_from_a_name_the_card_holds(
         "health aid to Kenya (2)",
         "health aid to Kenya (3)",
     ]
+
+
+@pytest.mark.parametrize("helper", ["_concept", "_who"])
+def test_a_revision_reads_each_retrievals_naming_once_per_plan(
+    decision: Callable[..., Decision], monkeypatch: pytest.MonkeyPatch, helper: str
+) -> None:
+    """Naming a revision around the card's names reads each retrieval's concept
+    and parties once for the card's plan and once for the revision, however
+    many of them share a name."""
+
+    def dataset(requirement_id: str, measure: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2023, end=2023),
+        )
+
+    prior = Plan(
+        question="Health aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[dataset("health", "health aid"), dataset("again", "health aid")],
+    )
+    revision = Plan(
+        question="Health aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[dataset("health", "health aid"), dataset("new", "health aid")],
+    )
+    real = getattr(plan_display, helper)
+    reads: Counter[tuple[str, str]] = Counter()
+
+    def counted(requirement: DatasetRequirement, plan: Plan, **kwargs: Any) -> str:
+        reads[plan.question, requirement.id] += 1
+        return real(requirement, plan, **kwargs)
+
+    monkeypatch.setattr(plan_display, helper, counted)
+    revision = revision.amend(question="Health aid to Kenya, revised")
+
+    plan_words(revision, shown_as=prior)
+
+    assert reads, helper
+    assert max(reads.values()) == 1, reads
 
 
 def test_a_revision_not_compiled_names_what_the_card_holds_by_the_cards_names() -> None:

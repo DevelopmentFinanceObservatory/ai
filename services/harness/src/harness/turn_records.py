@@ -683,8 +683,11 @@ class SearchReading(StrictModel):
     copied from its block): their entries are the planner's.
     `entity_groups` are the named sets the part's places were asked for as
     (`resolved.entity_groups`), which a resubmit of the reading posts again
-    (`harness.graph.switch`); stored and not rendered. `observed_at` is
-    stored and not rendered.
+    (`harness.graph.switch`); stored and not rendered.
+    `entity_groups_unreadable` is true when the part's block named sets this
+    release could not read (`compiler.sources.block_groups`), so
+    `entity_groups` is empty without the part having none, and that resubmit
+    refuses. It is stored and not rendered, as is `observed_at`.
     """
 
     text: str | None
@@ -729,6 +732,9 @@ class SearchReading(StrictModel):
     entity_groups: tuple[ResolvedGroup, ...] = Field(
         default=(), exclude_if=lambda groups: not groups
     )
+    entity_groups_unreadable: bool = Field(
+        default=False, exclude_if=lambda unreadable: not unreadable
+    )
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -769,7 +775,8 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them, `planner_axes` and `entity_groups` too. A `no_data` part's `reason` is the
+        among them, `planner_axes`, `entity_groups` and
+        `entity_groups_unreadable` too. A `no_data` part's `reason` is the
         reading's `refusal_code`, and `counted_as`, `alternatives` and
         `other_prices` are `harness.tool_contracts.measure_choice`'s.
         """
@@ -837,6 +844,7 @@ class SearchReading(StrictModel):
             scope=part.get("scope"),
             planner_axes=tuple(part.get("planner_axes") or ()),
             entity_groups=tuple(part.get("entity_groups") or ()),
+            entity_groups_unreadable=part.get("entity_groups_unreadable") is True,
             origin=origin,
             observed_at=observed_at,
         )

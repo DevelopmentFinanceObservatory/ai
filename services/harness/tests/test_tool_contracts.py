@@ -630,7 +630,8 @@ def test_a_part_summary_offers_a_count_only_when_search_lists_a_basis_sibling(
 
 def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None:
     """A set naming a class of party this release does not know is not readable:
-    the summary says no reading of it and the stored reading holds no sets."""
+    the summary says no reading of it, and the stored reading holds no sets and
+    says they could not be read."""
     part = _definite("spec_a")
     part["spec"]["resolved"] |= {
         "entity_groups": {
@@ -641,7 +642,8 @@ def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None
     (summary,) = graph_envelope({"parts": [part]})["part_digests"]
 
     assert "group_readings" not in summary
-    assert reading_facts(part["spec"])["entity_groups"] == []
+    facts = reading_facts(part["spec"])
+    assert (facts["entity_groups"], facts["entity_groups_unreadable"]) == ([], True)
 
 
 @pytest.mark.parametrize(

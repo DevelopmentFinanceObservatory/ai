@@ -1077,14 +1077,25 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
 
 # DAC members summed on the donor side, where Search states nothing left out,
 # and Africa's countries summed on the recipient side, where Search names the
-# residual Africa's published total counts beside them. The G7's published
-# total is a figure of its own, which can differ from its members' sum.
+# residuals Africa's published total counts beside them. The G7's published
+# total is a figure of its own, which can differ from its members' sum, and is
+# said in a sentence of its own, so the residuals' list ends before it.
+_AFRICA_LEFT_OUT = (
+    " and leaves out what the data allocates to no single country: "
+    "Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC)."
+)
+_PUBLISHED = (
+    " The source publishes its own figure for {label}, "
+    "which can differ from one built from its members."
+)
+
+
 @pytest.mark.parametrize(
-    ("group", "left_out"),
+    ("group", "tail"),
     [
         (
             {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
-            "",
+            ".",
         ),
         (
             {
@@ -1092,32 +1103,49 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
                     "ref": "africa",
                     "label": "Africa",
                     "total": None,
-                    "left_out": ["Africa, unallocated by country (DAC)"],
+                    "left_out": [
+                        "Africa, unallocated by country (DAC)",
+                        "North of Sahara, unallocated by country (DAC)",
+                    ],
                     "sum_differs": False,
                 }
             },
-            " and leaves out what the data allocates to no single country: "
-            "Africa, unallocated by country (DAC)",
+            _AFRICA_LEFT_OUT,
         ),
         (
             {"origin": {"ref": None, "label": "G7", "total": None, "sum_differs": True}},
-            ", and the source publishes its own figure for the group, "
-            "which can differ from one built from its members",
+            "." + _PUBLISHED.format(label="G7"),
+        ),
+        (
+            {
+                "destination": {
+                    "ref": "africa",
+                    "label": "Africa",
+                    "total": None,
+                    "left_out": [
+                        "Africa, unallocated by country (DAC)",
+                        "North of Sahara, unallocated by country (DAC)",
+                    ],
+                    "sum_differs": True,
+                }
+            },
+            _AFRICA_LEFT_OUT + _PUBLISHED.format(label="Africa"),
         ),
     ],
     ids=[
         "donor-members-leave-nothing-out",
-        "recipient-members-leave-out-a-residual",
+        "recipient-members-leave-out-residuals",
         "donor-total-differs-from-its-members-sum",
+        "residuals-end-before-the-published-figure",
     ],
 )
 def test_summed_members_state_only_the_residuals_search_names(
-    group: dict[str, dict[str, object]], left_out: str
+    group: dict[str, dict[str, object]], tail: str
 ) -> None:
     (read,) = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=group)).groups
 
     assert members_reading(read, answer=MembersAnswer.SUMMED) == (
-        f"The figure for {read.label} adds up its members' figures{left_out}."
+        f"The figure for {read.label} adds up its members' figures{tail}"
     )
 
 

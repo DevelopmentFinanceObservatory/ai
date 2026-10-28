@@ -348,7 +348,7 @@ def plan_words(
     (`_pinned_sources`): the one the card's plan `shown_as` reads where the
     card's retrieval reads the same, else the one Search answered for its
     pin (`pinned`, by spec_id). Where `shown_as` is given, a retrieval it
-    holds with the same naming facets (`_naming_facets`) reads by its name
+    holds with the same naming facets (`_namings`) reads by its name
     there (`_carried_names`), and any other retrieval is named around those
     names. Any other requirement reads by the retrievals it reads
     (`_concept_of`): "health as a share of official development assistance".
@@ -356,8 +356,9 @@ def plan_words(
     shown = shown_plan(plan)
     prior = shown_plan(shown_as) if shown_as is not None else None
     sources = _pinned_sources(shown, shown_as=prior, pinned=pinned or {})
-    carried = _carried_names(shown, prior, sources=sources) if prior is not None else {}
-    concepts = _concepts(shown, carried=carried, sources=sources)
+    namings = _namings(shown, sources=sources)
+    carried = _carried_names(namings, prior) if prior is not None else {}
+    concepts = _concepts(shown, carried=carried, namings=namings)
     return PlanWords(
         names={
             requirement.id: _concept_of(requirement, shown, concepts)
@@ -839,6 +840,7 @@ def _concepts(
     *,
     carried: Mapping[str, str] | None = None,
     sources: Mapping[str, SelectedSource] | None = None,
+    namings: Mapping[str, _Naming] | None = None,
 ) -> dict[str, str]:
     """What each retrieval of `plan` is named by in the card's labels, by requirement id.
 
@@ -848,19 +850,22 @@ def _concepts(
     Kenya in 2023", and any still alike a number no other name holds, "(1)",
     "(2)", each set of namesakes in card order. A retrieval in `carried`
     keeps the name given there, and the others are told apart from it as
-    from each other. A plan not compiled reads its sources off `sources`
-    (`_source`).
+    from each other. The names are read off each retrieval's naming facets,
+    `namings` where given, else read by `_namings`, a plan not compiled
+    reading its sources off `sources` (`_source`).
     """
     carried = carried or {}
+    namings = namings if namings is not None else _namings(plan, sources=sources)
     datasets = [r for r in _card_order(plan) if isinstance(r, DatasetRequirement)]
     names = {
-        dataset.id: carried.get(dataset.id) or _concept(dataset, plan, sources=sources)
-        for dataset in datasets
+        dataset.id: carried.get(dataset.id) or namings[dataset.id].concept for dataset in datasets
     }
     fresh = [dataset for dataset in datasets if dataset.id not in carried]
     alike = _alike(names)
     for dataset in fresh:
-        if dataset.id in alike and (who := _who(dataset, plan, sources=sources)):
+        if dataset.id not in alike:
+            continue
+        if who := namings[dataset.id].who:
             names[dataset.id] = f"{names[dataset.id]} {who}"
     for name in dict.fromkeys(_alike(names).values()):
         namesakes = [dataset for dataset in datasets if names[dataset.id] == name]
@@ -881,36 +886,41 @@ def _concepts(
     return names
 
 
-def _carried_names(
-    revision: Plan, shown: Plan, *, sources: Mapping[str, SelectedSource]
-) -> dict[str, str]:
-    """The name the card gives each retrieval of `shown` (`_concepts`) that
-    `revision`, its retrievals' sources read off `sources` where it is not
-    compiled, holds with the same naming facets (`_naming_facets`), by
-    requirement id."""
-    names = _concepts(shown)
-    earlier = _datasets(shown)
+def _carried_names(namings: Mapping[str, _Naming], shown: Plan) -> dict[str, str]:
+    """The name the card gives each retrieval of `shown` (`_concepts`) that a
+    revision, `namings` its retrievals' naming facets (`_namings`), holds with
+    the same facets, by requirement id."""
+    earlier = _namings(shown)
+    names = _concepts(shown, namings=earlier)
     return {
-        dataset.id: names[dataset.id]
-        for dataset in _datasets(revision).values()
-        if dataset.id in earlier
-        and _naming_facets(dataset, revision, sources=sources)
-        == _naming_facets(earlier[dataset.id], shown)
+        requirement_id: names[requirement_id]
+        for requirement_id, naming in namings.items()
+        if earlier.get(requirement_id) == naming
     }
 
 
-def _naming_facets(
-    dataset: DatasetRequirement,
-    plan: Plan,
-    *,
-    sources: Mapping[str, SelectedSource] | None = None,
-) -> tuple[str, str, Period]:
-    """What `_concepts` names `dataset` by: its concept, parties and period."""
-    return (
-        _concept(dataset, plan, sources=sources),
-        _who(dataset, plan, sources=sources),
-        dataset.period,
-    )
+class _Naming(typing.NamedTuple):
+    """What `_concepts` names a retrieval by: its concept, parties and period."""
+
+    concept: str
+    who: str
+    period: Period
+
+
+def _namings(
+    plan: Plan, *, sources: Mapping[str, SelectedSource] | None = None
+) -> dict[str, _Naming]:
+    """The naming facets of each retrieval of `plan`, by requirement id, each
+    read once (`_concept`, `_who`). A plan not compiled reads its sources off
+    `sources` (`_source`)."""
+    return {
+        dataset.id: _Naming(
+            _concept(dataset, plan, sources=sources),
+            _who(dataset, plan, sources=sources),
+            dataset.period,
+        )
+        for dataset in _datasets(plan).values()
+    }
 
 
 def _pinned_sources(

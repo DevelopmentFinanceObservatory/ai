@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import readable_groups
+from compiler.sources import block_groups
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from planner.plan import (
@@ -519,18 +519,34 @@ async def _resubmit(
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
     so Search names them again. They are the groups `reading` was resolved
     with (`SearchReading.entity_groups`), or `block`'s for a reading stored
-    without them.
+    without them (`compiler.sources.block_groups`).
 
     Raises:
-        SwitchFailedError: If the call does not complete, Search refuses it,
-            or its answer is not one definite part with a scope.
+        SwitchFailedError: If `reading`'s groups were not readable when it was
+            stored (`SearchReading.entity_groups_unreadable`, whatever `block`
+            holds) or `block`'s are not, since the switch would post the part
+            without them. Also if the call does not complete, Search refuses
+            it, or its answer is not one definite part with a scope.
     """
+    unreadable = SwitchFailedError(
+        "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
+    )
+    if reading.entity_groups_unreadable:
+        logger.warning("plan switch not compiled: pin=%s named sets were not readable", pin)
+        raise unreadable
+    groups = reading.entity_groups
+    if not groups and block is not None:
+        try:
+            groups = block_groups(block)
+        except ValueError as exc:
+            logger.warning("plan switch not compiled: pin=%s named sets not readable: %s", pin, exc)
+            raise unreadable from exc
     try:
         part = await resolve_definition(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=reading.entity_groups or (readable_groups(block) if block is not None else ()),
+            groups=groups,
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:

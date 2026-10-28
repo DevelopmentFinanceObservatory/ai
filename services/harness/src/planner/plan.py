@@ -3142,7 +3142,7 @@ def _build_shapes(
         ],
     )
     shapes_by_id: dict[str, FrameShape] = {}
-    for requirement_id in _topological_order(requirements_by_id):
+    for requirement_id in requirement_step_order(requirements_by_id):
         requirement = requirements_by_id[requirement_id]
         named = origins.get(requirement_id, requirement_id)
         if named != requirement_id and not isinstance(requirement, DatasetRequirement):
@@ -3172,24 +3172,31 @@ def _build_shapes(
     return shapes_by_id
 
 
-def _topological_order(requirements_by_id: dict[str, EvidenceRequirement]) -> list[str]:
-    """Return every requirement id ordered so each comes after everything `inputs_of` names.
+def requirement_step_order(requirements_by_id: Mapping[str, EvidenceRequirement]) -> list[str]:
+    """Every requirement id in the order the compiled workflow runs the operation
+    carrying out each, one per requirement.
 
-    A post-order depth-first walk. Assumes the requirements already form a
-    DAG -- `_check_reads_resolve` calls `_find_cycle` before this runs.
+    A post-order depth-first walk taking the requirements, and each one's
+    inputs (`inputs_of`), by id, as the compiler takes operations by
+    requirement id (`compiler.compile._canonical_key`) and runs each after the
+    inputs it reads (`compiler.compile._Build._topological_order`). So each
+    id comes after every id it reads, in whatever order `requirements_by_id`
+    holds them. An input missing from `requirements_by_id` is skipped. Assumes
+    the requirements form a DAG; `_check_reads_resolve` calls `_find_cycle`
+    before shapes are built.
     """
     order: list[str] = []
     visited: set[str] = set()
 
     def visit(requirement_id: str) -> None:
-        if requirement_id in visited:
+        if requirement_id in visited or requirement_id not in requirements_by_id:
             return
         visited.add(requirement_id)
-        for input_id in inputs_of(requirements_by_id[requirement_id]):
+        for input_id in sorted(inputs_of(requirements_by_id[requirement_id])):
             visit(input_id)
         order.append(requirement_id)
 
-    for requirement_id in requirements_by_id:
+    for requirement_id in sorted(requirements_by_id):
         visit(requirement_id)
     return order
 

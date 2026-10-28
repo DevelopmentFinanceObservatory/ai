@@ -19,6 +19,7 @@ from typing import Any
 from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
+    block_groups,
     bound_refs,
     open_entity_axes_of,
     readable_groups,
@@ -553,8 +554,10 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `_scope` reads it, and `planner_axes` the axes the planner's own words
     settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `entity_groups`
     are the named sets the part's places were asked for as
-    (`compiler.sources.readable_groups`, none where they are not readable),
-    which a later resubmit of the reading, such as a chip's, posts again. These are keys
+    (`compiler.sources.block_groups`), which a later resubmit of the reading,
+    such as a chip's, posts again. Where they are not readable they are none,
+    with a warning logged, and `entity_groups_unreadable` is true, so that
+    resubmit refuses rather than post the part without them. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -565,6 +568,13 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     resolved = spec.get("resolved") or {}
     requested = _identity(spec).get("requested_window")
     facts = _wide_facts(spec)
+    try:
+        groups = block_groups(spec)
+    except ValueError as exc:
+        logger.warning("named sets of %s are not readable: %s", spec.get("spec_id"), exc)
+        groups, unreadable = (), True
+    else:
+        unreadable = False
     return {
         "coverage_kind": (resolved.get("coverage") or {}).get("kind"),
         "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
@@ -572,7 +582,8 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "open_entity_axes": facts["open_entity_axes"],
         "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
         "planner_axes": sorted(planner_axes(spec)),
-        "entity_groups": [group.model_dump(mode="json") for group in readable_groups(spec)],
+        "entity_groups": [group.model_dump(mode="json") for group in groups],
+        "entity_groups_unreadable": unreadable,
     }
 
 

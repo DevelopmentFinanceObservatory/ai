@@ -3537,19 +3537,12 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
             {"destination": {"label": "Africa", "ref": "africa"}},
             id="readable",
         ),
-        # A set naming a class of party this release does not know is not readable,
-        # so the switch posts none.
-        pytest.param(
-            {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]},
-            None,
-            id="unknown-class",
-        ),
     ],
 )
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
     group: dict[str, Any],
-    posted_groups: dict[str, Any] | None,
+    posted_groups: dict[str, Any],
 ) -> None:
     """The part's block names Africa as the set its recipients were asked for,
     with the total party Search states for it. The switch posts the set as a
@@ -3564,6 +3557,30 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
     assert entry.get("entity_groups") == posted_groups
+
+
+async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The part's block names Africa as a set of a class of party this release does
+    not know, so the set cannot be read. Posting the part without it would let
+    Search count another population, so the switch posts nothing and offers the
+    plan unchanged under `switch_failed`, which asking again cannot get past."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+    group = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
+
+    runner, _, plan, _, events = await _switch_runner(
+        real_schemas, search, entity_groups={"destination": group}
+    )
+
+    assert search.posted == []
+    offered = _output_of(events, "switch")
+    assert offered["revision"] == plan_revision(plan)
+    failed = offered["switch_failed"]
+    assert (failed["code"], failed["retryable"]) == (SCOPE_CHOICE_NOT_APPLIED, False)
+    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
 
 
 @pytest.mark.parametrize(
@@ -4137,6 +4154,27 @@ async def test_a_chip_posts_the_groups_its_reading_was_resolved_with() -> None:
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
     assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
+
+
+async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> None:
+    """The answer's reading came from a block naming Africa as a set of a class
+    of party this release does not know, and no block of it is kept, so nothing
+    names the set. Posting the part without it would let Search count another
+    population, so the chip posts nothing and its step fails as a plan card's
+    switch over such a block does."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+    group = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
+
+    runner, _, executor, _ = await _chip_turn(search, entity_groups={"destination": group})
+
+    assert search.posted == []
+    (step,) = executor.steps
+    refusal = step["result"]["refusal"]
+    assert (refusal["code"], refusal["retry_mode"]) == (SCOPE_CHOICE_NOT_APPLIED, "do_not_retry")
+    assert not any(c["tool"] == "get_data" for c in executor.calls)
+    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
 
 
 async def test_a_chip_offered_on_another_reading_is_refused_stale_and_compiles_nothing() -> None:

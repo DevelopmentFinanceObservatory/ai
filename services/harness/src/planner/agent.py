@@ -45,11 +45,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import logging
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
-from compiler.sources import block_groups, readable_groups
+from compiler.sources import block_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -159,10 +160,11 @@ from planner.records import (
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
 from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
-from planner.workflow import ResolvedGroup
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
+
+logger = logging.getLogger(__name__)
 
 AGENT_NAME = "dfo_planner"
 
@@ -1405,7 +1407,7 @@ def _first_year_unreadable(
     )
 
 
-async def compile_on_basis(
+async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
     surface: ToolSurface,
     realignment: Realignment,
     *,
@@ -1417,8 +1419,8 @@ async def compile_on_basis(
     the axis it names (`harness.scope_choices.option_axis`), as an explicit
     entry from its choice in place of the entry on that axis, the resubmit
     a switch on the plan card posts (`harness.scope_choices.switch_entries`)
-    once per option, with the part's entity groups (none where they are not
-    readable, `compiler.sources.readable_groups`), through data-mcp's
+    once per option, with the part's entity groups
+    (`compiler.sources.block_groups`), through data-mcp's
     `resolve_definition`, which stores the definition it answers. One
     resubmit carries every option, so an input moving on the measure basis
     and the provider scope is compiled once. The answer is shown to the
@@ -1439,7 +1441,8 @@ async def compile_on_basis(
     Returns `None` once the pin is held, or the refusal the proposal
     answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
     `OPERATION_UNSUPPORTED` when it refuses the options or answers with no
-    one dataset.
+    one dataset, or when the part's entity groups are not readable, since a
+    resubmit posted without them can bind another population.
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -1482,11 +1485,20 @@ async def compile_on_basis(
         )
     entries = [entry.model_dump(mode="json", exclude_none=True) for entry in switched]
     try:
+        groups = block_groups(block)
+    except ValueError as exc:
+        logger.warning(
+            "basis compile of %s refused: named sets not readable: %s", realignment.spec_id, exc
+        )
+        return unservable(
+            f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
+        )
+    try:
         part = await resolve_definition(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=readable_groups(block),
+            groups=groups,
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:
@@ -1519,7 +1531,7 @@ async def compile_on_basis(
     return None
 
 
-async def compile_whole(
+async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
     surface: ToolSurface,
     realignment: Realignment,
     *,
@@ -1566,8 +1578,10 @@ async def compile_whole(
     did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` under a cause
     naming why: the part's pin is not among the datasets shown
     (`part_not_shown`), is shown with no block (`part_block_missing`), holds
-    scope choices this release cannot read (`scope_unreadable`), or binds
-    nothing on the axis to leave open (`axis_not_held`); or Search refuses
+    scope choices this release cannot read (`scope_unreadable`), binds
+    nothing on the axis to leave open (`axis_not_held`), or names a set on a
+    role the whole keeps that this release cannot read, which the whole
+    would otherwise be posted without (`groups_unreadable`); or Search refuses
     the whole (as `requested_option_unavailable` where it cannot hold an
     option the part holds), or answers with no one dataset (`whole_refused`),
     or with a donor or recipient whole that Search shows does not hold a party
@@ -1588,9 +1602,16 @@ async def compile_whole(
     scope = part_scope(part_pin, block)
     if source is None or block is None or scope is None or not whole_axis_held(scope, axis):
         return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
-    identity, groups, choices = _opened(scope, block, axis)
-    concepts = {entry.axis: entry.concept for entry in scope.entries}
     column = WHOLE_COLUMNS.get(axis)
+    try:
+        groups = block_groups(block, leaving_out=column)
+    except ValueError as exc:
+        logger.warning("whole of %s refused: named sets not readable: %s", part_pin, exc)
+        return underivable(
+            f"Search's named sets for {part_pin} are not readable", "groups_unreadable"
+        )
+    identity, choices = _opened(scope, axis)
+    concepts = {entry.axis: entry.concept for entry in scope.entries}
     entries = [
         ScopeEntry(
             axis=choice.axis,
@@ -1642,44 +1663,36 @@ async def compile_whole(
     return None
 
 
-def _opened(
-    scope: PartScope, block: Mapping[str, Any], axis: str
-) -> tuple[dict[str, Any], tuple[ResolvedGroup, ...], list[ScopeChoice]]:
-    """The identity, entity groups and scope choices the whole of the part `scope`
-    records, `block` its spec block, over every member of `axis` posts
-    (`compile_whole`).
+def _opened(scope: PartScope, axis: str) -> tuple[dict[str, Any], list[ScopeChoice]]:
+    """The identity and scope choices the whole of the part `scope` records over
+    every member of `axis` posts (`compile_whole`).
 
     On the sector, the base identity with the slot the sector choice binds
-    unbound (`axis_slot`), every group, and every choice but the sector. On a
-    donor or recipient, the base identity without that role's column
-    (`WHOLE_COLUMNS`), the groups on other roles, and every choice but one
-    adding entities to that role, the region's. Groups that are not readable
-    are none (`compiler.sources.readable_groups`).
+    unbound (`axis_slot`), and every choice but the sector. On a donor or
+    recipient, the base identity without that role's column
+    (`WHOLE_COLUMNS`), and every choice but one adding entities to that role,
+    the region's. The whole posts the part's groups on other roles
+    (`compiler.sources.block_groups`).
     """
     identity = copy.deepcopy(scope.base.identity)
-    groups = readable_groups(block)
     column = WHOLE_COLUMNS.get(axis)
     if column is None:
         slot = axis_slot(scope, axis)
         for held in identity.get("slots") or ():
             if held.get("property") == slot:
                 held["binding"] = {"state": "unbound"}
-        return identity, groups, [choice for choice in scope.choices if choice.axis != axis]
+        return identity, [choice for choice in scope.choices if choice.axis != axis]
     identity["entities"] = {
         role: refs for role, refs in (identity.get("entities") or {}).items() if role != column
     }
-    return (
-        identity,
-        tuple(group for group in groups if group.role != column),
-        [
-            choice
-            for choice in scope.choices
-            if not any(
-                isinstance(option.binding, EntitiesBinding) and option.binding.role == column
-                for option in choice.options
-            )
-        ],
-    )
+    return identity, [
+        choice
+        for choice in scope.choices
+        if not any(
+            isinstance(option.binding, EntitiesBinding) and option.binding.role == column
+            for option in choice.options
+        )
+    ]
 
 
 def _answered_options(spec_id: str, spec: Mapping[str, Any]) -> dict[str, str]:
