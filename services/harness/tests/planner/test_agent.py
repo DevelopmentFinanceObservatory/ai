@@ -4819,22 +4819,25 @@ def _show_blocks(ctx: _FakeToolContext, *blocks: dict[str, Any]) -> None:
     )
 
 
+@pytest.mark.parametrize("set_unreadable", [False, True], ids=["no-set", "set-unreadable"])
 async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_basis(
-    decision: DecisionFactory,
+    decision: DecisionFactory, set_unreadable: bool
 ) -> None:
     """US health aid counted gross on the CRS over the US total counted in grant
     equivalents on DAC1: the total is compiled gross through the resubmit a switch
     posts, the share reads both inputs gross, and the planner's decision says the
     inputs were put on one basis. The compiled total drops the source the planner
     wrote, which discovery would otherwise search back to the grant-equivalent
-    total."""
+    total. A named set on the total's block that is not readable, as one naming a
+    class of party this release does not know, is posted as none."""
     surface = BasisCompiles()
     ctx = _FakeToolContext()
-    _show_blocks(
-        ctx,
-        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
-        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
-    )
+    total_block = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
+    if set_unreadable:
+        total_block["resolved"]["entity_groups"] = {
+            "origin": {"label": "DAC countries", "whole_of": ["sovereign_fund"]}
+        }
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"), total_block)
 
     result = await _share_of_health(
         _tools_reading(surface)["propose_plan"].func, ctx, decision(), source="OECD DAC1"
@@ -4849,6 +4852,7 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
         total_scope["base"]["spec_id"],
         total_scope["base"]["identity"],
     )
+    assert "entity_groups" not in call
     assert call["scope_entries"] == [
         {
             "axis": "measure_basis",
@@ -5280,37 +5284,65 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
 
 @pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
 @pytest.mark.parametrize(
-    ("total_donor", "code"),
+    ("scope", "total_donor", "marked", "code"),
     [
         pytest.param(
+            "inclusive",
             "InternationalDevelopmentAssociation",
+            True,
             ProblemCode.OPERATION_UNSUPPORTED.value,
             id="multilateral-reporter",
         ),
-        pytest.param("country/USA", Outcome.OK.value, id="one-reporter-kind"),
+        # IDA stating no marker may be a multilateral's outflows.
+        pytest.param(
+            "inclusive",
+            "InternationalDevelopmentAssociation",
+            None,
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="unmarked-organisation",
+        ),
+        pytest.param("inclusive", "country/USA", None, Outcome.OK.value, id="one-reporter-kind"),
+        # Bilateral flows alone: each input counts its reporters' own flows by the one
+        # stream, whatever money those count, and no multilateral money of one can be
+        # the other's outflows.
+        pytest.param(
+            "bilateral",
+            "InternationalDevelopmentAssociation",
+            None,
+            Outcome.OK.value,
+            id="bilateral-beside-an-unmarked-organisation",
+        ),
     ],
 )
 def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_money(
-    decision: DecisionFactory, accept: bool, total_donor: str, code: str
+    decision: DecisionFactory,
+    accept: bool,
+    scope: str,
+    total_donor: str,
+    marked: bool | None,
+    code: str,
 ) -> None:
-    """US health aid plus a total, both counted bilateral plus imputed multilateral,
-    whether the sum aligns its inputs or accepts a provider difference. Where the
-    total is IDA's, whose own outflows spend the core contributions its funders paid
-    it, both inputs count the donors' aid through multilaterals, one as an imputed
-    share and one as IDA's spending, so the sum is refused although both hold one
-    option. Where both report as countries they count each money by the same
+    """US health aid plus a total, both counted on one provider scope, whether the sum
+    aligns its inputs or accepts a provider difference. Where the scope counts imputed
+    multilateral flows and the total is IDA's, whose own outflows spend the core
+    contributions its funders paid it, both inputs count the donors' aid through
+    multilaterals, one as an imputed share and one as IDA's spending, so the sum is
+    refused although both hold one option. Where both report as countries, or the
+    scope counts the reporters' own flows alone, they count each money by the same
     streams, and the provider scope says nothing of whether their flows overlap."""
     ctx = _FakeToolContext()
     total = _from_donors(
-        provider_block(TOTAL, narrow=False, active="provider:inclusive"), [total_donor]
+        provider_block(TOTAL, narrow=False, active=f"provider:{scope}"), [total_donor]
     )
     if total_donor != "country/USA":
         (donor,) = total["resolved"]["entities"]
-        donor.update(entity_type="Organization", multilateral=True)
+        donor.update(entity_type="Organization")
+        if marked is not None:
+            donor.update(multilateral=marked)
     _show_blocks(
         ctx,
         _from_donors(
-            provider_block(HEALTH, narrow=True, active="provider:inclusive"), ["country/USA"]
+            provider_block(HEALTH, narrow=True, active=f"provider:{scope}"), ["country/USA"]
         ),
         total,
     )
@@ -5323,7 +5355,7 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
         return
     assert result["detail"]["basis"] == {
         "spec_id": TOTAL,
-        "option_ids": ["provider:inclusive"],
+        "option_ids": [f"provider:{scope}"],
         "requirement_id": "total",
         "step_id": "sum",
     }
@@ -7254,7 +7286,10 @@ async def test_a_caveat_survives_a_revision_restating_its_slot(
     ],
 )
 async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inputs_match(
-    decision: DecisionFactory, whole: str, whole_counts: str | None
+    decision: DecisionFactory,
+    whole: str,
+    whole_counts: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CRS bilateral health aid over a total the user asked for as it stands. The
     share states a provider difference unless every input's scope record holds one
@@ -7262,7 +7297,16 @@ async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inp
     and over a DAC1 total Search states no provider scope for, since nothing says it
     counts the same providers, but not over the CRS bilateral total. The stated
     difference names what each input counts, or that its dataset does not say, and
-    the dataset it is from where Search names one."""
+    the dataset it is from where Search names one. The inputs are named for the
+    card only where a difference is stated."""
+    named: list[object] = []
+    card_names = submission_service._card_names
+
+    def counted(*args: Any, **kwargs: Any) -> dict[str, str]:
+        named.append(args)
+        return card_names(*args, **kwargs)
+
+    monkeypatch.setattr(submission_service, "_card_names", counted)
     ctx = _FakeToolContext()
     _show_blocks(ctx, _search_labelled("health"), _search_labelled(whole))
 
@@ -7280,6 +7324,7 @@ async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inp
     assert plan is not None
     stated = [d for d in plan.decisions if d.caveat == "providers_differ"]
     assert len(stated) == (whole_counts is not None)
+    assert bool(named) == (whole_counts is not None)
     for noted in stated:
         assert "counts bilateral flows only, from OECD Creditor Reporting System (CRS)." in (
             noted.rationale
@@ -7452,7 +7497,7 @@ def test_a_provider_difference_over_four_inputs_is_stated_within_the_rationale_l
     ]
     shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in blocks.values()}
 
-    (stated,) = submission_service._provider_difference_decisions(requirements, shown=shown)["all"]
+    (stated,) = submission_service._difference_decisions(requirements, shown=shown)["all"]
 
     lead = (
         "The inputs are set to different provider scopes, so they count different "
@@ -7512,7 +7557,7 @@ def test_a_sum_states_the_provider_difference_of_its_inputs_beside_one_with_no_r
     ]
     shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in (a, b, c)}
 
-    stated = submission_service._provider_difference_decisions(requirements, shown=shown)
+    stated = submission_service._difference_decisions(requirements, shown=shown)
 
     assert [d.caveat for d in stated["abc"]] == ["providers_differ"] * differs
     assert [d.caveat for d in stated["ab"]] == ["providers_differ"] * differs
@@ -8071,6 +8116,18 @@ async def _share_over_every(
             "donors, sectors, measure basis and providers",
             id="recipient-crs",
         ),
+        # The same over every donor, where Search's set for Africa names a class of
+        # party this release does not know: the set is not readable, so none is posted.
+        pytest.param(
+            "africa_unknown_class",
+            "donor",
+            None,
+            "total over every donor",
+            {"sector", "region", "measure_basis", "provider"},
+            [],
+            "recipients, sectors, measure basis and providers",
+            id="donor-part-set-unreadable",
+        ),
     ],
 )
 async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_open(
@@ -8090,7 +8147,9 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     one Search may drop over every donor and an explicit one over every recipient,
     whose total names the part's donor, and no search. Search's answer is the population the whole
     holds, and the caveat names it and what both sides' dataset counts alike."""
-    block = _us_health_to_africa() if part == "africa" else _us_block(part)
+    block = _us_health_to_africa() if part.startswith("africa") else _us_block(part)
+    if part == "africa_unknown_class":
+        block["resolved"]["entity_groups"]["destination"]["whole_of"] = ["sovereign_fund"]
     surface = _OpenedWholeCompiles(block, groups=groups)
     ctx = _FakeToolContext()
 
@@ -8327,6 +8386,20 @@ _DAC_COUNTRIES = _DAC_DONOR_WHOLES["dac1"]["whole"]["resolved"]["entity_groups"]
             None,
             id="whole-class-of-the-side",
         ),
+        # A class of party this release does not know, on the side or the whole: the
+        # group is unreadable, so nothing shows the total holds the US.
+        pytest.param(
+            ["DACOfficialDonors"],
+            {**_OFFICIAL_DONORS, "side_classes": ["official", "sovereign_fund"]},
+            "whole_members_unstated",
+            id="side-class-unknown",
+        ),
+        pytest.param(
+            ["DACOfficialDonors"],
+            {**_OFFICIAL_DONORS, "whole_of": ["sovereign_fund"]},
+            "whole_members_unstated",
+            id="whole-class-unknown",
+        ),
     ],
 )
 async def test_a_donor_whole_is_served_only_where_search_shows_it_holds_the_parts_donor(
@@ -8481,6 +8554,28 @@ def test_a_wholes_caveat_reads_each_blocks_scope_record_once(
 
     assert sorted(read) == sorted([part["spec_id"], whole_block["spec_id"]])
     assert stated.rationale.endswith("the part bilateral flows only."), stated.rationale
+
+
+def test_a_wholes_caveat_names_its_total_by_axis_where_searchs_groups_are_unreadable() -> None:
+    """DAC countries' total ODA as the whole of US ODA, where Search's group for it
+    names a class of party this release does not know: the caveat is stated, its
+    total named by the axis the whole opens."""
+    recorded = _DAC_DONOR_WHOLES["dac1"]
+    part, whole_block = recorded["part"], json.loads(json.dumps(recorded["whole"]))
+    whole_block["resolved"]["entity_groups"]["origin"]["whole_of"] = ["sovereign_fund"]
+    whole = AlignedPin(
+        origin=part["spec_id"],
+        option_ids=(),
+        spec_id=whole_block["spec_id"],
+        digest={"spec_block": whole_block},
+        whole_axis="donor",
+    )
+
+    (stated,) = submission_service._whole_decisions(
+        {_WHOLE: whole}, [], shown={part["spec_id"]: PinSource(block=part, settled=True)}
+    )[_WHOLE]
+
+    assert stated.chosen.endswith("total over every donor"), stated.chosen
 
 
 def test_a_dac1_donor_whole_of_a_donor_outside_the_dac_is_refused() -> None:
@@ -9244,6 +9339,11 @@ def test_sides_read_one_series_only_through_one_derivation(
         return
     assert result["outcome"] == Outcome.OK.value, result
     assert _pins(ctx) == [("first", TOTAL), ("second", _TOTAL_NET_DEFAULT)]
+    # The comparison states that its inputs are counted on different measure bases.
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    differ = {d.slot for d in plan.decisions if d.caveat == "bases_differ"}
+    assert differ & set(plan.requirement(steps[-1].id).decision_ids)
 
 
 # --- a pin whose identity a search recorded, over the requirement's period ----------

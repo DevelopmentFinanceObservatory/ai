@@ -49,7 +49,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
-from compiler.sources import block_groups
+from compiler.sources import block_groups, readable_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -1417,7 +1417,8 @@ async def compile_on_basis(
     the axis it names (`harness.scope_choices.option_axis`), as an explicit
     entry from its choice in place of the entry on that axis, the resubmit
     a switch on the plan card posts (`harness.scope_choices.switch_entries`)
-    once per option, with the part's entity groups, through data-mcp's
+    once per option, with the part's entity groups (none where they are not
+    readable, `compiler.sources.readable_groups`), through data-mcp's
     `resolve_definition`, which stores the definition it answers. One
     resubmit carries every option, so an input moving on the measure basis
     and the provider scope is compiled once. The answer is shown to the
@@ -1485,7 +1486,7 @@ async def compile_on_basis(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=block_groups(block),
+            groups=readable_groups(block),
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:
@@ -1652,10 +1653,11 @@ def _opened(
     unbound (`axis_slot`), every group, and every choice but the sector. On a
     donor or recipient, the base identity without that role's column
     (`WHOLE_COLUMNS`), the groups on other roles, and every choice but one
-    adding entities to that role, the region's.
+    adding entities to that role, the region's. Groups that are not readable
+    are none (`compiler.sources.readable_groups`).
     """
     identity = copy.deepcopy(scope.base.identity)
-    groups = block_groups(block)
+    groups = readable_groups(block)
     column = WHOLE_COLUMNS.get(axis)
     if column is None:
         slot = axis_slot(scope, axis)
@@ -1741,7 +1743,9 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
     residuals, nothing here says which class the party is, so it is unshown.
     Any other party is outside where Search binds parties or lists a total's
     members there, and unshown where the total it binds states neither its
-    members nor a whole class.
+    members nor a whole class. Where Search's groups are not readable, as one
+    naming a class of party outside `PartyClass`, every party it does not bind
+    is unshown.
     """
     definition = spec.get("definition")
     identity = definition.get("identity") if isinstance(definition, Mapping) else None
@@ -1749,9 +1753,13 @@ def _parties_outside(scope: PartScope, spec: Mapping[str, Any], column: str) -> 
     bound = entities.get(column) if isinstance(entities, Mapping) else None
     if not bound:
         return _Containment()
-    group = next((g for g in block_groups(spec) if g.role == column), None)
-    members = set(group.members) if group is not None else set()
     named = (scope.base.identity.get("entities") or {}).get(column) or ()
+    try:
+        groups = block_groups(spec)
+    except ValueError:
+        return _Containment(unshown=tuple(party for party in named if party not in bound))
+    group = next((g for g in groups if g.role == column), None)
+    members = set(group.members) if group is not None else set()
     outside: list[str] = []
     unshown: list[str] = []
     for party in named:

@@ -17,6 +17,7 @@ from compiler.sources import (
     members_reading,
     outcome_from_envelope,
     pinned_stat_var,
+    readable_source,
     source_from_spec_block,
     stat_var_count,
     total_reading,
@@ -678,6 +679,18 @@ def test_an_entity_without_its_role_is_refused() -> None:
     # be compiled against, so the block is refused rather than trimmed.
     with pytest.raises(ValueError, match="not usable as a source"):
         source_from_spec_block(_spec(entities=[{"label": "Kenya", "ref": "country/KEN"}]))
+
+
+def test_a_readable_source_is_none_with_a_warning_for_an_unusable_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A caller naming by the source reads an unusable block as none, logged once,
+    and a usable one as `source_from_spec_block` reads it."""
+    block = _spec()
+    assert readable_source(block) == source_from_spec_block(block)
+    with caplog.at_level("WARNING", logger="compiler.sources"):
+        assert readable_source(_spec("spec-abc")) is None
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
 
 
 # --- Whether a source mints as one StatVar ------------------------------------------

@@ -1837,23 +1837,24 @@ class _Translator:
                 PlanDecision(
                     id=decision.get("slot", f"d{index + 1}"),
                     question=questions[decision.get("slot", "")],
-                    chosen=option_named(decision.get("chosen", "")),
+                    chosen=option_named(decision.get("chosen", ""), decision=held),
                     alternatives=(
-                        [option_named(option) for option in decision["options"]]
+                        [option_named(option, decision=held) for option in decision["options"]]
                         if decision.get("options") is not None
                         else None
                     ),
                     # A reason saying only that Search's default holds says nothing.
                     reason=""
-                    if _search_default(scoped.get(decision.get("slot", "")))
-                    else named(decision.get("rationale", "")),
+                    if _search_default(held)
+                    else named(decision.get("rationale", ""), decision=held),
                     resolved_by=_RESOLVED_BY_TO_WIRE.get(
                         decision.get("resolved_by", ""), "default"
                     ),
-                    **_scope_members(scoped.get(decision.get("slot", "")), plan),
+                    **_scope_members(held, plan),
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions
+                for held in [scoped.get(decision["slot"])]
             ]
             choices = _switchable(decisions)
             card = PlanProposed(

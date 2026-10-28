@@ -19,9 +19,9 @@ from typing import Any
 from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
-    block_groups,
     bound_refs,
     open_entity_axes_of,
+    readable_groups,
     resolved_source_mentions,
     total_reading,
 )
@@ -553,8 +553,8 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `_scope` reads it, and `planner_axes` the axes the planner's own words
     settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `entity_groups`
     are the named sets the part's places were asked for as
-    (`compiler.sources.block_groups`), which a later resubmit of the reading,
-    such as a chip's, posts again. These are keys
+    (`compiler.sources.readable_groups`, none where they are not readable),
+    which a later resubmit of the reading, such as a chip's, posts again. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -572,7 +572,7 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "open_entity_axes": facts["open_entity_axes"],
         "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
         "planner_axes": sorted(planner_axes(spec)),
-        "entity_groups": [group.model_dump(mode="json") for group in block_groups(spec)],
+        "entity_groups": [group.model_dump(mode="json") for group in readable_groups(spec)],
     }
 
 
@@ -699,11 +699,7 @@ def _total_readings(spec: Mapping[str, Any]) -> list[str]:
     `group_read_as_members` departure. A block whose sets are not readable
     has none.
     """
-    try:
-        groups = block_groups(spec)
-    except ValueError:
-        logger.warning("search: named sets of %s are not readable", spec.get("spec_id"))
-        return []
+    groups = readable_groups(spec)
     entities = (spec.get("resolved") or {}).get("entities") or ()
     labels = {
         str(entity["ref"]): str(entity["label"])

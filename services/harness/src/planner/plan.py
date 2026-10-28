@@ -656,7 +656,7 @@ class DecisionScope(StrictModel):
 
 
 # How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`).
-DecisionCaveat = Literal["providers_differ", "derived_whole"]
+DecisionCaveat = Literal["providers_differ", "bases_differ", "derived_whole"]
 
 
 class Decision(_Choice):
@@ -677,8 +677,9 @@ class Decision(_Choice):
     )
     # Set only on a decision `propose_plan` writes for a choice that qualifies
     # the answer, whose `rationale` says how: a calculation whose inputs count
-    # different providers (`providers_differ`) or a total compiled from its
-    # part (`derived_whole`) (`submission.service._provider_difference_decisions`,
+    # different providers (`providers_differ`) or are counted on different
+    # measure bases (`bases_differ`), or a total compiled from its part
+    # (`derived_whole`) (`submission.service._difference_decisions`,
     # `_whole_decisions`). Absent from `DecisionDraft`, so the planner cannot
     # set it.
     caveat: Annotated[DecisionCaveat | None, HASHED_WHEN_SET] = Field(

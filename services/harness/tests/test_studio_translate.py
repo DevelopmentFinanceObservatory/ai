@@ -557,6 +557,32 @@ def test_two_choices_on_one_axis_each_name_the_input_they_govern() -> None:
     ]
 
 
+def test_a_reason_opening_with_an_option_id_reads_its_own_decisions_label() -> None:
+    """The US health share whose two basis choices offer one option id under
+    different labels, the total's reason opening with that id. The total's row
+    reads the label its own decision gives that id."""
+    plan = _us_health_share()
+    total_basis = "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca"
+    reason = " because the user asked for net flows"
+
+    def relabelled(decision: Decision) -> Decision:
+        return decision.model_copy(
+            update={
+                "options": tuple(f"total's {label}" for label in decision.options),
+                "chosen": f"total's {decision.chosen}",
+                "rationale": f"measure_basis:net{reason}",
+            }
+        )
+
+    plan = _us_health_share(
+        decisions=[relabelled(d) if d.slot == total_basis else d for d in plan.decisions]
+    )
+
+    reasons = {row.id: row.reason for row in _card_of(plan).decisions}
+
+    assert reasons[total_basis] == f"total's net disbursements, current USD{reason}"
+
+
 def test_an_approved_plan_states_the_card_the_user_saw() -> None:
     """Title, summary, step labels, caveats and, for each scope choice, its
     short name and the option it holds; a choice holding another label than

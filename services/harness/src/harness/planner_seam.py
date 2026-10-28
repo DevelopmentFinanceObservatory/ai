@@ -94,13 +94,12 @@ import json
 import logging
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
-from compiler.sources import source_from_spec_block
+from compiler.sources import readable_source
 from compiler.surface import ToolSurface
 from executor.classify import ExecutorCode
 from google.adk import Context, Event
@@ -1460,12 +1459,8 @@ def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSo
     sources: dict[str, SelectedSource] = {}
     for spec_id in spec_ids:
         block = blocks.get(to_origin.get(spec_id, spec_id))
-        if block is None:
-            continue
-        try:
-            sources[spec_id] = source_from_spec_block(block)
-        except ValueError:
-            logger.warning("planner: spec block for %s is not readable as a source", spec_id)
+        if block is not None and (source := readable_source(block)) is not None:
+            sources[spec_id] = source
     return sources
 
 
@@ -1829,15 +1824,11 @@ def _whole_reading_name(
     by_axis = plan_display.whole_name(pin.whole_axis, measure=measure)
     if pin.whole_axis == "sector":
         return by_axis
-    try:
-        source = source_from_spec_block(block or {})
-    except ValueError:
+    source = readable_source(block or {})
+    if source is None:
         return by_axis
-    part: SelectedSource | None = None
     part_block = blocks.get(pin.origin)
-    if part_block is not None:
-        with suppress(ValueError):
-            part = source_from_spec_block(part_block)
+    part = readable_source(part_block) if part_block is not None else None
     sector = _sector_option(pin.spec_id, block) or _sector_option(pin.origin, part_block)
     named = plan_display.source_whole_name(
         pin.whole_axis, source=source, part=part, sector=sector, measure=measure

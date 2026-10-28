@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import block_groups
+from compiler.sources import readable_groups
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from planner.plan import (
@@ -530,7 +530,7 @@ async def _resubmit(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=reading.entity_groups or (block_groups(block) if block is not None else ()),
+            groups=reading.entity_groups or (readable_groups(block) if block is not None else ()),
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:

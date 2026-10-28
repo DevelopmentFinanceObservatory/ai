@@ -700,7 +700,7 @@ CHOICE_NAMES: dict[str, str] = {
 _SLUG = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 
 
-def card_choice_text(text: str, plan: Plan) -> str:
+def card_choice_text(text: str, plan: Plan, *, decision: Decision | None = None) -> str:
     """An option a decision chose or offers, as the card shows it.
 
     As `card_decision_text`, except that a text the planner opened with a
@@ -708,37 +708,51 @@ def card_choice_text(text: str, plan: Plan) -> str:
     the whole text reads as the option's label, the words Search gives it.
     """
     named = with_source_names(text, plan).strip()
-    if (labelled := _option_labelled(named, plan)) is not None:
+    if (labelled := _option_labelled(named, plan, decision)) is not None:
         return labelled[0]
     return _unslugged(named)
 
 
-def card_decision_text(text: str, plan: Plan) -> str:
+def card_decision_text(text: str, plan: Plan, *, decision: Decision | None = None) -> str:
     """A decision's question, reason or caveat as the card shows it.
 
     Each spec_id is named (`with_source_names`). A text the planner opened
     with a scope option's id reads with that id as the option's label and
     the rest as the planner wrote it: "provider:inclusive because the user
-    asked for it" reads "<label> because the user asked for it". A slug the
-    planner wrote for an option ("crs_total") reads as words ("crs total").
+    asked for it" reads "<label> because the user asked for it". The label
+    is the one `decision`, the decision the text is of, gives the option
+    where it is a scope decision, since two sources can give one option id
+    different labels; for any other text it is the label every scope
+    decision of `plan` offering the option gives it, and the id stays where
+    they give it different ones. A slug the planner wrote for an option
+    ("crs_total") reads as words ("crs total").
     """
     named = with_source_names(text, plan).strip()
-    if (labelled := _option_labelled(named, plan)) is not None:
+    if (labelled := _option_labelled(named, plan, decision)) is not None:
         label, rest = labelled
         return f"{label}{rest}"
     return _unslugged(named)
 
 
-def _option_labelled(text: str, plan: Plan) -> tuple[str, str] | None:
+def _option_labelled(text: str, plan: Plan, decision: Decision | None) -> tuple[str, str] | None:
     """The label of the scope option whose id `text` opens with, and the text
-    after that id; `None` when `text` opens with no option's id."""
-    for decision in plan.decisions:
-        if decision.scope is None:
-            continue
-        for option, label in zip(decision.scope.options, decision.options, strict=True):
+    after that id (`card_decision_text`); `None` when `text` opens with no
+    option's id, or with one the plan's decisions label differently."""
+    scoped = (
+        [decision]
+        if decision is not None and decision.scope is not None
+        else [held for held in plan.decisions if held.scope is not None]
+    )
+    found: dict[str, str] = {}
+    for held in scoped:
+        assert held.scope is not None
+        for option, label in zip(held.scope.options, held.options, strict=True):
             if text == option.option_id or text.startswith(f"{option.option_id} "):
-                return label, text.removeprefix(option.option_id)
-    return None
+                found[label] = text.removeprefix(option.option_id)
+    if len(found) != 1:
+        return None
+    ((label, rest),) = found.items()
+    return label, rest
 
 
 def _unslugged(text: str) -> str:

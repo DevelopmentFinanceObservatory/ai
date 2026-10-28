@@ -25,7 +25,6 @@ import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
 from compiler.evidence import check_evidence, evidence_from_source
-from compiler.sources import block_groups, wire_groups
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -3530,8 +3529,27 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     assert offered["revision"] == plan_revision(revised)
 
 
+@pytest.mark.parametrize(
+    ("group", "posted_groups"),
+    [
+        pytest.param(
+            {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"},
+            {"destination": {"label": "Africa", "ref": "africa"}},
+            id="readable",
+        ),
+        # A set naming a class of party this release does not know is not readable,
+        # so the switch posts none.
+        pytest.param(
+            {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]},
+            None,
+            id="unknown-class",
+        ),
+    ],
+)
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
+    group: dict[str, Any],
+    posted_groups: dict[str, Any] | None,
 ) -> None:
     """The part's block names Africa as the set its recipients were asked for,
     with the total party Search states for it. The switch posts the set as a
@@ -3540,16 +3558,12 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
-    await _switch_runner(real_schemas, search, entity_groups=groups)
+    await _switch_runner(real_schemas, search, entity_groups={"destination": group})
 
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
-    assert entry["entity_groups"] == wire_groups(
-        block_groups({"resolved": {"entity_groups": groups}})
-    )
-    assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
+    assert entry.get("entity_groups") == posted_groups
 
 
 @pytest.mark.parametrize(

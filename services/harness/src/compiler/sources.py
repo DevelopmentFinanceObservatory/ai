@@ -19,6 +19,7 @@ with the producer.
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from enum import StrEnum
 from typing import cast
@@ -47,6 +48,8 @@ from planner.workflow import (
     SelectedSource,
 )
 from pydantic import JsonValue, TypeAdapter
+
+logger = logging.getLogger(__name__)
 
 # The `coverage.kind` under which `search` reports a real series window.
 EXACT_COVERAGE = "exact"
@@ -443,6 +446,17 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
         # pydantic's ValidationError is a ValueError too, so one clause covers
         # a malformed field and a missing one alike.
         raise ValueError(f"the spec block is not usable as a source: {exc}") from exc
+
+
+def readable_source(block: Mapping[str, object]) -> SelectedSource | None:
+    """The source `block` states (`source_from_spec_block`), `None` with a warning
+    logged where it is not usable as one, for a caller that names or labels by the
+    source and falls back to other words without it."""
+    try:
+        return source_from_spec_block(block)
+    except ValueError as exc:
+        logger.warning("spec block %s is not readable as a source: %s", block.get("spec_id"), exc)
+        return None
 
 
 def _exact_codes(stat_vars: Mapping[str, object]) -> tuple[str, ...]:
@@ -1001,6 +1015,17 @@ def block_concept_label(block: Mapping[str, object] | None) -> str | None:
 def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`)."""
     return _groups(_mapping(_mapping(block.get("resolved")).get("entity_groups")))
+
+
+def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
+    """The named sets `block` states (`block_groups`), none with a warning logged
+    where they are not readable, as a set naming a class of party outside
+    `PartyClass`, for a caller that reads or posts them and goes on without."""
+    try:
+        return block_groups(block)
+    except ValueError as exc:
+        logger.warning("named sets of %s are not readable: %s", block.get("spec_id"), exc)
+        return ()
 
 
 def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, JsonValue]]:
