@@ -161,6 +161,7 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.records import (
+    MAX_IDENTIFIER_CHARS,
     AmbiguousEntityReading,
     EntityCandidate,
     EntityKey,
@@ -3564,9 +3565,6 @@ _PROVIDER_ALIGNED = (
 # reader (`_side_name`).
 _SECTOR_AXIS = "sector"
 
-# The longest `Decision.slot`, an identifier (`planner.records.Identifier`).
-_MAX_SLOT_CHARS = 64
-
 
 class AlignedPin(StrictModel):
     """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
@@ -4591,7 +4589,7 @@ def _derived_slot(prefix: str, requirement_id: str) -> str:
     (`_whole_slot`, `_provider_difference_slot`): `prefix` and the id, or `prefix`
     and a digest of the id where both pass an identifier's 64 characters."""
     slot = f"{prefix}{requirement_id}"
-    if len(slot) <= _MAX_SLOT_CHARS:
+    if len(slot) <= MAX_IDENTIFIER_CHARS:
         return slot
     return f"{prefix}{hashlib.sha256(requirement_id.encode()).hexdigest()[:16]}"
 

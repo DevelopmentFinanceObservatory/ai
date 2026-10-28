@@ -4846,32 +4846,48 @@ _NET_SWITCH = basis_block(
 
 
 @pytest.mark.parametrize(
-    ("total_pin", "switched", "total_after", "tools"),
+    ("total_pin", "ratio", "switched", "total_after", "tools"),
     [
         (
             TOTAL,
+            ShareOfRequirement,
             _NET_SWITCH,
             TOTAL_NET,
             ["resolve_definition", "resolve_definition"],
         ),
         (
             TOTAL,
+            ShareOfRequirement,
             basis_block(_HEALTH_SWITCHED, narrow=True, active="measure_basis:gross"),
             TOTAL_GROSS,
             ["resolve_definition"],
         ),
         (
             None,
+            ShareOfRequirement,
+            _NET_SWITCH,
+            TOTAL_NET,
+            ["search", "resolve_definition", "resolve_definition"],
+        ),
+        (
+            None,
+            QuotientRequirement,
             _NET_SWITCH,
             TOTAL_NET,
             ["search", "resolve_definition", "resolve_definition"],
         ),
     ],
-    ids=["basis-moves-both-inputs", "sector-moves-health-alone", "unpinned-total-moves-too"],
+    ids=[
+        "basis-moves-both-inputs",
+        "sector-moves-health-alone",
+        "unpinned-share-total-moves-too",
+        "unpinned-quotient-total-moves-too",
+    ],
 )
 async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     decision: Any,
     total_pin: str | None,
+    ratio: type[ShareOfRequirement | QuotientRequirement],
     switched: dict[str, Any],
     total_after: str,
     tools: list[str],
@@ -4880,10 +4896,10 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     the health aid's gross basis. A switch of the health aid's basis to net
     compiles the total on net too; a switch of its sector alone leaves the
     total on the gross pin compiled for it. A total the planner pinned no
-    dataset for, which a quotient divides by, of the United States as a
-    country, such as its GDP, is searched for in the translator's words and pinned before the plan records, so the switch moves
-    it too, and the search joins the turn's readings. (A share's unpinned whole
-    is compiled from its part instead.)"""
+    dataset for, of the United States as a donor in a share or as a country in
+    a quotient, such as its GDP, is searched for in the translator's words and
+    pinned before the plan records, so the switch moves it too, and the search
+    joins the turn's readings."""
 
     def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
         return DatasetRequirement(
@@ -4896,6 +4912,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         )
 
     health = dataset("health", HEALTH)
+    role = "donor" if ratio is ShareOfRequirement else None
     plan = Plan(
         question="What share of US aid went to health in 2023?",
         answer_mode=AnswerMode.COMPUTED,
@@ -4905,9 +4922,12 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
             dataset("total", TOTAL).model_copy(
                 update={"source_spec_id": total_pin}
                 if total_pin is not None
-                else {"source_spec_id": None, "entities": (Entity(name="United States"),)}
+                else {
+                    "source_spec_id": None,
+                    "entities": (Entity(name="United States", role=role),),
+                }
             ),
-            (ShareOfRequirement if total_pin is not None else QuotientRequirement)(
+            ratio(
                 id="share",
                 decision_ids=["measure"],
                 numerator=RequirementSide(input_id="health"),
@@ -5001,7 +5021,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     if total_pin is None:
         (part,) = surface.calls[0]["parts"]
         assert part["variable"] == "total"
-        assert part["entities"] == [{"text": "United States"}]
+        assert part["entities"] == [{"text": "United States", **({"role": role} if role else {})}]
         assert TOTAL in result["read"]
     (health_basis, total_basis) = result["bases"]
     assert health_basis[1] == total_basis[1]

@@ -453,7 +453,10 @@ def card_summary(plan: Plan) -> str | None:
     each as `_Counted` states it. A share names its numerator's retrievals,
     then "as a share of" its denominator's; a quotient "divided by". So does
     a step reading one input over a share or quotient, such as a rank of
-    shares or a total of quotients (`_ratio_beneath`). A fact
+    shares or a total of quotients (`_ratio_beneath`). `None` too where the
+    answer is a comparison, sum or join over ratios (`_reads_ratio`): the
+    retrievals it reads would name each ratio's numerator alone and lose the
+    "share of", so the card shows its title only. A fact
     every retrieval shares, the basis, the years or the source, is stated
     once at the head; a retrieval then reads by its sector and its parties,
     or "the total" for its parties when it names no sector. `None` before
@@ -472,6 +475,8 @@ def card_summary(plan: Plan) -> str | None:
             datasets_of(shown.requirement(requirement.numerator.input_id), shown),
             datasets_of(shown.requirement(requirement.denominator.input_id), shown),
         ]
+    elif _reads_ratio(requirement, shown):
+        return None
     else:
         joiner = ""
         sides = [datasets_of(requirement, shown)]
@@ -524,6 +529,15 @@ def _ratio_beneath(requirement: EvidenceRequirement, plan: Plan) -> EvidenceRequ
             return requirement
         current = plan.requirement(inputs[0])
     return current
+
+
+def _reads_ratio(requirement: EvidenceRequirement, plan: Plan) -> bool:
+    """Whether a share or quotient lies anywhere beneath `requirement`."""
+    return any(
+        isinstance(plan.requirement(input_id), ShareOfRequirement | QuotientRequirement)
+        or _reads_ratio(plan.requirement(input_id), plan)
+        for input_id in inputs_of(requirement)
+    )
 
 
 class _Counted(typing.NamedTuple):

@@ -3564,6 +3564,41 @@ def test_a_step_over_a_share_keeps_the_shares_summary(over: EvidenceRequirement)
     assert card_summary(plan) == card_summary(_recorded_plan("long"))
 
 
+@pytest.mark.parametrize(
+    "over",
+    [
+        ComparisonRequirement(
+            id="over_shares",
+            minuend=RequirementSide(input_id="health_share"),
+            subtrahend=RequirementSide(input_id="other_share"),
+        ),
+        SumOfRequirement(
+            id="over_shares",
+            left=RequirementSide(input_id="health_share"),
+            right=RequirementSide(input_id="other_share"),
+        ),
+    ],
+    ids=["comparison", "sum"],
+)
+def test_a_calculation_over_two_shares_has_no_summary(over: EvidenceRequirement) -> None:
+    """The answer is a comparison or sum of two shares: naming either share's
+    numerator alone would read as a plain amount, so the card shows its title only."""
+    plan = _recorded_plan("long")
+    share = plan.requirement("health_share")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                *plan.evidence_requirements,
+                share.model_copy(update={"id": "other_share"}),
+                over.model_copy(update={"decision_ids": ("measure",)}),
+            ],
+            "answered": [plan.answered[0].model_copy(update={"outputs": ("over_shares",)})],
+        }
+    )
+
+    assert card_summary(plan) is None
+
+
 def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> None:
     """Both sides of the share total the same retrieval: the summary keeps
     each side, joined by "as a share of", and does not read as one figure."""
