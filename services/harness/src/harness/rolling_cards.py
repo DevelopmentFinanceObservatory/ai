@@ -66,8 +66,10 @@ starts from the steps the store already holds), and for `WITHHELD_FOR_S` when
 it was refused, ran past its hard stop, or had no replayer. Each replay has
 `CARD_REPLAY_DEADLINE_S` and is cancelled `_HARD_STOP_GRACE_S` after it.
 
-Whether a frame rolls is read from the materialisation store alone
-(`RollingCards.frame`), so it is the same answer whenever it is asked.
+Whether a frame rolls is read from its recipe alone (`RollingCards.frame`), so it
+is the same answer whenever it is asked: the recipe dfo-apis' analysis runner
+stored with the frame, or for a frame an in-process verb computed, the one the
+materialisation store builds.
 
 A card, created or revised, that states a relative period on a frame that
 does not roll is refused `relative_period_on_closed_window` when the dataset's definition ends at a
@@ -87,6 +89,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
 import rfc8785
+from analysis_mcp.runner_client import DerivedUnread
 from common.live_apis import LiveApisError, LiveApisNotConfigured
 from common.materialisation import (
     FrameExpired,
@@ -95,7 +98,7 @@ from common.materialisation import (
     FrameTooLarge,
     get_store,
 )
-from common.recipe import RecipeAnchorError, RecipeError, build_recipe
+from common.recipe import RecipeAncestorMissingError, RecipeAnchorError, RecipeError, build_recipe
 from common.rolling import (
     PairingKeysUnstatedError,
     PopulationEmptyError,
@@ -109,6 +112,7 @@ from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.deadline import CallDeadline
 from pydantic import ValidationError
 
+from harness.derived_frames import derived_recipe
 from harness.recipe_replay import Pending, Refused, Replayed
 from harness.tool_contracts import HarnessCode, harness_refusal
 
@@ -417,6 +421,31 @@ _FrameKey = tuple[str, str]
 _ReplayKey = tuple[str, str, bytes]
 
 
+async def _recipe_of(frame: FrameRef) -> dict[str, Any]:
+    """The recipe of the derived frame `frame`: built from the store when it holds
+    the frame, as it does one an in-process verb computed, else the one dfo-apis'
+    analysis runner stored with it (`harness.derived_frames.derived_recipe`).
+
+    Raises:
+        RecipeError: The store holds the frame and builds no recipe for it.
+        DerivedUnread: dfo-apis does not serve the frame, or stored it without a
+            recipe (`recipe_not_found`).
+    """
+    try:
+        return await build_recipe(frame, store=get_store())
+    except RecipeAncestorMissingError as exc:
+        if exc.ref != frame:
+            raise
+    recipe = await derived_recipe(frame)
+    if recipe is None:
+        raise DerivedUnread(
+            code="recipe_not_found",
+            retryable=False,
+            detail="dfo-apis stored the frame without a recipe",
+        )
+    return recipe
+
+
 def _log_no_recipe(frame: FrameRef, exc: Exception) -> None:
     logger.warning(
         "no recipe for %s at %s, so its cards are written as fixed: %s",
@@ -499,7 +528,7 @@ class RollingCards:
         """The rolling frame held under `ref`, or `None` for a frame that cannot roll.
 
         A dataset frame, a derived frame of fixed periods, and a derived frame
-        the store can build no recipe for all answer `None`: none of them is
+        with no recipe to be had (`_recipe_of`) all answer `None`: none of them is
         replayed when data moves, so a card on one shows the periods it was
         written with. A rolling frame whose populations name a dataset no
         rolling period of its tree reads has no anchor of its own; it answers
@@ -518,7 +547,7 @@ class RollingCards:
             self._frames.move_to_end(key)
             return self._frames[key]
         try:
-            recipe = await build_recipe(frame, store=get_store())
+            recipe = await _recipe_of(frame)
         except RecipeAnchorError as exc:
             if exc.recipe is None:
                 _log_no_recipe(frame, exc)
@@ -527,8 +556,15 @@ class RollingCards:
             # so it has no anchor of its own. Its cards are replayed over the
             # populations of its own tree (`_populations`), which differ.
             recipe = exc.recipe
-        except (RecipeError, FrameExpired, FrameIntegrityError, FrameTooLarge) as exc:
-            # Not kept, because the store may hold the missing part on a later read.
+        except (
+            RecipeError,
+            FrameExpired,
+            FrameIntegrityError,
+            FrameTooLarge,
+            DerivedUnread,
+        ) as exc:
+            # Not kept, because the store or dfo-apis may hold the missing part on a
+            # later read.
             _log_no_recipe(frame, exc)
             return None
         # A tree with no rolling op-spec carries no population.

@@ -216,6 +216,10 @@ STOP_CODES = frozenset(
         "derived_input_unrecoverable",
         "derived_input_ordinal",
         "quotient_of_side_unit_unsupported",
+        # A verb read a frame fetched with a `breakdown` or a `stat_vars` sum,
+        # a rendering dfo-apis' analysis runner reads no root with. Fetching
+        # the frame another way is a different plan.
+        "rendering_not_recorded",
         # The newest period a run's rolling steps stand on, which the executor
         # resolves and writes each step's periods from. No year is held by half
         # of the series, or the periods are no calendar years. Both are facts of

@@ -98,6 +98,12 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
             {"code": "operation_still_processing", "retry_mode": "retry_after_delay"},
             Disposition.RETRY_LATER,
         ),
+        # The analysis runner's answer to a call it could not answer, or a
+        # refusal under a code analysis-mcp does not define.
+        (
+            {"code": "upstream_error", "retry_mode": "retry_after_delay"},
+            Disposition.RETRY_LATER,
+        ),
         (
             {"code": "upstream_version_changed", "retry_mode": "refresh_then_retry"},
             Disposition.REDISCOVER,
@@ -149,6 +155,12 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
         ),
         ({"code": "role_ambiguous", "retry_mode": "correct_and_retry"}, Disposition.STOP),
         ({"code": "frame_not_held", "retry_mode": "correct_and_retry"}, Disposition.STOP),
+        # A grouped fetch is no root the analysis runner reads: fetching it
+        # another way is a different plan.
+        (
+            {"code": "rendering_not_recorded", "retry_mode": "correct_and_retry"},
+            Disposition.STOP,
+        ),
         ({"code": "internal_error", "retry_mode": "do_not_retry"}, Disposition.STOP),
         # apis cannot sum the family `get_data` asked to sum. It stops by
         # its code too, whatever mode it arrives under: reading the family
@@ -242,6 +254,7 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
     ids=[
         "delay",
         "operation-still-processing-delay",
+        "upstream-error-delay",
         "refresh",
         "definition-gone",
         "open-role-gone",
@@ -255,6 +268,7 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
         "quotient-of-side-unit-unsupported-stop",
         "compiler-provable",
         "genuine-stop",
+        "rendering-not-recorded-stop",
         "final",
         "rollup-not-summable-final",
         "rollup-not-summable-stop",

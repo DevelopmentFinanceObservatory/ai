@@ -771,6 +771,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "derived_input_ordinal",
             "derived_input_unrecoverable",
             "derived_input_unusable",
+            "rendering_not_recorded",
             "join_output_collision",
             "grain_ambiguous",
             "spec_not_exportable",

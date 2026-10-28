@@ -30,20 +30,24 @@ again on the data apis holds now:
 4. The tree is walked from its roots up. Each node's verb is called with its
    recorded arguments and its inputs' new pairs. Before a call, the pair it would
    mint is computed with analysis-mcp's own identity functions, and the call is
-   skipped when the store already holds that pair, so a replay cut short is
-   resumed by the next one. Inputs of one node run at once, at most
-   `MAX_CONCURRENT_STEPS` calls at a time. Roots are minted one at a time.
-5. The final frame's recipe is built from the store (`common.recipe.build_recipe`).
-   A root whose mint record holds the options this replay minted it with is
+   skipped when the store already holds that pair, as it holds a frame an
+   in-process verb computed. The verbs compute on dfo-apis' analysis runner,
+   whose frames the store never holds, so each such step is called, and the
+   runner answers a step it stored before from what it holds: either way a
+   replay cut short is resumed by the next one. Inputs of one node run at once,
+   at most `MAX_CONCURRENT_STEPS` calls at a time. Roots are minted one at a time.
+5. The final frame's recipe is the one the runner stored with it, read from apis
+   (`LiveApisClient.read_recipe`). A frame the store holds, which an in-process
+   verb computed, has its recipe built from the store (`common.recipe.build_recipe`):
+   a root whose mint record holds the options this replay minted it with is
    stated with the options the stored recipe recorded for it, so the replayed
-   recipe keeps the stored `normal_form_hash`. The store's mint record keeps the
-   options sent, since a `get_data` call minting the same pair shares it. The
-   frame is published with the recipe through the caller's `publish`
+   recipe keeps the stored `normal_form_hash`. The frame is published with the
+   recipe through the caller's `publish`
    (`presentation_mcp.client.PlatformAssembler.publish_frame`), unless apis
-   already holds that pair under the recipe's `replay_key`. apis keeps a
-   pair's first recipe, so a pair another card published first under a recipe of
-   another normal form refuses `recipe_normal_form_changed`: no render draws this
-   card on it.
+   already holds that pair under the recipe's `replay_key`, as it holds every
+   frame the runner stored. apis keeps a pair's first recipe, so a pair another
+   card published first under a recipe of another normal form refuses
+   `recipe_normal_form_changed`: no render draws this card on it.
 
 The module calls no model and holds no state between calls. It imports nothing
 from `planner`, `compiler`, `executor`, `translator`, `orchestrator` or the
@@ -71,6 +75,7 @@ from collections.abc import Awaitable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+import rfc8785
 from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import (
     OpSpecIdentityError,
@@ -87,7 +92,12 @@ from common.materialisation import (
     MaterialisationStore,
     MintRecord,
 )
-from common.recipe import RECIPE_SCHEMA_VERSION, RecipeError, build_recipe
+from common.recipe import (
+    RECIPE_SCHEMA_VERSION,
+    RecipeAncestorMissingError,
+    RecipeError,
+    build_recipe,
+)
 from common.rolling import canonical_populations, rolling_roots
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, RowBudgetExhausted
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, CallDeadline, use_call_budget
@@ -177,8 +187,9 @@ class Replayed:
     """The recipe was computed on current data and apis holds the result.
 
     `frame` is the new derived pair and `recipe` its recipe. `newly_published` is
-    whether this call made apis record the frame, and is false when it held it
-    already. `normal_form_changed` is true only for a replay given replacement
+    whether this call's publish made apis record the frame, and is false when it
+    held it already, as it holds a frame the analysis runner stored as it
+    computed it. `normal_form_changed` is true only for a replay given replacement
     populations, whose recipe then has another `normal_form_hash` than the stored one.
     """
 
@@ -385,9 +396,9 @@ class _Replay:
         self.anchor_key: str | None = None
         self.populations: Sequence[Mapping[str, Any]] = ()
         self._steps = asyncio.Semaphore(MAX_CONCURRENT_STEPS)
-        # Each node's replay, by the pair the recipe recorded it under, so a frame
-        # two slots reach is computed once.
-        self._nodes: dict[tuple[str, str], asyncio.Task[_Frame]] = {}
+        # Each node's replay, by the node's RFC 8785 form, so a frame two slots
+        # reach is computed once.
+        self._nodes: dict[str, asyncio.Task[_Frame]] = {}
 
     def check_deadline(self) -> None:
         if self.deadline.remaining() <= 0:
@@ -589,10 +600,14 @@ class _Replay:
     # The tree
 
     async def frame_of(self, node: Mapping[str, Any]) -> _Frame:
-        """The new frame of `node`, replayed once however many slots reach it."""
+        """The new frame of `node`, replayed once however many slots reach it.
+
+        A node is known by its RFC 8785 form, since a tree the runner stored names
+        no frame on its nodes: two slots reaching the same op-spec over the same
+        inputs reach one frame."""
         if "root" in node:
             return self.root_frames[node["root"]]
-        key = (node["frame"]["spec_id"], node["frame"]["content_version"])
+        key = rfc8785.dumps(node).decode()
         if key not in self._nodes:
             self._nodes[key] = asyncio.create_task(self._derived(node))
         return await self._nodes[key]
@@ -767,6 +782,46 @@ def _parsed(recipe: Mapping[str, Any]) -> tuple[Mapping[str, Any], list[MintReco
         ) from exc
 
 
+async def _final_recipe(frame: _Frame, *, replay: _Replay) -> dict[str, Any]:
+    """The recipe of the replay's final frame: the one dfo-apis' analysis runner
+    stored with it, or for a frame the store holds, as an in-process verb left it,
+    the one the store builds.
+
+    Raises:
+        _Stopped: `recipe_unbuildable` for a frame with no recipe to be had, and
+            a dfo-apis failure as `_apis_stop` reads it.
+    """
+    try:
+        return await build_recipe(frame.ref, store=replay.store, root_options=replay.stated_options)
+    except RecipeAncestorMissingError as exc:
+        if exc.ref != frame.ref:
+            raise _Stopped(
+                Refused(code="recipe_unbuildable", detail=str(exc), stage="publish")
+            ) from exc
+    except RecipeError as exc:
+        raise _Stopped(
+            Refused(code="recipe_unbuildable", detail=str(exc), stage="publish")
+        ) from exc
+    try:
+        stored = await replay.apis.read_recipe(
+            spec_id=frame.ref.spec_id, content_version=frame.ref.content_version
+        )
+    except LiveApisError as exc:
+        raise _apis_stop(exc, stage="publish") from exc
+    if stored is None:
+        raise _Stopped(
+            Refused(
+                code="recipe_unbuildable",
+                detail=(
+                    f"dfo-apis holds no recipe for {frame.ref.spec_id}/"
+                    f"{frame.ref.content_version}, and the store holds no frame under it"
+                ),
+                stage="publish",
+            )
+        )
+    return dict(stored)
+
+
 async def _replayed(
     recipe: Mapping[str, Any],
     *,
@@ -782,14 +837,7 @@ async def _replayed(
     await replay.resolve_rolling(populations)
     frame = await replay.frame_of(replay.tree)
 
-    try:
-        replayed = await build_recipe(
-            frame.ref, store=replay.store, root_options=replay.stated_options
-        )
-    except RecipeError as exc:
-        raise _Stopped(
-            Refused(code="recipe_unbuildable", detail=str(exc), stage="publish")
-        ) from exc
+    replayed = await _final_recipe(frame, replay=replay)
     changed = replayed["normal_form_hash"] != recipe.get("normal_form_hash")
     if changed and populations is None:
         # apis renders a card on a frame only when the two recipes share a

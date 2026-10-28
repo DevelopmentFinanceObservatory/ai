@@ -20,6 +20,11 @@ and `find_anchor` posts roots and populations to `POST
 - An answer outside that contract, an unreachable dfo-apis, a timeout and a
   failed credential are `upstream_error`, the last three retryable.
 
+`read_derived_manifest` and `read_derived_file` read a frame the runner stored,
+by its `ops_` pair, from `GET /api/datasets/derived/{spec_id}/{content_version}`
+and its `/file`, for a caller that needs its recipe or its rows. Each raises
+`DerivedUnread` naming the problem document's code.
+
 Every call carries the Cloud Run ID token (`common.apis_auth`) and, for a caller
 the website named (`x-dfo-caller: ip:<digest>`), the caller principal beside it,
 so dfo-apis resolves the website's client as it does on the website's own
@@ -49,6 +54,10 @@ logger = logging.getLogger(__name__)
 
 ANALYSIS_PATH = "/api/datasets/analysis"
 ANCHOR_PATH = "/api/datasets/analysis/anchor"
+DERIVED_PATH = "/api/datasets/derived/{spec_id}/{content_version}"
+DERIVED_FILE_PATH = f"{DERIVED_PATH}/file"
+# The derived file query that answers the frame's rows as one Parquet file.
+DERIVED_FILE_QUERY: Mapping[str, str] = {"format": "parquet", "bundle": "false"}
 CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
 
 # The caller the website names, which dfo-apis believes beside the principal.
@@ -116,16 +125,25 @@ class RunnerClient:
 
     async def post(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | ToolRefusal:
         """POST `body` to `path`, or the retryable refusal for a call that got no answer."""
+        return await self._send("POST", path, json=body)
+
+    async def get(
+        self, path: str, *, params: Mapping[str, str] | None = None
+    ) -> httpx2.Response | ToolRefusal:
+        """GET `path`, or the retryable refusal for a call that got no answer."""
+        return await self._send("GET", path, params=params)
+
+    async def _send(self, method: str, path: str, **request: Any) -> httpx2.Response | ToolRefusal:
         try:
             headers = {**(await self._auth()), **self._caller_headers()}
-            return await self._client.post(path, json=body, headers=headers)
+            return await self._client.request(method, path, headers=headers, **request)
         except ApisAuthError as exc:
             detail = f"no dfo-apis credential: {exc}"
         except httpx2.TimeoutException:
             detail = "dfo-apis did not answer in time"
         except httpx2.TransportError as exc:
             detail = f"dfo-apis is unreachable: {type(exc).__name__}"
-        logger.warning("analysis runner call to %s failed: %s", path, detail)
+        logger.warning("dfo-apis call to %s failed: %s", path, detail)
         return ToolRefusal.upstream_error(
             upstream_code=None, detail=detail, retry_after_s=DEFAULT_RETRY_AFTER_S
         )
@@ -287,3 +305,72 @@ async def find_anchor(
     except ValidationError as exc:
         logger.warning("analysis runner anchor answer unreadable: %s", exc)
         return _unusable("the anchor answer does not fit this service")
+
+
+class DerivedUnread(Exception):  # noqa: N818 -- a read's outcome, as `ToolRefusal` is
+    """A derived frame dfo-apis did not serve: `code` is its problem document's code,
+    `upstream_error` for an answer outside the contract or no answer at all, and
+    `retryable` says whether the same read can succeed later."""
+
+    def __init__(self, *, code: str, retryable: bool, detail: str) -> None:
+        self.code = code
+        self.retryable = retryable
+        self.detail = detail
+        super().__init__(f"derived frame unread ({code}): {detail}")
+
+
+def _derived_unread(answer: httpx2.Response | ToolRefusal) -> DerivedUnread:
+    if isinstance(answer, ToolRefusal):
+        return DerivedUnread(
+            code=ToolErrorCode.UPSTREAM_ERROR.value, retryable=True, detail=answer.message
+        )
+    problem = _json(answer) or {}
+    code = problem.get("code")
+    return DerivedUnread(
+        code=code if isinstance(code, str) else ToolErrorCode.UPSTREAM_ERROR.value,
+        retryable=problem.get("retryable") is True
+        if isinstance(code, str)
+        else answer.status_code >= 500,
+        detail=str(problem.get("detail") or f"dfo-apis answered {answer.status_code}"),
+    )
+
+
+def _derived_path(path: str, ref: FrameRef) -> str:
+    return path.format(spec_id=ref.spec_id, content_version=ref.content_version)
+
+
+async def read_derived_manifest(ref: FrameRef) -> Mapping[str, Any]:
+    """The manifest dfo-apis serves for the derived frame `ref`
+    (`GET /api/datasets/derived/{spec_id}/{content_version}`): its `recipe`, with
+    `replay_key` and `tree`, its `anchor`, its `roots` and the rest.
+
+    Raises:
+        DerivedUnread: dfo-apis holds no such frame (`snapshot_not_found`), its
+            stored frame has expired (`artifact_expired`), or the read failed.
+    """
+    answer = await runner_holder.get().get(_derived_path(DERIVED_PATH, ref))
+    if isinstance(answer, ToolRefusal) or not answer.is_success:
+        raise _derived_unread(answer)
+    body = _json(answer)
+    if body is None:
+        raise DerivedUnread(
+            code=ToolErrorCode.UPSTREAM_ERROR.value,
+            retryable=False,
+            detail="the derived manifest is no JSON object",
+        )
+    return body
+
+
+async def read_derived_file(ref: FrameRef) -> bytes:
+    """The rows of the derived frame `ref` as one Parquet file
+    (`GET /api/datasets/derived/{spec_id}/{content_version}/file`).
+
+    Raises:
+        DerivedUnread: As `read_derived_manifest`.
+    """
+    answer = await runner_holder.get().get(
+        _derived_path(DERIVED_FILE_PATH, ref), params=DERIVED_FILE_QUERY
+    )
+    if isinstance(answer, ToolRefusal) or not answer.is_success:
+        raise _derived_unread(answer)
+    return answer.content
