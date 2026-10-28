@@ -199,8 +199,8 @@ def switch_node(
         plan = readable_plan(ctx, ctx.state.get("plan"))
         assert plan is not None, "approve routes a switch only for a plan it read"
         choice_id, option_id = str(pick.get("choice_id")), str(pick.get("option_id"))
-        # The state as it stood, which a switch that fails or is stopped
-        # leaves as it found.
+        # The state as it stood, which a switch that fails, is stopped or
+        # ends on any other error leaves as it found.
         before = _restorable_state(ctx)
         try:
             output = await _unless_stopped(
@@ -234,6 +234,9 @@ def switch_node(
                     "retryable": exc.retryable,
                 },
             }
+        except BaseException:
+            _restore(ctx, before)
+            raise
         yield Event(output=output, route="offer")
 
     return switch
@@ -608,8 +611,8 @@ def _pin_source(
 
 
 def _restorable_state(ctx: Context) -> dict[str, Any]:
-    """A copy of the state a switch that fails or is stopped puts back: the
-    drafting state (`_DRAFTING_PREFIXES`) and `_RESTORED_KEYS`."""
+    """A copy of the state a switch that fails, is stopped or raises puts back:
+    the drafting state (`_DRAFTING_PREFIXES`) and `_RESTORED_KEYS`."""
     state = ctx.state.to_dict()
     kept = {key: value for key, value in state.items() if key.startswith(_DRAFTING_PREFIXES)}
     kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}

@@ -19,7 +19,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -3736,6 +3736,56 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     ]
     assert state.get("planner:rounds") is None
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+class _RaisingSeam(_StoppedSeam):
+    """A `_StoppedSeam` whose revision, once it has written its state, raises an
+    error of its own with no Stop. `sessions` holds the session each revision ran in."""
+
+    sessions: ClassVar[list[Any]] = []
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        self.sessions.append(kwargs["ctx"].session)
+        token = SWITCH_STOP.set(asyncio.Event())
+        try:
+            return await super().revise(**kwargs)
+        finally:
+            SWITCH_STOP.reset(token)
+
+    async def _stopped(self) -> dict[str, Any]:
+        raise RuntimeError("revision broke")
+
+
+async def test_a_switch_whose_revision_raises_puts_the_state_back_and_raises(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A revision ending on an error other than `SwitchFailedError` ends the switch
+    with that error, once the drafting state, the plan and the readings it wrote,
+    a declared whole's reading among them, are put back for the next turn."""
+    scope = _hashed_scope()
+    new_pin, envelope = _switched_answer(scope)
+    revised = _scoped_plan(
+        new_pin,
+        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
+        schemas=real_schemas,
+        version=2,
+    )
+    _RaisingSeam.sessions.clear()
+
+    with pytest.raises(RuntimeError, match="revision broke"):
+        await _switch_runner(
+            real_schemas,
+            SearchStub(answer={scope["id"]: envelope}),
+            {"plan": revised.model_dump(mode="json"), "summary": {}},
+            seam_type=_RaisingSeam,
+        )
+
+    (session,) = _RaisingSeam.sessions
+    state = session.state
+    assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
+        scope["compiled"]["spec_id"]
+    ]
+    assert state.get("planner:rounds") is None
 
 
 def _unwinding_revision(

@@ -42,7 +42,7 @@ import hashlib
 import logging
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast
@@ -3849,13 +3849,10 @@ def _aligned_bases(
     A part with no pin is searched for first. A declared whole is never
     aligned: its calculation's other inputs are aligned among themselves
     first, and the whole is then compiled from its part's final pin, the
-    one alignment moved the part to, so it follows its part by construction. In a
-    calculation reading other inputs beside its part, such as the US total
-    minus the UK total, the whole is a fixed target: those inputs are
-    counted on the whole's option or the calculation is refused
-    (`_aligned_to_wholes`). A provider
-    scope it differs on is stated (`_provider_difference_decisions`). A
-    whole not compiled yet answers `BASES_UNALIGNED` naming it
+    one alignment moved the part to, so it follows its part by construction.
+    Nothing reads a whole but the denominator of a share or quotient of its
+    part (`planner.plan.whole_of_fault`), so alignment never reaches it
+    through another input. A whole not compiled yet answers `BASES_UNALIGNED` naming it
     (`Realignment.whole_axis`), and a part Search cannot leave the axis open
     on answers `SHARE_WHOLE_UNDERIVABLE`. A share
     declaring nothing is never rewritten: its inputs are aligned as any
@@ -3985,15 +3982,6 @@ def _aligned_bases(
         return _basis_unknown(list(unpinned.values()))
     try:
         targets = _alignment_targets(steps, reads, by_axis, view=view, proposer=proposer)
-        _aligned_to_wholes(
-            targets,
-            steps,
-            reads,
-            by_axis,
-            parts={whole.id: part.id for whole, part, _ in declared},
-            view=view,
-            proposer=proposer,
-        )
         wanted, realigned = _realigned_pins(targets, by_axis, compiled=compiled)
         if wanted:
             raise _Unservable(_bases_unaligned(wanted, by_axis))
@@ -4161,94 +4149,6 @@ def _claim(
     )
 
 
-def _aligned_to_wholes(
-    targets: dict[tuple[str, str], tuple[str, str]],
-    steps: Sequence[EvidenceRequirement],
-    reads: Mapping[str, Sequence[str]],
-    by_axis: Mapping[str, Mapping[str, _InputBasis]],
-    *,
-    parts: Mapping[str, str],
-    view: SessionView,
-    proposer: Proposer,
-) -> None:
-    """Count, in `targets`, every input of a calculation reading a declared whole
-    on the whole's option, the whole being a fixed target (`_aligned_bases`).
-
-    `parts` names each declared whole's part, by the whole's requirement id.
-    On each axis a whole is counted on the option its part is counted on
-    once aligned (`targets`), and reads as the user's where the part does.
-    The part itself is left out: the whole follows it by construction. Inputs the user stated on options
-    different from each other's keep them, as `_shared_basis` leaves them;
-    otherwise every other input is counted on the whole's option, and a
-    calculation whose wholes are on different options, or whose input the
-    user stated on another option than an unstated whole's, is refused.
-
-    Raises:
-        _Unservable: When an input cannot be counted on its whole's option.
-    """
-    for axis, bases in by_axis.items():
-        fixed: dict[str, _InputBasis] = {}
-        for whole_id, part_id in parts.items():
-            part = bases.get(part_id)
-            if part is None:
-                continue
-            held = targets.get((part_id, axis))
-            active = held[0] if held is not None else part.choice.active
-            fixed[whole_id] = replace(
-                part,
-                requirement_id=whole_id,
-                choice=part.choice.model_copy(update={"active": active}),
-            )
-        for step in steps:
-            if not _reads_on(step, axis):
-                continue
-            under = reached(step.id, reads)
-            wholes = [basis for whole_id, basis in fixed.items() if whole_id in under]
-            own_parts = {parts[basis.requirement_id] for basis in wholes}
-            others = [
-                basis
-                for requirement_id, basis in bases.items()
-                if requirement_id in under and requirement_id not in own_parts
-            ]
-            if not wholes or not others:
-                continue
-            inputs = [*wholes, *others]
-            stated = {basis.choice.active for basis in inputs if basis.stated}
-            if not _aligns(step, axis) or len(stated) > 1:
-                _refuse_double_count(step, axis, inputs, view=view, proposer=proposer)
-                continue
-            whole = wholes[0]
-            target = whole.choice.active
-            odd = next(
-                (
-                    basis
-                    for basis in inputs
-                    if basis.choice.active != target
-                    and (basis.requirement_id in fixed or basis.stated)
-                ),
-                None,
-            )
-            if odd is not None:
-                raise _Unservable(
-                    _basis_unservable(
-                        view,
-                        proposer,
-                        step_id=step.id,
-                        requirement_id=odd.requirement_id,
-                        spec_id=odd.origin,
-                        option_id=target,
-                        reason=(
-                            f"{step.id!r} reads {whole.requirement_id!r}, a total compiled "
-                            f"from its part and counted as {whole.label(target)}, which is "
-                            f"never moved, and {odd.requirement_id!r} is counted as "
-                            f"{odd.label(odd.choice.active)}"
-                        ),
-                    )
-                )
-            for basis in others:
-                _claim(targets, basis, axis, target, step, view=view, proposer=proposer)
-
-
 def _realigned_pins(
     targets: Mapping[tuple[str, str], tuple[str, str]],
     by_axis: Mapping[str, Mapping[str, _InputBasis]],
@@ -4389,22 +4289,30 @@ def _whole_parts(
 ) -> list[tuple[DatasetRequirement, DatasetRequirement, str]]:
     """Each whole the planner declared (`DatasetRequirement.whole_of`), with its part and the axis it leaves open (`_aligned_bases`).
 
-    A whole that cannot name its part so (`planner.plan.whole_of_fault`) is
-    left out, for `Plan` to refuse.
+    A whole is read only as the denominator of a share or quotient of its
+    part, so alignment never reaches it through any other calculation.
 
     Raises:
-        _Unservable: With `BASIS_UNKNOWN`, naming each part pinned to no
+        _Unservable: With `INVALID_PLAN` for a whole that cannot name its
+            part so or that another calculation reads (`planner.plan.whole_of_fault`),
+            `BASIS_UNKNOWN`, naming each part pinned to no
             dataset and not searched for yet (`unsearched`), the whole as the
             step wanting it, or `SHARE_WHOLE_UNDERIVABLE` when Search settled a
             part on no one dataset.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
+    wholes = [
+        requirement
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.whole_of is not None
+    ]
+    for whole in wholes:
+        if (fault := whole_of_fault(whole, by_id)) is not None:
+            raise _Unservable(_invalid_plan(fault))
     declared: list[tuple[DatasetRequirement, DatasetRequirement, str]] = [
         (whole, cast(DatasetRequirement, by_id[whole.whole_of.part]), whole.whole_of.axis)
-        for whole in requirements
-        if isinstance(whole, DatasetRequirement)
-        and whole.whole_of is not None
-        and whole_of_fault(whole, by_id) is None
+        for whole in wholes
+        if whole.whole_of is not None
     ]
     searches = {
         part.id: _unpinned(unsearched[part.id], whole.id)
@@ -4574,7 +4482,8 @@ def _whole_decisions(
     """The decision each whole compiled from its part (`AlignedPin.whole_axis`) states,
     by the whole's requirement id, `wholes` holding each one's pin.
 
-    It says, in reader words, that the share divides by the total of its
+    It says, in reader words, that the share (or quotient, as the
+    calculation reading the whole is one) divides by the total of its
     part's own dataset over every member of the axis left open, and that
     both sides count the same donors, recipients, measure basis and
     providers, naming the part's dataset by its title where
@@ -4599,6 +4508,15 @@ def _whole_decisions(
             if isinstance(part, DatasetRequirement) and part.source_spec_id is not None
             else whole.origin
         )
+        divides = (
+            "quotient"
+            if any(
+                isinstance(reader, QuotientRequirement)
+                and reader.denominator.input_id == requirement_id
+                for reader in requirements
+            )
+            else "share"
+        )
         part_block = _pin_block(origin, shown)
         dataset = _dataset_title(part_block)
         total = f"total over every {whole.whole_axis}"
@@ -4621,13 +4539,13 @@ def _whole_decisions(
         try:
             decision = Decision(
                 slot=_whole_slot(requirement_id),
-                description="Which total the share divides by.",
+                description=f"Which total the {divides} divides by.",
                 options=(chosen, "a total from another dataset"),
                 chosen=chosen,
                 resolved_by=ResolvedBy.PLANNER_DEFAULT,
                 rationale=_fitting_rationale(
                     *(
-                        f"The share divides by the {total} from {source} {part_named}, so both "
+                        f"The {divides} divides by the {total} from {source} {part_named}, so both "
                         "sides count the same donors, recipients, measure basis and providers."
                         for source, part_named in named
                     )

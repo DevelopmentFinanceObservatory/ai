@@ -942,9 +942,9 @@ class DatasetRequirement(TaggedModel):
         default=None,
         exclude_if=lambda whole_of: whole_of is None,
         description=(
-            "Set on a share's total that is its part over every sector, as all US aid is "
-            "for US health aid: counted from the part's own dataset on the same providers, "
-            "with no search."
+            "Set on the total a share_of or quotient_of divides its part by, the part over "
+            "every sector, as all US aid is for US health aid: counted from the part's own "
+            "dataset on the same providers, with no search. Read only as that denominator."
         ),
     )
 
@@ -2299,7 +2299,9 @@ def whole_of_fault(
 
     The whole is compiled from the part's pin with only the part's scope
     widened, so the part is another dataset requirement, itself no whole,
-    and the whole counts the part's parties.
+    and the whole counts the part's parties. It follows its part wherever
+    the part is counted, so it is read only as the denominator of a share or
+    quotient of its part (`_whole_read_fault`).
     """
     if whole.whole_of is None:
         return None
@@ -2320,6 +2322,65 @@ def whole_of_fault(
             f"{whole.id!r} is the whole of {part_id!r}, counted from its dataset for the same "
             "parties, so it states the same entities and `across`"
         )
+    return _whole_read_fault(whole, part_id, requirements_by_id)
+
+
+def _whole_read_fault(
+    whole: DatasetRequirement,
+    part_id: str,
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> str | None:
+    """Why `whole`, the whole of `part_id`, is read other than as the denominator of a
+    share or quotient of its part, `None` when it is read only so.
+
+    The whole is read directly or through calculations over it alone, such
+    as the whole summed by year. Each such read ends in a share or quotient
+    whose denominator reads it and whose numerator reads no dataset but the
+    part, directly or summed the same way. Anything else reading it, and a
+    read that ends unread, takes a plain total of its own.
+    """
+    reads: dict[str, Sequence[str]] = {
+        input_id: ()
+        for requirement in requirements_by_id.values()
+        for input_id in inputs_of(requirement)
+    }
+    reads |= {rid: inputs_of(requirement) for rid, requirement in requirements_by_id.items()}
+
+    def datasets(node: str) -> set[str]:
+        return {
+            rid
+            for rid in reached(node, reads)
+            if isinstance(requirements_by_id.get(rid), DatasetRequirement)
+        }
+
+    over_whole = {rid for rid in requirements_by_id if datasets(rid) == {whole.id}}
+    readers: dict[str, list[EvidenceRequirement]] = {rid: [] for rid in over_whole}
+    for reader in requirements_by_id.values():
+        for input_id in inputs_of(reader):
+            if input_id in readers:
+                readers[input_id].append(reader)
+    rule = (
+        f"{whole.id!r} states `whole_of`, so it is read only as the denominator of a "
+        f"share_of or quotient_of whose numerator is its part {part_id!r}"
+    )
+    for read_id in sorted(over_whole):
+        if not readers[read_id]:
+            return (
+                f"{rule}, and nothing reads {read_id!r}. For a total of its own, state a "
+                "plain total: another dataset requirement without `whole_of`"
+            )
+        for reader in readers[read_id]:
+            if reader.id in over_whole or (
+                isinstance(reader, ShareOfRequirement | QuotientRequirement)
+                and reader.denominator.input_id == read_id
+                and datasets(reader.numerator.input_id) == {part_id}
+            ):
+                continue
+            return (
+                f"{rule}, and {reader.id!r} reads {read_id!r} otherwise. For "
+                f"{reader.id!r}, state a plain total: another dataset requirement without "
+                "`whole_of`, read in its place"
+            )
     return None
 
 
@@ -4200,7 +4261,12 @@ class Plan(StrictModel):
             if uncited:
                 raise ValueError(f"no evidence requirement cites the decisions {uncited!r}")
         _check_reads_resolve({r.id: r for r in self.evidence_requirements})
-        _check_wholes_name_their_parts({r.id: r for r in self.evidence_requirements})
+        # The model's own requirements: a copy the split adds reads copies of a
+        # whole's part.
+        copied = copy_origins(self.rolling_copies)
+        _check_wholes_name_their_parts(
+            {r.id: _reading(r, copied) for r in self.evidence_requirements if r.id not in copied}
+        )
         _check_first_years(self)
         split = split_of(self)
         if split.first_year_unknown:

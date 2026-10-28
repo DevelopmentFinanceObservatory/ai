@@ -6107,10 +6107,15 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     provenance and the planner's axes are the part's, so a later search carries
     from the whole what it carries from the part. The whole states no scope row of
     its own, since each would restate the part's; a decision of the planner's
-    states it, cited by the whole."""
+    states it, cited by the whole. The whole's source keeps the provenance its
+    part's source records."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block(part), *([_us_block(whole)] if whole else []))
+    shown = pin_sources(ctx.state)
+    part_pin = us_2023_block(part)["spec_id"]
+    provenance = {"provenance_ref": "provenance/OECD_CRS", "provenance_account": "OECD CRS"}
+    save_pin_sources(ctx.state, {**shown, part_pin: shown[part_pin].model_copy(update=provenance)})
 
     result = await _us_2023(
         _tools_reading(surface)["propose_plan"].func,
@@ -6145,7 +6150,13 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
         (_WHOLE, us_2023_block(compiled)["spec_id"]),
     ]
     assert searched_pins(ctx.state) == ()
-    held = pin_sources(ctx.state)[us_2023_block(compiled)["spec_id"]].block
+    held_source = pin_sources(ctx.state)[us_2023_block(compiled)["spec_id"]]
+    assert (held_source.provenance_ref, held_source.provenance_account) == (
+        provenance["provenance_ref"],
+        provenance["provenance_account"],
+    )
+    held = held_source.block
+    assert held is not None
     assert PLANNER_AXES_BLOCK_KEY not in held
     assert {
         choice["axis"]: choice["provenance"]
@@ -6310,44 +6321,61 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     assert "health, CRS 120 alone" in named["narrow_whole"]
 
 
-def _uk_total(spec_id: str, *, active: str, gross: str = "available") -> dict[str, Any]:
+def _uk_total(spec_id: str) -> dict[str, Any]:
     """The UK donor total for 2023 under `spec_id`: `US_2023`'s DAC1 total with the
-    United Kingdom as donor, counted as `active` by default, its gross option
-    `gross`."""
+    United Kingdom as donor."""
     block = json.loads(json.dumps(us_2023_block("dac1_total_gross")))
     block["spec_id"] = spec_id
     scope = block["resolved"]["scope_choices"]
     scope["base"]["identity"]["entities"] = {"origin": ["country/GBR"]}
     scope["entries"] = []
-    (basis,) = scope["choices"]
-    basis["active"], basis["provenance"] = active, "default"
-    for option in basis["options"]:
-        if option["option_id"] == "measure_basis:gross" and gross == "unavailable":
-            option["availability"] = {"status": "unavailable", "code": "basis_not_published"}
     return block
 
 
-@pytest.mark.parametrize("gross", ["available", "unavailable"], ids=["aligned", "refused"])
-async def test_a_declared_whole_is_a_fixed_target_for_another_calculation_reading_it(
-    decision: DecisionFactory, gross: str
+_UK = f"spec_{'a' * 32}"
+
+
+def _whole_reader(kind: str) -> EvidenceRequirement:
+    """A calculation reading `_WHOLE` other than as the denominator of a share of its
+    part: the whole minus the UK total, the UK total divided by the whole, or the
+    whole summed by year. Built at call time, since `_WHOLE` is rebound further
+    down this module."""
+    if kind == "comparison":
+        return ComparisonRequirement(
+            id=_COMPARE,
+            decision_ids=["measure"],
+            minuend=RequirementSide(input_id=_WHOLE),
+            subtrahend=RequirementSide(input_id="uk_total"),
+        )
+    if kind == "quotient-of-another-dataset":
+        return QuotientRequirement(
+            id="uk_over_us",
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id="uk_total"),
+            denominator=RequirementSide(input_id=_WHOLE),
+        )
+    return AggregateRequirement(
+        id=_TOTAL,
+        decision_ids=["measure"],
+        input_id=_WHOLE,
+        reduction=Reduction.SUM,
+        group_by=[GroupBy.PERIOD],
+    )
+
+
+@pytest.mark.parametrize("kind", ["comparison", "quotient-of-another-dataset", "aggregate"])
+async def test_a_declared_whole_read_by_another_calculation_is_refused_for_a_plain_total(
+    decision: DecisionFactory, kind: str
 ) -> None:
-    """US health aid as a share of a declared US total, and that US total minus the
-    UK total counted net. The whole, compiled gross from its part, is never moved,
-    so the comparison counts the UK total gross where it is served that way, and is
-    refused where it is not."""
+    """US health aid as a share of a declared US total, and that total read again by
+    another calculation: the US total minus the UK total, the UK total divided by
+    it, or it summed by year. A declared whole is read only as the denominator of a
+    share or quotient of its part, so the plan is refused before anything is
+    compiled, naming the other calculation to read a plain total of its own."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
-    uk, uk_gross = f"spec_{'a' * 32}", f"spec_{'b' * 32}"
-    _show_blocks(
-        ctx,
-        us_2023_block("health"),
-        _uk_total(uk, active="measure_basis:net", gross=gross),
-        _uk_total(uk_gross, active="measure_basis:gross"),
-    )
-    save_aligned_pin(
-        ctx.state,
-        AlignedPin(origin=uk, option_ids=("measure_basis:gross",), spec_id=uk_gross, digest={}),
-    )
+    _show_blocks(ctx, us_2023_block("health"), _uk_total(_UK))
+    reader = _whole_reader(kind)
 
     result = await _us_2023(
         _tools_reading(surface)["propose_plan"].func,
@@ -6363,31 +6391,16 @@ async def test_a_declared_whole_is_a_fixed_target_for_another_calculation_readin
                 measure="UK total ODA",
                 entities=[Entity(name="United Kingdom", role="donor")],
                 period=Period(start=2023, end=2023),
-                source_spec_id=uk,
+                source_spec_id=_UK,
             ),
-            ComparisonRequirement(
-                id=_COMPARE,
-                decision_ids=["measure"],
-                minuend=RequirementSide(input_id=_WHOLE),
-                subtrahend=RequirementSide(input_id="uk_total"),
-            ),
+            reader,
         ],
     )
 
-    if gross == "unavailable":
-        assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
-        assert result["detail"]["basis"] == {
-            "spec_id": uk,
-            "option_ids": ["measure_basis:gross"],
-            "requirement_id": "uk_total",
-            "step_id": _COMPARE,
-        }
-        assert load_plan(ctx.state) is None
-        return
-    assert result["outcome"] == Outcome.OK.value, result
-    pins = dict(_pins(ctx))
-    assert pins[_WHOLE] == us_2023_block("whole")["spec_id"]
-    assert pins["uk_total"] == uk_gross
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert repr(reader.id) in result["message"]
+    assert surface.calls == []
+    assert load_plan(ctx.state) is None
 
 
 async def test_a_declared_whole_follows_its_part_when_another_calculation_realigns_it(
@@ -6479,9 +6492,10 @@ async def test_a_quotient_over_a_declared_whole_divides_by_the_parts_own_total(
 async def test_wholes_declaring_one_part_and_axis_share_one_compile(
     decision: DecisionFactory,
 ) -> None:
-    """The share's whole and a second total, reported on its own, both declare the
-    health part over every sector: the whole is compiled once and both read it, and
-    replacing it changes no calculation, since each total declared what it is."""
+    """The share's whole and the whole a second share of the same part divides by
+    both declare the health part over every sector: the whole is compiled once and
+    both read it, and replacing it changes no calculation, since each total declared
+    what it is."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), us_2023_block("dac1_total_gross"))
@@ -6493,12 +6507,11 @@ async def test_wholes_declaring_one_part_and_axis_share_one_compile(
         period=Period(start=2023, end=2023),
         whole_of=WholeOf(part=_PART, axis="sector"),
     )
-    by_year = AggregateRequirement(
+    second_share = ShareOfRequirement(
         id=_TOTAL,
         decision_ids=["measure"],
-        input_id=reported.id,
-        reduction=Reduction.SUM,
-        group_by=[GroupBy.PERIOD],
+        numerator=RequirementSide(input_id=_PART),
+        denominator=RequirementSide(input_id=reported.id),
     )
 
     result = await _us_2023(
@@ -6508,7 +6521,7 @@ async def test_wholes_declaring_one_part_and_axis_share_one_compile(
         part="health",
         whole="dac1_total_gross",
         declared=True,
-        extra=[reported, by_year],
+        extra=[reported, second_share],
     )
 
     assert result["outcome"] == Outcome.OK.value, result

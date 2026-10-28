@@ -278,7 +278,8 @@ _PLANNING = (
     "total as a dataset requirement with `whole_of` naming the part's "
     "requirement and `axis='sector'`, the part's entities and `across`, and "
     "no `source` or `source_spec_id`: it is counted from the part's own "
-    "dataset, on the same donors, measure basis and providers. Leave "
+    "dataset, on the same donors, measure basis and providers, and only "
+    "that share reads it. Leave "
     "`whole_of` unset when the whole binds a sector itself, as health aid "
     "does under malaria aid, when the share is one party's part of other "
     "parties' total, as one donor's share of all aid to Kenya, or when the "
@@ -1524,8 +1525,9 @@ async def compile_whole(
     Search then keeps the part's measure basis, provider scope and region,
     which an option the whole cannot serve would otherwise leave to
     Search's default. No model call is made. The answer is shown to the
-    planner as a source of its own, whose choices the whole takes from its
-    part: each carries the part's provenance, and the block marks as the
+    planner as a source of its own, the part's source holding the whole's
+    block, as `compile_on_basis` holds a realigned one, whose choices the
+    whole takes from its part: each carries the part's provenance, and the block marks as the
     planner's (`harness.scope_choices.mark_planner_axes`) the axes the
     part's block marks, so the whole reads as the part was settled and a
     later search carries what the part's carries. It is held as a
@@ -1595,9 +1597,7 @@ async def compile_whole(
     }
     digest = resolver_digest({"parts": [_with_provenance(part, inherited)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
-    whole_source = PinSource(
-        block=digest["spec_block"], settled=True, asked_roles=source.asked_roles
-    )
+    whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
     save_pin_sources(state, {**sources, spec_id: whole_source})
     save_aligned_pin(
         state,
