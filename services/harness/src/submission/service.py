@@ -42,7 +42,7 @@ import hashlib
 import logging
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast
@@ -220,10 +220,10 @@ class SessionView(Protocol):
     recorded plan, its rounds, pins shown and windowed, histories read,
     asks, the pending referral, the discovery log), read through their own
     loaders. The four readers answer from what the user was asked and
-    answered in this session. The three writes are the chain's only side
-    effects: an `unsupported` answer and the asks a `PERIOD_REDUCTION_UNSTATED`
-    refusal names, both recorded even though the call is refused, and an
-    admitted plan.
+    answered in this session. The four writes are the chain's only side
+    effects: an `unsupported` answer, an optional decline and the asks a
+    `PERIOD_REDUCTION_UNSTATED` refusal names, each recorded even though the
+    call is refused, and an admitted plan.
     """
 
     @property
@@ -249,6 +249,10 @@ class SessionView(Protocol):
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
         """Record that a proposal in this planner entry was answered `unsupported` for `operation`."""
+        ...
+
+    def record_optional_decline(self, operation: UnsupportedOperation) -> None:
+        """Permit a decline of `operation` for the rest of this planner entry, without requiring one."""
         ...
 
     def record_reduction_refused(self, asks: Iterable[int]) -> None:
@@ -489,11 +493,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         previous=previous,
         scopes=scope_choice_decisions(
             pins,
-            open_axes={
-                pin.spec_id: pin.whole_axis
-                for pin in aligned_pins(view.state)
-                if pin.whole_axis is not None
-            },
+            wholes={pin.spec_id: pin for pin in aligned_pins(view.state) if pin.whole_axis},
         ),
         wholes=_whole_decisions(wholes, aligned_after, shown=pins),
         calculations=_provider_difference_decisions(aligned_after, shown=pins),
@@ -3245,7 +3245,7 @@ _SCOPE_QUESTIONS: dict[str, str] = {
 
 
 def scope_choice_decisions(
-    shown: Mapping[str, PinSource], *, open_axes: Mapping[str, str] | None = None
+    shown: Mapping[str, PinSource], *, wholes: Mapping[str, AlignedPin] | None = None
 ) -> dict[str, tuple[Decision, ...]]:
     """The scope decisions a pin of each spec_id of `shown` states, in the order Search lists its choices.
 
@@ -3254,12 +3254,14 @@ def scope_choice_decisions(
     release cannot read, states none. Each choice is one decision
     (`_scope_decision`), when it states one; a choice on an axis the block
     marks as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`)
-    is the planner's decision. A choice on the axis `open_axes` holds for
-    the spec_id, a whole compiled from its part with that axis left open
-    (`AlignedPin.whole_axis`), states none: any one option on it would
-    count a single slice of what the whole counts in full.
+    is the planner's decision. A whole compiled from its part (`wholes`, by
+    spec_id, `AlignedPin.whole_axis`) states a decision only for a choice the
+    user switched on its own row (`AlignedPin.option_ids`): its other
+    choices hold the part's options and restate the part's rows, and any
+    one option on the axis it leaves open would count a single slice of
+    what the whole counts in full.
     """
-    open_axes = open_axes or {}
+    wholes = wholes or {}
     decisions: dict[str, tuple[Decision, ...]] = {}
     for spec_id, source in shown.items():
         block = source.spec_block(spec_id)
@@ -3267,10 +3269,16 @@ def scope_choice_decisions(
         if scope is None:
             continue
         planner = planner_axes(block)
+        whole = wholes.get(spec_id)
+        own = (
+            {option_axis(option_id) for option_id in whole.option_ids} - {whole.whole_axis}
+            if whole is not None
+            else None
+        )
         written = tuple(
             decision
             for choice in scope.choices
-            if choice.axis != open_axes.get(spec_id)
+            if (own is None or choice.axis in own)
             and (decision := _scope_decision(spec_id, choice, scope=scope, planner=planner))
             is not None
         )
@@ -3848,7 +3856,11 @@ def _aligned_bases(
     aligned: it holds the options the user switched on its own row, so its
     calculation's other inputs are aligned among themselves first, and the
     whole is then compiled from its part's final pin, the one alignment
-    moved the part to, so it follows its part by construction. A provider
+    moved the part to, so it follows its part by construction. In a
+    calculation reading other inputs beside its part, such as the US total
+    minus the UK total, the whole is a fixed target: those inputs are
+    counted on the whole's option or the calculation is refused
+    (`_aligned_to_wholes`). A provider
     scope it differs on is stated (`_provider_difference_decisions`). A
     whole not compiled yet answers `BASES_UNALIGNED` naming it
     (`Realignment.whole_axis`), and a part Search cannot leave the axis open
@@ -3979,17 +3991,25 @@ def _aligned_bases(
             unpinned.setdefault(requirement_id, _unpinned(unsearched[requirement_id], step.id))
     if unpinned:
         return _basis_unknown(list(unpinned.values()))
+    compiled_wholes = [pin for pin in aligned if pin.whole_axis is not None]
+    switched = _switched_by_whole(declared, carried=carried, compiled=compiled_wholes)
     try:
         targets = _alignment_targets(steps, reads, by_axis, view=view, proposer=proposer)
+        _aligned_to_wholes(
+            targets,
+            steps,
+            reads,
+            by_axis,
+            parts={whole.id: part.id for whole, part, _ in declared},
+            switched=switched,
+            view=view,
+            proposer=proposer,
+        )
         wanted, realigned = _realigned_pins(targets, by_axis, compiled=compiled)
         if wanted:
             raise _Unservable(_bases_unaligned(wanted, by_axis))
         wholes = _declared_wholes(
-            declared,
-            realigned=realigned,
-            carried=carried,
-            shown=shown,
-            compiled=[pin for pin in aligned if pin.whole_axis is not None],
+            declared, realigned=realigned, switched=switched, shown=shown, compiled=compiled_wholes
         )
     except _Unservable as exc:
         return exc.problem
@@ -4031,38 +4051,11 @@ def _alignment_targets(
             inputs = [basis for requirement_id, basis in bases.items() if requirement_id in under]
             if len(inputs) < 2:
                 continue
-            aligns = _aligns(step, axis)
-            own = _shared_basis(inputs) if aligns else None
+            own = _shared_basis(inputs) if _aligns(step, axis) else None
             if own is not None:
                 aligning.append((step, inputs, own))
-            elif (
-                axis == _PROVIDER_AXIS
-                and isinstance(step, SumOfRequirement)
-                and (
-                    pair := _double_counted(
-                        [basis for basis in inputs if basis.stated] if aligns else inputs
-                    )
-                )
-                is not None
-            ):
-                first, other = pair
-                raise _Unservable(
-                    _basis_unservable(
-                        view,
-                        proposer,
-                        step_id=step.id,
-                        requirement_id=other.requirement_id,
-                        spec_id=other.origin,
-                        option_id=first.choice.active,
-                        reason=(
-                            f"{step.id!r} adds {first.requirement_id!r}, counted as "
-                            f"{first.label(first.choice.active)}, to {other.requirement_id!r}, "
-                            f"counted as {other.label(other.choice.active)}, and a figure "
-                            "including imputed multilateral flows already holds the bilateral "
-                            "ones and the sum counts them twice"
-                        ),
-                    )
-                )
+            else:
+                _refuse_double_count(step, axis, inputs, view=view, proposer=proposer)
         groups: list[set[str]] = []
         for _, inputs, _ in aligning:
             joined = {basis.requirement_id for basis in inputs}
@@ -4078,39 +4071,195 @@ def _alignment_targets(
         for step, inputs, own in aligning:
             target = group_target[inputs[0].requirement_id] or own
             for basis in inputs:
-                held_target, held_by = targets.setdefault(
-                    (basis.requirement_id, axis), (target, step.id)
-                )
-                option = next((o for o in basis.choice.options if o.option_id == target), None)
-                unserved = option is None or option.availability.status == "unavailable"
-                if held_target == target and unserved and axis == _PROVIDER_AXIS:
-                    raise _Unservable(_providers_unaligned(step, basis, target))
-                if held_target != target:
-                    reason = (
-                        f"{basis.requirement_id!r} is also an input of {held_by!r}, which "
-                        f"counts it as {basis.label(held_target)}, and one dataset "
-                        "requirement is counted one way"
-                    )
-                elif unserved:
-                    reason = (
-                        f"{step.id!r} counts its inputs as {basis.label(target)}, and "
-                        f"{basis.requirement_id!r}'s dataset, counted as "
-                        f"{basis.label(basis.choice.active)}, is not served that way"
-                    )
-                else:
-                    continue
+                _claim(targets, basis, axis, target, step, view=view, proposer=proposer)
+    return targets
+
+
+def _refuse_double_count(
+    step: EvidenceRequirement,
+    axis: str,
+    inputs: Sequence[_InputBasis],
+    *,
+    view: SessionView,
+    proposer: Proposer,
+) -> None:
+    """Refuse a sum whose `inputs`, left on their own options of `axis`, count one
+    provider's flows twice (`_double_counted`): of a sum aligning its inputs,
+    those the user stated, and of one accepting a provider difference, every one.
+
+    Raises:
+        _Unservable: When two such inputs can count one donor's flows.
+    """
+    if axis != _PROVIDER_AXIS or not isinstance(step, SumOfRequirement):
+        return
+    pair = _double_counted(
+        [basis for basis in inputs if basis.stated] if _aligns(step, axis) else inputs
+    )
+    if pair is None:
+        return
+    first, other = pair
+    raise _Unservable(
+        _basis_unservable(
+            view,
+            proposer,
+            step_id=step.id,
+            requirement_id=other.requirement_id,
+            spec_id=other.origin,
+            option_id=first.choice.active,
+            reason=(
+                f"{step.id!r} adds {first.requirement_id!r}, counted as "
+                f"{first.label(first.choice.active)}, to {other.requirement_id!r}, "
+                f"counted as {other.label(other.choice.active)}, and a figure "
+                "including imputed multilateral flows already holds the bilateral "
+                "ones and the sum counts them twice"
+            ),
+        )
+    )
+
+
+def _claim(
+    targets: dict[tuple[str, str], tuple[str, str]],
+    basis: _InputBasis,
+    axis: str,
+    target: str,
+    step: EvidenceRequirement,
+    *,
+    view: SessionView,
+    proposer: Proposer,
+) -> None:
+    """Count `basis` on `target` along `axis` for `step` in `targets`, unless
+    another calculation counts it on another option or its dataset does not
+    serve `target`.
+
+    Raises:
+        _Unservable: With `PROVIDERS_UNALIGNED` for a provider scope the input's
+            dataset does not serve, else `OPERATION_UNSUPPORTED`.
+    """
+    held_target, held_by = targets.setdefault((basis.requirement_id, axis), (target, step.id))
+    option = next((o for o in basis.choice.options if o.option_id == target), None)
+    unserved = option is None or option.availability.status == "unavailable"
+    if held_target == target and unserved and axis == _PROVIDER_AXIS:
+        raise _Unservable(
+            _providers_unaligned(step, basis, target, permit=view.record_optional_decline)
+        )
+    if held_target != target:
+        reason = (
+            f"{basis.requirement_id!r} is also an input of {held_by!r}, which "
+            f"counts it as {basis.label(held_target)}, and one dataset "
+            "requirement is counted one way"
+        )
+    elif unserved:
+        reason = (
+            f"{step.id!r} counts its inputs as {basis.label(target)}, and "
+            f"{basis.requirement_id!r}'s dataset, counted as "
+            f"{basis.label(basis.choice.active)}, is not served that way"
+        )
+    else:
+        return
+    raise _Unservable(
+        _basis_unservable(
+            view,
+            proposer,
+            step_id=step.id,
+            requirement_id=basis.requirement_id,
+            spec_id=basis.origin,
+            option_id=target,
+            reason=reason,
+        )
+    )
+
+
+def _aligned_to_wholes(
+    targets: dict[tuple[str, str], tuple[str, str]],
+    steps: Sequence[EvidenceRequirement],
+    reads: Mapping[str, Sequence[str]],
+    by_axis: Mapping[str, Mapping[str, _InputBasis]],
+    *,
+    parts: Mapping[str, str],
+    switched: Mapping[str, tuple[str, ...]],
+    view: SessionView,
+    proposer: Proposer,
+) -> None:
+    """Count, in `targets`, every input of a calculation reading a declared whole
+    on the whole's option, the whole being a fixed target (`_aligned_bases`).
+
+    `parts` names each declared whole's part and `switched` the options the
+    user switched on the whole's own row (`_switched_options`), by the whole's
+    requirement id. On each axis a whole is counted on its switched option,
+    else on the option its part is counted on once aligned (`targets`), and
+    reads as the user's where either is. The part itself is left out: the
+    whole follows it by construction. Inputs the user stated on options
+    different from each other's keep them, as `_shared_basis` leaves them;
+    otherwise every other input is counted on the whole's option, and a
+    calculation whose wholes are on different options, or whose input the
+    user stated on another option than an unstated whole's, is refused.
+
+    Raises:
+        _Unservable: When an input cannot be counted on its whole's option.
+    """
+    for axis, bases in by_axis.items():
+        fixed: dict[str, _InputBasis] = {}
+        for whole_id, part_id in parts.items():
+            part = bases.get(part_id)
+            if part is None:
+                continue
+            own = next((o for o in switched.get(whole_id, ()) if option_axis(o) == axis), None)
+            held = targets.get((part_id, axis))
+            active = own or (held[0] if held is not None else part.choice.active)
+            fixed[whole_id] = replace(
+                part,
+                requirement_id=whole_id,
+                choice=part.choice.model_copy(update={"active": active}),
+                stated=own is not None or part.stated,
+            )
+        for step in steps:
+            if not _reads_on(step, axis):
+                continue
+            under = reached(step.id, reads)
+            wholes = [basis for whole_id, basis in fixed.items() if whole_id in under]
+            own_parts = {parts[basis.requirement_id] for basis in wholes}
+            others = [
+                basis
+                for requirement_id, basis in bases.items()
+                if requirement_id in under and requirement_id not in own_parts
+            ]
+            if not wholes or not others:
+                continue
+            inputs = [*wholes, *others]
+            stated = {basis.choice.active for basis in inputs if basis.stated}
+            if not _aligns(step, axis) or len(stated) > 1:
+                _refuse_double_count(step, axis, inputs, view=view, proposer=proposer)
+                continue
+            whole = wholes[0]
+            target = whole.choice.active
+            odd = next(
+                (
+                    basis
+                    for basis in inputs
+                    if basis.choice.active != target
+                    and (basis.requirement_id in fixed or basis.stated)
+                ),
+                None,
+            )
+            if odd is not None:
                 raise _Unservable(
                     _basis_unservable(
                         view,
                         proposer,
                         step_id=step.id,
-                        requirement_id=basis.requirement_id,
-                        spec_id=basis.origin,
+                        requirement_id=odd.requirement_id,
+                        spec_id=odd.origin,
                         option_id=target,
-                        reason=reason,
+                        reason=(
+                            f"{step.id!r} reads {whole.requirement_id!r}, a total compiled "
+                            f"from its part and counted as {whole.label(target)}, which is "
+                            f"never moved, and {odd.requirement_id!r} is counted as "
+                            f"{odd.label(odd.choice.active)}"
+                        ),
                     )
                 )
-    return targets
+            for basis in others:
+                _claim(targets, basis, axis, target, step, view=view, proposer=proposer)
 
 
 def _realigned_pins(
@@ -4144,18 +4293,27 @@ def _realigned_pins(
 
 
 def _providers_unaligned(
-    step: EvidenceRequirement, basis: _InputBasis, target: str
+    step: EvidenceRequirement,
+    basis: _InputBasis,
+    target: str,
+    *,
+    permit: Callable[[UnsupportedOperation], None],
 ) -> dict[str, object]:
-    """Return the `PROVIDERS_UNALIGNED` problem for an input of `step` its dataset does
-    not serve on `target`, the provider scope `step`'s other inputs are counted on.
+    """Record and return the `PROVIDERS_UNALIGNED` problem for an input of `step` its
+    dataset does not serve on `target`, the provider scope `step`'s other inputs are
+    counted on.
 
     The planner can repair it: declare a share's total the part over every
     sector (`DatasetRequirement.whole_of`), or pin an input counted on that
     scope. `accept_provider_difference` is named only for a user who asked for
     that input's source, so the planner does not take it as a way past the
-    refusal. `detail.requirement_id` names the input, as every refusal about
-    one requirement does, for its sentence (`harness.sentences`).
+    refusal. Where no repair applies, the calculation is declined: `permit`
+    records an `unsupported_ask` decline as optional, so the decline is earned
+    and a repaired plan owes none. `detail.requirement_id` names the input, as
+    every refusal about one requirement does, for its sentence
+    (`harness.sentences`).
     """
+    permit(UnsupportedOperation.UNSUPPORTED_ASK)
     return problem(
         ProblemCode.PROVIDERS_UNALIGNED,
         f"{step.id!r} subtracts, divides or adds its inputs, so they count one provider scope, "
@@ -4165,7 +4323,9 @@ def _providers_unaligned(
         "sector, state that total with `whole_of` naming its part; otherwise pin for "
         f"{basis.requirement_id!r} a dataset counted as {basis.label(target)}. Set "
         f"`accept_provider_difference` on {step.id!r} only when the user asked for "
-        f"{basis.requirement_id!r}'s source as it stands.",
+        f"{basis.requirement_id!r}'s source as it stands. When none of these applies, record "
+        f"the part of the question asking for {step.id!r} in `declined` with code "
+        f"{UnsupportedOperation.UNSUPPORTED_ASK.value!r}.",
         outcome=Outcome.INVALID_INPUT,
         detail={
             "requirement_id": basis.requirement_id,
@@ -4279,11 +4439,32 @@ def _whole_parts(
     return declared
 
 
+def _switched_by_whole(
+    declared: Sequence[tuple[DatasetRequirement, DatasetRequirement, str]],
+    *,
+    carried: Sequence[EvidenceRequirement],
+    compiled: Sequence[AlignedPin],
+) -> dict[str, tuple[str, ...]]:
+    """The options the user switched on each declared whole's own row
+    (`_switched_options`), by requirement id, `carried` being the requirements
+    of the plan amended and `compiled` the wholes compiled so far."""
+    own = {(pin.spec_id, pin.whole_axis): pin.option_ids for pin in compiled}
+    before = {
+        requirement.id: requirement
+        for requirement in carried
+        if isinstance(requirement, DatasetRequirement)
+    }
+    return {
+        whole.id: _switched_options(whole, before.get(whole.id), own, axis=axis)
+        for whole, _, axis in declared
+    }
+
+
 def _declared_wholes(
     declared: Sequence[tuple[DatasetRequirement, DatasetRequirement, str]],
     *,
     realigned: Mapping[str, str],
-    carried: Sequence[EvidenceRequirement],
+    switched: Mapping[str, tuple[str, ...]],
     shown: Mapping[str, PinSource],
     compiled: Sequence[AlignedPin],
 ) -> dict[str, str]:
@@ -4294,13 +4475,13 @@ def _declared_wholes(
     the declared axis binds unbound (`axis_slot`) and every other choice
     held, so it counts the same donors, recipients, measure basis and
     providers as the part, but for the options the user switched on the
-    whole's own row. Those are the options of the compiled whole the
-    whole's pin is (`AlignedPin.option_ids`, held by `harness.graph.switch`
-    for a switch), else of the one the requirement of the same id pins in
-    the plan this call amends (`carried`), so a whole restated with its
-    `whole_of` and no pin keeps them, and a whole compiled again from
-    another pin of its part keeps them too. A whole restated with another
-    `whole_of` starts from the part's own options.
+    whole's own row (`switched`, `_switched_by_whole`). Those are the
+    options of the compiled whole the whole's pin is (`AlignedPin.option_ids`,
+    held by `harness.graph.switch` for a switch), else of the one the
+    requirement of the same id pins in the plan this call amends, so a whole
+    restated with its `whole_of` and no pin keeps them, and a whole compiled
+    again from another pin of its part keeps them too. A whole restated with
+    another `whole_of` starts from the part's own options.
     `compiled` holds the wholes compiled so far (`AlignedPin.key`), so wholes
     declaring one part, axis and options share one compile.
 
@@ -4311,12 +4492,6 @@ def _declared_wholes(
             part's pin hold no choice on the axis binding one slot.
     """
     pins = {pin.key: pin.spec_id for pin in compiled}
-    own = {(pin.spec_id, pin.whole_axis): pin.option_ids for pin in compiled}
-    before = {
-        requirement.id: requirement
-        for requirement in carried
-        if isinstance(requirement, DatasetRequirement)
-    }
     wanted: dict[tuple[str, str, tuple[str, ...]], Realignment] = {}
     wholes: dict[str, str] = {}
     for whole, part, axis in declared:
@@ -4330,7 +4505,7 @@ def _declared_wholes(
                     whole_id=whole.id, part_spec_id=pin, reason=reason, cause=cause
                 )
             )
-        options = _switched_options(whole, before.get(whole.id), own, axis=axis)
+        options = switched[whole.id]
         held = pins.get((pin, options, axis))
         if held is not None:
             wholes[whole.id] = held
@@ -4393,13 +4568,18 @@ def _without_replaced_whole_decisions(
     wholes: Collection[str],
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
     """`decisions` and `evidence_requirements` less each planner decision only the
-    wholes `wholes` cite, by requirement id, and those citations.
+    wholes `wholes` cite, by requirement id, that fixes the whole's measure,
+    and those citations.
 
-    Such a decision chose the source of a total that is now compiled from
-    its part's own dataset, so it can say something false of the plan, as
-    "Source for total aid denominator: dac1 total aid" over a CRS whole.
-    `_whole_decisions` states the whole in its place. A user's decision, and
-    one a requirement other than those wholes cites, stays. Citations are
+    A planner decision fixing a total's measure chose the dataset it reads,
+    and the total is now compiled from its part's own dataset, so the
+    decision can say something false of the plan, as "Source for total aid
+    denominator: dac1 total aid" over a CRS whole. `_whole_decisions` states
+    the whole in its place. A planner fixes no provider scope, measure basis
+    or sector: Search's choices state those, and the scope decisions written
+    for them are never removed here. Any other decision, such as the year a
+    whole reads, stays cited by the whole, as do a user's decision and one a
+    requirement other than those wholes cites. Citations are
     read over `after`, the plan's requirements once the patch applies, so a
     requirement the patch carries counts as well as one it states.
 
@@ -4420,6 +4600,8 @@ def _without_replaced_whole_decisions(
             *(decision for decision in carried if decision.slot not in restated),
         ]
         if decision.resolved_by is ResolvedBy.PLANNER_DEFAULT
+        and decision.fixes is not None
+        and decision.fixes.measure is not None
         and not (is_scope_choice(decision) or is_search_pin(decision))
         and decision.caveat != "derived_whole"
         and citers.get(decision.slot)

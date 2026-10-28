@@ -138,6 +138,7 @@ from planner.plan import (
     load_plan,
     pin_sources,
     plan_revision,
+    record_optional_decline,
     record_reduction_refused_asks,
     record_unsupported,
     save_full_history,
@@ -1175,6 +1176,10 @@ class ToolContextSession:
         """Record `operation` as answered `unsupported` in this planner entry."""
         record_unsupported(self.tool_context.state, operation)
 
+    def record_optional_decline(self, operation: UnsupportedOperation) -> None:
+        """Permit `operation` as an optional decline in this planner entry."""
+        record_optional_decline(self.tool_context.state, operation)
+
     def record_reduction_refused(self, asks: Iterable[int]) -> None:
         """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
         record_reduction_refused_asks(self.tool_context.state, asks)
@@ -1519,10 +1524,13 @@ async def compile_whole(
     or the option of `realignment.option_ids` on that choice's axis, one
     the user switched on the whole's own row. Search then keeps the part's
     measure basis, provider scope and region, which an option the whole
-    cannot serve would otherwise leave to Search's default. No model call is made. The answer is shown to the
-    planner as a source of its own, its block marking every posted axis as
-    the planner's (`harness.scope_choices.mark_planner_axes`) so a later
-    search carries none of them, and held as a
+    cannot serve would otherwise leave to Search's default. No model call
+    is made. The answer is shown to the planner as a source of its own,
+    whose choices the whole takes from its part: each choice not switched on
+    the whole's row carries the part's provenance, and the block marks as
+    the planner's (`harness.scope_choices.mark_planner_axes`) the axes the
+    part's block marks, so the whole reads as the part was settled and a
+    later search carries what the part's carries. It is held as a
     `submission.service.AlignedPin` from the part on that axis and those
     options, which every whole declaring the part and the axis on them pins.
 
@@ -1585,8 +1593,13 @@ async def compile_whole(
     spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
     if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
         return underivable(f"Search holds no one dataset counting every {axis} of {part_pin}")
-    digest = resolver_digest({"parts": [dict(part)]})
-    mark_planner_axes(digest, (entry.axis for entry in entries))
+    inherited: dict[str, str] = {
+        choice.axis: choice.provenance
+        for choice in scope.choices
+        if choice.axis != axis and choice.axis not in switched
+    }
+    digest = resolver_digest({"parts": [_with_provenance(part, inherited)]})
+    mark_planner_axes(digest, planner_axes(block) & inherited.keys())
     whole_source = PinSource(
         block=digest["spec_block"], settled=True, asked_roles=source.asked_roles
     )
@@ -1602,6 +1615,18 @@ async def compile_whole(
         ),
     )
     return None
+
+
+def _with_provenance(part: Mapping[str, Any], provenance: Mapping[str, str]) -> dict[str, Any]:
+    """A copy of `part`, a `definite` Search part, whose scope choice on each axis of
+    `provenance` carries the provenance given for that axis (`compile_whole`)."""
+    copied = copy.deepcopy(dict(part))
+    resolved = copied["spec"].get("resolved")
+    scope = resolved.get("scope_choices") if isinstance(resolved, dict) else None
+    for choice in (scope or {}).get("choices") or ():
+        if isinstance(choice, dict) and choice.get("axis") in provenance:
+            choice["provenance"] = provenance[choice["axis"]]
+    return copied
 
 
 async def pin_by_search(
