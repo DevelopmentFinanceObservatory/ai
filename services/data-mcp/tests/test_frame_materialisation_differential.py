@@ -1,7 +1,7 @@
 """Record-and-replay for the artifact decode step: every table in
 `fixtures/frame_materialisation_differential.jsonl` is written as a Parquet
 artifact shaped like the apis service's `get_data` output, decoded by
-`frame_materialisation._frame_from_parquet_bytes`, and the outcome must equal
+`frame_materialisation.frame_from_parquet_bytes`, and the outcome must equal
 the recorded one: the frame's `frame_sha256`, a `FrameError` category, or the
 type of any other exception.
 
@@ -26,7 +26,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from data_mcp.frame_materialisation import _frame_from_parquet_bytes
+from data_mcp.frame_materialisation import frame_from_parquet_bytes
 from dfo_frame_grammar import FrameError, frame_sha256
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "frame_materialisation_differential.jsonl"
@@ -306,7 +306,7 @@ def generate_cases() -> list[dict[str, Any]]:
 
 def _outcome(columns: list[Column]) -> dict[str, object]:
     try:
-        frame = _frame_from_parquet_bytes(_parquet(columns))
+        frame = frame_from_parquet_bytes(_parquet(columns))
     except FrameError as exc:
         return {"frame_error": exc.category}
     except Exception as exc:

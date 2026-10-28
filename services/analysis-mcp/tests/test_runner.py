@@ -15,6 +15,7 @@ from analysis_mcp.runner_client import RunnerClient, runner_holder
 from analysis_mcp.summary import VerbSummary
 from common.caller import supplied_caller
 from common.materialisation import (
+    AnchorRecord,
     FrameRef,
     InMemoryMaterialisationStore,
     MintRecord,
@@ -131,31 +132,65 @@ async def test_a_two_sided_call_fills_data_and_other_by_the_runners_slots(
     }
     assert rendered == inputs
     assert runner.body["latest"] is False
+    assert "anchor_roots" not in runner.body
 
 
-async def test_a_rolling_call_sends_its_op_spec_and_no_anchor_key(
+_ROLLING = {
+    "window_start": {"anchor": "latest", "offset": -1, "rule": "half1"},
+    "window_end": {"anchor": "latest", "offset": 0, "rule": "half1"},
+    "population": [{"spec_id": _SPEC, "bindings": {}}],
+}
+
+
+async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
     store: InMemoryMaterialisationStore,
 ) -> None:
+    # The record was resolved over a second root beside the call's own frame, as
+    # over both sides of a pairing whose one side the call grows.
+    record = AnchorRecord(
+        populations=[{"spec_id": _SPEC, "bindings": {}}],
+        roots=(FrameRef(**_FRAME), FrameRef(**_DERIVED)),
+        rule="half1",
+        period="2022",
+    )
+    await store.put_anchor_record(record)
     runner = _install(_problem(422, "op_spec_invalid"))
-    rolling = {
-        "window_start": {"anchor": "latest", "offset": -1, "rule": "half1"},
-        "window_end": {"anchor": "latest", "offset": 0, "rule": "half1"},
-        "population": [{"spec_id": _SPEC, "bindings": {}}],
-    }
     await verbs.growth(
         frame_ref=_FRAME,
         window_start="2021",
         window_end="2022",
-        rolling=rolling,
-        anchor_key="rak_" + "6" * 32,
+        rolling=_ROLLING,
+        anchor_key=record.anchor_key,
     )
 
     tree = runner.body["tree"]
     assert tree["verb"] == "growth"
     assert tree["arguments"]["window_start"] == "2021"
-    assert tree["arguments"]["rolling"]["window_end"] == rolling["window_end"]
+    assert tree["arguments"]["rolling"]["window_end"] == _ROLLING["window_end"]
     assert "anchor_key" not in tree["arguments"]
     assert "frame_ref" not in tree["arguments"]
+    assert runner.body["anchor_roots"] == [
+        _DERIVED,
+        {**_FRAME, "rendering": {"without_party_totals": False, "columns": []}},
+    ]
+
+
+async def test_a_rolling_call_whose_anchor_key_names_no_record_refuses_before_any_call(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    runner = _install(_problem(422, "op_spec_invalid"))
+    result = await verbs.growth(
+        frame_ref=_FRAME,
+        window_start="2021",
+        window_end="2022",
+        rolling=_ROLLING,
+        anchor_key="rak_" + "6" * 32,
+    )
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "rolling_anchor_unresolved"
+    assert result.structured_content["fix"]["detail"] == "anchor_record_missing"
+    assert runner.requests == []
 
 
 # The root a frame ref becomes ------------------------------------------------------

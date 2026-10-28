@@ -24,7 +24,9 @@ again on the data apis holds now:
    (`data_mcp.frame_materialisation.frame_ref_for`) was the sum, and replays.
 3. A tree with a rolling op-spec has its latest period resolved once, over the
    new frames of the roots a path through a rolling op-spec reads
-   (`common.rolling.rolling_roots`), by analysis-mcp's `resolve_anchor`. Each rolling literal is
+   (`common.rolling.rolling_roots`), or of the `anchor_roots` the runner stored on
+   a node, which name the roots the period was first taken over in their place,
+   by analysis-mcp's `resolve_anchor`. Each rolling literal is
    rewritten to that period at its offset, and each rolling call carries the
    returned `anchor_key`. A tree of fixed periods makes no such call.
 4. The tree is walked from its roots up. Each node's verb is called with its
@@ -138,6 +140,7 @@ RESOLVE_ANCHOR_TOOL = "resolve_anchor"
 
 _PRIMARY_SLOT = "frame_ref"
 _ROLLING = "rolling"
+_ANCHOR_ROOTS = "anchor_roots"
 _RETRY_AFTER_DELAY = "retry_after_delay"
 
 Stage = Literal["recipe", "mint", "anchor", "verb", "publish"]
@@ -568,8 +571,12 @@ class _Replay:
             return
         self.check_deadline()
         # The period is taken over only these roots, since a dataset joined beside
-        # a rolling step does not move it (`common.rolling.rolling_roots`).
-        reached = [self.root_frames[node["root"]] for node in rolling_roots(self.tree)]
+        # a rolling step does not move it (`common.rolling.rolling_roots`), unless
+        # the tree names its anchor roots, as dfo-apis' runner reads them.
+        anchors = [
+            root for node in _derived_nodes(self.tree) for root in node.get(_ANCHOR_ROOTS, ())
+        ]
+        reached = [self.root_frames[node["root"]] for node in anchors or rolling_roots(self.tree)]
         roots = {(frame.ref.spec_id, frame.ref.content_version): frame for frame in reached}
         answer = await self._claimed(
             sum(frame.rows for frame in roots.values()),

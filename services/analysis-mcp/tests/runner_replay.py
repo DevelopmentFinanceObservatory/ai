@@ -60,11 +60,11 @@ def _replies(path: Path) -> dict[str, Any]:
 
 
 def _roots(body: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
-    """Every dataset root a request names."""
+    """Every dataset root a request names, its anchor roots included."""
     if "roots" in body:
         yield from body["roots"]
         return
-    stack = [body["tree"]]
+    stack = [body["tree"], *body.get("anchor_roots", ())]
     while stack:
         node = stack.pop()
         if "verb" in node:

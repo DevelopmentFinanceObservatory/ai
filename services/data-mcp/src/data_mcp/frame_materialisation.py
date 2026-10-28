@@ -102,6 +102,7 @@ __all__ = [
     "WITHOUT_PARTY_TOTALS",
     "DegradedReason",
     "MaterialisationOutcome",
+    "frame_from_parquet_bytes",
     "frame_ref_for",
     "materialise_and_register",
     "recorded_stamp",
@@ -751,7 +752,7 @@ async def _parse_and_register(
     schema and trusts the cells), and registered only when its `frame_sha256` mints
     `ref.content_version`, so the frame held under an apis service pair is the one its
     token names. A mismatch refuses `upstream_response_unusable`. Any other artifact
-    is a rendering, validated cell by cell (`_frame_from_parquet_bytes`) and
+    is a rendering, validated cell by cell (`frame_from_parquet_bytes`) and
     registered under its derived pair unchecked.
 
     The frame's trace keeps the mint's `options` and `stamp`, the stamp `ref` is named
@@ -768,7 +769,7 @@ async def _parse_and_register(
         frame = (
             frame_from_verified_parquet_bytes(fetched)
             if canonical
-            else _frame_from_parquet_bytes(fetched)
+            else frame_from_parquet_bytes(fetched)
         )
         minted = mint_content_version(frame_sha256=frame_sha256(frame)) if canonical else None
     except (FrameError, pa.ArrowException, KeyError) as exc:
@@ -1289,7 +1290,7 @@ def holds_family_ref(frame: Frame, *, spec_id: str) -> bool:
     return pc.index(frame.table.column(STAT_VAR_COLUMN), f"dcid:{spec_id}").as_py() >= 0
 
 
-def _frame_from_parquet_bytes(data: bytes) -> Frame:
+def frame_from_parquet_bytes(data: bytes) -> Frame:
     """Parse `data` (a whole Parquet file's bytes) into a `Frame`.
 
     `role_keys` is every column name in the table's own schema minus the grammar's

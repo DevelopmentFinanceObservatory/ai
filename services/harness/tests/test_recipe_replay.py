@@ -609,6 +609,23 @@ async def test_a_dataset_joined_beside_a_rolling_step_is_not_read_for_its_period
     assert scene.tools.names == ["resolve_anchor", "filter", "join"]
 
 
+async def test_the_anchor_roots_a_recipe_names_are_the_roots_its_period_is_read_over(
+    scene: Scene,
+) -> None:
+    # dfo-apis' runner stores the roots its period was taken over on the top node,
+    # here the dataset joined beside the rolling step too.
+    _, recipe = await scene.rolling_beside_fixed()
+    anchored = copy.deepcopy(recipe)
+    anchored["tree"]["anchor_roots"] = [
+        {"frame": root["frame"], "root": index} for index, root in enumerate(recipe["roots"])
+    ]
+
+    await scene.replay(anchored)
+
+    read = [root["spec_id"] for root in scene.tools.arguments("resolve_anchor")["roots"]]
+    assert sorted(read) == sorted([SPEC, _BESIDE])
+
+
 async def test_a_root_recorded_with_one_stat_var_that_now_holds_two_is_refused(
     scene: Scene,
 ) -> None:

@@ -4,7 +4,7 @@ analysis-mcp verb.
 apis writes a `get_data` Parquet artifact's `unit` column as text
 (`materialise.formats._cell_text` in apis): a unit ref as its own text, a
 converted unit as the JCS text of its `{currency, prices, base_year}` object.
-`data_mcp.frame_materialisation._frame_from_parquet_bytes` decodes each cell
+`data_mcp.frame_materialisation.frame_from_parquet_bytes` decodes each cell
 into the frame's own unit, so a converted-unit pin on `rank`, `aggregate` or
 `share_of` compares with the cell by currency, prices and base year. The verbs
 compute on dfo-apis' analysis runner, replayed from its recorded answers
@@ -35,7 +35,7 @@ from common.materialisation import (
     set_store,
 )
 from common.unit_refs import PERCENT_UNIT
-from data_mcp.frame_materialisation import _frame_from_parquet_bytes
+from data_mcp.frame_materialisation import frame_from_parquet_bytes
 from dfo_frame_grammar import canonical_frame_bytes
 from dfo_frame_grammar.grammar import UnitRequest
 from fastmcp import Client
@@ -104,7 +104,7 @@ async def store() -> AsyncIterator[InMemoryMaterialisationStore]:
 async def _register(store: InMemoryMaterialisationStore, artifact: bytes) -> dict[str, str]:
     """Decode `artifact` through data-mcp's own reader and hold it the way
     `materialise_and_register` does, under a frame reference its rows name."""
-    frame = _frame_from_parquet_bytes(artifact)
+    frame = frame_from_parquet_bytes(artifact)
     token = hashlib.sha256(canonical_frame_bytes(frame)).hexdigest()[:32]
     ref = FrameRef(spec_id=f"spec_{token}", content_version=f"cv_{token}")
     trace = MaterialisationTrace(
@@ -163,14 +163,14 @@ def _result_unit(frame: pa.Table) -> object:
 
 
 def test_a_converted_unit_text_cell_decodes_to_its_request() -> None:
-    frame = _frame_from_parquet_bytes(_artifact(_UNIT_TEXT["USD_CONSTANT_2024"]))
+    frame = frame_from_parquet_bytes(_artifact(_UNIT_TEXT["USD_CONSTANT_2024"]))
 
     units = {row[frame.columns.index("unit")] for row in frame.rows}
     assert units == {UnitRequest(currency="USD", prices="constant", base_year=2024)}
 
 
 def test_a_ref_unit_text_cell_decodes_to_the_ref() -> None:
-    frame = _frame_from_parquet_bytes(_artifact("CurrencyUSD"))
+    frame = frame_from_parquet_bytes(_artifact("CurrencyUSD"))
 
     units = {row[frame.columns.index("unit")] for row in frame.rows}
     assert units == {"CurrencyUSD"}

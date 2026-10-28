@@ -1,8 +1,8 @@
 """The client of dfo-apis' analysis runner, where every verb and `resolve_anchor`
 computes.
 
-`run_tree` posts a request tree (`runner_tree`) to `POST /api/datasets/analysis`
-and `find_anchor` posts roots and populations to `POST
+`run_tree` posts a request tree (`runner_tree`), with a rolling call's anchor
+roots, to `POST /api/datasets/analysis` and `find_anchor` posts roots and populations to `POST
 /api/datasets/analysis/anchor`. Each returns the runner's answer, or the
 `ToolRefusal` its reply maps to:
 
@@ -259,10 +259,18 @@ def _pending(response: httpx2.Response) -> ToolRefusal:
 
 
 async def run_tree(
-    node: Mapping[str, Any], *, refs_by_root: Mapping[Pair, FrameRef]
+    node: Mapping[str, Any],
+    *,
+    anchor_roots: Sequence[Mapping[str, Any]] = (),
+    refs_by_root: Mapping[Pair, FrameRef],
 ) -> VerbSummary | ToolRefusal:
-    """The summary of the tree `node` computed by the runner, or its refusal."""
-    response = await runner_holder.get().post(ANALYSIS_PATH, {"tree": node, "latest": False})
+    """The summary of the tree `node` computed by the runner, or its refusal.
+    `anchor_roots`, when given, are the roots the runner takes a rolling call's
+    latest period over."""
+    request: dict[str, Any] = {"tree": node, "latest": False}
+    if anchor_roots:
+        request["anchor_roots"] = list(anchor_roots)
+    response = await runner_holder.get().post(ANALYSIS_PATH, request)
     if isinstance(response, ToolRefusal):
         return response
     if response.status_code == httpx2.codes.ACCEPTED:

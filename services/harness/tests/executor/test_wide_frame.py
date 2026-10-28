@@ -2395,14 +2395,6 @@ _MATCHED_PLACES = (
 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "dfo-apis' runner resolves a rolling literal from the roots of the call's own tree, so "
-        "a growth over one side of a paired population refuses rolling_anchor_unresolved "
-        "(population_without_root)"
-    ),
-)
 async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_places_share(
     plan_for: PlanFactory,
     retrieved: Retrieved,

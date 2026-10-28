@@ -29,7 +29,7 @@ _CANONICAL: dict[str, bytes] = {}
 def version_of(frame_file: bytes) -> str:
     """The `content_version` of the version whose frame file is `frame_file`: the
     token of the frame data-mcp parses out of it."""
-    frame = frame_materialisation._frame_from_parquet_bytes(frame_file)
+    frame = frame_materialisation.frame_from_parquet_bytes(frame_file)
     content_version = mint_content_version(frame_sha256=frame_sha256(frame))
     _CANONICAL[content_version] = frame_to_parquet_bytes(frame)
     return content_version

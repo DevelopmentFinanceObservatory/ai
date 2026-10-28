@@ -23,7 +23,13 @@ record is sent as a version read with no columns. The runner reads a root with
 no other option, so a frame fetched with one refuses `rendering_not_recorded`.
 
 `anchor_key` is no part of an op-spec, and the runner checks every rolling
-literal against the latest period it finds itself, so no tree carries one.
+literal against the latest period it finds itself, so no tree carries one. The
+key names the anchor record `resolve_anchor` stored, whose `roots` are the frames
+the anchor route was asked about. A rolling call sends them as the request's
+`anchor_roots` (`Tree.anchor_roots`), each the root node `root_node` gives, so the
+runner takes the latest period over the roots the literals were written from,
+such as both sides of a pairing whose one side the call grows. A key that names
+no readable record refuses `rolling_anchor_unresolved` before any call.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from common.materialisation import FrameRef, get_store
+from common.materialisation import AnchorRecordIntegrityError, FrameRef, get_store
 
 from analysis_mcp.identity import OpSpecVariant
 from analysis_mcp.op_spec import Verb
@@ -67,6 +73,7 @@ class Tree:
 
     node: dict[str, Any]
     refs_by_root: Mapping[Pair, FrameRef]
+    anchor_roots: tuple[dict[str, Any], ...] = ()
 
 
 async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
@@ -123,8 +130,38 @@ def _sides(op_spec: OpSpecVariant) -> tuple[FrameRef, FrameRef | None]:
     return op_spec.frame_ref, second
 
 
-async def verb_tree(op_spec: OpSpecVariant) -> Tree | ToolRefusal:
-    """The one-node tree of `op_spec`, or the refusal for a frame it reads."""
+async def _anchor_roots(
+    anchor_key: str, refs_by_root: dict[Pair, FrameRef]
+) -> tuple[dict[str, Any], ...] | ToolRefusal:
+    """The root node of each root of the anchor record under `anchor_key`, each
+    pair added to `refs_by_root`, or the refusal for a record or root the runner
+    cannot be sent."""
+    try:
+        record = await get_store().get_anchor_record(anchor_key)
+    except AnchorRecordIntegrityError as exc:
+        return ToolRefusal.rolling_anchor_unresolved(
+            detail="anchor_record_unreadable", reason=exc.reason, context={"anchor_key": anchor_key}
+        )
+    if record is None:
+        return ToolRefusal.rolling_anchor_unresolved(
+            detail="anchor_record_missing",
+            reason=f"no record is stored under {anchor_key}",
+            context={"anchor_key": anchor_key},
+        )
+    nodes: list[dict[str, Any]] = []
+    for ref in record.roots:
+        root = await root_node(ref)
+        if isinstance(root, ToolRefusal):
+            return root
+        node, pair = root
+        nodes.append(node)
+        refs_by_root.setdefault(pair, ref)
+    return tuple(nodes)
+
+
+async def verb_tree(op_spec: OpSpecVariant, *, anchor_key: str | None = None) -> Tree | ToolRefusal:
+    """The one-node tree of `op_spec`, with the anchor roots of the record under
+    `anchor_key` when given, or the refusal for a frame it reads."""
     slots = {"verb", "frame_ref", *_SECOND_SLOT.values()}
     arguments = op_spec.model_dump(mode="json", exclude=slots, exclude_none=True)
     inputs: dict[str, Any] = {}
@@ -138,5 +175,11 @@ async def verb_tree(op_spec: OpSpecVariant) -> Tree | ToolRefusal:
             return root
         inputs[name], pair = root
         refs_by_root[pair] = ref
+    anchor_roots: tuple[dict[str, Any], ...] = ()
+    if anchor_key is not None:
+        anchored = await _anchor_roots(anchor_key, refs_by_root)
+        if isinstance(anchored, ToolRefusal):
+            return anchored
+        anchor_roots = anchored
     node = {"verb": str(op_spec.verb), "arguments": arguments, "inputs": inputs}
-    return Tree(node=node, refs_by_root=refs_by_root)
+    return Tree(node=node, refs_by_root=refs_by_root, anchor_roots=anchor_roots)

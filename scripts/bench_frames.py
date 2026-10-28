@@ -111,8 +111,8 @@ from common.place_type import kind_column
 from common.row_budget import RowBudget, row_budget, set_row_budget
 from common.settings import BaseServiceSettings
 from data_mcp.frame_materialisation import (
-    _frame_from_parquet_bytes,
     _verify_parse_and_register,
+    frame_from_parquet_bytes,
 )
 from data_mcp.manifest import strip_manifest
 from data_mcp.settings import Settings as DataSettings
@@ -477,7 +477,7 @@ def _setup_decode(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
     del store
 
     def run() -> None:
-        _frame_from_parquet_bytes(inputs.artifact)
+        frame_from_parquet_bytes(inputs.artifact)
 
     return run
 

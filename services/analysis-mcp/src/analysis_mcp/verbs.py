@@ -6,8 +6,10 @@ twin (`aggregate_tool.aggregate` and the rest), builds the same op-spec from
 them, and runs it on the runner (`tool_pipeline.run_on_runner`). An argument
 that forms no op-spec refuses `op_spec_invalid` before any call, as it did. A
 rolling `growth`, `rank` or `filter` still needs an `anchor_key`, checked as
-before (`op_spec.with_anchor_key`), and the runner checks each rolling literal
-against the latest period it finds, so the key reaches no request.
+before (`op_spec.with_anchor_key`). The key reaches no request: the call sends
+the roots of the anchor record it names as `anchor_roots`, and the runner checks
+each rolling literal against the latest period it finds over them
+(`runner_tree.verb_tree`).
 
 `resolve_anchor` asks the runner's anchor route for the latest period of the
 root frames over the populations, then stores the anchor record and returns its
@@ -76,7 +78,7 @@ def _on_runner(in_process: Tool, build: Callable[[Arguments], OpSpecVariant]) ->
         op_spec = build_op_spec_or_refusal(lambda: build(bound.arguments))
         if isinstance(op_spec, ToolResult):
             return op_spec
-        return await run_on_runner(op_spec)
+        return await run_on_runner(op_spec, anchor_key=bound.arguments.get("anchor_key"))
 
     return tool
 
