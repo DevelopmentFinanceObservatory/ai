@@ -895,7 +895,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     """The named sets `resolved.entity_groups` states, each keyed by the role column it fills.
 
     A group stating no name names nothing a requirement can ask for, so it is
-    left out rather than failing the block. `total` is the published total
+    left out rather than failing the block. `group_id` is the membership
+    registry's id for a set the graph holds no node for. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
     `whole_of` is the classes of party a whole-population total holds, or a
     union of such totals, absent for any other set. `side_classes` is the
@@ -917,6 +918,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     role=role,
                     label=label,
                     ref=_text(group.get("ref")),
+                    group_id=_text(group.get("group_id")),
                     total=_text(group.get("total")),
                     whole_of=_party_classes(group.get("whole_of")),
                     side_classes=_party_classes(group.get("side_classes")),
@@ -1148,8 +1150,7 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     out the residuals Search says the group's total counts beside them
     (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"), named
     as Search names them; where Search states that none is, the sentence
-    states none. Where Search states nothing, on a flow side, the sentence
-    says the figure leaves out amounts the data allocates to no single country.
+    states none (`_left_out`).
     Where Search says the source publishes its own figure for the group
     (`ResolvedGroup.sum_differs`), a second sentence says that figure can
     differ, so the residuals' list ends with the first.
@@ -1163,14 +1164,6 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
         )
     if answer is MembersAnswer.EACH:
         return f"The figures for {group.label} are its members' figures, each on its own."
-    if group.left_out:
-        left_out = " and leaves out what the data allocates to no single country: " + "; ".join(
-            group.left_out
-        )
-    elif group.left_out is None and group.role in FLOW_ROLE_COLUMNS:
-        left_out = " and leaves out amounts the data allocates to no single country"
-    else:
-        left_out = ""
     published = (
         f" The source publishes its own figure for {group.label}, "
         "which can differ from one built from its members."
@@ -1178,7 +1171,34 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
         else ""
     )
     built = "adds up" if answer is MembersAnswer.SUMMED else "is computed from"
-    return f"The figure for {group.label} {built} its members' figures{left_out}.{published}"
+    return (
+        f"The figure for {group.label} {built} its members' figures{_left_out(group)}.{published}"
+    )
+
+
+def _left_out(group: ResolvedGroup) -> str:
+    """The clause naming what `group`'s members leave out of its published total.
+
+    On the recipient side the residuals are the money the data allocates to no
+    single country ("Africa, unallocated by country (DAC)"); on any other side
+    they are named as what the group's total counts beside its members. Where
+    Search states nothing on a flow side, the clause says the members leave
+    such amounts out on the recipient side and may on the donor side; where it
+    states that none is, there is no clause.
+    """
+    unallocated = group.role == "destination"
+    if group.left_out:
+        what = (
+            "what the data allocates to no single country"
+            if unallocated
+            else f"what the source's total for {group.label} counts beside them"
+        )
+        return f" and leaves out {what}: " + "; ".join(group.left_out)
+    if group.left_out is None and group.role in FLOW_ROLE_COLUMNS:
+        if unallocated:
+            return " and leaves out amounts the data allocates to no single country"
+        return f" and may leave out amounts the source's total for {group.label} counts beside them"
+    return ""
 
 
 def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
@@ -1186,10 +1206,16 @@ def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
     for a resubmit to post beside the identity they stand for (`_groups`).
 
     `total` is not posted. Search recomputes it from what the role binds,
-    and a server that predates the field refuses it.
+    and a server that predates the field refuses it. `group_id` is posted
+    where set: a set the graph holds no node for, read as its members, is
+    kept only through it, with the total its dataset publishes for it.
     """
     return {
-        group.role: {"label": group.label, **({"ref": group.ref} if group.ref else {})}
+        group.role: {
+            "label": group.label,
+            **({"ref": group.ref} if group.ref else {}),
+            **({"group_id": group.group_id} if group.group_id else {}),
+        }
         for group in groups
     }
 

@@ -11,8 +11,11 @@ from typing import Any, get_args
 import pytest
 from data_mcp.digest import _dropped_cause_words
 from data_mcp.search_tool import SearchContext
+from harness import tool_contracts
+from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.scope_choices import REASON_COPY, PartScope, ScopeEntry, ScopeReasonCode
-from harness.tool_contracts import graph_envelope, reading_facts
+from harness.tool_contracts import graph_envelope, reading_facts, resolver_digest
+from harness.turn_records import SearchReading
 from pydantic import ValidationError
 
 from .basis_alignment import dac1_with_contributions
@@ -593,6 +596,38 @@ def test_a_part_summary_says_a_set_is_read_as_its_published_total(
     (summary,) = graph_envelope({"parts": [part]})["part_digests"]
 
     assert summary.get("group_readings") == readings
+
+
+@pytest.mark.parametrize("whole_of", [["official"], ["party"]], ids=["readable", "unknown-class"])
+def test_a_searched_part_reads_its_sets_once_from_digest_to_stored_reading(
+    monkeypatch: pytest.MonkeyPatch, whole_of: list[str]
+) -> None:
+    """The digest's group readings and the stored reading's sets come from one
+    read of the block, so an unreadable set is warned of once."""
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "entity_groups": {"origin": {"ref": None, "label": "DAC", "whole_of": whole_of}},
+    }
+    reads: list[object] = []
+    read = tool_contracts.readable_groups
+
+    def counting(block: Any) -> Any:
+        reads.append(block)
+        return read(block)
+
+    monkeypatch.setattr(tool_contracts, "readable_groups", counting)
+    state: dict[str, Any] = {}
+
+    (reading,) = store_search(state, resolver_digest({"parts": [part]}))
+
+    assert len(reads) == 1
+    (stored,) = [SearchReading.model_validate(raw) for raw in state[ORCHESTRATOR_SEARCHES_KEY]]
+    unreadable = whole_of == ["party"]
+    assert (stored.entity_groups_unreadable, len(stored.entity_groups)) == (
+        unreadable,
+        0 if unreadable else 1,
+    )
+    assert tool_contracts.GROUP_FACTS_KEY not in reading
 
 
 @pytest.mark.parametrize(

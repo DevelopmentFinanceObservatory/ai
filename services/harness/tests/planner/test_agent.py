@@ -150,6 +150,8 @@ from planner.records import (
     MAX_ENTITIES,
     AmbiguousEntityReading,
     AmbiguousSourceReading,
+    Breakdown,
+    BreakdownDimension,
     DenominatorScope,
     EntityCandidate,
     EntityIn,
@@ -178,6 +180,7 @@ from submission.service import (
     COMBINE_OPTION,
     AlignedPin,
     Realignment,
+    SourceReadings,
     _choice_not_offered,
     _combination_unasked,
     _entity_dcid_unoffered,
@@ -1751,6 +1754,11 @@ def _sum_of_two_sources(
     )
 
 
+def _shown_readings(ctx: _FakeToolContext) -> SourceReadings:
+    """The readings of the blocks `ctx` shows the planner, as one proposal reads them."""
+    return SourceReadings.of_shown(pin_sources(ctx.state))
+
+
 @pytest.mark.parametrize(
     ("datasets", "resolved_by", "refused"),
     [
@@ -1790,7 +1798,9 @@ def test_a_sum_of_two_datasets_needs_the_users_decision(
         requirement=requirement,
     )
 
-    result = _combination_unasked(plan, ToolContextSession(ctx), previous=None)
+    result = _combination_unasked(
+        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+    )
 
     if refused:
         assert result is not None
@@ -1966,7 +1976,9 @@ def test_a_users_decision_to_combine_two_datasets_needs_their_pick(
         requirement=requirement,
     )
 
-    result = _combination_unasked(plan, ToolContextSession(ctx), previous=None)
+    result = _combination_unasked(
+        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+    )
 
     if traced:
         assert result is None
@@ -1995,7 +2007,9 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
         requirement=requirement,
     )
 
-    result = _combination_unasked(plan, ToolContextSession(ctx), previous=None)
+    result = _combination_unasked(
+        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+    )
 
     assert result is not None
     assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
@@ -2073,7 +2087,9 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
     plan = _with_debt_side(base, requirement_id=stated[0], spec_id=stated[1], measure=measure)
     previous = None
     if route == "pick":
-        refusal = _combination_unasked(first, ToolContextSession(ctx), previous=None)
+        refusal = _combination_unasked(
+            first, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        )
         assert refusal is not None
         detail = refusal["detail"]
         ctx.session.events.extend(
@@ -2084,7 +2100,9 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
     else:
         previous = first
 
-    result = _combination_unasked(plan, ToolContextSession(ctx), previous=previous)
+    result = _combination_unasked(
+        plan, ToolContextSession(ctx), previous=previous, sources=_shown_readings(ctx)
+    )
 
     assert (result is not None) is refused
     if result is not None:
@@ -2180,7 +2198,9 @@ def test_a_sum_carried_from_an_earlier_plan_keeps_its_sum_without_a_new_pick(
         }
     )
 
-    result = _combination_unasked(plan, ToolContextSession(ctx), previous=previous_of(recorded))
+    result = _combination_unasked(
+        plan, ToolContextSession(ctx), previous=previous_of(recorded), sources=_shown_readings(ctx)
+    )
 
     assert (result is not None) is refused
     if result is not None:
@@ -7581,7 +7601,9 @@ def test_a_provider_difference_over_four_inputs_is_stated_within_the_rationale_l
     ]
     shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in blocks.values()}
 
-    (stated,) = submission_service._difference_decisions(requirements, shown=shown)["all"]
+    (stated,) = submission_service._difference_decisions(
+        requirements, sources=SourceReadings.of_shown(shown)
+    )["all"]
 
     lead = (
         "The inputs are set to different provider scopes, so they count different "
@@ -7641,7 +7663,9 @@ def test_a_sum_states_the_provider_difference_of_its_inputs_beside_one_with_no_r
     ]
     shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in (a, b, c)}
 
-    stated = submission_service._difference_decisions(requirements, shown=shown)
+    stated = submission_service._difference_decisions(
+        requirements, sources=SourceReadings.of_shown(shown)
+    )
 
     assert [d.caveat for d in stated["abc"]] == ["providers_differ"] * differs
     assert [d.caveat for d in stated["ab"]] == ["providers_differ"] * differs
@@ -9482,37 +9506,66 @@ def test_sides_read_one_series_only_through_one_derivation(
     assert differ & set(plan.requirement(steps[-1].id).decision_ids)
 
 
+_US_DONOR = Entity(name="United States", role="donor")
+
+
 @pytest.mark.parametrize(
-    "second_reads",
+    ("both_reads", "second_reads", "served_count"),
     [
         # 2015-2023 against 2019-2023 on one part reads two series.
-        pytest.param({"period": Period(start=2019, end=2023)}, id="another-period"),
+        pytest.param({}, {"period": Period(start=2019, end=2023)}, 1, id="another-period"),
         # Aid to Ghana alone, one recipient of the two, reads another series.
         pytest.param(
-            {
-                "entities": [
-                    Entity(name="United States", role="donor"),
-                    Entity(name="Ghana", role="recipient"),
-                ]
-            },
+            {},
+            {"entities": [_US_DONOR, Entity(name="Ghana", role="recipient")]},
+            1,
             id="another-recipient",
+        ),
+        # US aid to each recipient reads another frame than its total.
+        pytest.param(
+            {"entities": [_US_DONOR]}, {"across": ("recipient",)}, 1, id="across-recipients"
+        ),
+        # Aid by sector group reads another frame than the total.
+        pytest.param(
+            {},
+            {"breakdown": Breakdown(dimension=BreakdownDimension.SECTOR, level=0)},
+            1,
+            id="by-sector",
+        ),
+        # A family read one series per member StatVar reads another frame than its
+        # sum, the reading a family whose axes are not summable takes by default.
+        pytest.param(
+            {"stat_vars": StatVarReading.SUM},
+            {"stat_vars": StatVarReading.SEPARATE},
+            2,
+            id="separate-stat-vars",
         ),
     ],
 )
 def test_one_part_over_other_years_or_entities_is_aligned(
-    decision: DecisionFactory, second_reads: dict[str, Any]
+    decision: DecisionFactory,
+    both_reads: dict[str, Any],
+    second_reads: dict[str, Any],
+    served_count: int,
 ) -> None:
     """US aid to Ghana and Kenya pinned twice on one part, the first stated gross and
-    the second left on net, compared. Two pins of one part read one
-    series only over one period and one set of entities, so a second input read over
-    other years or other recipients is aligned on gross. Read alike, the two keep their
-    own bases (`test_sides_read_one_series_only_through_one_derivation`, total less
-    total)."""
-    gross = basis_block(TOTAL, narrow=False, active="measure_basis:gross", provenance="explicit")
-    net = json.loads(
-        json.dumps(
-            basis_block(_TOTAL_NET_DEFAULT, narrow=False, active="measure_basis:net")
-        ).replace(f"{_TOTAL_NET_DEFAULT}_base", f"{TOTAL}_base")
+    the second left on net, compared, each read as `both_reads` states and the
+    second as `second_reads` too, from a part serving `served_count` StatVars. Two
+    pins of one part read one series only over one period and one set of entities,
+    into one frame (`across`, `breakdown`, `stat_vars`), so a second input read over
+    other years or other recipients, or into another frame, is aligned on gross.
+    Read alike, the two keep their own bases
+    (`test_sides_read_one_series_only_through_one_derivation`, total less total)."""
+    gross, net = (
+        json.loads(
+            json.dumps(basis_block(spec_id, narrow=False, active=active, provenance=provenance))
+            .replace(f"{spec_id}_base", f"{TOTAL}_base")
+            .replace('"served_count": 1', f'"served_count": {served_count}')
+        )
+        for spec_id, active, provenance in (
+            (TOTAL, "measure_basis:gross", "explicit"),
+            (_TOTAL_NET_DEFAULT, "measure_basis:net", "default"),
+        )
     )
     ctx = _FakeToolContext()
     _show_blocks(ctx, gross, net)
@@ -9525,6 +9578,7 @@ def test_one_part_over_other_years_or_entities_is_aligned(
             Entity(name="Kenya", role="recipient"),
         ],
         "period": Period(start=2015, end=2023),
+        **both_reads,
     }
 
     result = _tools_by_name()["propose_plan"].func(
@@ -9555,6 +9609,98 @@ def test_one_part_over_other_years_or_entities_is_aligned(
     assert result.get("code") == ProblemCode.BASES_UNALIGNED.value, result
     assert [(r["spec_id"], r["option_ids"]) for r in result["detail"]["realign"]] == [
         (_TOTAL_NET_DEFAULT, ["measure_basis:gross"])
+    ]
+
+
+@pytest.mark.parametrize(
+    ("other_across", "realigned"),
+    [
+        # Both sums take their second leaf over one frame of one pin, so
+        # aligning the net input on gross puts the two sides on one series.
+        pytest.param((), False, id="one-frame"),
+        # One takes US aid to each recipient, the other its total: the sides read
+        # different series whatever the first leaves count, so the net input is
+        # aligned on gross.
+        pytest.param(("recipient",), True, id="another-frame"),
+    ],
+)
+def test_leaves_with_no_choice_read_one_series_only_in_one_frame(
+    decision: DecisionFactory, other_across: tuple[str, ...], realigned: bool
+) -> None:
+    """Two sums compared, each a US total on one part, the first stated gross and the
+    second left on net, plus a figure from a dataset offering no measure basis choice,
+    pinned to one spec_id on both. Two such leaves read one series only where
+    they read their pin alike, so a second leaf read into another frame (`across`)
+    lets the net input be aligned; read alike, each keeps its own basis."""
+    gross, net = (
+        json.loads(
+            json.dumps(
+                basis_block(spec_id, narrow=False, active=active, provenance=provenance)
+            ).replace(f"{spec_id}_base", f"{TOTAL}_base")
+        )
+        for spec_id, active, provenance in (
+            (TOTAL, "measure_basis:gross", "explicit"),
+            (_TOTAL_NET_DEFAULT, "measure_basis:net", "default"),
+        )
+    )
+    unchosen = f"spec_{'8' * 32}"
+    plain = basis_block(unchosen, narrow=False, active="measure_basis:net")
+    plain["resolved"] = {
+        key: value for key, value in plain["resolved"].items() if key != "scope_choices"
+    }
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, gross, net, plain)
+    question = "How does US gross ODA plus its loans compare with net ODA plus its loans?"
+    ctx.state[ASKS_STATE_KEY] = [question]
+
+    def dataset(requirement_id: str, pin: str, across: tuple[str, ...] = ()) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="US total ODA",
+            entities=[_US_DONOR],
+            across=across,
+            period=Period(start=2015, end=2023),
+            source_spec_id=pin,
+        )
+
+    def plus(requirement_id: str, left: str, right: str) -> SumOfRequirement:
+        return SumOfRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            left=RequirementSide(input_id=left),
+            right=RequirementSide(input_id=right),
+        )
+
+    result = _tools_by_name()["propose_plan"].func(
+        question=question,
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        answered=[AskAnswer(ask=0, outputs=(_COMPARE,))],
+        evidence_requirements=[
+            dataset("first", TOTAL),
+            dataset("second", _TOTAL_NET_DEFAULT),
+            dataset("first_plus", unchosen),
+            dataset("second_plus", unchosen, other_across),
+            plus("first_sum", "first", "first_plus"),
+            plus("second_sum", "second", "second_plus"),
+            _difference("first_sum", "second_sum"),
+        ],
+        tool_context=ctx,
+    )
+
+    if realigned:
+        assert result.get("code") == ProblemCode.BASES_UNALIGNED.value, result
+        assert [(r["spec_id"], r["option_ids"]) for r in result["detail"]["realign"]] == [
+            (_TOTAL_NET_DEFAULT, ["measure_basis:gross"])
+        ]
+        return
+    assert result.get("outcome") == Outcome.OK.value, result
+    assert _pins(ctx) == [
+        ("first", TOTAL),
+        ("second", _TOTAL_NET_DEFAULT),
+        ("first_plus", unchosen),
+        ("second_plus", unchosen),
     ]
 
 
@@ -14265,7 +14411,12 @@ def test_prior_translator_provider_sources_remain_summable(decision, pinning_dec
             warnings={},
         ),
     )
-    assert _combination_unasked(plan, ToolContextSession(ctx), previous=None) is None
+    assert (
+        _combination_unasked(
+            plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("target", ["annual_debt_service", "another_dataset"])

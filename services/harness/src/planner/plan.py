@@ -266,6 +266,11 @@ MAX_PLAN_DECISIONS = 24
 # for its size rather than for a discovery budget it can never spend.
 MAX_PLAN_REQUIREMENTS = 24
 
+# The most requirements a plan holds: the model writes at most
+# `MAX_PLAN_REQUIREMENTS` (`Plan._record_fits_the_size_limit`), and
+# `whole_history_split` copies each of them at most once.
+MAX_HELD_REQUIREMENTS = 2 * MAX_PLAN_REQUIREMENTS
+
 # The most asks one brief may list, and the longest each may run. An ask is a
 # short line naming one output the user asked for, such as a chart or a
 # figure.
@@ -655,8 +660,18 @@ class DecisionScope(StrictModel):
     provenance: Annotated[ChoiceProvenance | None, HASHED_WHEN_SET] = None
 
 
-# How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`).
-DecisionCaveat = Literal["providers_differ", "bases_differ", "derived_whole"]
+# How a calculation qualifies the answer where its inputs differ on one aligned
+# axis, one caveat per axis (`submission.service._DIFFERENCES`).
+DifferenceCaveat = Literal["providers_differ", "bases_differ"]
+
+# How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`): a
+# calculation's inputs differing on an axis, or a whole compiled from its part.
+DecisionCaveat = Literal[DifferenceCaveat, "derived_whole"]
+
+# The most decisions qualifying the answer one requirement carries: a calculation
+# states at most one per axis its inputs differ on, and a whole, a dataset
+# requirement, only `derived_whole`.
+MAX_REQUIREMENT_CAVEATS = len(get_args(DifferenceCaveat))
 
 
 class Decision(_Choice):
@@ -4112,11 +4127,11 @@ class Plan(StrictModel):
         ),
     )
     # Past `MAX_PLAN_DECISIONS`, a plan carries the decisions qualifying its answer
-    # (`Decision.caveat`), at most one per requirement the model writes
-    # (`_decisions_fit_the_cap`).
+    # (`Decision.caveat`, `_decisions_fit_the_cap`), at most `MAX_REQUIREMENT_CAVEATS`
+    # for each requirement it states.
     decisions: tuple[Decision, ...] = Field(
         default=(),
-        max_length=MAX_PLAN_DECISIONS + MAX_PLAN_REQUIREMENTS,
+        max_length=MAX_PLAN_DECISIONS + MAX_REQUIREMENT_CAVEATS * MAX_HELD_REQUIREMENTS,
         description=(
             f"The methodological choices this plan makes, at most "
             f"{MAX_PLAN_DECISIONS}; a plan names its parts by `slot`, so no two decisions "
@@ -4124,11 +4139,9 @@ class Plan(StrictModel):
             "requirement."
         ),
     )
-    # The model writes at most `MAX_PLAN_REQUIREMENTS` (`_record_fits_the_size_limit`),
-    # and `whole_history_split` copies each of them at most once.
     evidence_requirements: tuple[EvidenceRequirement, ...] = Field(
         default=(),
-        max_length=2 * MAX_PLAN_REQUIREMENTS,
+        max_length=MAX_HELD_REQUIREMENTS,
         description=(
             f"What the answer rests on, at most {MAX_PLAN_REQUIREMENTS} requirements: a "
             "dataset requirement per measure and source, naming every entity, and a derived "

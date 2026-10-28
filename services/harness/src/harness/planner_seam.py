@@ -99,7 +99,6 @@ from typing import Any, cast
 
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
-from compiler.sources import readable_source
 from compiler.surface import ToolSurface
 from executor.classify import ExecutorCode
 from google.adk import Context, Event
@@ -122,7 +121,6 @@ from planner.plan import (
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
-    DatasetRequirement,
     PinSource,
     Plan,
     PlanStatus,
@@ -154,8 +152,10 @@ from submission.service import (
     SEARCHED_PINS_STATE_KEY,
     AlignedPin,
     Proposal,
+    SourceReadings,
     aligned_pins,
     held_sector,
+    pinned_sources,
     searched_pins,
     submit,
 )
@@ -1450,18 +1450,9 @@ def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSo
     origin's block. A block not readable as a source is left out, so the
     retrieval is named by its composed label."""
     to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
-    spec_ids = {
-        requirement.source_spec_id
-        for requirement in plan.evidence_requirements
-        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
-    }
     blocks = _spec_blocks(state)
-    sources: dict[str, SelectedSource] = {}
-    for spec_id in spec_ids:
-        block = blocks.get(to_origin.get(spec_id, spec_id))
-        if block is not None and (source := readable_source(block)) is not None:
-            sources[spec_id] = source
-    return sources
+    sources = SourceReadings(lambda spec_id: blocks.get(to_origin.get(spec_id, spec_id)))
+    return pinned_sources(plan.evidence_requirements, sources)
 
 
 def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
@@ -1773,7 +1764,7 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         )
     ]
     stored = {reading.spec_id for reading in readings}
-    blocks: dict[str, Mapping[str, Any]] | None = None
+    sources: SourceReadings | None = None
     for pin in held:
         if pin.spec_id in stored:
             continue
@@ -1783,9 +1774,9 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         digest = copy.deepcopy(pin.digest)
         (part,) = digest["part_digests"]
         if pin.whole_axis is not None:
-            if blocks is None:
-                blocks = _spec_blocks(planner_state)
-            part["variable"] = _whole_reading_name(pin, part.get("spec_block"), blocks=blocks)
+            if sources is None:
+                sources = SourceReadings(_spec_blocks(planner_state).get)
+            part["variable"] = _whole_reading_name(pin, part.get("spec_block"), sources=sources)
         elif origin is not None:
             part["variable"] = origin.text
         store_search(
@@ -1809,10 +1800,11 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
 
 
 def _whole_reading_name(
-    pin: AlignedPin, block: Mapping[str, Any] | None, *, blocks: Mapping[str, Mapping[str, Any]]
+    pin: AlignedPin, block: Mapping[str, Any] | None, *, sources: SourceReadings
 ) -> str:
     """The name a declared whole's reading is stored under, read off its own
-    `block` and its part's (`pin.origin` in `blocks`) alone, so it holds
+    `block` and its part's (`pin.origin` in `sources`) alone, each read as a
+    source once however many wholes read it, so it holds
     whatever plan the turn ends on. Over every donor or recipient, as the
     plan card names it (`harness.plan_display.source_whole_name`), on the
     sector option the whole's scope holds, else the part's. Over every
@@ -1824,12 +1816,12 @@ def _whole_reading_name(
     by_axis = plan_display.whole_name(pin.whole_axis, measure=measure)
     if pin.whole_axis == "sector" or block is None:
         return by_axis
-    source = readable_source(block)
+    # `sources` holds `block` under the whole's own spec_id (`_spec_blocks`).
+    source = sources.get(pin.spec_id)
     if source is None:
         return by_axis
-    part_block = blocks.get(pin.origin)
-    part = readable_source(part_block) if part_block is not None else None
-    held = held_sector(block) or held_sector(part_block)
+    part = sources.get(pin.origin)
+    held = held_sector(block) or held_sector(sources.block(pin.origin))
     sector = held.label if held is not None else None
     named = plan_display.source_whole_name(
         pin.whole_axis, source=source, part=part, sector=sector, measure=measure

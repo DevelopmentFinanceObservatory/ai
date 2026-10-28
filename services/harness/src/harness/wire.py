@@ -629,26 +629,38 @@ MAX_SEED_GROUP_LABEL_CHARS = 120
 # `common.place_type.PartyClass`.
 MAX_SEED_PARTY_CLASSES = len(get_args(PartyClass))
 
+# The most members a set's `members` lists, and residual labels its `left_out` names,
+# as apis bounds `EntityGroup.members` and `EntityGroup.left_out`.
+MAX_SEED_GROUP_MEMBERS = 1024
+MAX_SEED_GROUP_LEFT_OUT = 64
+
+# One ref or label a set lists, held to the bound on any seed text.
+SeedText = Annotated[str, Field(max_length=MAX_SEED_TEXT_CHARS)]
+
 
 class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
-    `total` is the published total party the role bound for the set, absent
-    when it bound the members (`planner.workflow.ResolvedGroup.total`).
-    `whole_of` names the classes of party that total, or the set of totals the
-    role bound, holds in full, absent for any other set
-    (`planner.workflow.ResolvedGroup.whole_of`). `side_classes` names the classes
-    of party, totals aside, the dataset publishes on that set's side, absent for
-    any other set and from a Search that predates it
-    (`planner.workflow.ResolvedGroup.side_classes`). The
-    members are apis' `EntityGroup` fields, and any other key is refused,
+    The members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
+    Each field the harness reads of a searched set (`planner.workflow.ResolvedGroup`)
+    is carried to the seed's resubmit as Search served it: `ref` or `group_id`,
+    `total`, `whole_of`, `side_classes`, `members`, `left_out` (`None` where
+    Search states nothing) and `sum_differs`. A seed accepts
+    `holds_multilaterals` and the resubmit omits it: Search derives it on every
+    answer, and the harness reads it from Search's answer to the resubmit
+    (`harness.seeds.resolve_seed`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
     ref: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
+    group_id: str | None = Field(
+        default=None,
+        max_length=MAX_SEED_TEXT_CHARS,
+        exclude_if=lambda group_id: group_id is None,
+    )
     entity_type: str | None = Field(
         default=None,
         max_length=MAX_SEED_TEXT_CHARS,
@@ -663,6 +675,16 @@ class SeedEntityGroup(BaseModel):
     side_classes: tuple[PartyClass, ...] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
+    members: tuple[SeedText, ...] = Field(
+        default=(), max_length=MAX_SEED_GROUP_MEMBERS, exclude_if=lambda members: not members
+    )
+    holds_multilaterals: bool | None = Field(default=None, exclude_if=lambda holds: holds is None)
+    left_out: tuple[SeedText, ...] | None = Field(
+        default=None,
+        max_length=MAX_SEED_GROUP_LEFT_OUT,
+        exclude_if=lambda labels: labels is None,
+    )
+    sum_differs: bool = Field(default=False, exclude_if=lambda differs: not differs)
 
 
 class SeedSpec(BaseModel):

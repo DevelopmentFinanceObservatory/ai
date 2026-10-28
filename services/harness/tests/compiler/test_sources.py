@@ -983,6 +983,17 @@ def test_a_resubmit_posts_each_set_without_its_total() -> None:
     }
 
 
+def test_a_resubmit_posts_the_registry_id_of_a_set_the_graph_holds_no_node_for() -> None:
+    # Search keeps a set with no node of its own, read as its members, only through
+    # its registry id, which restores the total its dataset publishes for it.
+    asia = {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "total": None}
+    source = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups={"destination": asia}))
+
+    assert wire_groups(source.groups) == {
+        "destination": {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia"}
+    }
+
+
 # "ODA to Ethiopia from all donors" binds the OECD's official-donors total; the
 # union "all donors including private" binds that total and the private one.
 _WHOLE_ENTITIES = [
@@ -1076,7 +1087,7 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
 
 
 # DAC members summed on the donor side, where Search states that nothing is
-# left out, and Africa's countries summed on the recipient side, where Search
+# left out, names residuals, or states nothing, and Africa's countries summed on the recipient side, where Search
 # names the residuals Africa's published total counts beside them, or states
 # nothing, as a Search that predates the field does. The G7's published
 # total is a figure of its own, which can differ from its members' sum, and is
@@ -1144,6 +1155,22 @@ _PUBLISHED = (
             },
             _AFRICA_LEFT_OUT + _PUBLISHED.format(label="Africa"),
         ),
+        (
+            {
+                "origin": {
+                    "ref": "DAC",
+                    "label": "DAC members",
+                    "total": None,
+                    "left_out": ["DAC donors, unspecified"],
+                }
+            },
+            " and leaves out what the source's total for DAC members counts beside them: "
+            "DAC donors, unspecified.",
+        ),
+        (
+            {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
+            " and may leave out amounts the source's total for DAC members counts beside them.",
+        ),
     ],
     ids=[
         "donor-members-leave-nothing-out",
@@ -1151,6 +1178,8 @@ _PUBLISHED = (
         "recipient-members-leave-out-residuals",
         "donor-total-differs-from-its-members-sum",
         "residuals-end-before-the-published-figure",
+        "donor-members-leave-out-residuals",
+        "donor-members-search-states-nothing",
     ],
 )
 def test_summed_members_state_only_the_residuals_search_names(

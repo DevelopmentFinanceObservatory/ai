@@ -147,7 +147,12 @@ from planner.workflow import (
 )
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
-from submission.service import AlignedPin, save_aligned_pin, scope_choice_decisions
+from submission.service import (
+    AlignedPin,
+    SourceReadings,
+    save_aligned_pin,
+    scope_choice_decisions,
+)
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 from translator.referral import ReferralKind
@@ -4904,7 +4909,7 @@ def test_a_declared_whole_with_no_block_is_named_by_its_axis_with_no_warning(
     whole = AlignedPin(origin=HEALTH, option_ids=(), spec_id=TOTAL, digest={}, whole_axis="donor")
 
     with caplog.at_level(logging.WARNING):
-        named = planner_seam._whole_reading_name(whole, None, blocks={})
+        named = planner_seam._whole_reading_name(whole, None, sources=SourceReadings({}.get))
 
     assert (named, caplog.records) == ("all donors", [])
 

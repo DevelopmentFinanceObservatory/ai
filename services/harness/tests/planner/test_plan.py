@@ -56,6 +56,7 @@ from planner.plan import (
     DecisionFixes,
     DecisionScope,
     Decline,
+    DifferenceCaveat,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -4999,6 +5000,25 @@ def test_the_decision_cap_leaves_out_the_decisions_qualifying_the_answer(
         return
     with pytest.raises(ValidationError, match=f"over the {MAX_PLAN_DECISIONS} a plan may take"):
         Plan.model_validate(record)
+
+
+def test_every_requirement_carries_a_caveat_for_each_axis_its_inputs_differ_on() -> None:
+    """A plan at `MAX_PLAN_DECISIONS` whose every requirement cites one decision
+    qualifying the answer per difference axis (`DifferenceCaveat`), as
+    `submission.service._difference_decisions` writes for a calculation whose inputs
+    differ on both, validates."""
+    record = plan_record()
+    for requirement in record["evidence_requirements"]:
+        for caveat in get_args(DifferenceCaveat):
+            slot = f"{caveat}_{requirement['id']}"
+            record["decisions"].append({**record["decisions"][0], "slot": slot, "caveat": caveat})
+            requirement["decision_ids"].append(slot)
+
+    plan = Plan.model_validate(record)
+
+    assert sum(decision.caveat is not None for decision in plan.decisions) == len(
+        get_args(DifferenceCaveat)
+    ) * len(plan.evidence_requirements)
 
 
 def test_the_size_limit_leaves_out_the_scope_decisions_code_writes() -> None:

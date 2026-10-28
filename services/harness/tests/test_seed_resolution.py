@@ -39,6 +39,7 @@ from harness.mcp_client import _refusal_outcome
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.seeds import SEED_STEP_TOOL, resolve_seed, take_seeds
 from harness.studio_translate import _node_name
+from harness.tool_contracts import GROUP_FACTS_KEY
 from planner.plan import SEEDS_STATE_KEY
 from translator.discovery import resolved_spec
 
@@ -212,6 +213,8 @@ async def test_a_seeded_turn_hands_the_agent_each_seed_as_a_definite_search_part
         ("definite", _KENYA["spec_id"], [_RANK]),
         ("definite", water["spec_id"], [_RANK]),
     ]
+    # The sets the digest read for the stored reading stay off the text the agent reads.
+    assert GROUP_FACTS_KEY not in turn.read
     assert turn.steps["seeds"]["summary"] == "received 2 of 2 dataset(s) from Search"
     assert turn.state[SEEDS_STATE_KEY] is None
     assert set(turn.state[ORCHESTRATOR_SPECS_KEY]) == {_KENYA["spec_id"], water["spec_id"]}
@@ -540,6 +543,28 @@ async def test_a_seed_resolves_its_set_with_the_classes_its_whole_total_holds(
 
     (group,) = resolved
     assert revision_content(group) == hashed
+
+
+@pytest.mark.parametrize("case", ["dac1", "dac1_non_dac", "dac1_bilateral_uncovered"])
+async def test_a_seed_resolves_its_sets_as_the_harness_reads_them_searched(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A recorded block's sets, seeded, reach the seed's resubmit as
+    `compiler.sources` reads the same block searched."""
+    fixture = Path(__file__).parent / "fixtures" / "share_whole_dac_donor_wholes.json"
+    block = json.loads(fixture.read_text())[case]["whole"]
+    (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
+    resolved: list[Any] = []
+
+    async def capture(surface: object, **kwargs: Any) -> dict[str, Any]:
+        resolved.extend(kwargs["groups"])
+        return {}
+
+    monkeypatch.setattr("harness.seeds.resolve_definition", capture)
+
+    await resolve_seed(ScriptedSurface(), taken)
+
+    assert tuple(resolved) == source_from_spec_block(block).groups
 
 
 async def test_a_seed_over_a_sets_places_keeps_the_set_when_resolved_again() -> None:

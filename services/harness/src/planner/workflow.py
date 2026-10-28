@@ -75,7 +75,11 @@ class ResolvedGroup(StrictModel):
     `search` names the set it bound, keyed by the role column it fills
     (`resolved.entity_groups`). `label` is the set's name, and `ref` its own
     graph node, `None` when the graph holds none (a resolver group such as
-    "G7"). `total` is the party the dataset publishes as the set's own total
+    "G7"). `group_id` is the membership registry's id for a set the graph holds
+    no node for ("groups/OECD.DAC.Region.Asia"), `None` when `ref` is set or
+    the set is no registry group; a resubmit posts it so Search restores the
+    set and the total its dataset publishes for it (`compiler.sources.wire_groups`).
+    `total` is the party the dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
     when the role binds the set's members, one entity each. `whole_of` names
     the classes of party (`common.place_type.PartyClass`) the bound total holds
@@ -104,6 +108,9 @@ class ResolvedGroup(StrictModel):
     ref: str | None = None
     # Left out of every dump while unset, so a source saved without it keeps
     # its serialised form.
+    group_id: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda group_id: group_id is None
+    )
     total: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda total: total is None
     )

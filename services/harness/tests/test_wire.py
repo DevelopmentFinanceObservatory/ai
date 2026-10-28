@@ -1095,6 +1095,24 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
                 "side_classes": ("official", "private", "residual"),
             },
         ),
+        (
+            {
+                "label": "Africa",
+                "ref": "africa",
+                "left_out": ["Africa, unallocated by country (DAC)"],
+                "sum_differs": True,
+            },
+            {
+                "label": "Africa",
+                "ref": "africa",
+                "left_out": ("Africa, unallocated by country (DAC)",),
+                "sum_differs": True,
+            },
+        ),
+        (
+            {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "left_out": []},
+            {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "left_out": ()},
+        ),
     ],
     ids=[
         "single-total",
@@ -1102,6 +1120,8 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
         "without-the-field",
         "empty-field-is-absent",
         "with-the-sides-classes",
+        "members-leaving-out-residuals",
+        "registry-set-leaving-nothing-out",
     ],
 )
 def test_a_seed_carries_the_classes_a_whole_total_holds(
@@ -1114,6 +1134,22 @@ def test_a_seed_carries_the_classes_a_whole_total_holds(
 
     assert seed.spec.entity_groups is not None
     assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == kept
+
+
+@pytest.mark.parametrize("case", ["dac1", "dac1_non_dac", "dac1_bilateral_uncovered"])
+def test_a_seed_takes_every_key_search_serves_on_a_set(case: str) -> None:
+    """DAC countries' total as Search serves it, with its registry id, its members and
+    whether it holds a multilateral, seeds with every key it was served."""
+    fixture = Path(__file__).parent / "fixtures" / "share_whole_dac_donor_wholes.json"
+    block = json.loads(fixture.read_text())[case]["whole"]
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert {
+        role: group.model_dump(mode="json", exclude_none=True)
+        for role, group in seed.spec.entity_groups.items()
+    } == block["resolved"]["entity_groups"]
 
 
 @pytest.mark.parametrize(
@@ -1136,7 +1172,7 @@ def test_a_set_whose_whole_of_is_not_a_list_of_classes_is_dropped(whole_of: obje
     "group",
     [
         {"dcid": "africa", "label": "Africa"},
-        {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
+        {"ref": "africa", "label": "Africa", "member_dcids": ["country/KEN"]},
         {"label": "all donors", "side_kinds": ["official"]},
     ],
     ids=["dcid-before-ref", "unknown-member", "earlier-name-of-side-classes"],

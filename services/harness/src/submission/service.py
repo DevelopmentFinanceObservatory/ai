@@ -58,6 +58,7 @@ from compiler.sources import (
     readable_groups,
     readable_source,
     slot_codes,
+    stat_var_reading,
 )
 from data_mcp.scope import ChoiceOrigin
 from data_mcp.settings import Settings as DataMcpSettings
@@ -108,11 +109,11 @@ from planner.plan import (
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
-    DecisionCaveat,
     DecisionDraft,
     DecisionFixes,
     DecisionScope,
     Decline,
+    DifferenceCaveat,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -185,6 +186,7 @@ from planner.plan import (
 from planner.records import (
     MAX_IDENTIFIER_CHARS,
     AmbiguousEntityReading,
+    Breakdown,
     EntityCandidate,
     EntityIn,
     EntityKey,
@@ -474,10 +476,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             }
         )
     pins = pin_sources(view.state)
+    sources = SourceReadings.of_shown(pins)
     measures = measure_choices(
         pins,
         compiled=previous.workflow.sources if previous is not None and previous.workflow else (),
         offered=chain.from_iterable(referral.offered().values()) if referral else (),
+        sources=sources,
     )
     user_settled = _user_settled_measures(measures, view, pins)
     evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
@@ -485,6 +489,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
         evidence_requirements,
         shown=pins,
+        sources=sources,
         aligned=aligned_pins(view.state),
         searched=searched_pins(view.state),
         view=view,
@@ -521,7 +526,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         wholes=_whole_decisions(wholes, aligned_after, shown=pins),
         calculations=_difference_decisions(
             aligned_after,
-            shown=pins,
+            sources=sources,
             plan_decisions=_decisions_after(previous, settled, removed=removed_decisions),
             scope_decisions=scopes,
             previous=previous,
@@ -647,7 +652,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
         # `Plan` validation compares the sides of a share by name; the
         # pins resolve them to graph refs, so an alias divides by itself too.
-        check_wholes_span_their_totals(stated, refs=_entity_refs(view))
+        check_wholes_span_their_totals(stated, refs=_entity_refs(view, sources))
         split = split_of(stated)
         # The recorded plan carries the copies, and `Plan` validation checks
         # they are the split of `stated` before `_window_pins` gives each pin
@@ -688,6 +693,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         previous=previous,
         reads_user_words=reads_user_words,
         proposer=proposer,
+        sources=sources,
     )
     if blocked is not None:
         return blocked
@@ -1809,24 +1815,71 @@ def _search_scope(
     )
 
 
-def _pinned_source(spec_id: str | None, view: SessionView) -> SelectedSource | None:
+class SourceReadings:
+    """The spec block each spec_id has and the source it states
+    (`compiler.sources.readable_source`), each looked up and read once, on first use.
+
+    One proposal reads its pins' sources through one of these at every site
+    that names, labels or resolves by a pin's source, so each block is parsed
+    once and an unreadable one logs its warning once.
+    """
+
+    def __init__(self, block_of: Callable[[str], Mapping[str, Any] | None]) -> None:
+        self._block_of = block_of
+        self._blocks: dict[str, Mapping[str, Any] | None] = {}
+        self._sources: dict[str, SelectedSource | None] = {}
+
+    @classmethod
+    def of_shown(cls, shown: Mapping[str, PinSource]) -> SourceReadings:
+        """The readings of the blocks of the datasets the planner was shown (`_pin_block`)."""
+        return cls(lambda spec_id: _pin_block(spec_id, shown))
+
+    def block(self, spec_id: str) -> Mapping[str, Any] | None:
+        """The spec block of `spec_id`, `None` when none is held."""
+        if spec_id not in self._blocks:
+            self._blocks[spec_id] = self._block_of(spec_id)
+        return self._blocks[spec_id]
+
+    def get(self, spec_id: str) -> SelectedSource | None:
+        """The source `spec_id`'s block states, `None` where no block is held or it is not readable."""
+        if spec_id not in self._sources:
+            block = self.block(spec_id)
+            self._sources[spec_id] = readable_source(block) if block is not None else None
+        return self._sources[spec_id]
+
+
+def pinned_sources(
+    requirements: Iterable[EvidenceRequirement], sources: SourceReadings
+) -> dict[str, SelectedSource]:
+    """The source each dataset requirement of `requirements` pins, by spec_id, as
+    `sources` reads it, leaving out a pin whose block is not held or not readable."""
+    return {
+        requirement.source_spec_id: source
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.source_spec_id is not None
+        and (source := sources.get(requirement.source_spec_id)) is not None
+    }
+
+
+def _pinned_source(
+    spec_id: str | None, view: SessionView, sources: SourceReadings
+) -> SelectedSource | None:
     """The source `spec_id` pins, as the record that states it; `None` when nothing on record does.
 
-    The source is a block's the planner was shown, or one the
-    translator's discovery recorded, such as a referral's candidate
+    The source is a block's the planner was shown, as `sources` reads it, or
+    one the translator's discovery recorded, such as a referral's candidate
     (`translator.discovery.DiscoveryLog.recorded_source`).
     """
     if spec_id is None:
         return None
-    shown = pin_sources(view.state).get(spec_id)
-    block = shown.spec_block(spec_id) if shown is not None else None
-    if block is not None:
-        return readable_source(block)
+    if sources.block(spec_id) is not None:
+        return sources.get(spec_id)
     return load_log(view.state).recorded_source(spec_id)
 
 
 def _entity_refs(
-    view: SessionView,
+    view: SessionView, sources: SourceReadings
 ) -> Callable[[DatasetRequirement | None, Entity], frozenset[str]]:
     """The graph refs `check_wholes_span_their_totals` compares an entity by, given its side's dataset requirement.
 
@@ -1841,7 +1894,7 @@ def _entity_refs(
 
     @functools.cache
     def source(spec_id: str) -> SelectedSource | None:
-        return _pinned_source(spec_id, view)
+        return _pinned_source(spec_id, view, sources)
 
     def refs(dataset: DatasetRequirement | None, entity: Entity) -> frozenset[str]:
         if dataset is None or dataset.source_spec_id is None:
@@ -1865,7 +1918,9 @@ class _SumDatasets(NamedTuple):
     provider_flows: bool
 
 
-def _sum_datasets(plan: Plan, requirement: SumOfRequirement, view: SessionView) -> _SumDatasets:
+def _sum_datasets(
+    plan: Plan, requirement: SumOfRequirement, view: SessionView, sources: SourceReadings
+) -> _SumDatasets:
     """The datasets both sides of `requirement` read in `plan`, and what their pins state.
 
     A dataset requirement whose pin states its dataset (`_pinned_source`)
@@ -1883,7 +1938,7 @@ def _sum_datasets(plan: Plan, requirement: SumOfRequirement, view: SessionView) 
     while pending:
         read = plan.requirement(pending.pop())
         if isinstance(read, DatasetRequirement):
-            source = _pinned_source(read.source_spec_id, view)
+            source = _pinned_source(read.source_spec_id, view, sources)
             prior = pin_sources(view.state).get(read.source_spec_id or "")
             dataset = (
                 source.provenance_ref
@@ -1914,7 +1969,7 @@ def _sum_datasets(plan: Plan, requirement: SumOfRequirement, view: SessionView) 
 
 
 def _combination_unasked(
-    plan: Plan, view: SessionView, *, previous: Plan | None
+    plan: Plan, view: SessionView, *, previous: Plan | None, sources: SourceReadings
 ) -> dict[str, object] | None:
     """Return the refusal for a `sum_of` of two datasets the user was not asked to combine, or `None`.
 
@@ -1950,7 +2005,7 @@ def _combination_unasked(
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, SumOfRequirement):
             continue
-        datasets, stated, provider_flows = _sum_datasets(plan, requirement, view)
+        datasets, stated, provider_flows = _sum_datasets(plan, requirement, view, sources)
         if stated and (len(datasets) == 1 or provider_flows):
             continue
         consent = _consenting_decisions(plan, requirement)
@@ -1962,7 +2017,7 @@ def _combination_unasked(
             and previous is not None
             and not declined
             and requirement in previous.evidence_requirements
-            and _sum_datasets(previous, requirement, view).datasets == datasets
+            and _sum_datasets(previous, requirement, view, sources).datasets == datasets
             and _consenting_decisions(previous, requirement) == consent
         ):
             continue
@@ -2213,6 +2268,7 @@ def _unrecordable(
     previous: Plan | None,
     reads_user_words: bool,
     proposer: Proposer,
+    sources: SourceReadings,
 ) -> dict[str, object] | None:
     """Return the refusal for a built plan `propose_plan` may not record, or `None`.
 
@@ -2255,7 +2311,7 @@ def _unrecordable(
         or _entity_dcid_unoffered(stated, referral, previous)
         or _entity_dcid_unpicked(stated, referral, view, previous)
         or _choice_not_offered(stated, referral, view)
-        or _combination_unasked(stated, view, previous=previous)
+        or _combination_unasked(stated, view, previous=previous, sources=sources)
         or _decline_unearned(plan, previous, view)
         or _breakdown_decline_unearned(stated, view)
         or _decline_missing(plan, view, proposer)
@@ -2594,6 +2650,7 @@ def measure_choices(
     *,
     compiled: Sequence[SelectedSource] = (),
     offered: Iterable[SelectedSource] = (),
+    sources: SourceReadings | None = None,
 ) -> dict[str, MeasureChoice]:
     """The measure choice a pin of each spec_id states, for every measure a settled source shown offers.
 
@@ -2614,13 +2671,17 @@ def measure_choices(
     repeated one and any past `MAX_DECISION_OPTIONS` are left out, and a
     source left with one option offers no choice. Price alternatives (axis
     `unit`) count the flow the same way in other prices and offer no choice here.
+    Each shown block is read through `sources`, the proposal's readings of
+    `shown`, or readings of its own when none are given.
     """
+    if sources is None:
+        sources = SourceReadings.of_shown(shown)
     elections = {source.spec_id: source.elected_measure for source in (*compiled, *offered)}
     for spec_id, source in shown.items():
-        block = source.spec_block(spec_id) if source.settled and not source.other_count_of else None
-        if block is None or (read := readable_source(block)) is None:
+        if not source.settled or source.other_count_of:
             continue
-        elections[spec_id] = read.elected_measure
+        if (read := sources.get(spec_id)) is not None:
+            elections[spec_id] = read.elected_measure
     choices: dict[str, MeasureChoice] = {}
     for spec_id, elected in elections.items():
         if elected is None or len(elected.label) > MAX_OPTION_CHARS:
@@ -3784,16 +3845,11 @@ class _InputBasis:
     choice, or a carried one, the user's choice earlier in the conversation,
     and the origin's block does not mark the axis as the planner's
     (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`), or Search settled the
-    provider row on the words it searched (`_provider_read_in_words`). `rank` is how narrow the origin's part is (`_part_rank`).
-    `flows` is where the origin's part's flows lie (`_Flows`). `own_flows` is
-    the money its reporters' own flows count (`_own_flows`), read on the
-    provider axis alone and `None` on any other. `part` is the spec_id of the
-    origin's part before any choice (`PartScope.base`) and `actives` the option
-    each of its choices holds, by axis. The two together are what the origin
-    compiles to. `reads` is what the requirement reads of it (`_Reads`), which
-    alignment sees before `_window_pins` puts each pin on its own period, so two
-    inputs holding one `part`, one option on every axis and one `reads` read one
-    series.
+    provider row on the words it searched (`_provider_read_in_words`). `held`
+    is the origin as alignment reads it on every axis (`_Origin`), and `reads`
+    what the requirement reads of it (`_Reads`), which alignment sees before
+    `_window_pins` puts each pin on its own period, so two inputs holding one
+    `held.part`, one option on every axis and one `reads` read one series.
     """
 
     requirement_id: str
@@ -3801,11 +3857,7 @@ class _InputBasis:
     origin: str
     choice: ScopeChoice
     stated: bool
-    rank: int
-    flows: _Flows
-    own_flows: frozenset[ProviderMoney] | None
-    part: str
-    actives: tuple[tuple[str, str], ...]
+    held: _Origin
     reads: _Reads
 
     def label(self, option_id: str) -> str:
@@ -3824,15 +3876,27 @@ class _Reads(NamedTuple):
     source resolves the name to (`compiler.evidence.named_members`), so
     "United States" and "United States of America" bound to one ref read
     alike, or as its case-folded name where the source resolves none.
+    `across`, `breakdown` and `stat_vars` are what else shapes the frame its
+    retrieval carries (`compiler.compile._retrieve_arguments`): the sides it
+    keeps open, the classification it splits the total by, and how it reads a
+    family of StatVars, as the compiler settles it (`stat_var_reading`), so
+    each recipient's aid and the recipients' total read different series.
     """
 
     period: tuple[str, bool]
     entities: frozenset[frozenset[tuple[str, str]] | str]
+    across: frozenset[str]
+    breakdown: Breakdown | None
+    stat_vars: StatVarReading | None
 
     @classmethod
     def of(cls, requirement: DatasetRequirement, source: SelectedSource | None) -> _Reads:
         """What `requirement` reads, its names resolved against `source`, its pin's
         origin's source, `None` where its block is not held or not readable."""
+        # A breakdown is read separately, as the compiler reads it.
+        requested = (
+            StatVarReading.SEPARATE if requirement.breakdown is not None else requirement.stat_vars
+        )
         return cls(
             period=(requirement.period.model_dump_json(), requirement.period_end_open),
             entities=frozenset(
@@ -3841,6 +3905,11 @@ class _Reads(NamedTuple):
                 else entity.name.casefold()
                 for entity in requirement.entities
             ),
+            across=frozenset(requirement.across),
+            breakdown=requirement.breakdown,
+            stat_vars=requested
+            if source is None
+            else stat_var_reading(source, requested).stat_var_reading,
         )
 
 
@@ -3923,80 +3992,113 @@ def _part_rank(identity: Mapping[str, Any]) -> int:
 
 @dataclass(frozen=True)
 class _Origin:
-    """A pin's origin as alignment reads it (`_input_bases`), parsed once per proposal:
-    its spec block, `None` where it was not shown, and the scope record the block
-    states (`part_scope`)."""
+    """A pin's origin as alignment reads it on every axis (`_input_bases`), parsed once
+    per proposal: its spec block, `None` where it was not shown, and the scope
+    record the block states (`part_scope`).
+
+    `rank` is how narrow its part is (`_part_rank`), `flows` where the part's
+    flows lie (`_Flows`) and `own_flows` the money its reporters' own flows count
+    (`_own_flows`), read on first use, since only the provider axis reads it.
+    `part` is the spec_id of the part before any choice (`PartScope.base`) and
+    `actives` the option each of its choices holds, by axis. The two together
+    are what the origin compiles to.
+    """
 
     block: Mapping[str, Any] | None
-    scope: PartScope | None
+    scope: PartScope
 
     @functools.cached_property
-    def source(self) -> SelectedSource | None:
-        """The source the block states (`compiler.sources.readable_source`), read on
-        first use, `None` where no block is held or it is not readable."""
-        return readable_source(self.block) if self.block is not None else None
+    def rank(self) -> int:
+        return _part_rank(self.scope.base.identity)
+
+    @functools.cached_property
+    def flows(self) -> _Flows:
+        return _Flows.of(self.scope, self.block)
+
+    @functools.cached_property
+    def own_flows(self) -> frozenset[ProviderMoney]:
+        return _own_flows(self.scope, self.block)
+
+    @property
+    def part(self) -> str:
+        return self.scope.base.spec_id
+
+    @functools.cached_property
+    def actives(self) -> tuple[tuple[str, str], ...]:
+        return tuple((choice.axis, choice.active) for choice in self.scope.choices)
 
 
-def _read_origins(
+class _Input(NamedTuple):
+    """One dataset requirement's pin as alignment reads it on every axis (`_read_inputs`):
+    the spec_id it states, the `origin` it was compiled from, that origin as read
+    (`held`), `None` where it carries no choice on an aligned axis
+    (`_ALIGNED_AXES`), and what the requirement reads of it (`reads`)."""
+
+    pin: str
+    origin: str
+    held: _Origin | None
+    reads: _Reads
+
+
+def _read_inputs(
     requirements: Sequence[EvidenceRequirement],
     *,
-    shown: Mapping[str, PinSource],
+    sources: SourceReadings,
     origins: Mapping[str, str],
-) -> dict[str, _Origin]:
-    """The origin (`origins`) of each dataset requirement's pin among `requirements`,
-    as `_input_bases` reads it on every axis, by its spec_id."""
-    read: dict[str, _Origin] = {}
-    for requirement in requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
-            continue
-        origin = origins.get(requirement.source_spec_id, requirement.source_spec_id)
-        if origin in read:
-            continue
-        source = shown.get(origin)
-        block = source.spec_block(origin) if source is not None else None
-        read[origin] = _Origin(block=block, scope=part_scope(origin, block))
-    return read
-
-
-def _input_bases(
-    requirements: Sequence[EvidenceRequirement],
-    *,
-    read: Mapping[str, _Origin],
-    origins: Mapping[str, str],
-    axis: str,
-) -> dict[str, _InputBasis]:
-    """The option each dataset requirement of `requirements` is counted on along `axis`, by requirement id.
-
-    `read` holds each pin's origin (`origins`) as `_read_origins` read it. A
-    requirement whose origin was not shown, or carries no choice on `axis`, has
-    none.
-    """
-    bases: dict[str, _InputBasis] = {}
+) -> dict[str, _Input]:
+    """Each pinned dataset requirement among `requirements`, its pin's origin
+    (`origins`) as `_input_bases` reads it on every axis, by requirement id. Each
+    origin is parsed once, its block and source read off `sources`."""
+    held: dict[str, _Origin | None] = {}
+    inputs: dict[str, _Input] = {}
     for requirement in requirements:
         if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
             continue
         pin = requirement.source_spec_id
         origin = origins.get(pin, pin)
-        held = read[origin]
-        block, scope = held.block, held.scope
-        choice = (
-            next((c for c in scope.choices if c.axis == axis), None) if scope is not None else None
-        )
-        if scope is None or choice is None:
-            continue
-        bases[requirement.id] = _InputBasis(
-            requirement_id=requirement.id,
+        if origin not in held:
+            block = sources.block(origin)
+            scope = part_scope(origin, block)
+            held[origin] = (
+                _Origin(block=block, scope=scope)
+                if scope is not None
+                and any(choice.axis in _ALIGNED_AXES for choice in scope.choices)
+                else None
+            )
+        inputs[requirement.id] = _Input(
             pin=pin,
             origin=origin,
+            held=held[origin],
+            reads=_Reads.of(requirement, sources.get(origin)),
+        )
+    return inputs
+
+
+def _input_bases(inputs: Mapping[str, _Input], *, axis: str) -> dict[str, _InputBasis]:
+    """The option each dataset requirement of `inputs` is counted on along `axis`, by requirement id.
+
+    `inputs` holds each requirement as `_read_inputs` read it. A requirement
+    whose origin carries no choice on `axis` has none.
+    """
+    bases: dict[str, _InputBasis] = {}
+    for requirement_id, read in inputs.items():
+        held = read.held
+        if held is None:
+            continue
+        choice = next((c for c in held.scope.choices if c.axis == axis), None)
+        if choice is None:
+            continue
+        bases[requirement_id] = _InputBasis(
+            requirement_id=requirement_id,
+            pin=read.pin,
+            origin=read.origin,
             choice=choice,
             stated=choice.provenance != "default"
-            and (axis not in planner_axes(block) or _provider_read_in_words(scope, choice)),
-            rank=_part_rank(scope.base.identity),
-            flows=_Flows.of(scope, block),
-            own_flows=_own_flows(scope, block) if axis == PROVIDER_AXIS else None,
-            part=scope.base.spec_id,
-            actives=tuple((held.axis, held.active) for held in scope.choices),
-            reads=_Reads.of(requirement, held.source),
+            and (
+                axis not in planner_axes(held.block) or _provider_read_in_words(held.scope, choice)
+            ),
+            held=held,
+            reads=read.reads,
         )
     return bases
 
@@ -4094,6 +4196,7 @@ def _aligned_bases(
     evidence_requirements: Sequence[EvidenceRequirement],
     *,
     shown: Mapping[str, PinSource],
+    sources: SourceReadings,
     aligned: Sequence[AlignedPin],
     searched: Sequence[SearchedPin],
     view: SessionView,
@@ -4195,6 +4298,7 @@ def _aligned_bases(
             patch lands (`_requirements_after`).
         evidence_requirements: This call's own requirements.
         shown: The datasets the planner was shown (`planner.plan.pin_sources`).
+        sources: The proposal's readings of the blocks of `shown` (`SourceReadings`).
         aligned: The pins compiled so far (`aligned_pins`).
         searched: The searches made so far for unpinned inputs (`searched_pins`).
         view: The session, where an `unsupported` answer is recorded.
@@ -4238,11 +4342,8 @@ def _aligned_bases(
     # final pin below.
     whole_ids = {whole.id for whole, _, _ in declared}
     aligning = [requirement for requirement in requirements if requirement.id not in whole_ids]
-    read = _read_origins(aligning, shown=shown, origins=origins)
-    by_axis = {
-        axis: _input_bases(aligning, read=read, origins=origins, axis=axis)
-        for axis in _ALIGNED_AXES
-    }
+    inputs = _read_inputs(aligning, sources=sources, origins=origins)
+    by_axis = {axis: _input_bases(inputs, axis=axis) for axis in _ALIGNED_AXES}
     steps = [step for step in requirements if len(inputs_of(step)) >= 2]
     groups = _input_groups(requirements)
     unpinned: dict[str, Unpinned] = {}
@@ -4269,7 +4370,14 @@ def _aligned_bases(
     if unpinned:
         return _basis_unknown(list(unpinned.values()))
     try:
-        targets = _alignment_targets(steps, groups, by_axis, view=view, proposer=proposer)
+        targets = _alignment_targets(
+            steps,
+            groups,
+            by_axis,
+            reads={requirement_id: read.reads for requirement_id, read in inputs.items()},
+            view=view,
+            proposer=proposer,
+        )
         wanted, realigned = _realigned_pins(targets, by_axis, compiled=compiled)
         if wanted:
             raise _Unservable(_bases_unaligned(wanted, by_axis))
@@ -4545,6 +4653,7 @@ def _alignment_targets(
     input_groups: Mapping[str, Sequence[_InputGroup]],
     by_axis: Mapping[str, Mapping[str, _InputBasis]],
     *,
+    reads: Mapping[str, _Reads],
     view: SessionView,
     proposer: Proposer,
 ) -> dict[tuple[str, str], tuple[str, str]]:
@@ -4559,8 +4668,8 @@ def _alignment_targets(
     different series, whichever calculation moves them. Once an axis's options
     are chosen, a calculation whose two sides alignment has put on one series,
     each computed alike from inputs on one part and options
-    (`_sides_one_series`), has every group that moved one of those inputs left
-    unaligned on that axis, and the options are chosen again until no group
+    (`_sides_one_series`, each input read as `reads` holds it, by requirement
+    id), has every group that moved one of those inputs left unaligned on that axis, and the options are chosen again until no group
     changes. The axis is what the calculation
     contrasts, as "what share of US ODA goes to multilaterals" reads US
     multilateral ODA over US total ODA, and counting the total on the
@@ -4611,7 +4720,7 @@ def _alignment_targets(
             moved = {
                 move
                 for candidate in candidates
-                for move in _sides_one_series(candidate.group, bases, axis, targets, counted)
+                for move in _sides_one_series(candidate.group, bases, reads, axis, targets, counted)
             }
             # The inputs of a calculation kept apart stay on their own options.
             aligned = {index for index, _ in aligning}
@@ -4707,6 +4816,7 @@ def _chosen_options(
 def _sides_one_series(
     group: _InputGroup,
     bases: Mapping[str, _InputBasis],
+    reads: Mapping[str, _Reads],
     axis: str,
     targets: Mapping[tuple[str, str], tuple[str, str]],
     counted: Mapping[str, Collection[str]],
@@ -4719,13 +4829,13 @@ def _sides_one_series(
     hold one shape and each pair of leaves at one position reads one series, so
     a total compared with an average of one series reads two, and a total by
     year over the series itself reads one. Two leaves read one series where
-    both have a choice on `axis` (`bases`), share a part (`_InputBasis.part`),
-    read it over one period and one set of entities (`_InputBasis.reads`),
-    and hold one option on every axis (`_InputBasis.actives`), which on `axis`
+    both have a choice on `axis` (`bases`), share a part (`_Origin.part`),
+    read it alike (`_InputBasis.reads`: one period, one set of entities, one
+    frame), and hold one option on every axis (`_Origin.actives`), which on `axis`
     is an option `counted` gives or the input's own, and on an earlier axis the
-    one in `targets`, or where neither has a choice on `axis` and both pin one
-    spec_id. A part and its options are what a pin compiles to. `counted`
-    holds every option any aligning group counts an input on, so a pair is
+    one in `targets`, or where neither has a choice on `axis`, both pin one
+    spec_id and read it alike (`reads`, by requirement id). A part and its
+    options are what a pin compiles to. `counted` holds every option any aligning group counts an input on, so a pair is
     caught on whichever group moves it, in any step order. Two sides on one
     series before alignment moves an input are left alone, since alignment did
     not put them there. A group with no sides (`_InputGroup.sides`) has none
@@ -4742,15 +4852,15 @@ def _sides_one_series(
         requirement_id, pin = leaf
         basis = bases.get(requirement_id)
         if basis is None:
-            return [(None, pin)]
+            return [(None, (pin, reads.get(requirement_id)))]
         others = {
             held: targets.get((requirement_id, held), (active, ""))[0]
-            for held, active in basis.actives
+            for held, active in basis.held.actives
             if held != axis
         }
         options = {basis.choice.active, *counted.get(requirement_id, ())}
         return [
-            (option, (basis.part, basis.reads, {**others, axis: option}))
+            (option, (basis.held.part, basis.reads, {**others, axis: option}))
             for option in sorted(options)
         ]
 
@@ -4825,11 +4935,11 @@ def _refuse_double_count(
     spending = next(
         (
             f", since the donors of {basis.requirement_id!r} "
-            f"{'are' if basis.own_flows == MULTILATERAL_REPORTERS else 'may include'} "
+            f"{'are' if basis.held.own_flows == MULTILATERAL_REPORTERS else 'may include'} "
             "multilateral organisations, whose outflows spend the core contributions "
             "their funders paid them"
             for basis in (first, other)
-            if "multilateral" in (basis.own_flows or ANY_REPORTERS)
+            if "multilateral" in basis.held.own_flows
             and "multilateral" in money
             and "bilateral" in _streams(basis)
         ),
@@ -5004,7 +5114,7 @@ def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBas
 
     Two inputs count a money by different streams where they hold different
     options, or one option whose reporters' own flows count different money
-    (`_InputBasis.own_flows`) where the option counts multilateral money by another
+    (`_Origin.own_flows`) where the option counts multilateral money by another
     stream too: DAC countries' inclusive aid and IDA's outflows on the inclusive
     scope both count the donors' aid through multilaterals, one as an imputed share
     and one as what IDA spends. Two inputs on one option whose
@@ -5017,9 +5127,12 @@ def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBas
             (first, other)
             for index, first in enumerate(kept)
             for other in kept[index + 1 :]
-            if (first.choice.active != other.choice.active or first.own_flows != other.own_flows)
+            if (
+                first.choice.active != other.choice.active
+                or first.held.own_flows != other.held.own_flows
+            )
             and _shared_money(first, other)
-            and first.flows.meet(other.flows)
+            and first.held.flows.meet(other.held.flows)
         ),
         None,
     )
@@ -5059,20 +5172,14 @@ def _shared_money(first: _InputBasis, other: _InputBasis) -> frozenset[ProviderM
         return frozenset()
     # No own flows: the money the option's streams other than the bilateral one count.
     pooled = scope_money(scope, own_flows=frozenset())
-    return (_own_money(first) | _own_money(other)) & pooled
-
-
-def _own_money(basis: _InputBasis) -> frozenset[ProviderMoney]:
-    """The money `basis`'s reporters' own flows count, any money where unread."""
-    return basis.own_flows if basis.own_flows is not None else ANY_REPORTERS
+    return (first.held.own_flows | other.held.own_flows) & pooled
 
 
 def _money(basis: _InputBasis) -> frozenset[ProviderMoney]:
     """The money `basis` counts on the provider option it holds active
     (`harness.scope_choices.scope_money`), its reporters' own flows counting what
-    its donors are (`_InputBasis.own_flows`), any money where those are unread;
-    any money where the option states no scope."""
-    return scope_money(_active_scope(basis), own_flows=_own_money(basis))
+    its donors are (`_Origin.own_flows`); any money where the option states no scope."""
+    return scope_money(_active_scope(basis), own_flows=basis.held.own_flows)
 
 
 def _active_scope(basis: _InputBasis) -> ProviderScope | None:
@@ -5092,7 +5199,7 @@ def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:
     stated = {basis.choice.active for basis in inputs if basis.stated}
     if len(stated) > 1:
         return None
-    return next(iter(stated)) if stated else max(inputs, key=lambda b: b.rank).choice.active
+    return next(iter(stated)) if stated else max(inputs, key=lambda b: b.held.rank).choice.active
 
 
 def _reads_on(step: EvidenceRequirement, axis: str) -> bool:
@@ -5512,7 +5619,7 @@ def _card_names(
     decisions: Sequence[Decision],
     scope_decisions: Mapping[str, Sequence[Decision]],
     previous: Plan | None,
-    shown: Mapping[str, PinSource],
+    sources: SourceReadings,
 ) -> dict[str, str]:
     """What the plan card names each retrieval of `requirements` by, by requirement
     id (`harness.plan_display.plan_words`), read off the plan they state once this
@@ -5521,7 +5628,7 @@ def _card_names(
     `_scope_decisions` cites them, since its sector decision names it where Search
     states no concept. Each retrieval the card's plan `previous` holds alike keeps
     its name there, and any other reads the source of the block its pin was shown
-    with (`shown`). Retrievals named alike are numbered in the order the compiled
+    with (`sources`). Retrievals named alike are numbered in the order the compiled
     plan's workflow runs them (`planner.plan.requirement_step_order`), the card's
     order, whatever order the plan states them in."""
     order = {
@@ -5554,14 +5661,9 @@ def _card_names(
         decisions=(*decisions, *(d for held in scope_decisions.values() for d in held)),
         evidence_requirements=tuple(datasets),
     )
-    pinned: dict[str, SelectedSource] = {}
-    for requirement in datasets:
-        if requirement.source_spec_id is None:
-            continue
-        block = _pin_block(requirement.source_spec_id, shown)
-        if block is not None and (source := readable_source(block)) is not None:
-            pinned[requirement.source_spec_id] = source
-    return dict(plan_words(draft, shown_as=previous, pinned=pinned).names)
+    return dict(
+        plan_words(draft, shown_as=previous, pinned=pinned_sources(datasets, sources)).names
+    )
 
 
 class _Difference(NamedTuple):
@@ -5576,7 +5678,7 @@ class _Difference(NamedTuple):
     """
 
     prefix: str
-    caveat: DecisionCaveat
+    caveat: DifferenceCaveat
     description: str
     options: tuple[str, str]
     lead: str
@@ -5619,7 +5721,7 @@ _CALCULATION_CAVEATS = frozenset(difference.caveat for difference in _DIFFERENCE
 def _difference_decisions(
     requirements: Sequence[EvidenceRequirement],
     *,
-    shown: Mapping[str, PinSource],
+    sources: SourceReadings,
     plan_decisions: Sequence[Decision] = (),
     scope_decisions: Mapping[str, Sequence[Decision]] | None = None,
     previous: Plan | None = None,
@@ -5663,7 +5765,7 @@ def _difference_decisions(
         (requirement, block, _block_scope(block))
         for requirement in requirements
         if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
-        for block in [_pin_block(requirement.source_spec_id, shown)]
+        for block in [sources.block(requirement.source_spec_id)]
     ]
     # The card's names are read only once a difference needs its inputs named.
     names: dict[str, str] | None = None
@@ -5709,7 +5811,7 @@ def _difference_decisions(
                     decisions=plan_decisions,
                     scope_decisions=scope_decisions or {},
                     previous=previous,
-                    shown=shown,
+                    sources=sources,
                 )
             lead = _ACCEPTED_PROVIDER_LEAD if flagged else difference.lead
             try:
