@@ -490,7 +490,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         settled,
         evidence_requirements,
         previous=previous,
-        scopes=scope_choice_decisions(pins, wholes={pin.spec_id for pin in wholes.values()}),
+        scopes=scope_choice_decisions(pins, wholes=_whole_only_pins(aligned_after, wholes)),
         wholes=_whole_decisions(wholes, aligned_after, shown=pins),
         calculations=_provider_difference_decisions(aligned_after, shown=pins),
         removed=removed_decisions,
@@ -3251,10 +3251,11 @@ def scope_choice_decisions(
     (`_scope_decision`), when it states one; a choice on an axis the block
     marks as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`)
     is the planner's decision. The pin of a declared whole (`wholes`, by
-    spec_id, `_compiled_wholes`) states none: its choices hold its part's
+    spec_id, `_whole_only_pins`) states none: its choices hold its part's
     options, so the part's rows move both, and any one option on the axis
     it leaves open would count a single slice of what the whole counts in
-    full.
+    full. A pin a plain requirement shares with a declared whole is no
+    whole's alone, and states its rows.
     """
     decisions: dict[str, tuple[Decision, ...]] = {}
     for spec_id, source in shown.items():
@@ -3471,7 +3472,7 @@ def _scope_decisions(
         if not isinstance(requirement, DatasetRequirement):
             return calculations.get(requirement.id, ())
         pin = requirement.source_spec_id
-        own = scopes.get(pin, ()) if pin is not None else ()
+        own = scopes.get(pin, ()) if pin is not None and requirement.whole_of is None else ()
         return (*own, *wholes.get(requirement.id, ()))
 
     cited_after = {
@@ -4406,6 +4407,19 @@ def _compiled_wholes(
         if isinstance(requirement, DatasetRequirement)
         and requirement.whole_of is not None
         and requirement.source_spec_id in compiled
+    }
+
+
+def _whole_only_pins(
+    requirements: Sequence[EvidenceRequirement], wholes: Mapping[str, AlignedPin]
+) -> set[str]:
+    """The spec_ids `wholes` (`_compiled_wholes`) pin that no requirement of
+    `requirements` other than a declared whole pins, which state no scope rows. A
+    plain requirement the planner pins to a whole's dataset is no whole: its rows stay."""
+    return {pin.spec_id for pin in wholes.values()} - {
+        requirement.source_spec_id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.whole_of is None
     }
 
 

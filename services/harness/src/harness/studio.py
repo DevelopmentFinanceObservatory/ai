@@ -1638,11 +1638,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     **held_labels(pending.card),
                     **conversation.turn_choice_baseline,
                 }
-            elif body.decision is InterruptDecision.AMEND:
-                # The planner drafts the plan again, and may reuse the
-                # requirement ids the choice ids are built from, so no
-                # earlier card's labels describe its choices.
-                conversation.turn_choice_baseline = {}
             if resuming:
                 # A retry resuming the same answer again: the dead attempt
                 # may already have sent frames the client saw, carrying a

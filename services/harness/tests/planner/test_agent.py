@@ -6226,6 +6226,55 @@ async def test_a_declared_whole_offers_no_row_on_the_axis_it_leaves_open(
     assert any(d.caveat == "derived_whole" for d in plan.decisions) is whole
 
 
+async def test_a_plain_requirement_on_a_declared_wholes_pin_keeps_its_rows(
+    decision: DecisionFactory,
+) -> None:
+    """A share of US health aid with the total declared a whole over every sector,
+    then an amendment adding "US total aid" as a plain requirement the planner pins
+    to the whole's compiled dataset. The plain requirement is no whole, so it states
+    and cites the sector row Search returned on that dataset, while the declared
+    whole still cites none."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"))
+    propose = _tools_reading(WholeCompiles(opened=True))["propose_plan"].func
+    result = await _us_2023(propose, ctx, decision(), part="health", whole=None, declared=True)
+    assert result["outcome"] == Outcome.OK.value, result
+    pin = dict(_pins(ctx))[_WHOLE]
+
+    result = await propose(
+        evidence_requirements=[
+            DatasetRequirement(
+                id="us_total",
+                decision_ids=["measure"],
+                measure="US total aid",
+                entities=[Entity(name="United States", role="donor")],
+                period=Period(start=2023, end=2023),
+                source_spec_id=pin,
+            ),
+            AggregateRequirement(
+                id="total_by_year",
+                input_id="us_total",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+        ],
+        amends_version=result["version"],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    rows = {
+        d.slot
+        for d in plan.decisions
+        if d.scope is not None and d.fixes is not None and d.fixes.source_spec_id == pin
+    }
+    assert rows
+    assert rows <= set(plan.requirement("us_total").decision_ids)
+    assert rows.isdisjoint(plan.requirement(_WHOLE).decision_ids)
+
+
 @pytest.mark.parametrize(
     ("title", "titled"),
     [("OECD CRS", True), ("OECD CRS " + "t" * 700, False)],

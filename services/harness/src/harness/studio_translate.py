@@ -1382,6 +1382,10 @@ class _Translator:
         # late `progress` reports, carry no output and add no frame.
         started = event.custom_metadata.get(PLANNER_STARTED_KEY) if event.custom_metadata else None
         if node == "planner" and isinstance(started, dict):
+            # The planner drafts the plan again, an amendment's or an execute
+            # replan's, and may reuse the requirement ids the choice ids are
+            # built from, so no earlier card's labels describe its choices.
+            self._conversation.turn_choice_baseline = {}
             label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
         output = event.output if isinstance(event.output, dict) else None

@@ -1495,6 +1495,20 @@ def test_a_replan_shows_revising_the_plan() -> None:
     assert _status_lines(frames) == [("s0", "Revising the plan", StepStatus.RUNNING)]
 
 
+@pytest.mark.parametrize("revising", [True, False], ids=["replan-or-amendment", "draft"])
+def test_a_planner_draft_drops_the_labels_the_turns_switches_kept(revising: bool) -> None:
+    """Whatever routes the turn to the planner, an amendment or the execute
+    node's replan included, it drafts the plan again, possibly under the same
+    requirement ids the choice ids are built from, so no earlier card's labels
+    describe the new plan's choices."""
+    translator = _translator()
+    translator._conversation.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
+
+    translator.translate(_node_event("planner", planner_started={"revising": revising}))
+
+    assert translator._conversation.turn_choice_baseline == {}
+
+
 def test_the_planner_starting_a_first_draft_opens_working_on_a_plan() -> None:
     """Whatever routes the turn to the planner, the line opens as the
     planner node starts its draft."""
