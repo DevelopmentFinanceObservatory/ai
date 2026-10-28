@@ -518,12 +518,26 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
                 "side_classes": ["official", "residual"],
             },
         ),
+        (
+            {"holds_multilaterals": False},
+            {
+                "role": "observationAbout",
+                "label": "Africa",
+                "ref": "africa",
+                "holds_multilaterals": False,
+            },
+        ),
         ({}, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
     ],
-    ids=["with-the-marker", "with-the-sides-classes", "without-the-field"],
+    ids=[
+        "with-the-marker",
+        "with-the-sides-classes",
+        "holding-no-multilateral",
+        "without-the-field",
+    ],
 )
 async def test_a_seed_resolves_its_set_with_the_classes_its_whole_total_holds(
-    monkeypatch: pytest.MonkeyPatch, marked: dict[str, list[str]], hashed: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, marked: dict[str, Any], hashed: dict[str, Any]
 ) -> None:
     # A seed without the field resolves to the group it always did, so a plan hash over
     # the source does not move.

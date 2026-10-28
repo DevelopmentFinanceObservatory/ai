@@ -96,7 +96,9 @@ class ResolvedGroup(StrictModel):
     and `None` where it states nothing, as a Search that predates the field
     and a set saved before it do. `sum_differs` says the source publishes its
     own figure for the set, which can differ from the members' sum; false
-    where Search states nothing.
+    where Search states nothing. `holds_multilaterals` says, for a donor set read
+    as a published total or a whole population, whether that population holds a
+    multilateral organisation; `None` where Search states nothing.
     A requirement's `Entity` naming the label, case-folded, on the set's side
     of the flow is met by the source under either reading
     (`compiler.evidence.resolve_group`), except that one asking for the members
@@ -128,6 +130,9 @@ class ResolvedGroup(StrictModel):
     )
     sum_differs: Annotated[bool, HASHED_WHEN_SET] = Field(
         default=False, exclude_if=lambda differs: not differs
+    )
+    holds_multilaterals: Annotated[bool | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda holds: holds is None
     )
 
     @property

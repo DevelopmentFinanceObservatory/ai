@@ -630,6 +630,32 @@ def test_a_searched_part_reads_its_sets_once_from_digest_to_stored_reading(
     assert tool_contracts.GROUP_FACTS_KEY not in reading
 
 
+def test_the_orchestrators_digest_reads_a_parts_sets_for_its_readings_and_states_no_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`graph_envelope` reads a definite part's sets once, for its group
+    readings, and builds none of the stored reading's set facts, which only
+    `resolver_digest` hands on."""
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "entity_groups": {"origin": {"ref": None, "label": "DAC", "whole_of": ["official"]}},
+    }
+    calls: list[str] = []
+    for name in ("readable_groups", "group_facts"):
+        real = getattr(tool_contracts, name)
+
+        def counting(value: Any, *, _name: str = name, _real: Any = real) -> Any:
+            calls.append(_name)
+            return _real(value)
+
+        monkeypatch.setattr(tool_contracts, name, counting)
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+
+    assert calls == ["readable_groups"]
+    assert tool_contracts.GROUP_FACTS_KEY not in summary
+
+
 @pytest.mark.parametrize(
     ("alternatives", "offered"),
     [

@@ -3783,6 +3783,47 @@ def test_a_revisions_changed_retrieval_is_told_apart_from_a_name_the_card_holds(
     ]
 
 
+def test_a_revisions_retrieval_sharing_a_carried_retrievals_concept_keeps_its_parties(
+    decision: Callable[..., Decision],
+) -> None:
+    """A retrieval the revision changed shares its concept with one the card
+    holds by a name with parties added; it reads with its own parties too,
+    since the concept alone reads as either."""
+
+    def dataset(requirement_id: str, donor: str, start: int) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="health aid",
+            entities=[Entity(name=donor, role="donor"), Entity(name="Kenya", role="recipient")],
+            period=Period(start=start, end=2023),
+        )
+
+    prior = Plan(
+        question="Health aid to Kenya from the United States and France",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("us", "United States", 2023),
+            dataset("france", "France", 2023),
+        ],
+    )
+    revision = Plan(
+        question="Health aid to Kenya from the United States and France",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("us", "United States", 2023),
+            dataset("france", "France", 2020),
+        ],
+    )
+
+    words = plan_words(revision, shown_as=prior)
+
+    assert (words.names["us"], words.names["france"]) == (
+        "health aid from United States to Kenya",
+        "health aid from France to Kenya",
+    )
+
+
 @pytest.mark.parametrize("helper", ["_concept", "_who"])
 def test_a_revision_reads_each_retrievals_naming_once_per_plan(
     decision: Callable[..., Decision], monkeypatch: pytest.MonkeyPatch, helper: str

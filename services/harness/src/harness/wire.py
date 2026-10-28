@@ -644,12 +644,11 @@ class SeedEntityGroup(BaseModel):
     The members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
     Each field the harness reads of a searched set (`planner.workflow.ResolvedGroup`)
-    is carried to the seed's resubmit as Search served it: `ref` or `group_id`,
+    is carried into the set the seed resolves as Search served it: `ref` or `group_id`,
     `total`, `whole_of`, `side_classes`, `members`, `left_out` (`None` where
-    Search states nothing) and `sum_differs`. A seed accepts
-    `holds_multilaterals` and the resubmit omits it: Search derives it on every
-    answer, and the harness reads it from Search's answer to the resubmit
-    (`harness.seeds.resolve_seed`).
+    Search states nothing), `sum_differs` and `holds_multilaterals`
+    (`harness.seeds.resolve_seed`). The resubmit post omits
+    `holds_multilaterals`, since Search derives it on every answer.
     """
 
     model_config = ConfigDict(extra="forbid")

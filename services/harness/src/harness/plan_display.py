@@ -849,30 +849,26 @@ def _concepts(
     Kenya". Any still alike whose periods differ add their period, "health to
     Kenya in 2023", and any still alike a number no other name holds, "(1)",
     "(2)", each set of namesakes in card order. A retrieval in `carried`
-    keeps the name given there, and the others are told apart from it as
-    from each other. The names are read off each retrieval's naming facets,
+    keeps the name given there; namesakes are found by these facets, carried
+    or not, so the others are told apart from it as from each other. The names are read off each retrieval's naming facets,
     `namings` where given, else read by `_namings`, a plan not compiled
     reading its sources off `sources` (`_source`).
     """
     carried = carried or {}
     namings = namings if namings is not None else _namings(plan, sources=sources)
     datasets = [r for r in _card_order(plan) if isinstance(r, DatasetRequirement)]
-    names = {
-        dataset.id: carried.get(dataset.id) or namings[dataset.id].concept for dataset in datasets
-    }
+    stems = {dataset.id: namings[dataset.id].concept for dataset in datasets}
+    for rid in _alike(stems):
+        if who := namings[rid].who:
+            stems[rid] = f"{stems[rid]} {who}"
+    names = {dataset.id: carried.get(dataset.id) or stems[dataset.id] for dataset in datasets}
     fresh = [dataset for dataset in datasets if dataset.id not in carried]
-    alike = _alike(names)
-    for dataset in fresh:
-        if dataset.id not in alike:
-            continue
-        if who := namings[dataset.id].who:
-            names[dataset.id] = f"{names[dataset.id]} {who}"
-    for name in dict.fromkeys(_alike(names).values()):
-        namesakes = [dataset for dataset in datasets if names[dataset.id] == name]
+    for stem in dict.fromkeys(_alike(stems).values()):
+        namesakes = [dataset for dataset in datasets if stems[dataset.id] == stem]
         if len({dataset.period for dataset in namesakes}) > 1:
             for dataset in namesakes:
                 if dataset.id not in carried:
-                    names[dataset.id] = f"{name} {_in_period(dataset)}"
+                    names[dataset.id] = f"{stem} {_in_period(dataset)}"
     for name in dict.fromkeys(_alike(names).values()):
         taken = set(names.values())
         number = 0

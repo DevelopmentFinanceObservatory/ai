@@ -8699,6 +8699,21 @@ def test_a_wholes_caveat_names_its_total_by_axis_where_searchs_groups_are_unread
     assert stated.chosen.endswith("total over every donor"), stated.chosen
 
 
+def test_a_recipient_a_part_binds_through_its_region_choice_alone_is_held_for_a_whole() -> None:
+    """US health aid to Africa's residual bucket, which the part binds on `destination`
+    only through the option its region choice holds active: the part binds a recipient
+    a whole over every recipient can leave open, as the identity it compiles to binds
+    one there."""
+    block = _us_health_to_africa()
+    scope_record = block["resolved"]["scope_choices"]
+    del scope_record["base"]["identity"]["entities"]["destination"]
+    scope_record["compiled"]["identity"]["entities"]["destination"] = ["AfricaRegional"]
+    scope = submission_service.part_scope(block["spec_id"], block)
+    assert scope is not None
+
+    assert submission_service.whole_axis_held(scope, "recipient")
+
+
 def test_a_dac1_donor_whole_of_a_donor_outside_the_dac_is_refused() -> None:
     """The United Arab Emirates' DAC1 total over DAC countries' total, which Search
     binds for its whole and whose members it lists without the Emirates: the
@@ -8940,6 +8955,30 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
         "step_id": _SUM,
     }
     assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("whole_of", "money"),
+    [
+        pytest.param(None, {"bilateral"}, id="readable-set"),
+        pytest.param(["sovereign_fund"], {"bilateral", "multilateral"}, id="unreadable-set"),
+    ],
+)
+def test_a_donor_sets_marker_speaks_for_its_donors_only_where_the_set_is_readable(
+    whole_of: list[str] | None, money: set[str]
+) -> None:
+    """DAC countries' bilateral ODA, whose donor set Search marks as holding no
+    multilateral: its reporters' own flows count bilateral money. Where the set names
+    a class of party this release does not know, the set is not read, so its marker
+    says nothing and the total reads as an unmarked organisation's, which may hold a
+    multilateral."""
+    block = json.loads(json.dumps(_SUM_BLOCKS["dac_countries_bilateral"]))
+    if whole_of is not None:
+        block["resolved"]["entity_groups"]["origin"]["whole_of"] = whole_of
+    scope = submission_service.part_scope(block["spec_id"], block)
+    assert scope is not None
+
+    assert submission_service._own_flows(scope, block) == money
 
 
 def _searched_in_words(block: dict[str, Any], *, stated: bool = True) -> dict[str, Any]:

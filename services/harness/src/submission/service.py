@@ -52,6 +52,7 @@ from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
     block_concept_label,
+    block_groups,
     countries_apart,
     measure_named_by_query,
     open_entity_axes_of,
@@ -1892,6 +1893,8 @@ def _entity_refs(
     record, resolves no ref and is compared by its name.
     """
 
+    # `sources` caches a shown block's source; this also caches the discovery log's
+    # source for a pin with no shown block, which `load_log` rebuilds on every read.
     @functools.cache
     def source(spec_id: str) -> SelectedSource | None:
         return _pinned_source(spec_id, view, sources)
@@ -4133,7 +4136,7 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
     be.
 
     Search states it on the donor side. Each donor bound there counts what the set
-    naming it states (`entity_groups.origin.holds_multilaterals`), where it is that
+    naming it states (`ResolvedGroup.holds_multilaterals`), where it is that
     set's total or one of its members, or where the set names neither and Search
     does not mark the donor a multilateral; any other donor counts `multilateral`
     where Search marks it one (`_donor_money`), as IDA bound beside a set of DAC
@@ -4142,7 +4145,9 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
     (`role_axis_facts`). Search marks only parties the graph types `Organization`,
     so an unmarked country is none. Anything else states nothing: an unmarked
     organisation or total, or an open role stating nothing, may hold one, as an
-    unreadable axis counts as overlapping.
+    unreadable axis counts as overlapping. Where Search's sets are not readable
+    (`compiler.sources.block_groups`), no set's marker is read, so each donor
+    counts what Search marks of it alone (`_donor_money`).
     """
     resolved = (block or {}).get("resolved") or {}
     donors = (scope.base.identity.get("entities") or {}).get("origin") or ()
@@ -4159,10 +4164,13 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
         if isinstance(stated, bool):
             return ANY_REPORTERS if stated else BILATERAL_REPORTERS
         return ANY_REPORTERS
-    group = (resolved.get("entity_groups") or {}).get("origin")
-    group = group if isinstance(group, Mapping) else {}
-    marker = group.get("holds_multilaterals")
-    named = {group.get("total"), *(group.get("members") or ())} - {None}
+    try:
+        groups = block_groups(block or {})
+    except ValueError:
+        groups = ()
+    group = next((group for group in groups if group.role == "origin"), None)
+    marker = group.holds_multilaterals if group is not None else None
+    named = {group.total, *group.members} - {None} if group is not None else set()
     entities = {
         entity.get("ref"): entity
         for entity in resolved.get("entities") or ()
@@ -4174,7 +4182,7 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
         # A set naming no one speaks for every donor but one Search marks a
         # multilateral of its own, bound beside the set.
         covered = donor in named or (not named and (entity or {}).get("multilateral") is not True)
-        if isinstance(marker, bool) and covered:
+        if marker is not None and covered:
             money |= ANY_REPORTERS if marker else BILATERAL_REPORTERS
         else:
             money |= _donor_money(entity)
@@ -5963,12 +5971,13 @@ WHOLE_COLUMNS: Mapping[str, str] = {"donor": "origin", "recipient": "destination
 def whole_axis_held(scope: PartScope, axis: str) -> bool:
     """Whether the part `scope` records binds something on `axis` a declared whole can
     leave open: for the sector, a choice binding one slot (`axis_slot`); for a donor
-    or recipient, an entity on that role's column of its base identity
-    (`WHOLE_COLUMNS`)."""
+    or recipient, an entity on that role's column (`WHOLE_COLUMNS`) of the identity
+    its active options compile to (`PartScope.compiled`), so a party a choice's
+    option adds there (`EntitiesBinding`) counts as the base identity's own do."""
     column = WHOLE_COLUMNS.get(axis)
     if column is None:
         return axis_slot(scope, axis) is not None
-    return bool((scope.base.identity.get("entities") or {}).get(column))
+    return bool((scope.compiled.identity.get("entities") or {}).get(column))
 
 
 def unread_part(

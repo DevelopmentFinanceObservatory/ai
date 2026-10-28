@@ -906,7 +906,10 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     `sum_differs` are, for a set read as its members, the residuals its total
     counts that the members leave out, `None` where the group states nothing
     (an empty list states that none is), and whether the source publishes its
-    own figure for it, absent from a Search that predates them. A class outside
+    own figure for it, absent from a Search that predates them.
+    `holds_multilaterals` is whether a donor set read as a total or a whole
+    population holds a multilateral organisation, absent where Search states
+    nothing. A class outside
     `common.place_type.PartyClass` fails the block.
     """
     found = []
@@ -929,6 +932,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                         else tuple(_strings(group.get("left_out")))
                     ),
                     sum_differs=_flag(group.get("sum_differs")) is True,
+                    holds_multilaterals=_flag(group.get("holds_multilaterals")),
                 )
             )
     return tuple(found)

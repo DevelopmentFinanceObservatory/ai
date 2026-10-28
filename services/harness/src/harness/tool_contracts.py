@@ -457,11 +457,11 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
 
 def _envelope_digest(
     envelope: dict[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any] | None]]:
-    """`graph_envelope`'s digest, and each part's named sets as `group_facts` states
-    them, `None` for a part that is not `definite`, by the part's position."""
-    digest, facts = _decision_digest(envelope)
-    return {**digest, "skills": _named_skills(envelope)}, facts
+) -> tuple[dict[str, Any], list[tuple[ResolvedGroup, ...] | None]]:
+    """`graph_envelope`'s digest, and each part's named sets as `_part_summary`
+    read them, by the part's position."""
+    digest, groups = _decision_digest(envelope)
+    return {**digest, "skills": _named_skills(envelope)}, groups
 
 
 def _named_skills(envelope: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -478,7 +478,7 @@ def _named_skills(envelope: Mapping[str, Any]) -> list[dict[str, str]]:
 
 def _decision_digest(
     envelope: dict[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any] | None]]:
+) -> tuple[dict[str, Any], list[tuple[ResolvedGroup, ...] | None]]:
     """`graph_envelope`'s fields, every one but `skills`, and each part's named sets
     (`_envelope_digest`)."""
     kind = str(envelope.get("kind") or "resolution")
@@ -489,7 +489,7 @@ def _decision_digest(
     digest = _part_digest(envelope, parts[0] if parts else {}, count)
     summaries = [_part_summary(envelope, part) for part in parts]
     digest["part_digests"] = [summary for summary, _ in summaries]
-    return digest, [facts for _, facts in summaries]
+    return digest, [groups for _, groups in summaries]
 
 
 def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -513,7 +513,7 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     when it states none. The skills it names for `get_skill` are
     `graph_envelope`'s own `skills`.
     """
-    digest, facts = _envelope_digest(envelope)
+    digest, part_groups = _envelope_digest(envelope)
     raw_parts = envelope.get("parts") or []
     raw_part = raw_parts[0] if raw_parts else {}
     digest["spec_block"] = (
@@ -522,15 +522,12 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     for part, summary, groups in zip(
-        raw_parts, digest.get("part_digests") or [], facts, strict=False
+        raw_parts, digest.get("part_digests") or [], part_groups, strict=False
     ):
-        summary["spec_block"] = (
-            _with_bound_refs(part, part.get("spec"))
-            if summary.get("status") == "definite"
-            else None
-        )
-        if groups is not None:
-            summary[GROUP_FACTS_KEY] = groups
+        definite = summary.get("status") == "definite"
+        summary["spec_block"] = _with_bound_refs(part, part.get("spec")) if definite else None
+        if definite:
+            summary[GROUP_FACTS_KEY] = group_facts(groups)
         summary["candidate_blocks"] = {
             spec["spec_id"]: _with_bound_refs(part, spec)
             for spec in _offered_specs(part)
@@ -578,8 +575,8 @@ def reading_facts(
     are the named sets the part's places were asked for as
     (`compiler.sources.readable_groups`), which a later resubmit of the reading,
     such as a chip's, posts again. Where they are not readable they are none,
-    with a warning logged, and `entity_groups_unreadable` is true, so that
-    resubmit refuses rather than post the part without them. `groups` are
+    with a warning logged, and `entity_groups_unreadable` is true, which makes
+    a resubmit of the reading refuse. `groups` are
     those two keys as `resolver_digest` read them from `spec` (`group_facts`),
     read from `spec` here when not given. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
@@ -658,9 +655,11 @@ def chosen_part(spec: Mapping[str, Any], *, variable: str | None) -> dict[str, A
 
 def _part_summary(
     envelope: dict[str, Any], part: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
+) -> tuple[dict[str, Any], tuple[ResolvedGroup, ...] | None]:
     """One search part, as `graph_envelope`'s `part_digests` names it, and, for a
-    `definite` part, the named sets its block states (`group_facts`), read once."""
+    `definite` part, the named sets its block states
+    (`compiler.sources.readable_groups`), read once; `None` for any other part
+    or where they are not readable."""
     digest = _part_digest(envelope, part, 1)
     resolved = ((part.get("spec") or {}).get("resolved") or {}).get("rendered_sentence")
     summary = {
@@ -707,7 +706,7 @@ def _part_summary(
     summary.update(measure_choice(spec))
     if codes := source_codes(spec):
         summary["source_codes"] = codes
-    return summary, group_facts(groups)
+    return summary, groups
 
 
 def measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
