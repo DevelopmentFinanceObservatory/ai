@@ -5166,9 +5166,13 @@ def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBas
     (`_Origin.own_flows`) where the option counts multilateral money by another
     stream too: DAC countries' inclusive aid and IDA's outflows on the inclusive
     scope both count the donors' aid through multilaterals, one as an imputed share
-    and one as what IDA spends. Two inputs on one option whose
-    reporters count the same money count it by the same streams, and whether
-    their flows overlap is no question of provider scope.
+    and one as what IDA spends. Two inputs on one option whose reporters' own
+    flows are known to count the same money count it by the same streams, and
+    whether their flows overlap is no question of provider scope. `ANY_REPORTERS`
+    states that the money is unknown, so two inputs holding it may each be
+    a country or a multilateral and go on like any other pair: two organisations
+    Search states nothing of, on the inclusive scope, may be one's outflows
+    beside the other's imputed share of them.
 
     `_refuse_double_count` gives the inputs (`_alignment_targets`)."""
     return next(
@@ -5179,6 +5183,7 @@ def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBas
             if (
                 first.choice.active != other.choice.active
                 or first.held.own_flows != other.held.own_flows
+                or first.held.own_flows == ANY_REPORTERS
             )
             and _shared_money(first, other)
             and first.held.flows.meet(other.held.flows)

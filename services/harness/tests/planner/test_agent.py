@@ -5221,8 +5221,14 @@ def test_a_calculation_counts_its_inputs_on_one_provider_scope(
     ctx = _FakeToolContext()
     _show_blocks(
         ctx,
-        provider_block(HEALTH, narrow=True, active=health[0], provenance=health[1]),
-        provider_block(TOTAL, narrow=False, active=total[0], provenance=total[1]),
+        _from_donors(
+            provider_block(HEALTH, narrow=True, active=health[0], provenance=health[1]),
+            ["country/USA"],
+        ),
+        _from_donors(
+            provider_block(TOTAL, narrow=False, active=total[0], provenance=total[1]),
+            ["country/USA"],
+        ),
     )
 
     refused = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
@@ -5354,10 +5360,11 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
 
 @pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
 @pytest.mark.parametrize(
-    ("scope", "total_donor", "marked", "code"),
+    ("scope", "health_donor", "total_donor", "marked", "code"),
     [
         pytest.param(
             "inclusive",
+            "country/USA",
             "InternationalDevelopmentAssociation",
             True,
             ProblemCode.OPERATION_UNSUPPORTED.value,
@@ -5366,17 +5373,37 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
         # IDA stating no marker may be a multilateral's outflows.
         pytest.param(
             "inclusive",
+            "country/USA",
             "InternationalDevelopmentAssociation",
             None,
             ProblemCode.OPERATION_UNSUPPORTED.value,
             id="unmarked-organisation",
         ),
-        pytest.param("inclusive", "country/USA", None, Outcome.OK.value, id="one-reporter-kind"),
+        # Two organisations stating no marker: either may be a multilateral whose
+        # outflows spend the money the other's imputed share counts, so their own flows
+        # being equally unknown says nothing of the streams they count it by.
+        pytest.param(
+            "inclusive",
+            "AsianDevelopmentBank",
+            "InternationalDevelopmentAssociation",
+            None,
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="two-unmarked-organisations",
+        ),
+        pytest.param(
+            "inclusive",
+            "country/USA",
+            "country/USA",
+            None,
+            Outcome.OK.value,
+            id="one-reporter-kind",
+        ),
         # Bilateral flows alone: each input counts its reporters' own flows by the one
         # stream, whatever money those count, and no multilateral money of one can be
         # the other's outflows.
         pytest.param(
             "bilateral",
+            "country/USA",
             "InternationalDevelopmentAssociation",
             None,
             Outcome.OK.value,
@@ -5388,6 +5415,7 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
     decision: DecisionFactory,
     accept: bool,
     scope: str,
+    health_donor: str,
     total_donor: str,
     marked: bool | None,
     code: str,
@@ -5397,25 +5425,24 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
     multilateral flows and the total is IDA's, whose own outflows spend the core
     contributions its funders paid it, both inputs count the donors' aid through
     multilaterals, one as an imputed share and one as IDA's spending, so the sum is
-    refused although both hold one option. Where both report as countries, or the
-    scope counts the reporters' own flows alone, they count each money by the same
-    streams, and the provider scope says nothing of whether their flows overlap."""
+    refused although both hold one option, as it is where both are organisations
+    Search states nothing of. Where both report as countries, or the scope counts the
+    reporters' own flows alone, they count each money by the same streams, and the
+    provider scope says nothing of whether their flows overlap."""
     ctx = _FakeToolContext()
+    health = _from_donors(
+        provider_block(HEALTH, narrow=True, active=f"provider:{scope}"), [health_donor]
+    )
     total = _from_donors(
         provider_block(TOTAL, narrow=False, active=f"provider:{scope}"), [total_donor]
     )
-    if total_donor != "country/USA":
-        (donor,) = total["resolved"]["entities"]
-        donor.update(entity_type="Organization")
-        if marked is not None:
-            donor.update(multilateral=marked)
-    _show_blocks(
-        ctx,
-        _from_donors(
-            provider_block(HEALTH, narrow=True, active=f"provider:{scope}"), ["country/USA"]
-        ),
-        total,
-    )
+    for block in (health, total):
+        (donor,) = block["resolved"]["entities"]
+        if not donor["ref"].startswith("country/"):
+            donor.update(entity_type="Organization")
+            if marked is not None:
+                donor.update(multilateral=marked)
+    _show_blocks(ctx, health, total)
 
     result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
 
