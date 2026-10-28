@@ -6353,6 +6353,66 @@ async def test_a_declared_whole_switched_on_its_own_row_is_never_realigned(
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat == "derived_whole"]
     assert stated.slot in plan.requirement(_WHOLE).decision_ids
+    assert stated.rationale.endswith(
+        "so both sides count the same donors, recipients and measure basis."
+    )
+
+
+async def test_a_declared_whole_follows_its_part_when_another_calculation_realigns_it(
+    decision: DecisionFactory,
+) -> None:
+    """US bilateral health aid as a share of a declared whole, and also compared with
+    health aid the user asked for with imputed multilateral flows. The comparison
+    moves the part to the inclusive compile, so the whole is compiled from that
+    final pin and the share divides an inclusive part by an inclusive total."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    inclusive = us_2023_block("health_inclusive")
+    stated = _stated_provider(json.loads(json.dumps(inclusive)))
+    stated["spec_id"] = f"spec_{'8' * 32}"
+    _show_blocks(ctx, us_2023_block("health"), inclusive, stated)
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin=us_2023_block("health")["spec_id"],
+            option_ids=("provider:inclusive",),
+            spec_id=inclusive["spec_id"],
+            digest={},
+        ),
+    )
+
+    result = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=None,
+        declared=True,
+        extra=[
+            DatasetRequirement(
+                id="health_stated",
+                decision_ids=["measure"],
+                measure="US aid to health with imputed multilateral flows",
+                entities=[Entity(name="United States", role="donor")],
+                period=Period(start=2023, end=2023),
+                source_spec_id=stated["spec_id"],
+            ),
+            ComparisonRequirement(
+                id=_COMPARE,
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="health_stated"),
+                subtrahend=RequirementSide(input_id=_PART),
+            ),
+        ],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    assert [e["option_id"] for e in call["scope_entries"] if e["axis"] == "provider"] == [
+        "provider:inclusive"
+    ]
+    assert dict(_pins(ctx))[_PART] == inclusive["spec_id"]
+    assert dict(_pins(ctx))[_WHOLE] == us_2023_block("whole_inclusive")["spec_id"]
 
 
 async def test_a_quotient_over_a_declared_whole_divides_by_the_parts_own_total(

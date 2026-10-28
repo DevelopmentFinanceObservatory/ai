@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 from harness.plan_display import (
+    _card_label,
+    _concepts,
     _label,
     basis_free,
     card_decision_text,
@@ -70,6 +72,8 @@ from planner.plan import (
     ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
+    WholeOf,
+    frame_shapes,
     scope_choice_slot,
 )
 from planner.records import (
@@ -3277,6 +3281,82 @@ def test_the_card_states_a_recorded_plan_once_in_short_labels(
     assert card_title(plan) == title
     assert card_summary(plan) == summary
     assert [row["label"] for row in rows] == labels
+
+
+def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_measure() -> None:
+    """The recorded US health share with its total declared the health part over
+    every sector, under the planner's measure "Total aid to health": the whole's
+    labels name all sectors, the part's sector opened, and never that measure."""
+    plan = _recorded_plan("long")
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(
+                    update={
+                        "measure": "Total aid to health",
+                        "whole_of": WholeOf(part="us_health_aid_raw", axis="sector"),
+                    }
+                )
+                if r.id == "us_total_aid_raw"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+
+    labels = [row["label"] for row in card_rows(plan)]
+
+    assert labels == [
+        f"Fetch {_HEALTH} for United States",
+        f"Total {_HEALTH}",
+        "Fetch all sectors for United States",
+        "Total all sectors",
+        f"{_HEALTH[0].upper()}{_HEALTH[1:]} as a share of all sectors",
+    ]
+
+
+def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
+    decision: DecisionFactory,
+) -> None:
+    """US grant equivalents minus the UK's, both read from one DAC1 fetch of the
+    two donors: each side names the entity it narrows the fetch to, so the
+    card label, the step label, the sentence and the plan's words tell the two
+    sides apart."""
+    plan = Plan(
+        question="How much more grant-equivalent ODA did the US give than the UK in 2023?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="dac1",
+                decision_ids=["measure"],
+                measure="grant equivalents",
+                entities=[
+                    Entity(name="United States", role="donor"),
+                    Entity(name="United Kingdom", role="donor"),
+                ],
+                period=Period(start=2023, end=2023),
+            ),
+            ComparisonRequirement(
+                id="gap",
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="dac1", entity="United States"),
+                subtrahend=RequirementSide(input_id="dac1", entity="United Kingdom"),
+            ),
+        ],
+    )
+    gap = plan.requirement("gap")
+    us, uk = "grant equivalents for United States", "grant equivalents for United Kingdom"
+
+    card = _card_label(gap, plan, concepts=_concepts(plan), shapes=frame_shapes(plan))
+
+    assert card == f"Compare {us} to {uk}"
+    assert _label(gap, plan) == f"Compare {us} to {uk}"
+    (row,) = [row for row in requirement_rows(plan) if row["id"] == "gap"]
+    assert row["sentence"] == (
+        f"Grant equivalents for United States minus {uk}, at every period the two share."
+    )
+    assert plan_words(plan).names["gap"] == f"{us} against {uk}"
 
 
 def test_a_card_answering_an_ask_of_only_whitespace_takes_the_plans_title() -> None:

@@ -3827,15 +3827,17 @@ def _aligned_bases(
     guaranteed for it.
 
     A whole the planner declared (`DatasetRequirement.whole_of`) is pinned
-    to its part's own dataset with the declared axis left open, compiled
-    with no search and whatever pin the planner wrote on it
-    (`_declared_wholes`). A part with no pin is searched for first. A whole
-    not compiled yet answers `BASES_UNALIGNED` naming it
-    (`Realignment.whole_axis`), and a part Search cannot leave the axis
-    open on answers `SHARE_WHOLE_UNDERIVABLE`. A compiled whole is never
+    to its part's dataset with the declared axis left open, compiled with
+    no search and whatever pin the planner wrote on it (`_declared_wholes`).
+    A part with no pin is searched for first. A declared whole is never
     aligned: it holds the options the user switched on its own row, so its
-    calculation's other inputs are aligned among themselves, and a provider
-    scope it differs on is stated (`_provider_difference_decisions`). A share
+    calculation's other inputs are aligned among themselves first, and the
+    whole is then compiled from its part's final pin, the one alignment
+    moved the part to, so it follows its part by construction. A provider
+    scope it differs on is stated (`_provider_difference_decisions`). A
+    whole not compiled yet answers `BASES_UNALIGNED` naming it
+    (`Realignment.whole_axis`), and a part Search cannot leave the axis open
+    on answers `SHARE_WHOLE_UNDERIVABLE`. A share
     declaring nothing is never rewritten: its inputs are aligned as any
     calculation's are.
 
@@ -3919,23 +3921,17 @@ def _aligned_bases(
     requirements = [_pinned(requirement, found) for requirement in requirements]
     evidence_requirements = [_pinned(requirement, found) for requirement in evidence_requirements]
     try:
-        wholes = _declared_wholes(
-            requirements,
-            carried=carried,
-            shown=shown,
-            unsearched=unsearched,
-            compiled=[pin for pin in aligned if pin.whole_axis is not None],
-        )
+        declared = _whole_parts(requirements, unsearched=unsearched)
     except _Unservable as exc:
         return exc.problem
-    requirements = [_pinned(requirement, wholes) for requirement in requirements]
     origins = {pin.spec_id: pin.origin for pin in aligned if pin.whole_axis is None}
     compiled = {
         (pin.origin, pin.option_ids): pin.spec_id for pin in aligned if pin.whole_axis is None
     }
-    # A compiled whole holds the options the user switched on its own row, so
-    # alignment never moves it; its calculation's other inputs align as before.
-    aligning = [requirement for requirement in requirements if requirement.id not in wholes]
+    # A declared whole holds the options the user switched on its own row, so
+    # alignment never moves it; it is compiled from its part's final pin below.
+    whole_ids = {whole.id for whole, _, _ in declared}
+    aligning = [requirement for requirement in requirements if requirement.id not in whole_ids]
     by_axis = {
         axis: _input_bases(aligning, shown=shown, origins=origins, axis=axis)
         for axis in _ALIGNED_AXES
@@ -3970,11 +3966,18 @@ def _aligned_bases(
         return _basis_unknown(list(unpinned.values()))
     try:
         targets = _alignment_targets(steps, reads, by_axis, view=view, proposer=proposer)
+        wanted, realigned = _realigned_pins(targets, by_axis, compiled=compiled)
+        if wanted:
+            raise _Unservable(_bases_unaligned(wanted, by_axis))
+        wholes = _declared_wholes(
+            declared,
+            realigned=realigned,
+            carried=carried,
+            shown=shown,
+            compiled=[pin for pin in aligned if pin.whole_axis is not None],
+        )
     except _Unservable as exc:
         return exc.problem
-    wanted, realigned = _realigned_pins(targets, by_axis, compiled=compiled)
-    if wanted:
-        return _bases_unaligned(wanted, by_axis)
     moved = {**wholes, **realigned}
     return [
         repinned(requirement, pin, exact_codes(_pin_block(pin, shown)))
@@ -4219,42 +4222,22 @@ def _aligns(step: EvidenceRequirement, axis: str) -> bool:
     return isinstance(step, _PROVIDER_ALIGNED) and not step.accept_provider_difference
 
 
-def _declared_wholes(
-    requirements: Sequence[EvidenceRequirement],
-    *,
-    carried: Sequence[EvidenceRequirement],
-    shown: Mapping[str, PinSource],
-    unsearched: Mapping[str, DatasetRequirement],
-    compiled: Sequence[AlignedPin],
-) -> dict[str, str]:
-    """The pin of each whole the planner declared (`DatasetRequirement.whole_of`), by requirement id (`_aligned_bases`).
+def _whole_parts(
+    requirements: Sequence[EvidenceRequirement], *, unsearched: Mapping[str, DatasetRequirement]
+) -> list[tuple[DatasetRequirement, DatasetRequirement, str]]:
+    """Each whole the planner declared (`DatasetRequirement.whole_of`), with its part and the axis it leaves open (`_aligned_bases`).
 
-    A declared whole is its part's own dataset with the slot the part's
-    choice on the declared axis binds unbound (`axis_slot`) and every other
-    choice held, so it counts the same donors, recipients, measure basis
-    and providers as the part, but for the options the user switched on the
-    whole's own row. Those are the options of the compiled whole the
-    whole's pin is (`AlignedPin.option_ids`, held by `harness.graph.switch`
-    for a switch), else of the one the requirement of the same id pins in
-    the plan this call amends (`carried`), so a whole restated with its
-    `whole_of` and no pin keeps them, and a whole compiled again from
-    another pin of its part keeps them too. A whole restated with another
-    `whole_of` starts from the part's own options.
-    `compiled` holds the wholes compiled so far (`AlignedPin.key`), so wholes
-    declaring one part, axis and options share one compile. A whole that
-    cannot name its part so (`planner.plan.whole_of_fault`) is left for
-    `Plan` to refuse.
+    A whole that cannot name its part so (`planner.plan.whole_of_fault`) is
+    left out, for `Plan` to refuse.
 
     Raises:
         _Unservable: With `BASIS_UNKNOWN`, naming each part pinned to no
             dataset and not searched for yet (`unsearched`), the whole as the
-            step wanting it, with `BASES_UNALIGNED`, naming each whole not compiled
-            yet, once per part pin, axis and options (`Realignment.whole_axis`), or
-            `SHARE_WHOLE_UNDERIVABLE` when a part has no pin, or Search's scope
-            records for its pin hold no choice on the axis binding one slot.
+            step wanting it, or `SHARE_WHOLE_UNDERIVABLE` when Search settled a
+            part on no one dataset.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
-    declared = [
+    declared: list[tuple[DatasetRequirement, DatasetRequirement, str]] = [
         (whole, cast(DatasetRequirement, by_id[whole.whole_of.part]), whole.whole_of.axis)
         for whole in requirements
         if isinstance(whole, DatasetRequirement)
@@ -4268,6 +4251,50 @@ def _declared_wholes(
     }
     if searches:
         raise _Unservable(_basis_unknown(list(searches.values())))
+    for whole, part, _ in declared:
+        if part.source_spec_id is None:
+            raise _Unservable(
+                share_whole_underivable(
+                    whole_id=whole.id,
+                    part_spec_id=None,
+                    reason=f"Search settled {part.id!r} on no one dataset",
+                    cause="part_unpinned",
+                )
+            )
+    return declared
+
+
+def _declared_wholes(
+    declared: Sequence[tuple[DatasetRequirement, DatasetRequirement, str]],
+    *,
+    realigned: Mapping[str, str],
+    carried: Sequence[EvidenceRequirement],
+    shown: Mapping[str, PinSource],
+    compiled: Sequence[AlignedPin],
+) -> dict[str, str]:
+    """The pin of each declared whole of `declared` (`_whole_parts`), by requirement id (`_aligned_bases`).
+
+    A declared whole is its part's final pin, the one alignment moved the
+    part to (`realigned`) else its own, with the slot the part's choice on
+    the declared axis binds unbound (`axis_slot`) and every other choice
+    held, so it counts the same donors, recipients, measure basis and
+    providers as the part, but for the options the user switched on the
+    whole's own row. Those are the options of the compiled whole the
+    whole's pin is (`AlignedPin.option_ids`, held by `harness.graph.switch`
+    for a switch), else of the one the requirement of the same id pins in
+    the plan this call amends (`carried`), so a whole restated with its
+    `whole_of` and no pin keeps them, and a whole compiled again from
+    another pin of its part keeps them too. A whole restated with another
+    `whole_of` starts from the part's own options.
+    `compiled` holds the wholes compiled so far (`AlignedPin.key`), so wholes
+    declaring one part, axis and options share one compile.
+
+    Raises:
+        _Unservable: With `BASES_UNALIGNED`, naming each whole not compiled
+            yet, once per part pin, axis and options (`Realignment.whole_axis`),
+            or `SHARE_WHOLE_UNDERIVABLE` when Search's scope records for a
+            part's pin hold no choice on the axis binding one slot.
+    """
     pins = {pin.key: pin.spec_id for pin in compiled}
     own = {(pin.spec_id, pin.whole_axis): pin.option_ids for pin in compiled}
     before = {
@@ -4278,16 +4305,7 @@ def _declared_wholes(
     wanted: dict[tuple[str, str, tuple[str, ...]], Realignment] = {}
     wholes: dict[str, str] = {}
     for whole, part, axis in declared:
-        pin = part.source_spec_id
-        if pin is None:
-            raise _Unservable(
-                share_whole_underivable(
-                    whole_id=whole.id,
-                    part_spec_id=pin,
-                    reason=f"Search settled {part.id!r} on no one dataset",
-                    cause="part_unpinned",
-                )
-            )
+        pin = realigned.get(part.id) or cast(str, part.source_spec_id)
         block = _pin_block(pin, shown)
         scope = part_scope(pin, block)
         if scope is None or axis_slot(scope, axis) is None:
@@ -4408,6 +4426,17 @@ def _without_replaced_whole_decisions(
     ]
 
 
+# What a declared whole holds from its part, by the axis a switch on the
+# whole's own row moves, in reader words; donors have no such axis
+# (`_whole_decisions`).
+_WHOLE_HELD = (
+    (None, "donors"),
+    ("region", "recipients"),
+    (_BASIS_AXIS, "measure basis"),
+    (_PROVIDER_AXIS, "providers"),
+)
+
+
 def _whole_decisions(
     wholes: Mapping[str, AlignedPin],
     requirements: Sequence[EvidenceRequirement],
@@ -4418,7 +4447,10 @@ def _whole_decisions(
     by the whole's requirement id, `wholes` holding each one's pin.
 
     It says, in reader words, that the share divides by the total of its
-    part's own dataset over every member of the axis left open. The part is
+    part's own dataset over every member of the axis left open, and that
+    both sides count the same donors, recipients, measure basis and
+    providers, less any of those the user switched on the whole's own row
+    (`AlignedPin.option_ids`). The part is
     the one the whole declares (`DatasetRequirement.whole_of`), else the pin
     it was compiled from (`AlignedPin.origin`), so two wholes compiled to one
     pin each name their own. It is the planner's, qualifies the answer
@@ -4447,6 +4479,9 @@ def _whole_decisions(
             f"the {dataset}, the same dataset as" if dataset is not None else "the same dataset as"
         )
         part_named = f"the {side} figures" if side is not None else "its part"
+        switched = {option_axis(option_id) for option_id in whole.option_ids}
+        held = [words for axis, words in _WHOLE_HELD if axis not in switched]
+        same = ", ".join(held[:-1]) + f" and {held[-1]}" if len(held) > 1 else held[0]
         try:
             decision = Decision(
                 slot=_whole_slot(requirement_id),
@@ -4456,8 +4491,7 @@ def _whole_decisions(
                 resolved_by=ResolvedBy.PLANNER_DEFAULT,
                 rationale=(
                     f"The share divides by the total over every {whole.whole_axis} from "
-                    f"{source} {part_named}, so both sides count the same donors, recipients, "
-                    "measure basis and providers."
+                    f"{source} {part_named}, so both sides count the same {same}."
                 ),
                 fixes=DecisionFixes(source_spec_id=whole.spec_id),
                 caveat="derived_whole",

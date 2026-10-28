@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
@@ -377,11 +377,6 @@ async def _switched_plan(
             held_open=[item.reading.open_roles],
             share_sides=[item.reading.share_over],
         )
-    moved: dict[str, dict[str, str]] = {}
-    for item in switched:
-        for entry in moved_choices(item.scope, item.after, switched=axis):
-            row = _moved_row(revised_plan, item, entry["choice_id"])
-            moved.setdefault(row, {**entry, "choice_id": row})
     logger.info(
         "plan switched: choice_id=%s option_id=%s sources=%d version=%d",
         choice_id,
@@ -393,7 +388,7 @@ async def _switched_plan(
         **revised_plan.model_dump(mode="json"),
         "summary": revised["summary"],
         "revision": plan_revision(revised_plan),
-        "moved": list(moved.values()),
+        "moved": _moved_entries(revised_plan, switched, axis=axis),
     }
 
 
@@ -428,14 +423,32 @@ def _hold_switched_wholes(
         )
 
 
-def _moved_row(plan: PlannerPlan, item: _Switched, moved: str) -> str:
+def _moved_entries(
+    plan: PlannerPlan, switched: Sequence[_Switched], *, axis: str
+) -> list[dict[str, str]]:
+    """Each other choice the switch on `axis` moved (`moved_choices`), once per card row.
+
+    A move is listed under its row's id (`_moved_row`), so one move across
+    several switched sources sharing a row, or showing none, is listed once.
+    """
+    pins = {item.spec_id for item in switched}
+    moved: dict[str, dict[str, str]] = {}
+    for item in switched:
+        for entry in moved_choices(item.scope, item.after, switched=axis):
+            row = _moved_row(plan, item, entry["choice_id"], switched=pins)
+            moved.setdefault(row, {**entry, "choice_id": row})
+    return list(moved.values())
+
+
+def _moved_row(plan: PlannerPlan, item: _Switched, moved: str, *, switched: Collection[str]) -> str:
     """The card's id for the choice of `item`'s compiled scope Search names `moved`.
 
     The id of `plan`'s row for it (`harness.plan_display.choice_id`); for a
     choice the plan holds no decision for, so the card shows no row, the id
-    such a row would have (`pinned_choice_id`), and the entry still reaches
-    the card's `moved` list. Search's own id when no requirement pins the
-    source either.
+    such a row would have over every switched source (`switched`,
+    `pinned_choice_id`), so the move is one entry of the card's `moved` list
+    on each axis whichever source Search moved. Search's own id when no
+    requirement pins a switched source either.
     """
     axis = next((choice.axis for choice in item.after.choices if choice.id == moved), None)
     decision = next(
@@ -453,7 +466,7 @@ def _moved_row(plan: PlannerPlan, item: _Switched, moved: str) -> str:
         return row_choice_id(plan, decision)
     if axis is None:
         return moved
-    return pinned_choice_id(plan, {item.spec_id}, axis) or moved
+    return pinned_choice_id(plan, switched, axis) or moved
 
 
 def _exact_codes(digest: Mapping[str, Any]) -> frozenset[str]:

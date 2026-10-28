@@ -111,6 +111,7 @@ from harness.wire import (
     PlanApproved,
     PlanDecision,
     PlanDecisionOption,
+    PlanProposed,
     RetryMode,
     StepStatus,
     ToolError,
@@ -3286,6 +3287,45 @@ async def test_a_stopped_switch_still_sending_frames_ends_at_the_reoffer_deadlin
     frames = _data_frames(sent)
     assert frames[-1]["event"] == "error"
     assert frames[-1]["error"]["error"] == "cancelled"
+
+
+async def test_a_stopped_switch_that_reoffers_its_plan_keeps_the_turn_open_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A switch stopped once that offers its plan again, then takes longer than
+    `SWITCH_REOFFER_SECONDS` to unwind: the offered plan ends the deadline, so
+    the stream ends on it with no `cancelled` frame and the paused turn stays
+    open for the card the user now sees."""
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
+
+    async def segment():
+        yield _running_line(0)
+        await asyncio.sleep(0.05)  # idle while the Stop is read
+        yield PlanProposed(
+            event="plan.proposed",
+            seq=1,
+            interrupt_id="int_1",
+            plan_version_id="plan_1",
+            version=1,
+            title="Research plan",
+            steps=[],
+            actions=[],
+        )
+        await asyncio.sleep(0.3)  # the segment's teardown outlasts the deadline
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    conversation.begin_turn()
+    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    assert [frame["event"] for frame in _data_frames(sent)] == ["activity.step", "plan.proposed"]
+    assert not conversation.turn_recorded
 
 
 async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segment() -> None:

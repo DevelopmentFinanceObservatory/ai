@@ -125,7 +125,7 @@ REFERRAL_REASONS: Mapping[ReferralKind, str] = {
     ReferralKind.REQUIREMENT_NEEDS_REPAIR: (
         "the plan asked for its data in a form the calculation cannot use"
     ),
-    ReferralKind.SURFACE_UNAVAILABLE: "the calculation service could not be reached",
+    ReferralKind.SURFACE_UNAVAILABLE: "a service the plan needs could not be reached",
     ReferralKind.INTERNAL_FAILURE: "a fault inside the system stopped the plan",
 }
 
@@ -337,8 +337,8 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
     ),
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}, so nothing was recorded.",
     ProblemCode.SURFACE_UNAVAILABLE: (
-        "The calculation service could not be reached{at}, so nothing was recorded. Try again "
-        "shortly."
+        "A service the plan needs could not be reached{at}, so nothing was recorded. Try "
+        "again shortly."
     ),
     ProblemCode.RUN_WOULD_STOP: (
         "The newest year the plan counts from could not be read{at}, so nothing was recorded."
@@ -383,7 +383,7 @@ SEAM_REASONS: Mapping[SeamCode | ProblemCode, str] = {
     ),
     ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",
-    ProblemCode.SURFACE_UNAVAILABLE: "the calculation service could not be reached",
+    ProblemCode.SURFACE_UNAVAILABLE: "a service the plan needs could not be reached",
     ProblemCode.RUN_WOULD_STOP: "the newest year the plan counts from could not be read{at}",
     ProblemCode.PLAN_REJECTED: "the plan was rejected",
     ProblemCode.APPROVAL_DECLINED: "the plan was not approved",

@@ -735,9 +735,19 @@ def concept_name(
     return measure_label or measure
 
 
+# What a declared whole fetches, by the axis it opens (`WholeOf.axis`).
+_WHOLE_NAMES = {"sector": "all sectors"}
+
+
 def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     """What `requirement` fetches, in the reader's words, as `_concepts` names it
-    (`concept_name`), read off the scope decisions it cites and its source."""
+    (`concept_name`), read off the scope decisions it cites and its source.
+
+    A declared whole (`DatasetRequirement.whole_of`) is its part with the
+    part's axis opened, so it is named by that axis ("all sectors"), and never
+    by the planner's `measure`."""
+    if requirement.whole_of is not None:
+        return _WHOLE_NAMES[requirement.whole_of.axis]
     governing = _governing(requirement, plan)
     basis = governing.get("measure_basis")
     source = _selected_source(requirement.id, plan)
@@ -777,29 +787,53 @@ def _alike(names: Mapping[str, str]) -> dict[str, str]:
     return {rid: name for rid, name in names.items() if counts[name] > 1}
 
 
+def _sides(requirement: EvidenceRequirement) -> tuple[RequirementSide, RequirementSide] | None:
+    """The two sides of a share, quotient, sum or comparison, in the order its
+    words name them; `None` for any other requirement."""
+    match requirement:
+        case ShareOfRequirement() | QuotientRequirement():
+            return requirement.numerator, requirement.denominator
+        case SumOfRequirement():
+            return requirement.left, requirement.right
+        case ComparisonRequirement():
+            return requirement.minuend, requirement.subtrahend
+        case _:
+            return None
+
+
+def _side_named(side: RequirementSide, name: str) -> str:
+    """`name`, what `side` reads, with the one entity it narrows to
+    (`RequirementSide.entity`) when it names one, so two sides of one
+    retrieval read apart: "grant equivalents for United States"."""
+    return f"{name} for {side.entity}" if side.entity is not None else name
+
+
 def _concept_of(requirement: EvidenceRequirement, plan: Plan, concepts: Mapping[str, str]) -> str:
     """The concept a step's value is a reading of, walking a total, a change,
     a rank or a filter back to the retrieval it reads (`_concepts`); a step
-    reading two names both."""
+    reading two names both, each side with the entity it narrows to
+    (`_side_named`)."""
     if isinstance(requirement, DatasetRequirement):
         return concepts[requirement.id]
-    if isinstance(requirement, ShareOfRequirement | QuotientRequirement | SumOfRequirement):
-        left, right = (
-            _concept_of(plan.requirement(input_id), plan, concepts)
-            for input_id in inputs_of(requirement)
-        )
-        joiner = {
-            ShareOfRequirement: "as a share of",
-            QuotientRequirement: "divided by",
-            SumOfRequirement: "plus",
-        }[type(requirement)]
-        return f"{left} {joiner} {right}"
-    if isinstance(requirement, ComparisonRequirement | JoinRequirement):
+    if isinstance(requirement, JoinRequirement):
         left, right = (
             _concept_of(plan.requirement(input_id), plan, concepts)
             for input_id in inputs_of(requirement)
         )
         return f"{left} against {right}"
+    sides = _sides(requirement)
+    if sides is not None:
+        left, right = (
+            _side_named(side, _concept_of(plan.requirement(side.input_id), plan, concepts))
+            for side in sides
+        )
+        joiner = {
+            ShareOfRequirement: "as a share of",
+            QuotientRequirement: "divided by",
+            SumOfRequirement: "plus",
+            ComparisonRequirement: "against",
+        }[type(requirement)]
+        return f"{left} {joiner} {right}"
     (input_id,) = inputs_of(requirement)
     return _concept_of(plan.requirement(input_id), plan, concepts)
 
@@ -817,6 +851,9 @@ def _card_label(
     def of(requirement_id: str) -> str:
         return _concept_of(plan.requirement(requirement_id), plan, concepts)
 
+    def side(read: RequirementSide) -> str:
+        return _side_named(read, of(read.input_id))
+
     kept = _kept_words(shapes[requirement.id], plan)
     by = f" by {' and '.join(kept)}" if kept else ""
     match requirement:
@@ -830,12 +867,9 @@ def _card_label(
                 f"{requirement.window_end}{_following(requirement.rolling)}"
             )
         case ComparisonRequirement():
-            label = (
-                f"Compare {of(requirement.minuend.input_id)} "
-                f"to {of(requirement.subtrahend.input_id)}"
-            )
+            label = f"Compare {side(requirement.minuend)} to {side(requirement.subtrahend)}"
         case SumOfRequirement():
-            label = f"Add {of(requirement.left.input_id)} and {of(requirement.right.input_id)}"
+            label = f"Add {side(requirement.left)} and {side(requirement.right)}"
         case RankRequirement():
             ranked = (
                 _axis_word(requirement, plan)
@@ -1758,16 +1792,19 @@ def _label_growth(requirement: GrowthRequirement, plan: Plan) -> str:
     )
 
 
+def _side_measure(side: RequirementSide, plan: Plan) -> str:
+    """What `side` reads, by its measure (`_measure_of`), with its entity (`_side_named`)."""
+    return _side_named(side, _measure_of(plan.requirement(side.input_id), plan))
+
+
 def _label_comparison(requirement: ComparisonRequirement, plan: Plan) -> str:
-    minuend = plan.requirement(requirement.minuend.input_id)
-    subtrahend = plan.requirement(requirement.subtrahend.input_id)
-    return f"Compare {_measure_of(minuend, plan)} to {_measure_of(subtrahend, plan)}"
+    minuend = _side_measure(requirement.minuend, plan)
+    return f"Compare {minuend} to {_side_measure(requirement.subtrahend, plan)}"
 
 
 def _label_sum_of(requirement: SumOfRequirement, plan: Plan) -> str:
-    left = plan.requirement(requirement.left.input_id)
-    right = plan.requirement(requirement.right.input_id)
-    return f"Add {_measure_of(left, plan)} and {_measure_of(right, plan)}"
+    left = _side_measure(requirement.left, plan)
+    return f"Add {left} and {_side_measure(requirement.right, plan)}"
 
 
 def _label_rank(requirement: RankRequirement, plan: Plan) -> str:
@@ -1780,17 +1817,15 @@ def _label_rank(requirement: RankRequirement, plan: Plan) -> str:
 
 
 def _label_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
-    numerator = plan.requirement(requirement.numerator.input_id)
-    label = f"Share of {_measure_of(numerator, plan)}"
+    label = f"Share of {_side_measure(requirement.numerator, plan)}"
     if requirement.axis is not None:
         label += f" per {requirement.axis}"
     return label
 
 
 def _label_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:
-    numerator = plan.requirement(requirement.numerator.input_id)
-    denominator = plan.requirement(requirement.denominator.input_id)
-    label = f"Divide {_measure_of(numerator, plan)} by {_measure_of(denominator, plan)}"
+    numerator = _side_measure(requirement.numerator, plan)
+    label = f"Divide {numerator} by {_side_measure(requirement.denominator, plan)}"
     if requirement.axis is not None:
         label += f" per {requirement.axis}"
     return label
@@ -2025,11 +2060,10 @@ def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
 
 
 def _sentence_comparison(requirement: ComparisonRequirement, plan: Plan) -> str:
-    minuend = plan.requirement(requirement.minuend.input_id)
-    subtrahend = plan.requirement(requirement.subtrahend.input_id)
+    minuend = _side_measure(requirement.minuend, plan)
     return (
-        f"{_measure_of(minuend, plan).capitalize()} minus {_measure_of(subtrahend, plan)}, at every "
-        "period the two share."
+        f"{minuend[:1].upper()}{minuend[1:]} minus {_side_measure(requirement.subtrahend, plan)}, "
+        "at every period the two share."
     )
 
 

@@ -542,7 +542,9 @@ async def _sse_stream(
     plan unchanged (`harness.graph.switch.SWITCH_STOP`). The cancel event
     is armed again, so a second Stop ends the stream as any Stop does, and
     so does the stream reaching `SWITCH_REOFFER_SECONDS` after the first
-    with no end: a Stop never leaves a stream open.
+    with no `plan.proposed`: a Stop never leaves a stream open. Once that
+    frame passes, the deadline is met, so a slow unwind after it leaves the
+    paused turn open.
     `"segment_lost"` (this stream's segment lease was taken over, or this
     instance's own renewal could not keep it alive) yields a stream-fatal
     `transient_unavailable` frame without closing the turn. Another
@@ -602,6 +604,13 @@ async def _sse_stream(
                                 else max(0.0, min(heartbeat_seconds, reoffer_by - loop.time())),
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
+                            if (
+                                next_frame in done
+                                and next_frame.exception() is None
+                                and isinstance(next_frame.result(), PlanProposed)
+                            ):
+                                # The stopped switch offered its plan in time.
+                                reoffer_by = None
                             # Checked on every frame too: a stopped switch
                             # still sending frames is never idle.
                             overdue = reoffer_by is not None and loop.time() >= reoffer_by

@@ -101,7 +101,7 @@ from harness.graph.switch import (
     SwitchFailedError,
 )
 from harness.planner_seam import PlannerSeam
-from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
@@ -3405,6 +3405,49 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
             "reason": "It conflicts with another choice.",
         }
     ]
+
+
+def test_one_move_across_two_switched_sources_with_no_row_is_listed_once(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """Two switched sources, each pinned by a requirement of the plan and each
+    moved from gross disbursements to grant equivalents, with no basis row on
+    the card: the move is listed once, under the id a row over both would have."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    after = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
+
+    def source(prefix: str) -> Any:
+        before, answered = copy.deepcopy(scope), copy.deepcopy(after)
+        for raw in (before, answered):
+            raw["id"] = f"{prefix}_{raw['id']}"
+            for choice in raw["choices"]:
+                choice["id"] = f"{raw['id']}:{choice['axis']}"
+        return switch_module._Switched(
+            pin=f"{prefix}_pin",
+            reading=cast(Any, None),
+            scope=PartScope.from_search(before),
+            envelope={},
+            spec_id=f"{prefix}_spec",
+            after=PartScope.from_search(answered),
+        )
+
+    (dataset,) = [
+        r
+        for r in _seam_plan(schemas=real_schemas).evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ]
+    plan = SimpleNamespace(
+        decisions=(),
+        evidence_requirements=[
+            dataset.model_copy(update={"id": "first", "source_spec_id": "a_spec"}),
+            dataset.model_copy(update={"id": "second", "source_spec_id": "b_spec"}),
+        ],
+    )
+
+    moved = switch_module._moved_entries(cast(Any, plan), [source("a"), source("b")], axis="sector")
+
+    assert [entry["choice_id"] for entry in moved] == ["first:measure_basis"]
 
 
 async def test_a_switch_on_a_declared_wholes_row_holds_the_answer_as_its_whole(
