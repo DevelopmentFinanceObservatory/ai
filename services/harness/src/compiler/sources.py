@@ -19,7 +19,7 @@ with the producer.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from enum import StrEnum
 from typing import cast
 
@@ -434,7 +434,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             ),
             identity=_identity(_mapping(block.get("definition")).get("identity")),
             open_axes=_open_axes(resolved),
-            slot_codes=_slot_codes(resolved),
+            slot_codes=slot_codes(resolved),
         )
     except ValueError as exc:
         # pydantic's ValidationError is a ValueError too, so one clause covers
@@ -498,7 +498,7 @@ def _open_axes(resolved: Mapping[str, object]) -> tuple[OpenAxis, ...]:
     return tuple(axes)
 
 
-def _slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | None] | None:
+def slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | None] | None:
     """The codes each slot of `resolved.slots` admits, by constraint property.
 
     A `value` binding admits its ref and every code its `expansion` added;
@@ -557,14 +557,26 @@ def entity_scopes_disjoint(left: SelectedSource, right: SelectedSource) -> bool:
     for role in {entity.role for entity in left.entities} & {
         entity.role for entity in right.entities
     }:
-        refs = [
-            {entity.ref for entity in source.entities if entity.role == role}
-            for source in (left, right)
-        ]
-        countries = all(ref.startswith(_COUNTRY_PREFIX) for ref in refs[0] | refs[1])
-        if countries and refs[0].isdisjoint(refs[1]):
+        if countries_apart(
+            *(
+                {entity.ref for entity in source.entities if entity.role == role}
+                for source in (left, right)
+            )
+        ):
             return True
     return False
+
+
+def countries_apart(left: Collection[str], right: Collection[str]) -> bool:
+    """Whether two sets of entity refs bound on one role name rows that never meet:
+    both name countries alone, at least one each, and none in common. A region
+    holds countries, so a ref that is no country proves nothing."""
+    return (
+        bool(left)
+        and bool(right)
+        and all(ref.startswith(_COUNTRY_PREFIX) for ref in (*left, *right))
+        and set(left).isdisjoint(right)
+    )
 
 
 class FamilyOverlap(StrEnum):
