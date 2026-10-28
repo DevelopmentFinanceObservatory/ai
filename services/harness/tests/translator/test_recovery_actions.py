@@ -589,13 +589,37 @@ _NAME_THE_TOTAL = (
 )
 
 
+# The DAC total pin with its donor side bound to the members of one group ("DAC
+# members"), read as members.
+_DAC_MEMBERS_PIN = {
+    **_KENYA_ODA["dac_total"],
+    "resolved": _KENYA_ODA["dac_total"]["resolved"]
+    | {
+        "entities": [
+            {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+            {"role": "origin", "label": "United States", "ref": "country/USA"},
+            {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        ],
+        "entity_groups": {"origin": {"label": "DAC members", "ref": "DACMembers"}},
+    },
+}
+_NAME_THE_MEMBERS = (
+    "name 'DAC members' as donor in `entities` with `members: true` and drop 'donor' from `across`"
+)
+
+
 @pytest.mark.parametrize(
-    ("reader", "repair"),
-    [(_TOP_DONORS, None), (_TOTAL, _NAME_THE_TOTAL)],
-    ids=["rank", "total"],
+    ("reader", "pin", "repair"),
+    [
+        (_TOP_DONORS, _KENYA_ODA["dac_total"], None),
+        (_TOTAL, _KENYA_ODA["dac_total"], _NAME_THE_TOTAL),
+        (_TOP_DONORS, _DAC_MEMBERS_PIN, _NAME_THE_MEMBERS),
+    ],
+    ids=["rank", "total", "rank-of-a-group-of-members"],
 )
 async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the_open_source(
     reader: EvidenceRequirement,
+    pin: dict[str, Any],
     repair: str | None,
     draft: DraftFactory,
     decision: DecisionFactory,
@@ -608,8 +632,10 @@ async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the
     # is offered and the pin gives way to it: naming the total would leave one
     # donor to rank. A total over donors sums the side away, so the pin's
     # scope is the figure asked for, the open source is withheld, and the
-    # repair names the total.
-    dac_total = _KENYA_ODA["dac_total"]["spec_id"]
+    # repair names the total. A ranking over a side the pin holds to the
+    # members of one group ranks those members, so the open source is
+    # withheld and the repair names the group for its members.
+    dac_total = pin["spec_id"]
     donor_open = _KENYA_ODA["donor_open"]["spec_id"]
 
     def oda(**overrides: Any) -> DatasetRequirement:
@@ -633,9 +659,7 @@ async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the
             evidence_requirements=[oda(source_spec_id=dac_total), reader],
         )
     )
-    save_pin_sources(
-        context.state, {dac_total: PinSource(block=_KENYA_ODA["dac_total"], settled=True)}
-    )
+    save_pin_sources(context.state, {dac_total: PinSource(block=pin, settled=True)})
     core = _core(McpSurface(sources={"data-mcp": _donor_open_server()}))
 
     result = await core.discover_source(requirement_id="oda", tool_context=context)

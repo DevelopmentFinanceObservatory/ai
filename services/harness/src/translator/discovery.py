@@ -108,6 +108,7 @@ import rfc8785
 from common.hashed_fields import revision_content
 from compiler.evidence import (
     named_members,
+    named_on_open_axes,
     named_refs,
     open_axes_for,
     source_requirement_matches,
@@ -136,7 +137,7 @@ from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
-from planner.parties import across_party, flow_side, party_role
+from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
     DatasetRequirement,
@@ -144,6 +145,7 @@ from planner.plan import (
     Plan,
     PlanStatus,
     QuotientRequirement,
+    RankRequirement,
     SessionState,
     ShareOfRequirement,
     Unit,
@@ -586,11 +588,17 @@ class DiscoveryLog(StrictModel):
         the user named as a share's whole, as G7 in "Germany's share of G7
         ODA", is that case.
 
+        A plan whose every reader ranks over that side, where the pin holds
+        it to the members of one group (`_ranks_its_group_members`), keeps
+        the scope too: "the largest DAC donors" ranks the DAC members, and a
+        source holding every provider open would rank providers outside the
+        group. Its repair names the group for its members.
+
         The pin gives way, and every source is offered, the same sources a
-        search with the pin dropped finds, in two cases. A reader other than
-        such a sum, such as a rank or a filter, reads the side per member, and
-        naming the pin's scope would leave one member where the reader needs
-        every one `across` asks for. A sum that a share_of or quotient_of
+        search with the pin dropped finds, in two cases. Any other reader,
+        such as a filter or a rank over a side held to one member, reads the
+        side per member, and naming the pin's scope would leave one member
+        where the reader needs every one `across` asks for. A sum that a share_of or quotient_of
         divides by, where the pin binds that side to the numerator's own
         members alone (`_divides_its_member_by_itself`), would divide the
         member by itself: "the United States' share of ODA to Kenya" with its
@@ -598,11 +606,10 @@ class DiscoveryLog(StrictModel):
         source set aside, every source is offered too.
         """
         held = self.set_aside_pin(requirement_revision(requirement), requirement.id)
-        if (
-            held is None
-            or not _sums_its_sides_away(plan, requirement.id)
-            or _divides_its_member_by_itself(plan, requirement, held)
-        ):
+        if held is None or _divides_its_member_by_itself(plan, requirement, held):
+            return ScopeKept(offered=tuple(sources))
+        summed = _sums_its_sides_away(plan, requirement.id)
+        if not summed and not _ranks_its_group_members(plan, requirement, held):
             return ScopeKept(offered=tuple(sources))
         offered: list[SelectedSource] = []
         withheld: list[WithheldSource] = []
@@ -611,7 +618,11 @@ class DiscoveryLog(StrictModel):
                 withheld.append(WithheldSource(source=source, dropped=dropped))
             else:
                 offered.append(source)
-        repairs = [repair for word in requirement.across if (repair := scope_repair(held, word))]
+        repairs = [
+            repair
+            for word in requirement.across
+            if (repair := scope_repair(held, word, members=not summed))
+        ]
         repair = "; ".join(repairs) if withheld and repairs else None
         return ScopeKept(offered=tuple(offered), withheld=tuple(withheld), repair=repair)
 
@@ -2356,6 +2367,13 @@ async def _source_from_resolve_pin(
     withheld from the referral when every reader sums the side away
     (`DiscoveryLog.scope_kept`).
 
+    A source that leaves open the side an entity `requirement` names sits on,
+    and so binds none of those names (`compiler.evidence.named_on_open_axes`),
+    is not honoured either. The fresh `search` sends the names with their
+    roles (`search_part`), so the source it finds binds them, and the plan
+    approved holds the entities its run resolves. "ODA of the United States
+    and Germany" pinned to a source holding every donor open is that case.
+
     When none of the readers above holds the pin's source, the source a
     search recorded for its `spec_id` (`DiscoveryLog.recorded_source`) is
     read for that check alone, so a pin of a source the translator found
@@ -2373,7 +2391,7 @@ async def _source_from_resolve_pin(
         return read
     source, honoured = read
     holds_closed = _holds_closed(requirement, source)
-    if not honoured and not holds_closed:
+    if not holds_closed and (not honoured or named_on_open_axes(requirement, source)):
         return None
     if holds_closed:
         set_aside = DiscoveryRecord(
@@ -2505,7 +2523,9 @@ async def name_pinned_groups(
     that. A named group is read as the pinned source binds it, as its
     members or as its published total (`compiler.evidence.named_members`),
     and every reader sums the side away, so either reading gives the
-    group's figure. A side held to named
+    group's figure. Where every reader ranks over the side instead, the
+    group is named for its members, so the rank orders the members the pin
+    held. A side held to named
     members alone is left as it is: widening it changes the scope, which the
     planner decides (`DiscoveryLog.scope_kept`). So is the total a share or
     quotient divides by when the group is the numerator's own
@@ -2521,12 +2541,13 @@ async def name_pinned_groups(
 
     The side turns from open to named, so a requirement is rewritten only
     when every requirement reading it sums that side away
-    (`_summed_by_every_reader`), and only when the plan still validates with
-    it rewritten: a decision the requirement cites may fix its `across` or
+    (`_summed_by_every_reader`) or ranks over it (`_ranked_sides`), which
+    then reads the group's members, and only when the plan still validates
+    with it rewritten: a decision the requirement cites may fix its `across` or
     `entities`. A requirement left as it is, with the reason logged, takes
     discovery's set-aside path, and its referral withholds the sources that
-    drop the pin's scope only when every reader sums the side away
-    (`DiscoveryLog.scope_kept`).
+    drop the pin's scope only when every reader sums the side away or ranks
+    the members of a group the pin holds it to (`DiscoveryLog.scope_kept`).
 
     The draft is saved in place, at its version, so the plan the user
     approves names the group. A pin whose source is honoured is recorded
@@ -2582,6 +2603,24 @@ def _origin_id(plan: Plan, requirement_id: str) -> str:
     """The requirement `requirement_id` copies over its whole history (`Plan.rolling_copies`), else `requirement_id`."""
     origin = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
     return origin.get(requirement_id, requirement_id)
+
+
+def _ranks_its_group_members(
+    plan: Plan, requirement: DatasetRequirement, held: SelectedSource
+) -> bool:
+    """Whether every reader of `requirement` ranks over a side `held` holds to the members of one group.
+
+    Judged on the plan as the model wrote it (`authored`), as
+    `_sums_its_sides_away` judges it. The group is the one `_group_named`
+    names for its members on an `across` word of that side.
+    """
+    ranked = _ranked_sides(authored(plan), _origin_id(plan, requirement.id))
+    return any(
+        flow_side(word) in ranked
+        and (role := party_role(word)) is not None
+        and _group_named(held, word, role, members=True) is not None
+        for word in requirement.across
+    )
 
 
 def _sums_its_sides_away(plan: Plan, requirement_id: str) -> bool:
@@ -2660,6 +2699,51 @@ def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
     )
 
 
+def _ranked_sides(plan: Plan, requirement_id: str) -> frozenset[FlowSide]:
+    """The sides of a flow every requirement reading `requirement_id` ranks over, empty unless each is such a rank.
+
+    A rank orders the members of its `axis` side one by one, whether that
+    side is open or names a group's members, so naming the group a pin holds
+    the side to ranks the members the pin held. Empty when nothing reads
+    `requirement_id`, or when a reader is not a rank stating an `axis` that
+    names a side of a flow.
+    """
+    sides: set[FlowSide] = set()
+    for reader in plan.evidence_requirements:
+        if requirement_id not in inputs_of(reader):
+            continue
+        if not isinstance(reader, RankRequirement) or reader.axis is None:
+            return frozenset()
+        if (side := flow_side(reader.axis)) is None:
+            return frozenset()
+        sides.add(side)
+    return frozenset(sides)
+
+
+def _group_named(source: SelectedSource, word: str, role: str, *, members: bool) -> Entity | None:
+    """The entity naming the one group `source` holds the `across` word's side to, or `None`.
+
+    The group is `translator.referral.closing_group`'s. Named whole, it is
+    met by the source under either reading (`compiler.evidence.named_members`).
+    Named for its `members`, it is met only where the source binds the
+    members, so a group the source binds as a published total
+    (`ResolvedGroup.reads_total`) gives `None`.
+    """
+    label = closing_group(source, word)
+    if label is None:
+        return None
+    if not members:
+        return Entity(name=label, role=role)
+    side = flow_side(word)
+    if any(
+        group.reads_total
+        for group in source.groups
+        if group.label == label and flow_side(group.role) == side
+    ):
+        return None
+    return Entity(name=label, role=role, members=True)
+
+
 def _with_groups_named(
     plan: Plan, written: Plan, requirement: DatasetRequirement, groups: Sequence[NamedGroup]
 ) -> tuple[Plan, Plan, DatasetRequirement]:
@@ -2700,16 +2784,26 @@ async def _groups_named(
     `_pin_source` takes it.
 
     One group per `across` word whose side the pin's source holds to one
-    group (`translator.referral.closing_group`). `None` when a requirement
-    reading it keeps the sides apart (`_summed_by_every_reader`), when a
+    group (`_group_named`). A plan whose every reader ranks the requirement
+    over that side (`_ranked_sides`) names the group's members
+    (`Entity.members`), so "the largest DAC donors" pinned to the DAC
+    members ranks those members and no other provider. `None` when a
+    requirement reading it keeps the sides apart otherwise (neither
+    `_summed_by_every_reader` nor `_ranked_sides`), when a
     share or quotient divides by it and the pin's source binds the side to
     the numerator's own members alone (`_divides_its_member_by_itself`), as
     in "G7's share of ODA to Kenya" with the total pinned to G7, or when
     the pin's source cannot be read, leaves every side `across` asks for
     open, or holds none of them to one group.
     """
-    roles = [(word, role) for word in requirement.across if (role := party_role(word))]
-    if not roles or not _summed_by_every_reader(plan, requirement.id):
+    summed = _summed_by_every_reader(plan, requirement.id)
+    ranked = frozenset() if summed else _ranked_sides(plan, requirement.id)
+    roles = [
+        (word, role)
+        for word in requirement.across
+        if (role := party_role(word)) and (summed or flow_side(word) in ranked)
+    ]
+    if not roles:
         return None
     read = await _pin_source(
         tool_context, plan=plan, requirement=requirement, first_year=first_year, surface=surface
@@ -2722,9 +2816,9 @@ async def _groups_named(
     ):
         return None
     groups = tuple(
-        NamedGroup(requirement.id, Entity(name=label, role=role), word)
+        NamedGroup(requirement.id, entity, word)
         for word, role in roles
-        if (label := closing_group(source, word)) is not None
+        if (entity := _group_named(source, word, role, members=not summed)) is not None
     )
     if not groups:
         return None

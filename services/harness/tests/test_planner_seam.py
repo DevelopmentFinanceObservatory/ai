@@ -2230,6 +2230,162 @@ def test_a_refusal_past_the_cap_is_cut_and_says_so(fresh: bool) -> None:
     assert len(message) < 8 * MAX_QUESTION_CHARS
 
 
+def _window_short(ref: str, magnitude: float) -> dict[str, Any]:
+    """A `window_short` warning for a donor series that ends a year before the requirement."""
+    stat_var = "GrantEquivalent_FinancialFlow_Disbursement_DAC1AidType1010_Nominal"
+    return {
+        "code": "window_short",
+        "severity": "warning",
+        "requirement_id": "donor_oda",
+        "detail": (
+            f"series {stat_var} for [{ref!r}] covers 2024-2024, the requirement asks for 2024-2025"
+        ),
+        "found": {"start": 2024, "end": 2024},
+        "required": {"start": 2024, "end": 2025},
+        "stat_var": stat_var,
+        "entities": [{"role": "financingProvider", "ref": ref, "label": None}],
+        "magnitude": magnitude,
+    }
+
+
+_DONORS = (
+    "United States",
+    "Germany",
+    "EU Institutions",
+    "United Kingdom",
+    "Japan",
+    "France",
+    "Canada",
+    "Netherlands",
+    "Italy",
+    "Turkey",
+)
+
+
+def _entities_unmet_refusal() -> dict[str, Any]:
+    """A `requirement_unmet` refusal with four `window_short` warnings for donors outside
+    the ten, listed before an `entity_missing` error for each of the ten donors the plan
+    named on a source that left the donor side open."""
+    return {
+        "kind": "refused",
+        "refusal": "requirement_unmet",
+        "detail": "requirement 'donor_oda' is not met by what 'get_data' returned",
+        "step_id": "donor_oda",
+        "requirement_id": "donor_oda",
+        "issues": [
+            _window_short("country/CYP", 12894524.0),
+            _window_short("country/KAZ", 50351002.0),
+            _window_short("country/SAU", 5553675122.0),
+            _window_short("country/THA", 21450000.0),  # codespell:ignore
+            *(
+                {
+                    "code": "entity_missing",
+                    "severity": "error",
+                    "requirement_id": "donor_oda",
+                    "detail": f"the source resolves no entity named {name!r}",
+                    "found": [],
+                    "required": name,
+                }
+                for name in _DONORS
+            ),
+        ],
+        "also_stopped": [],
+    }
+
+
+def test_a_refusal_shows_the_planner_every_error_before_its_warnings() -> None:
+    """Four `window_short` warnings listed ahead of the entity errors would fill the cap
+    and cut the errors off. Every error reaches the planner, and the warnings that do
+    not fit are counted by code."""
+    message = _render(_seam(), fresh=False, refusal=_entities_unmet_refusal())
+
+    shown, listed = _refusal_shown(message)
+    errors = [*shown["issues"], *listed]
+    assert [issue["required"] for issue in errors] == list(_DONORS)
+    assert {issue["code"] for issue in errors} == {"entity_missing"}
+    assert shown["warnings_left_out"] == {"window_short": 4}
+    assert CUT_MARKER not in message
+
+
+def test_a_refusal_lists_its_errors_before_its_warnings_when_all_fit() -> None:
+    refusal = _entities_unmet_refusal()
+    refusal["issues"] = [*refusal["issues"][:2], refusal["issues"][4]]
+
+    shown, listed = _refusal_shown(_render(_seam(), fresh=False, refusal=refusal))
+
+    assert [issue["code"] for issue in shown["issues"]] == [
+        "entity_missing",
+        "window_short",
+        "window_short",
+    ]
+    assert listed == []
+
+
+def _refusal_shown(message: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The refusal JSON a replan message carries, and the errors listed after it."""
+    refusal = message.split("Refusal: ", 1)[1].split("\nCall ", 1)[0]
+    shown, _, listed = refusal.partition("\nErrors: ")
+    return json.loads(shown), _errors_and_left_out(listed)[0] if listed else []
+
+
+def _errors_and_left_out(listed: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """The errors an `Errors:` line lists, and the counts its `Errors left out:` line gives."""
+    errors, _, left_out = listed.split("\nCall ", 1)[0].partition("\nErrors left out: ")
+    return json.loads(errors), json.loads(left_out) if left_out else {}
+
+
+def _grain_ambiguous(requirement_id: str, series: int) -> dict[str, Any]:
+    """A `grain_ambiguous` error, which the evidence check raises once per series."""
+    return {
+        "code": "grain_ambiguous",
+        "severity": "error",
+        "requirement_id": requirement_id,
+        "detail": f"series {series} of {requirement_id!r} holds more than one row per period",
+        "found": None,
+        "required": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("extra", "left_out"),
+    [
+        pytest.param([], set(), id="every-error-fits"),
+        pytest.param(
+            [_grain_ambiguous(rid, n) for rid in ("donor_oda", "gdp") for n in range(300)],
+            {"grain_ambiguous"},
+            id="hundreds-of-series-errors",
+        ),
+    ],
+)
+def test_errors_past_the_cap_follow_the_cut_refusal(
+    extra: list[dict[str, Any]], left_out: set[str]
+) -> None:
+    """Past the cap the errors follow the cut refusal. The first of each requirement and
+    code is always listed, more while a bound allows, and the rest are counted by code."""
+    refusal = _entities_unmet_refusal()
+    refusal["detail"] = "d" * 1_000_000
+    refusal["issues"] = [*refusal["issues"], *extra]
+    errors = [issue for issue in refusal["issues"] if issue["severity"] == "error"]
+    for issue in errors[: len(_DONORS)]:
+        issue["found"] = ["a donor label"] * 1_000
+
+    message = _render(_seam(), fresh=False, refusal=refusal)
+
+    cut, _, listed = message.partition("\nErrors: ")
+    shown, counted = _errors_and_left_out(listed)
+    fields = ("code", "requirement_id", "detail", "required")
+    assert shown[: len(_DONORS)] == [
+        {key: issue[key] for key in fields} for issue in errors[: len(_DONORS)]
+    ]
+    assert {(one["requirement_id"], one["code"]) for one in shown} == {
+        (issue["requirement_id"], issue["code"]) for issue in errors
+    }
+    assert len(shown) + sum(counted.values()) == len(errors)
+    assert set(counted) == left_out
+    assert cut.endswith(CUT_MARKER)
+    assert len(message) < 5 * MAX_QUESTION_CHARS
+
+
 def test_a_short_refusal_is_rendered_whole() -> None:
     message = _render(_seam(), fresh=False, refusal=_rediscovery_refusal(SPEC))
 

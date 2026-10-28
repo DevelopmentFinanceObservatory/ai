@@ -970,7 +970,9 @@ def _short_series_note(short: Mapping[_SeriesKey, _ShortSeries]) -> str:
     """The note naming up to `_SHORT_SERIES_NAMED` of the series `short`
     holds, the largest first (`_ShortSeries.rank`), and counting the rest by
     how they fall short, the most common way first ("30 other series start
-    after 2015, and 20 other series end before 2023").
+    after 2015, and 20 other series end before 2023"). A lone series past
+    the cap that can be named is named, so a count is only ever of two or
+    more series that could be named.
 
     A series is named by its owner, and by its measure as well where
     `short` holds series of several sources. One with no owner, or one whose
@@ -998,6 +1000,11 @@ def _short_series_note(short: Mapping[_SeriesKey, _ShortSeries]) -> str:
             named.append(f"{name} {one.shortfall}")
         else:
             rest[key] = one
+    name_of = dict(zip((key for key, _ in ranked), names, strict=True))
+    if len(rest) == 1 and (last := name_of[next(iter(rest))]) is not None and shared[last] == 1:
+        # One series past the cap is named too: "1 other series" would hide a
+        # name the note holds.
+        named.append(f"{last} {rest.popitem()[1].shortfall}")
     owners = {one.owner for one in rest.values()}
     sources = {source for source, _, _ in rest}
     if len(owners) == 1 and len(sources) == 1 and None not in owners and len(rest) > 1:

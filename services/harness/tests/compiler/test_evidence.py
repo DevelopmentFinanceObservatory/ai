@@ -121,6 +121,57 @@ def test_a_source_resolving_no_entities_is_an_error_when_the_requirement_fails_o
     assert issue.code is EvidenceIssueCode.ENTITY_UNVERIFIED
 
 
+_TEN_DONORS = (
+    "United States",
+    "Germany",
+    "EU Institutions",
+    "United Kingdom",
+    "Japan",
+    "France",
+    "Canada",
+    "Netherlands",
+    "Italy",
+    "Turkey",
+)
+
+
+@pytest.mark.parametrize(
+    ("named", "unverified"),
+    [
+        pytest.param(
+            [Entity(name=name, role="donor") for name in _TEN_DONORS], [], id="every-name-on-it"
+        ),
+        pytest.param(
+            [Entity(name="Japan", role="donor"), Entity(name="Kenya", role="recipient")],
+            ["Kenya"],
+            id="a-name-on-a-closed-side-stays-unverified",
+        ),
+    ],
+)
+def test_a_name_on_a_side_the_source_leaves_open_is_an_error(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    named: list[Entity],
+    unverified: list[str],
+) -> None:
+    """Ten donors named on a DAC1 source holding all 50 providers open, with no entity
+    resolved. The run resolves each name through the approved source, which binds none,
+    so each is refused before the plan reaches the user."""
+    open_donors = source(
+        entities=(), open_entity_axes=(OpenEntityAxis(column="origin", member_count=50),)
+    )
+
+    issues = check_evidence(requirement(entities=named), evidence_from_source(open_donors))
+
+    on_open_side = [entity.name for entity in named if entity.name not in unverified]
+    assert [(issue.code, issue.required) for issue in errors(issues)] == [
+        (EvidenceIssueCode.ENTITY_MISSING, name) for name in on_open_side
+    ]
+    assert [
+        issue.required for issue in issues if issue.code is EvidenceIssueCode.ENTITY_UNVERIFIED
+    ] == ([unverified] if unverified else [])
+
+
 def test_a_source_stating_no_coverage_leaves_its_data_unverified(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:

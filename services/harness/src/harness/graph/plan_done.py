@@ -21,6 +21,7 @@ from executor.ledger import RunLedger
 from executor.outcomes import StepRecord
 from google.adk import Context
 from planner.plan import (
+    UNNAMED_DONORS_SLOT,
     Plan,
     SessionState,
     authored_text,
@@ -428,6 +429,15 @@ def _stop_causes(plan: Plan, step_id: str | None) -> dict[str, str]:
     return {step: cause for step, cause in landed.items() if cause is not None}
 
 
+def _unnamed_donors_reading(plan: Plan) -> str | None:
+    """The reading `plan` chose for donors the question left unnamed
+    (`planner.plan.UNNAMED_DONORS_SLOT`), `None` when it records none."""
+    return next(
+        (decision.chosen for decision in plan.decisions if decision.slot == UNNAMED_DONORS_SLOT),
+        None,
+    )
+
+
 def shown_failure(
     failed: Mapping[str, Any] | None, plan: Plan, stopped: Mapping[str, str]
 ) -> dict[str, Any] | None:
@@ -833,6 +843,10 @@ def plan_done_node(
                 )
                 if _give_plan_back(ctx):
                     lead += " A brief that avoids the failure may be planned once more."
+            if "remedy" in result["failed_step"]:
+                lead += (
+                    " Tell the user what they can do about it, as the failed step's remedy says it."
+                )
         elif hand_back.nothing_chartable:
             lead = (
                 "The approved plan ran, but its result cannot be drawn: tell the user what "
@@ -841,6 +855,12 @@ def plan_done_node(
             )
         else:
             lead = "The approved plan ran. Chart its frames and answer."
+        reading = _unnamed_donors_reading(plan) if plan is not None else None
+        if not unfinished and reading is not None:
+            lead += (
+                f" Open the reply by saying it reads {reading} for the donors the user "
+                "left unnamed."
+            )
         yield {
             "status": ORCHESTRATOR_PLAN_RAN_STATUS,
             "text": f"{lead}\n{json.dumps(result)}{record}",

@@ -299,7 +299,7 @@ def closing_group(held: SelectedSource, across: str) -> str | None:
     return next(iter(labels)) if len(labels) == 1 else None
 
 
-def scope_repair(held: SelectedSource, across: str) -> str | None:
+def scope_repair(held: SelectedSource, across: str, *, members: bool = False) -> str | None:
     """The change to a requirement that restates the scope `held` keeps on the side the `across` word opens, or `None`.
 
     `held` is a pinned dataset's source set aside because it holds that side
@@ -307,8 +307,10 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
     requirement can name that member under the side's `PARTY_ROLES` word and
     drop the word from `across`, which brings the pinned source's scope back.
     Several named members, or a word naming no single role, give `None`.
-    The repair leaves one member on the side, so it answers only a plan whose
+    The repair leaves one member on the side, so it answers a plan whose
     readers sum the side away (`translator.discovery.DiscoveryLog.scope_kept`).
+    With `members`, for a plan whose readers rank over the side, only a group
+    is named, for its members, so the rank orders them.
     """
     role = party_role(across)
     side = flow_side(across)
@@ -316,11 +318,12 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
         return None
     groups = {group.label for group in held.groups if flow_side(group.role) == side}
     entities = {entity.label for entity in held.entities if flow_side(entity.role) == side}
-    labels = groups or entities
+    labels = groups if members else groups or entities
     if len(labels) != 1:
         return None
     (label,) = labels
-    return f"name {label!r} as {role} in `entities` and drop {across!r} from `across`"
+    named = "with `members: true` " if members else ""
+    return f"name {label!r} as {role} in `entities` {named}and drop {across!r} from `across`"
 
 
 class StalePin(StrictModel):

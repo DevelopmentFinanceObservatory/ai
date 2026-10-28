@@ -1147,9 +1147,9 @@ async def test_a_pooled_share_states_the_year_a_recipients_series_ends(
             [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D")],
             [
                 "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
-                "and 1 other series ends before 2024."
+                "and D's series ends in 2020."
             ],
-            id="one-counted",
+            id="a-lone-fourth-is-named-not-counted",
         ),
         pytest.param(
             [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D", "E")],

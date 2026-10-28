@@ -42,6 +42,7 @@ from executor.classify import ToolFailure
 from executor.completion import FramePublished
 from executor.ledger import InMemoryRunLedger
 from executor.outcomes import (
+    ISSUE_REMEDIES,
     Accepted,
     EvidenceRecord,
     MethodChoiceNeeded,
@@ -113,6 +114,9 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
+    DAC_TOTAL_READING,
+    TOP_DONORS_READING,
+    UNNAMED_DONORS_SLOT,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     Coverage,
@@ -962,6 +966,42 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
     assert body["step_summaries"] == ["fetched"]
 
 
+@pytest.mark.parametrize(
+    ("chosen", "resolved_by", "other"),
+    [
+        (DAC_TOTAL_READING, ResolvedBy.PLANNER_DEFAULT, TOP_DONORS_READING),
+        (TOP_DONORS_READING, ResolvedBy.USER, DAC_TOTAL_READING),
+    ],
+    ids=["dac-total-by-default", "top-donors-the-user-chose"],
+)
+async def test_the_reply_opens_with_the_reading_of_donors_the_question_left_unnamed(
+    real_schemas: list[ToolSchema], chosen: str, resolved_by: ResolvedBy, other: str
+) -> None:
+    """For "How much did major donors' total ODA change", the agent is told to open its
+    reply with the reading the plan's `UNNAMED_DONORS_SLOT` decision records."""
+    plan = _seam_plan(
+        schemas=real_schemas,
+        decision=Decision(
+            slot=UNNAMED_DONORS_SLOT,
+            description="Which donors 'major donors' means",
+            options=[DAC_TOTAL_READING, TOP_DONORS_READING],
+            chosen=chosen,
+            resolved_by=resolved_by,
+            rationale="the reading of donors the question leaves unnamed",
+        ),
+    )
+    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, model = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+
+    text, _ = handed_back(model)
+    lead = text.split('\n{"frames"', 1)[0]
+    assert chosen in lead
+    assert other not in lead
+
+
 async def test_two_terminal_steps_both_come_back_to_the_agent(
     real_schemas: list[ToolSchema],
 ) -> None:
@@ -1386,15 +1426,18 @@ def _seam_plan(
     bind_evidence: bool = False,
     stat_vars: str | None = None,
     terminal: tuple[str, ...] = ("totals",),
+    decision: Decision | None = None,
+    entities: tuple[Entity, ...] = (Entity(name="Kenya", role="recipient"),),
 ) -> PlannerPlan:
     """A real, translated `planner.plan.Plan` -- the shape a `PlannerModel` seam hands back.
 
     `stat_vars` is the reading its `get_data` step sends, for a plan whose
     source is a family of StatVars; `None` sends none. `terminal` names the
     steps that answer: `totals` by default, and `get_data` with it for a plan
-    that shows the series as well as its total.
+    that shows the series as well as its total. `decision` replaces the one
+    decision both requirements cite, and `entities` the dataset's entities.
     """
-    decision = Decision(
+    decision = decision or Decision(
         slot="window",
         description="Which years?",
         options=["2015-2024", "2018-2024"],
@@ -1404,14 +1447,14 @@ def _seam_plan(
     )
     dataset = DatasetRequirement(
         id="spending",
-        decision_ids=["window"],
+        decision_ids=[decision.slot],
         measure="health spending",
-        entities=[Entity(name="Kenya", role="recipient")],
+        entities=list(entities),
         period=Period(start=2015, end=2024),
     )
     totals = AggregateRequirement(
         id="totals",
-        decision_ids=["window"],
+        decision_ids=[decision.slot],
         input_id="spending",
         reduction=Reduction.SUM,
         group_by=(GroupBy.PERIOD,),
@@ -2746,6 +2789,36 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "source_unverified",
         "message": "the source states no provenance",
+    }
+
+    # A stop with every donor named missing. The failed step carries what the
+    # user can do about it, since the code alone says only that the names could
+    # not be resolved.
+    refused_names_missing = Refused(
+        revision="rev1",
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail="requirement 'donor_oda' is not met by what 'get_data' returned",
+        step_id="donor_oda",
+        requirement_id="donor_oda",
+        issues=tuple(
+            EvidenceIssue(
+                code=EvidenceIssueCode.ENTITY_MISSING,
+                severity=Severity.ERROR,
+                requirement_id="donor_oda",
+                detail=f"the source resolves no entity named {name!r}",
+                required=name,
+            )
+            for name in ("United States", "Germany")
+        ),
+    )
+    names_missing = _failed_step(refused_names_missing)
+    assert names_missing.pop("remedy") == ISSUE_REMEDIES[EvidenceIssueCode.ENTITY_MISSING]
+    assert names_missing == {
+        "step_id": "donor_oda",
+        "tool": None,
+        "code": "entity_missing",
+        "message": "the source resolves no entity named 'United States'; the source "
+        "resolves no entity named 'Germany'",
     }
 
 

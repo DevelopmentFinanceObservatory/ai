@@ -545,6 +545,30 @@ def named_refs(entities: Sequence[Entity], source: SelectedSource | RetrievalEvi
     return {one.ref for entity in entities for one in named_members(entity, source)}
 
 
+def named_on_open_axes(
+    requirement: DatasetRequirement, source: SelectedSource | RetrievalEvidence
+) -> tuple[Entity, ...]:
+    """The entities `requirement` names on a side of a flow `source` leaves open, that `source` does not resolve.
+
+    An entity whose role names a side of a flow one of the source's open
+    axes holds, and that names nothing the source holds (`named_members`),
+    is a name Search never bound: an open side binds no party, so the
+    run-time check, which resolves each name through the approved source,
+    can never find it. "United States" as a donor on a source holding every
+    donor open is one. An entity with no role, or with a role naming no side
+    of a flow, and a source whose open axes were never read, give none.
+    """
+    open_sides = {flow_side(axis.column) for axis in source.open_entity_axes or ()}
+    return tuple(
+        entity
+        for entity in requirement.entities
+        if entity.role is not None
+        and (side := flow_side(entity.role)) is not None
+        and side in open_sides
+        and not named_members(entity, source)
+    )
+
+
 def _role_fits(role: str | None, column: str) -> bool:
     """Whether the requirement's `role` phrase, `None` when unstated, allows the role `column`."""
     if role is None or role.casefold() == column.casefold():
@@ -1027,17 +1051,45 @@ def _named_entity_issues(
     entities that remain and the answer names it.
     """
     if not evidence.entities:
-        return [
-            EvidenceIssue(
-                code=EvidenceIssueCode.ENTITY_UNVERIFIED,
-                severity=_coverage_severity(requirement),
-                requirement_id=requirement.id,
-                detail="the source resolves no entities, so none of the required ones can be confirmed",
-                required=[entity.name for entity in requirement.entities],
+        unbound = named_on_open_axes(requirement, evidence)
+        unverified = [entity for entity in requirement.entities if entity not in unbound]
+        issues = [_unbound_issue(requirement, entity, evidence) for entity in unbound]
+        if unverified:
+            issues.append(
+                EvidenceIssue(
+                    code=EvidenceIssueCode.ENTITY_UNVERIFIED,
+                    severity=_coverage_severity(requirement),
+                    requirement_id=requirement.id,
+                    detail="the source resolves no entities, so none of the required ones can be confirmed",
+                    required=[entity.name for entity in unverified],
+                )
             )
-        ]
+        return issues
     issues, missing = _entity_findings(requirement, evidence, approved)
     return [*issues, *(issue for _, issue in missing)]
+
+
+def _unbound_issue(
+    requirement: DatasetRequirement, entity: Entity, evidence: RetrievalEvidence
+) -> EvidenceIssue:
+    """The `entity_missing` error for `entity`, named on a side the source leaves open (`named_on_open_axes`)."""
+    columns = sorted(
+        axis.column
+        for axis in evidence.open_entity_axes or ()
+        if flow_side(axis.column) == flow_side(entity.role or "")
+    )
+    return EvidenceIssue(
+        code=EvidenceIssueCode.ENTITY_MISSING,
+        severity=Severity.ERROR,
+        requirement_id=requirement.id,
+        detail=(
+            f"source {evidence.spec_id} leaves {', '.join(map(repr, columns))} open and binds no "
+            f"entity named {entity.name!r}, so the run cannot find it; a source found with "
+            "the name bound serves it"
+        ),
+        found=columns,
+        required=entity.name,
+    )
 
 
 def _entity_findings(
