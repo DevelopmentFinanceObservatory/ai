@@ -24,7 +24,7 @@ from compiler.sources import (
     wire_groups,
 )
 from planner.records import EntityCandidate, EntityKey, Period
-from planner.workflow import BoundEntity, OpenEntityAxis
+from planner.workflow import BoundEntity, OpenEntityAxis, SelectedSource
 
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
@@ -1075,9 +1075,10 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
     assert members_reading(union, answer=MembersAnswer.SUMMED) is None
 
 
-# DAC members summed on the donor side, where Search states nothing left out,
-# and Africa's countries summed on the recipient side, where Search names the
-# residuals Africa's published total counts beside them. The G7's published
+# DAC members summed on the donor side, where Search states that nothing is
+# left out, and Africa's countries summed on the recipient side, where Search
+# names the residuals Africa's published total counts beside them, or states
+# nothing, as a Search that predates the field does. The G7's published
 # total is a figure of its own, which can differ from its members' sum, and is
 # said in a sentence of its own, so the residuals' list ends before it.
 _AFRICA_LEFT_OUT = (
@@ -1094,8 +1095,12 @@ _PUBLISHED = (
     ("group", "tail"),
     [
         (
-            {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
+            {"origin": {"ref": "DAC", "label": "DAC members", "total": None, "left_out": []}},
             ".",
+        ),
+        (
+            {"destination": {"ref": "africa", "label": "Africa", "total": None}},
+            " and leaves out amounts the data allocates to no single country.",
         ),
         (
             {
@@ -1113,7 +1118,15 @@ _PUBLISHED = (
             _AFRICA_LEFT_OUT,
         ),
         (
-            {"origin": {"ref": None, "label": "G7", "total": None, "sum_differs": True}},
+            {
+                "origin": {
+                    "ref": None,
+                    "label": "G7",
+                    "total": None,
+                    "left_out": [],
+                    "sum_differs": True,
+                }
+            },
             "." + _PUBLISHED.format(label="G7"),
         ),
         (
@@ -1134,6 +1147,7 @@ _PUBLISHED = (
     ],
     ids=[
         "donor-members-leave-nothing-out",
+        "recipient-members-search-states-nothing",
         "recipient-members-leave-out-residuals",
         "donor-total-differs-from-its-members-sum",
         "residuals-end-before-the-published-figure",
@@ -1147,6 +1161,27 @@ def test_summed_members_state_only_the_residuals_search_names(
     assert members_reading(read, answer=MembersAnswer.SUMMED) == (
         f"The figure for {read.label} adds up its members' figures{tail}"
     )
+
+
+def test_a_stored_set_keeps_search_stating_nothing_apart_from_stating_none() -> None:
+    stated = {"ref": "africa", "label": "Africa", "total": None}
+    blocks = [{"destination": stated}, {"destination": {**stated, "left_out": []}}]
+    stored = [
+        SelectedSource.model_validate(
+            source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=block)).model_dump(
+                mode="json"
+            )
+        )
+        for block in blocks
+    ]
+
+    assert [
+        members_reading(source.groups[0], answer=MembersAnswer.SUMMED) for source in stored
+    ] == [
+        "The figure for Africa adds up its members' figures and leaves out amounts the data "
+        "allocates to no single country.",
+        "The figure for Africa adds up its members' figures.",
+    ]
 
 
 def test_a_resubmit_posts_a_whole_total_without_its_marker() -> None:

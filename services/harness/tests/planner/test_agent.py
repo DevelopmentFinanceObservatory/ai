@@ -8765,6 +8765,10 @@ def _group_unnamed(block: dict[str, Any]) -> dict[str, Any]:
 _SUM_BLOCKS["dac_countries_unnamed_and_ida_bilateral"] = _group_unnamed(
     _SUM_BLOCKS["dac_countries_and_ida_bilateral"]
 )
+_SUM_BLOCKS["dac_countries_multilateral_again"] = {
+    **_SUM_BLOCKS["dac_countries_multilateral"],
+    "spec_id": f"spec_{'9' * 32}",
+}
 
 
 @pytest.mark.parametrize(
@@ -8834,6 +8838,16 @@ _SUM_BLOCKS["dac_countries_unnamed_and_ida_bilateral"] = _group_unnamed(
             None,
             "provider:bilateral",
             id="bilateral-oda-of-an-unnamed-set-and-ida-and-multilateral-oda",
+        ),
+        # Multilateral ODA twice on one option, the second's donors stated nothing of, so
+        # their own flows may be a multilateral's outflows. The option counts the core
+        # contributions alone and no reporter's own flows, so both count one stream.
+        pytest.param(
+            "dac_countries_multilateral",
+            "dac_countries_multilateral_again",
+            _PART,
+            None,
+            id="multilateral-oda-and-unmarked-multilateral-oda",
         ),
     ],
 )

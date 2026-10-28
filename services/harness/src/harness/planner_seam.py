@@ -155,7 +155,7 @@ from submission.service import (
     AlignedPin,
     Proposal,
     aligned_pins,
-    part_scope,
+    held_sector,
     searched_pins,
     submit,
 )
@@ -1822,27 +1822,19 @@ def _whole_reading_name(
     raw = ((block or {}).get("resolved") or {}).get("measure_label")
     measure = raw if isinstance(raw, str) and raw else None
     by_axis = plan_display.whole_name(pin.whole_axis, measure=measure)
-    if pin.whole_axis == "sector":
+    if pin.whole_axis == "sector" or block is None:
         return by_axis
-    source = readable_source(block or {})
+    source = readable_source(block)
     if source is None:
         return by_axis
     part_block = blocks.get(pin.origin)
     part = readable_source(part_block) if part_block is not None else None
-    sector = _sector_option(pin.spec_id, block) or _sector_option(pin.origin, part_block)
+    held = held_sector(block) or held_sector(part_block)
+    sector = held.label if held is not None else None
     named = plan_display.source_whole_name(
         pin.whole_axis, source=source, part=part, sector=sector, measure=measure
     )
     return named or by_axis
-
-
-def _sector_option(spec_id: str, block: Mapping[str, Any] | None) -> str | None:
-    """The label of the sector option the scope choices of `block`, the spec
-    block of `spec_id`, hold active. `None` where it holds no sector choice."""
-    scope = part_scope(spec_id, block)
-    choice = next((c for c in scope.choices if c.axis == "sector"), None) if scope else None
-    option = choice.active_option if choice is not None else None
-    return option.label if option is not None else None
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:

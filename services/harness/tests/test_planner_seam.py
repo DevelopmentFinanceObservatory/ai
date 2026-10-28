@@ -4896,6 +4896,19 @@ def test_a_declared_wholes_reading_is_named_by_the_whole_not_its_parts_words(
     assert part_name(stored, block) == f'"{named}"'
 
 
+def test_a_declared_whole_with_no_block_is_named_by_its_axis_with_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A whole whose digest holds no spec block is named by the axis it opens,
+    and no block is read as a source, so no unreadable block is logged."""
+    whole = AlignedPin(origin=HEALTH, option_ids=(), spec_id=TOTAL, digest={}, whole_axis="donor")
+
+    with caplog.at_level(logging.WARNING):
+        named = planner_seam._whole_reading_name(whole, None, blocks={})
+
+    assert (named, caplog.records) == ("all donors", [])
+
+
 _WINDOWED_HEALTH = "spec_" + "e" * 32
 
 

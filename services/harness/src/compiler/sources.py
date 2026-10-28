@@ -903,8 +903,9 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     absent for any other set and from a Search that predates it. `members` are
     the parties a bound total holds where Search lists them. `left_out` and
     `sum_differs` are, for a set read as its members, the residuals its total
-    counts that the members leave out and whether the source publishes its own
-    figure for it, absent from a Search that predates them. A class outside
+    counts that the members leave out, `None` where the group states nothing
+    (an empty list states that none is), and whether the source publishes its
+    own figure for it, absent from a Search that predates them. A class outside
     `common.place_type.PartyClass` fails the block.
     """
     found = []
@@ -920,7 +921,11 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     whole_of=_party_classes(group.get("whole_of")),
                     side_classes=_party_classes(group.get("side_classes")),
                     members=tuple(_strings(group.get("members"))),
-                    left_out=tuple(_strings(group.get("left_out"))),
+                    left_out=(
+                        None
+                        if group.get("left_out") is None
+                        else tuple(_strings(group.get("left_out")))
+                    ),
                     sum_differs=_flag(group.get("sum_differs")) is True,
                 )
             )
@@ -1026,18 +1031,17 @@ def block_groups(
     return _groups({role: group for role, group in groups.items() if role != leaving_out})
 
 
-def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
-    """The named sets `block` states (`block_groups`), none with a warning logged
+def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | None:
+    """The named sets `block` states (`block_groups`), `None` with a warning logged
     where they are not readable, as a set naming a class of party outside
-    `PartyClass`, for a caller that only reads them and goes on without. A
-    resubmit posting them reads `block_groups` and refuses where they are not
-    readable, since a definition posted without its sets can bind another
-    population."""
+    `PartyClass`, for a caller that reads them and goes on without. A resubmit
+    posting them reads `block_groups` and refuses where they are not readable,
+    since a definition posted without its sets can bind another population."""
     try:
         return block_groups(block)
     except ValueError as exc:
         logger.warning("named sets of %s are not readable: %s", block.get("spec_id"), exc)
-        return ()
+        return None
 
 
 def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, JsonValue]]:
@@ -1143,7 +1147,9 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     the group sits on is not known. An answer combining the members leaves
     out the residuals Search says the group's total counts beside them
     (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"), named
-    as Search names them; where Search states none, the sentence states none.
+    as Search names them; where Search states that none is, the sentence
+    states none. Where Search states nothing, on a flow side, the sentence
+    says the figure leaves out amounts the data allocates to no single country.
     Where Search says the source publishes its own figure for the group
     (`ResolvedGroup.sum_differs`), a second sentence says that figure can
     differ, so the residuals' list ends with the first.
@@ -1157,11 +1163,14 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
         )
     if answer is MembersAnswer.EACH:
         return f"The figures for {group.label} are its members' figures, each on its own."
-    left_out = (
-        " and leaves out what the data allocates to no single country: " + "; ".join(group.left_out)
-        if group.left_out
-        else ""
-    )
+    if group.left_out:
+        left_out = " and leaves out what the data allocates to no single country: " + "; ".join(
+            group.left_out
+        )
+    elif group.left_out is None and group.role in FLOW_ROLE_COLUMNS:
+        left_out = " and leaves out amounts the data allocates to no single country"
+    else:
+        left_out = ""
     published = (
         f" The source publishes its own figure for {group.label}, "
         "which can differ from one built from its members."

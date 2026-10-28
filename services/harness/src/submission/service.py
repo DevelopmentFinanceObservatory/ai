@@ -3830,9 +3830,9 @@ class _Reads(NamedTuple):
     entities: frozenset[frozenset[tuple[str, str]] | str]
 
     @classmethod
-    def of(cls, requirement: DatasetRequirement, block: Mapping[str, Any] | None) -> _Reads:
-        """What `requirement` reads, its names resolved against `block`, its pin's origin's spec block."""
-        source = readable_source(block) if block is not None else None
+    def of(cls, requirement: DatasetRequirement, source: SelectedSource | None) -> _Reads:
+        """What `requirement` reads, its names resolved against `source`, its pin's
+        origin's source, `None` where its block is not held or not readable."""
         return cls(
             period=(requirement.period.model_dump_json(), requirement.period_end_open),
             entities=frozenset(
@@ -3921,17 +3921,55 @@ def _part_rank(identity: Mapping[str, Any]) -> int:
     return 1 if (identity.get("entities") or {}).get("destination") else 0
 
 
-def _input_bases(
+@dataclass(frozen=True)
+class _Origin:
+    """A pin's origin as alignment reads it (`_input_bases`), parsed once per proposal:
+    its spec block, `None` where it was not shown, and the scope record the block
+    states (`part_scope`)."""
+
+    block: Mapping[str, Any] | None
+    scope: PartScope | None
+
+    @functools.cached_property
+    def source(self) -> SelectedSource | None:
+        """The source the block states (`compiler.sources.readable_source`), read on
+        first use, `None` where no block is held or it is not readable."""
+        return readable_source(self.block) if self.block is not None else None
+
+
+def _read_origins(
     requirements: Sequence[EvidenceRequirement],
     *,
     shown: Mapping[str, PinSource],
+    origins: Mapping[str, str],
+) -> dict[str, _Origin]:
+    """The origin (`origins`) of each dataset requirement's pin among `requirements`,
+    as `_input_bases` reads it on every axis, by its spec_id."""
+    read: dict[str, _Origin] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+            continue
+        origin = origins.get(requirement.source_spec_id, requirement.source_spec_id)
+        if origin in read:
+            continue
+        source = shown.get(origin)
+        block = source.spec_block(origin) if source is not None else None
+        read[origin] = _Origin(block=block, scope=part_scope(origin, block))
+    return read
+
+
+def _input_bases(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    read: Mapping[str, _Origin],
     origins: Mapping[str, str],
     axis: str,
 ) -> dict[str, _InputBasis]:
     """The option each dataset requirement of `requirements` is counted on along `axis`, by requirement id.
 
-    A requirement whose pin's origin (`origins`) was not shown, or carries no
-    choice on `axis`, has none.
+    `read` holds each pin's origin (`origins`) as `_read_origins` read it. A
+    requirement whose origin was not shown, or carries no choice on `axis`, has
+    none.
     """
     bases: dict[str, _InputBasis] = {}
     for requirement in requirements:
@@ -3939,9 +3977,8 @@ def _input_bases(
             continue
         pin = requirement.source_spec_id
         origin = origins.get(pin, pin)
-        source = shown.get(origin)
-        block = source.spec_block(origin) if source is not None else None
-        scope = part_scope(origin, block)
+        held = read[origin]
+        block, scope = held.block, held.scope
         choice = (
             next((c for c in scope.choices if c.axis == axis), None) if scope is not None else None
         )
@@ -3959,7 +3996,7 @@ def _input_bases(
             own_flows=_own_flows(scope, block) if axis == PROVIDER_AXIS else None,
             part=scope.base.spec_id,
             actives=tuple((held.axis, held.active) for held in scope.choices),
-            reads=_Reads.of(requirement, block),
+            reads=_Reads.of(requirement, held.source),
         )
     return bases
 
@@ -4201,8 +4238,9 @@ def _aligned_bases(
     # final pin below.
     whole_ids = {whole.id for whole, _, _ in declared}
     aligning = [requirement for requirement in requirements if requirement.id not in whole_ids]
+    read = _read_origins(aligning, shown=shown, origins=origins)
     by_axis = {
-        axis: _input_bases(aligning, shown=shown, origins=origins, axis=axis)
+        axis: _input_bases(aligning, read=read, origins=origins, axis=axis)
         for axis in _ALIGNED_AXES
     }
     steps = [step for step in requirements if len(inputs_of(step)) >= 2]
@@ -4557,14 +4595,18 @@ def _alignment_targets(
                 aligns = _aligns(step, axis) and not (axis == PROVIDER_AXIS and group.accepted)
                 own = _shared_basis(inputs) if aligns else None
                 candidates.append(_Aligning(step, group, inputs, aligns, own))
+        # Each candidate counting its inputs on one option, by its index in
+        # `candidates`, with the option its inputs share.
         aligning = [
-            (candidate, own) for candidate in candidates if (own := candidate.own) is not None
+            (index, own)
+            for index, candidate in enumerate(candidates)
+            if (own := candidate.own) is not None
         ]
         while True:
-            chosen = _chosen_options(aligning, bases)
+            chosen = _chosen_options([(candidates[index], own) for index, own in aligning], bases)
             counted: dict[str, set[str]] = {}
-            for (candidate, _), target in zip(aligning, chosen, strict=True):
-                for basis in candidate.inputs:
+            for (index, _), target in zip(aligning, chosen, strict=True):
+                for basis in candidates[index].inputs:
                     counted.setdefault(basis.requirement_id, set()).add(target)
             moved = {
                 move
@@ -4572,28 +4614,28 @@ def _alignment_targets(
                 for move in _sides_one_series(candidate.group, bases, axis, targets, counted)
             }
             # The inputs of a calculation kept apart stay on their own options.
-            aligned = [candidate for candidate, _ in aligning]
+            aligned = {index for index, _ in aligning}
             held = {
                 basis.requirement_id
-                for candidate in candidates
-                if candidate.own is not None and candidate not in aligned
+                for index, candidate in enumerate(candidates)
+                if candidate.own is not None and index not in aligned
                 for basis in candidate.inputs
             }
             kept = [
-                (candidate, own)
-                for (candidate, own), target in zip(aligning, chosen, strict=True)
+                (index, own)
+                for (index, own), target in zip(aligning, chosen, strict=True)
                 if not any(
                     (basis.requirement_id, target) in moved
                     or (basis.requirement_id in held and target != basis.choice.active)
-                    for basis in candidate.inputs
+                    for basis in candidates[index].inputs
                 )
             ]
             if len(kept) == len(aligning):
                 break
             aligning = kept
-        aligned = [candidate for candidate, _ in aligning]
-        for candidate in candidates:
-            if candidate in aligned:
+        aligned = {index for index, _ in aligning}
+        for index, candidate in enumerate(candidates):
+            if index in aligned:
                 continue
             # A group left unaligned to keep two sides apart refuses as one
             # accepting a provider difference does, on every input.
@@ -4607,7 +4649,8 @@ def _alignment_targets(
                 view=view,
                 proposer=proposer,
             )
-        for (candidate, _), target in zip(aligning, chosen, strict=True):
+        for (index, _), target in zip(aligning, chosen, strict=True):
+            candidate = candidates[index]
             for basis in candidate.inputs:
                 _claim(targets, basis, axis, target, candidate.step, view=view, proposer=proposer)
             _refuse_double_count(
@@ -5006,10 +5049,14 @@ def _shared_money(first: _InputBasis, other: _InputBasis) -> frozenset[ProviderM
     they share money only where one input's reporters' own flows, the bilateral
     stream, count the multilateral money the option's other streams count for the
     other: IDA's outflows beside the US's imputed share of them. US bilateral aid
-    beside IDA's, both counting bilateral flows alone, share none, whatever IDA is."""
+    beside IDA's, both counting bilateral flows alone, share none, whatever IDA is,
+    and neither do two inputs on an option that counts no reporter's own flows
+    (`provider:multilateral`, core contributions alone)."""
     scope = _active_scope(first)
     if first.choice.active != other.choice.active or scope is None:
         return _money(first) & _money(other)
+    if "bilateral" not in PROVIDER_STREAMS[scope]:
+        return frozenset()
     # No own flows: the money the option's streams other than the bilateral one count.
     pooled = scope_money(scope, own_flows=frozenset())
     return (_own_money(first) | _own_money(other)) & pooled
@@ -5381,7 +5428,8 @@ def _whole_total(axis: str, block: Mapping[str, Any] | None) -> str:
     donor"."""
     column = WHOLE_COLUMNS.get(axis)
     label = next(
-        (group.label for group in readable_groups(block or {}) if group.role == column), None
+        (group.label for group in readable_groups(block or {}) or () if group.role == column),
+        None,
     )
     return f"total for {label}" if label is not None else f"total over every {axis}"
 
@@ -5750,12 +5798,10 @@ def _block_scope(block: Mapping[str, Any] | None) -> PartScope | None:
     return part_scope(str((block or {}).get("spec_id")), block)
 
 
-def _held_sector(scope: PartScope | None) -> Option | None:
-    """The option `scope`, a part's scope record, holds on its sector choice, `None`
-    where it states none."""
-    if scope is None:
-        return None
-    return next((c.active_option for c in scope.choices if c.axis == _SECTOR_AXIS), None)
+def held_sector(block: Mapping[str, Any] | None) -> Option | None:
+    """The option the scope choices of `block`, a spec block, hold on their sector
+    choice (`_active_option`), `None` where they state none."""
+    return _active_option(_block_scope(block), _SECTOR_AXIS)
 
 
 def _dataset_title(block: Mapping[str, Any] | None) -> str | None:
@@ -5775,7 +5821,7 @@ def _side_name(
     scope record: what Search says its series count (`compiler.sources.block_concept_label`),
     else the option its scope's sector choice holds, else, with `titled`, the dataset
     it counts from (`_dataset_title`), `None` when none is stated."""
-    held = _held_sector(scope)
+    held = _active_option(scope, _SECTOR_AXIS)
     named = block_concept_label(block) or (held.label if held is not None else None)
     if named is not None:
         return named

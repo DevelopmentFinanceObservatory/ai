@@ -698,7 +698,8 @@ async def test_a_retrieval_of_a_named_group_states_how_it_reads_the_group(
                 *(ResolvedEntity(role="origin", ref=ref, label=label) for ref, label in donors),
                 ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
             ),
-            "groups": (ResolvedGroup(role="origin", label="G7", total=total),),
+            # Search states that the G7's members leave nothing out.
+            "groups": (ResolvedGroup(role="origin", label="G7", total=total, left_out=()),),
         }
     )
     oda = _dataset(
