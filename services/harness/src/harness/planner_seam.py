@@ -161,7 +161,7 @@ from submission.service import (
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
-from translator.referral import USER_DECIDES
+from translator.referral import USER_DECIDES, ReferralKind
 from translator.tool import Translate, build_translate, permitted_repair
 
 from harness import plan_display
@@ -815,9 +815,11 @@ class PlannerSeam:
         (`_revision_refused`), the revision recording
         a version or not; the caller restores what it keeps. A translation
         that refers the plan back refuses as an entry ending on that
-        referral does: on its closing refusal (`_closing_refusal`), or as
-        `SeamCode.PLAN_NOT_READY` with the referral's reason (`_not_ready`),
-        since no model is there to settle it.
+        referral does: on its closing refusal (`_closing_refusal`), on the
+        service that did not answer for a transient one, which no later round
+        proposes again (`_unanswered`), or as `SeamCode.PLAN_NOT_READY` with
+        the referral's reason (`_not_ready`), since no model is there to
+        settle it.
         """
         state = cast(SessionState, ctx.state)
         prior = Plan.model_validate(prior_plan)
@@ -845,7 +847,9 @@ class PlannerSeam:
         referral = PlannerSeam._referral_dict(translation)
         if referral is not None:
             return self._revision_refused(
-                PlannerSeam._closing_refusal(referral) or _not_ready(referral),
+                PlannerSeam._closing_refusal(referral)
+                or _unanswered(referral)
+                or _not_ready(referral),
                 words=_plan_words(state, load_plan(state)),
             )
         answer = declare_ready({**recorded, "translation": translation}, ctx)
@@ -1448,6 +1452,25 @@ def _not_ready(referral: Mapping[str, Any] | None) -> dict[str, Any]:
     return {
         "code": SeamCode.PLAN_NOT_READY,
         "detail": _referral_detail(referral) if referral is not None else {},
+    }
+
+
+def _unanswered(referral: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The refusal a revision ends on for a transient referral, or `None` for
+    any other: Search not answering as `SeamCode.DISCOVERY_UNAVAILABLE`, and
+    any other service, such as the calculation service, as
+    `ProblemCode.SURFACE_UNAVAILABLE`. Each carries the requirement the
+    referral is about and its reason."""
+    if referral.get("outcome") != Outcome.TRANSIENT.value:
+        return None
+    return {
+        "code": SeamCode.DISCOVERY_UNAVAILABLE
+        if referral.get("kind") == ReferralKind.DISCOVERY_UNAVAILABLE
+        else ProblemCode.SURFACE_UNAVAILABLE,
+        "detail": {
+            "requirement_id": referral.get("requirement_id"),
+            "reason": referral.get("reason"),
+        },
     }
 
 

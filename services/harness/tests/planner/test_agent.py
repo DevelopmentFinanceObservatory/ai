@@ -78,6 +78,7 @@ from planner.plan import (
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     MAX_DECISION_DESCRIPTION_CHARS,
+    MAX_DECISION_RATIONALE_CHARS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_RECORD_CHARS,
     MAX_PLAN_REQUIREMENTS,
@@ -6154,6 +6155,65 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     assert stated.slot in whole_requirement.decision_ids
 
 
+async def test_a_declared_whole_offers_no_row_on_the_axis_it_leaves_open(
+    decision: DecisionFactory,
+) -> None:
+    """The declared whole over every sector comes back from Search with a sector
+    choice of its own: the plan states no sector row on the whole, whose
+    caveat says it counts every sector, while the part keeps its own."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"))
+
+    result = await _us_2023(
+        _tools_reading(WholeCompiles(opened=True))["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=None,
+        declared=True,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    sectors = {
+        d.fixes.source_spec_id
+        for d in plan.decisions
+        if d.scope is not None and d.scope.axis == "sector" and d.fixes is not None
+    }
+    assert sectors == {us_2023_block("health")["spec_id"]}
+
+
+@pytest.mark.parametrize(
+    ("title", "titled"),
+    [("OECD CRS", True), ("OECD CRS " + "t" * 700, False)],
+    ids=["titled", "untitled"],
+)
+def test_a_declared_whole_is_stated_whatever_its_parts_dataset_title(
+    title: str, titled: bool
+) -> None:
+    """The whole of US health aid over every sector, its part's dataset titled
+    `title`: the whole is stated naming the title while that fits the limits on
+    its choice and rationale, and without it past them, and is never dropped."""
+    block = json.loads(json.dumps(us_2023_block("health")))
+    block["resolved"]["facets"]["provenance"]["label"] = title
+    whole = AlignedPin(
+        origin=block["spec_id"],
+        option_ids=(),
+        spec_id="spec_" + "9" * 32,
+        digest={},
+        whole_axis="sector",
+    )
+
+    (stated,) = submission_service._whole_decisions(
+        {_WHOLE: whole}, [], shown={block["spec_id"]: PinSource(block=block, settled=True)}
+    )[_WHOLE]
+
+    assert stated.caveat == "derived_whole"
+    assert (title in stated.chosen, title in stated.rationale) == (titled, titled)
+    assert "total over every sector" in stated.chosen
+
+
 async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     decision: DecisionFactory,
 ) -> None:
@@ -6907,6 +6967,72 @@ async def test_a_carried_share_restates_its_provider_difference_when_an_input_is
         "counts bilateral plus imputed multilateral, from OECD CRS and ONE Imputed "
         f"Multilateral Sectors. {whole_counts}"
     )
+
+
+@pytest.mark.parametrize(
+    ("title", "measure", "form"),
+    [
+        pytest.param("OECD CRS", "US aid", "titled", id="titled"),
+        pytest.param("OECD CRS " + "t" * 200, "US aid", "untitled", id="untitled"),
+        pytest.param("OECD CRS " + "t" * 200, "US aid " + "m" * 190, "counted", id="counted"),
+    ],
+)
+def test_a_provider_difference_over_four_inputs_is_stated_within_the_rationale_limit(
+    title: str, measure: str, form: str
+) -> None:
+    """Four US inputs summed, two counting bilateral aid and two imputed
+    multilateral aid, each from a dataset titled `title` and named by the
+    planner's `measure`: the difference is stated in full while it fits the rationale's
+    limit, then with each input named without its dataset title, then as its
+    first sentence and how many inputs the sum reads, and is never dropped."""
+    ids = ("a", "b", "c", "d")
+    blocks = {}
+    for index, input_id in enumerate(ids):
+        spec_id = f"spec_{str(index + 5) * 32}"
+        block = provider_block(
+            spec_id,
+            narrow=False,
+            active="provider:bilateral" if index < 2 else "provider:inclusive",
+        )
+        block["resolved"]["facets"] = {"provenance": {"ref": "dataset", "label": title}}
+        blocks[input_id] = block
+    requirements: list[EvidenceRequirement] = [
+        DatasetRequirement(
+            id=input_id,
+            measure=f"{measure} {input_id}",
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=block["spec_id"],
+        )
+        for input_id, block in blocks.items()
+    ]
+    requirements += [
+        SumOfRequirement(
+            id="ab", left=RequirementSide(input_id="a"), right=RequirementSide(input_id="b")
+        ),
+        SumOfRequirement(
+            id="cd", left=RequirementSide(input_id="c"), right=RequirementSide(input_id="d")
+        ),
+        SumOfRequirement(
+            id="all", left=RequirementSide(input_id="ab"), right=RequirementSide(input_id="cd")
+        ),
+    ]
+    shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in blocks.values()}
+
+    (stated,) = submission_service._provider_difference_decisions(requirements, shown=shown)["all"]
+
+    lead = (
+        "The inputs are set to different provider scopes, so they count different "
+        "providers' spending."
+    )
+    assert stated.caveat == "providers_differ"
+    assert len(stated.rationale) <= MAX_DECISION_RATIONALE_CHARS
+    assert stated.rationale.startswith(lead)
+    assert (title in stated.rationale) is (form == "titled")
+    if form == "counted":
+        assert stated.rationale == f"{lead} The calculation reads 4 inputs."
+    else:
+        assert stated.rationale.count(" counts ") == 4
 
 
 def test_a_share_over_the_dac1_total_moves_it_to_bilateral_oda(decision: DecisionFactory) -> None:

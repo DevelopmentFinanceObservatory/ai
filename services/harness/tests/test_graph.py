@@ -3489,6 +3489,34 @@ async def test_a_switch_on_a_declared_wholes_row_holds_the_answer_as_its_whole(
     ]
 
 
+async def test_a_switch_on_the_axis_a_declared_whole_leaves_open_is_never_applied(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The switched source is a whole compiled from its part with its sector
+    left open, and the user picks one sector on it: Search is never asked,
+    the whole stays held as it was, and the plan is offered unchanged with
+    the switch refused, since one sector would count a slice of the total
+    the whole's caveat says it counts."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+    part = "spec_" + "4" * 32
+    whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
+
+    runner, seam, plan, scope, events = await _switch_runner(real_schemas, search, whole_of=whole)
+
+    assert search.posted == []
+    assert seam.revisions == []
+    offered = _output_of(events, "switch")
+    assert offered["revision"] == plan_revision(plan)
+    failed = offered["switch_failed"]
+    assert (failed["code"], failed["retryable"]) == (SCOPE_CHOICE_NOT_APPLIED, False)
+    held = aligned_pins(cast(SessionState, _session_state(runner)))
+    assert [(pin.key, pin.spec_id) for pin in held] == [
+        ((part, (), "sector"), scope["compiled"]["spec_id"])
+    ]
+
+
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
 ) -> None:

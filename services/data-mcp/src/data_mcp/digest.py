@@ -834,9 +834,11 @@ def _dropped_cause_words(cause: str, *, axis: str, availability: Mapping[str, An
     """`cause`, a dropped scope entry's cause code, in words.
 
     A partial requested option adds the years it covers, as "(2011 to
-    2024)". A cause with no words of its own, such as a declared conflict's
-    cause or one this release does not know, says only that Search could not
-    apply the entry, and keeps its code in brackets.
+    2024)". A declared conflict's own cause, the one the requested option's
+    `conflicts_with` availability names, reads as a conflict. Any other
+    cause with no words of its own, such as one this release does not
+    know, says only that Search could not apply the entry. Both keep the
+    code in brackets.
     """
     if cause == "axis_absent":
         words = f"this answer has no {axis} choice"
@@ -847,8 +849,15 @@ def _dropped_cause_words(cause: str, *, axis: str, availability: Mapping[str, An
     elif cause.startswith("blocks_every_"):
         blocked = cause.removeprefix("blocks_every_").split("_option", 1)[0]
         words = f"it rules out every {blocked} option"
+    elif cause in _DROPPED_CAUSE_WORDS:
+        words = _DROPPED_CAUSE_WORDS[cause]
+    elif (
+        availability.get("code") == "conflicts_with"
+        and (availability.get("detail") or {}).get("cause") == cause
+    ):
+        words = f"{REASON_COPY['conflicts_with']} [{cause}]"
     else:
-        words = _DROPPED_CAUSE_WORDS.get(cause) or f"Search could not apply it [{cause}]"
+        words = f"Search could not apply it [{cause}]"
     spans = availability.get("years") or []
     if availability.get("status") == "partial" and spans:
         covered = ", ".join(f"{start} to {end}" for start, end in spans)

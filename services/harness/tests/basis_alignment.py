@@ -331,14 +331,21 @@ class WholeCompiles:
     part as Search recorded it, `whole` for a bilateral provider entry and
     `whole_inclusive` for an inclusive one, or refuses with `refusal` when given,
     recording each call's arguments in `calls`. With `searched`, its `search`
-    answers that part of `US_2023`, and is recorded in `calls` as well."""
+    answers that part of `US_2023`, and is recorded in `calls` as well. With
+    `opened`, the whole also carries the part's sector choice, which Search
+    may return on the axis the whole leaves open."""
 
     def __init__(
-        self, *, refusal: Mapping[str, Any] | None = None, searched: str | None = None
+        self,
+        *,
+        refusal: Mapping[str, Any] | None = None,
+        searched: str | None = None,
+        opened: bool = False,
     ) -> None:
         self.calls: list[Mapping[str, Any]] = []
         self.refusal = refusal
         self.searched = searched
+        self.opened = opened
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -361,4 +368,13 @@ class WholeCompiles:
         ]
         name = {"provider:bilateral": "whole", "provider:inclusive": "whole_inclusive"}[provider]
         part = US_2023[name]
+        if self.opened:
+            part = json.loads(json.dumps(part))
+            scope = part["spec"]["resolved"]["scope_choices"]
+            (sector,) = [
+                c
+                for c in us_2023_block("health")["resolved"]["scope_choices"]["choices"]
+                if c["axis"] == "sector"
+            ]
+            scope["choices"] = [{**sector, "id": f"{scope['id']}:sector"}, *scope["choices"]]
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})

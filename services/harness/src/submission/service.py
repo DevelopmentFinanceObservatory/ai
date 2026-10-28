@@ -76,6 +76,7 @@ from planner.parties import (
 )
 from planner.plan import (
     MAX_DECISION_OPTIONS,
+    MAX_DECISION_RATIONALE_CHARS,
     MAX_DECLINES,
     MAX_GROUP_BY,
     MAX_OPTION_CHARS,
@@ -486,7 +487,14 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         settled,
         evidence_requirements,
         previous=previous,
-        scopes=scope_choice_decisions(pins),
+        scopes=scope_choice_decisions(
+            pins,
+            open_axes={
+                pin.spec_id: pin.whole_axis
+                for pin in aligned_pins(view.state)
+                if pin.whole_axis is not None
+            },
+        ),
         wholes=_whole_decisions(wholes, aligned_after, shown=pins),
         calculations=_provider_difference_decisions(aligned_after, shown=pins),
         removed=removed_decisions,
@@ -3236,7 +3244,9 @@ _SCOPE_QUESTIONS: dict[str, str] = {
 }
 
 
-def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[Decision, ...]]:
+def scope_choice_decisions(
+    shown: Mapping[str, PinSource], *, open_axes: Mapping[str, str] | None = None
+) -> dict[str, tuple[Decision, ...]]:
     """The scope decisions a pin of each spec_id of `shown` states, in the order Search lists its choices.
 
     Read from the source's spec block (`resolved.scope_choices`,
@@ -3244,8 +3254,12 @@ def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[De
     release cannot read, states none. Each choice is one decision
     (`_scope_decision`), when it states one; a choice on an axis the block
     marks as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`)
-    is the planner's decision.
+    is the planner's decision. A choice on the axis `open_axes` holds for
+    the spec_id, a whole compiled from its part with that axis left open
+    (`AlignedPin.whole_axis`), states none: any one option on it would
+    count a single slice of what the whole counts in full.
     """
+    open_axes = open_axes or {}
     decisions: dict[str, tuple[Decision, ...]] = {}
     for spec_id, source in shown.items():
         block = source.spec_block(spec_id)
@@ -3256,7 +3270,8 @@ def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[De
         written = tuple(
             decision
             for choice in scope.choices
-            if (decision := _scope_decision(spec_id, choice, scope=scope, planner=planner))
+            if choice.axis != open_axes.get(spec_id)
+            and (decision := _scope_decision(spec_id, choice, scope=scope, planner=planner))
             is not None
         )
         if written:
@@ -4450,7 +4465,8 @@ def _whole_decisions(
     part's own dataset over every member of the axis left open, and that
     both sides count the same donors, recipients, measure basis and
     providers, less any of those the user switched on the whole's own row
-    (`AlignedPin.option_ids`). The part is
+    (`AlignedPin.option_ids`), naming the part's dataset by its title where
+    that fits the rationale's limit (`_fitting_rationale`). The part is
     the one the whole declares (`DatasetRequirement.whole_of`), else the pin
     it was compiled from (`AlignedPin.origin`), so two wholes compiled to one
     pin each name their own. It is the planner's, qualifies the answer
@@ -4473,15 +4489,26 @@ def _whole_decisions(
         )
         part_block = _pin_block(origin, shown)
         dataset = _dataset_title(part_block)
-        side = _side_name(part_block)
-        chosen = " ".join(filter(None, ("the", dataset, f"total over every {whole.whole_axis}")))
-        source = (
-            f"the {dataset}, the same dataset as" if dataset is not None else "the same dataset as"
-        )
-        part_named = f"the {side} figures" if side is not None else "its part"
+        total = f"total over every {whole.whole_axis}"
+        chosen = f"the {dataset} {total}" if dataset is not None else f"the {total}"
+        if len(chosen) > MAX_OPTION_CHARS:
+            chosen = f"the {total}"
         switched = {option_axis(option_id) for option_id in whole.option_ids}
         held = [words for axis, words in _WHOLE_HELD if axis not in switched]
         same = ", ".join(held[:-1]) + f" and {held[-1]}" if len(held) > 1 else held[0]
+
+        # The dataset and the part's name, from the fullest to the shortest.
+        titled_side, side = _side_name(part_block), _side_name(part_block, titled=False)
+        named = (
+            (
+                f"the {dataset}, the same dataset as"
+                if dataset is not None
+                else "the same dataset as",
+                f"the {titled_side} figures" if titled_side is not None else "its part",
+            ),
+            ("the same dataset as", f"the {side} figures" if side is not None else "its part"),
+            ("the same dataset as", "its part"),
+        )
         try:
             decision = Decision(
                 slot=_whole_slot(requirement_id),
@@ -4489,9 +4516,12 @@ def _whole_decisions(
                 options=(chosen, "a total from another dataset"),
                 chosen=chosen,
                 resolved_by=ResolvedBy.PLANNER_DEFAULT,
-                rationale=(
-                    f"The share divides by the total over every {whole.whole_axis} from "
-                    f"{source} {part_named}, so both sides count the same {same}."
+                rationale=_fitting_rationale(
+                    *(
+                        f"The share divides by the {total} from {source} {part_named}, so both "
+                        f"sides count the same {same}."
+                        for source, part_named in named
+                    )
                 ),
                 fixes=DecisionFixes(source_spec_id=whole.spec_id),
                 caveat="derived_whole",
@@ -4542,7 +4572,10 @@ def _provider_difference_decisions(
     scope and they differ, as when the user set its inputs to different
     scopes (`_aligned_bases`). The decision says so in reader words, one
     sentence per input naming what it counts, or that its dataset does not
-    say (`_provider_sentence`). It is the planner's, qualifies the answer
+    say (`_provider_sentence`); where that passes the rationale's limit,
+    each input is named without its dataset title, and where that still
+    does, the first sentence is followed by how many inputs the calculation
+    reads (`_fitting_rationale`). It is the planner's, qualifies the answer
     (`Decision.caveat` `providers_differ`), and is cited by the calculation
     (`_scope_decisions`).
     """
@@ -4569,9 +4602,12 @@ def _provider_difference_decisions(
         differ = step.accept_provider_difference if None in scopes else len(scopes) > 1
         if not differ:
             continue
-        sides = " ".join(
-            _provider_sentence(requirement, block, provider)
-            for requirement, block, provider in inputs
+        lead = (
+            "The question asks for the inputs as their datasets count them, so they may "
+            "count different providers' spending."
+            if step.accept_provider_difference
+            else "The inputs are set to different provider scopes, so they count "
+            "different providers' spending."
         )
         try:
             decision = Decision(
@@ -4583,12 +4619,20 @@ def _provider_difference_decisions(
                 ),
                 chosen="each input as its dataset counts it",
                 resolved_by=ResolvedBy.PLANNER_DEFAULT,
-                rationale=(
-                    "The question asks for the inputs as their datasets count them, so they may "
-                    f"count different providers' spending. {sides}"
-                    if step.accept_provider_difference
-                    else "The inputs are set to different provider scopes, so they count "
-                    f"different providers' spending. {sides}"
+                rationale=_fitting_rationale(
+                    *(
+                        " ".join(
+                            (
+                                lead,
+                                *(
+                                    _provider_sentence(requirement, block, provider, titled=titled)
+                                    for requirement, block, provider in inputs
+                                ),
+                            )
+                        )
+                        for titled in (True, False)
+                    ),
+                    f"{lead} The calculation reads {len(inputs)} inputs.",
                 ),
                 caveat="providers_differ",
             )
@@ -4599,19 +4643,31 @@ def _provider_difference_decisions(
     return decisions
 
 
+def _fitting_rationale(*forms: str) -> str:
+    """The first of `forms`, a caveat's rationale from its fullest form to its
+    shortest, within `MAX_DECISION_RATIONALE_CHARS`, else the last, so a
+    caveat is stated in the shortest form rather than dropped."""
+    return next((form for form in forms if len(form) <= MAX_DECISION_RATIONALE_CHARS), forms[-1])
+
+
 def _provider_sentence(
-    requirement: DatasetRequirement, block: Mapping[str, Any] | None, provider: Option | None
+    requirement: DatasetRequirement,
+    block: Mapping[str, Any] | None,
+    provider: Option | None,
+    *,
+    titled: bool = True,
 ) -> str:
     """One sentence saying which providers' spending the input `requirement` counts:
     "<concept> counts <provider label>, from <dataset>." with the input named as
     the plan card names it (`_input_concept`), or that its dataset does not say.
-    The dataset is left out where Search names none (`_dataset_title`). A
+    The dataset is left out where Search names none (`_dataset_title`), or
+    without `titled`, the short form a long rationale falls back to. A
     dataset title opening with the provider label, such as "bilateral plus imputed
     multilateral (OECD CRS and ONE Imputed Multilateral Sectors)", is named by the
     rest of it, so the label is said once."""
     concept = _input_concept(requirement, block)
     concept = f"{concept[:1].upper()}{concept[1:]}"
-    title = _dataset_title(block)
+    title = _dataset_title(block) if titled else None
     if provider is None:
         if title is None:
             return f"{concept} does not say which providers it counts."
@@ -4651,16 +4707,19 @@ def _dataset_title(block: Mapping[str, Any] | None) -> str | None:
     return block_dataset(block).name
 
 
-def _side_name(block: Mapping[str, Any] | None) -> str | None:
+def _side_name(block: Mapping[str, Any] | None, *, titled: bool = True) -> str | None:
     """A share side's name for the reader: the sector its scope's sector choice holds,
-    else the dataset it counts from (`_dataset_title`), `None` when neither is stated."""
+    else, with `titled`, the dataset it counts from (`_dataset_title`), `None` when
+    neither is stated."""
     scope = part_scope(str((block or {}).get("spec_id")), block)
     sector = (
         next((c.active_option for c in scope.choices if c.axis == _SECTOR_AXIS), None)
         if scope is not None
         else None
     )
-    return sector.label if sector is not None else _dataset_title(block)
+    if sector is not None:
+        return sector.label
+    return _dataset_title(block) if titled else None
 
 
 def _provider_option(block: Mapping[str, Any] | None) -> Option | None:

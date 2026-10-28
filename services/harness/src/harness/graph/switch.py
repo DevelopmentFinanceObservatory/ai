@@ -310,6 +310,15 @@ async def _switched_plan(
         raise SwitchFailedError(
             f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
         )
+    # A whole compiled from its part counts every option on the axis it
+    # leaves open (`AlignedPin.whole_axis`); one option there would count a
+    # slice of it under the caveat that it counts the whole.
+    opened = {pin.spec_id for pin in aligned_pins(state) if pin.whole_axis == axis}
+    if any(pin in opened for pin, *_ in targets):
+        raise SwitchFailedError(
+            f"This total counts every {axis}, so it cannot be narrowed to {label}.",
+            code=SCOPE_CHOICE_NOT_APPLIED,
+        )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
     switched = await asyncio.gather(

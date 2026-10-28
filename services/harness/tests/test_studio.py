@@ -23,6 +23,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -3287,6 +3288,40 @@ async def test_a_stopped_switch_still_sending_frames_ends_at_the_reoffer_deadlin
     frames = _data_frames(sent)
     assert frames[-1]["event"] == "error"
     assert frames[-1]["error"]["error"] == "cancelled"
+
+
+async def test_a_segment_lost_as_the_reoffer_deadline_passes_keeps_the_turn_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped switch whose segment is taken over in the same wait in which
+    `SWITCH_REOFFER_SECONDS` pass: the stream ends on `transient_unavailable`
+    for the takeover, and leaves the turn open for the instance that took it."""
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
+    conversation = ConversationState(conversation_id=CONVERSATION)
+
+    async def segment():
+        yield _running_line(0)
+        await asyncio.sleep(0.05)  # idle while the Stop is read
+        # Blocks the loop past the deadline, so one wait sees both the
+        # deadline and the takeover the heartbeat records.
+        time.sleep(0.15)
+        _end_stream(conversation, "segment_lost")
+        yield _running_line(1)
+        await asyncio.Event().wait()
+
+    conversation.begin_turn()
+    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    frames = _data_frames(sent)
+    assert frames[-1]["error"]["error"] == "transient_unavailable"
+    assert not conversation.turn_recorded
 
 
 async def test_a_stopped_switch_that_reoffers_its_plan_keeps_the_turn_open_past_the_deadline(

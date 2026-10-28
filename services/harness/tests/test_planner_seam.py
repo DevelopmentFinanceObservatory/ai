@@ -4552,13 +4552,53 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
     assert result["summary"]["revision"] == plan_revision(revised)
 
 
+@pytest.mark.parametrize(
+    ("kind", "outcome", "code", "final", "reason", "retryable"),
+    [
+        (
+            ReferralKind.PINNED_SOURCE_NOT_FOUND,
+            "choice_required",
+            SeamCode.PLAN_NOT_READY,
+            False,
+            f'For "health aid", {referral_reason(ReferralKind.PINNED_SOURCE_NOT_FOUND)}.',
+            False,
+        ),
+        (
+            ReferralKind.DISCOVERY_UNAVAILABLE,
+            "transient",
+            SeamCode.DISCOVERY_UNAVAILABLE,
+            True,
+            'The data service did not answer while finding data for "health aid".',
+            True,
+        ),
+        (
+            ReferralKind.SURFACE_UNAVAILABLE,
+            "transient",
+            ProblemCode.SURFACE_UNAVAILABLE,
+            False,
+            "A service the plan needs could not be reached.",
+            True,
+        ),
+    ],
+    ids=["not_ready", "search_unanswered", "service_unanswered"],
+)
 async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_reason(
-    decision: Any, requirement: Any, derived_requirement: Any
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    kind: ReferralKind,
+    outcome: str,
+    code: str,
+    final: bool,
+    reason: str,
+    retryable: bool,
 ) -> None:
-    """A translation that refers the revised plan back (here, the pin it
-    moved to was not found again) ends the revision as a planner entry ending
-    on that referral would, with `plan_not_ready` and the referral's reason,
-    since no model is there to settle it."""
+    """A translation that refers the revised plan back ends the revision as a
+    planner entry ending on that referral would. A pin the revision moved to
+    that was not found again ends on `plan_not_ready` and the referral's
+    reason, since no model is there to settle it, and a switch to the same
+    option repeats it. A transient referral, with time left, ends on the
+    service that did not answer, which a later switch can escape."""
     old, new = "spec_" + "c" * 32, "spec_" + "d" * 32
     scope = _switchable_scope()
     shown = {
@@ -4578,13 +4618,12 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
             ],
         }
     )
-    kind = ReferralKind.PINNED_SOURCE_NOT_FOUND
 
     async def translate(tool_context: Any) -> dict[str, object]:
         del tool_context
         return {
             "kind": kind.value,
-            "outcome": "choice_required",
+            "outcome": outcome,
             "requirement_id": dataset.id,
             "reason": f"{dataset.id!r} pins {new!r}, which discovery did not find.",
         }
@@ -4631,10 +4670,9 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
     ]
 
     refused = result["refused"]
-    assert (refused["code"], refused["final"]) == (SeamCode.PLAN_NOT_READY, False)
-    assert refused["text"].startswith(f"No plan was made for requirement {dataset.id!r}: ")
-    assert refused["reason"] == f'For "health aid", {referral_reason(kind)}.'
-    assert referral_reason(kind) in refused["text"]
+    assert (refused["code"], refused["final"], refused["reason"]) == (code, final, reason)
+    assert (refused["code"] in switch._RETRYABLE_REVISION_CODES) is retryable
+    assert f"for requirement {dataset.id!r}" in refused["text"]
 
 
 async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(

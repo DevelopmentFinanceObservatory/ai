@@ -618,8 +618,10 @@ async def _sse_stream(
                                 break
                             if overdue or (cancel_wait is not None and cancel_wait in done):
                                 assert conversation is not None
-                                if overdue:
-                                    # The stopped switch offered nothing in time.
+                                if overdue and conversation.cancel_reason is None:
+                                    # The stopped switch offered nothing in
+                                    # time; a takeover recorded in the same
+                                    # wait keeps its own reason.
                                     conversation.cancel_reason = "cancelled"
                                 stop = conversation.switch_stop
                                 if (
