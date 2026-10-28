@@ -739,6 +739,13 @@ def concept_name(
 _WHOLE_NAMES = {"sector": "all sectors"}
 
 
+def whole_name(axis: str, *, measure: str | None = None) -> str:
+    """What a declared whole leaving `axis` open fetches, as the card names it
+    ("all sectors"), on `measure` when given ("gross disbursements in all sectors")."""
+    name = _WHOLE_NAMES[axis]
+    return f"{measure} in {name}" if measure else name
+
+
 def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     """What `requirement` fetches, in the reader's words, as `_concepts` names it
     (`concept_name`), read off the scope decisions it cites and its source.
@@ -747,7 +754,7 @@ def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     part's axis opened, so it is named by that axis ("all sectors"), and never
     by the planner's `measure`."""
     if requirement.whole_of is not None:
-        return _WHOLE_NAMES[requirement.whole_of.axis]
+        return whole_name(requirement.whole_of.axis)
     governing = _governing(requirement, plan)
     basis = governing.get("measure_basis")
     source = _selected_source(requirement.id, plan)

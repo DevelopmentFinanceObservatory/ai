@@ -100,7 +100,7 @@ from harness.graph.switch import (
     SWITCH_STOP,
     SwitchFailedError,
 )
-from harness.planner_seam import PlannerSeam
+from harness.planner_seam import PlannerSeam, store_aligned_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
@@ -3254,19 +3254,66 @@ class _RevisingSeam(_Seam):
         return self._revised
 
 
+# The pin of the whole `_StoppedSeam` compiles over every sector of its part.
+_WHOLE_PIN = "spec_" + "7" * 32
+
+
 class _StoppedSeam(_RevisingSeam):
     """A `_RevisingSeam` whose revision the user stops while it runs: it writes
-    drafting state, sets `SWITCH_STOP` as a Stop does, and waits to be cancelled."""
+    drafting state, compiles a declared whole over every sector of the switched
+    source and stores its reading (`store_aligned_readings`), as a revision of a
+    share does, sets `SWITCH_STOP` as a Stop does, and waits to be cancelled."""
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         self.revisions.append(kwargs)
-        kwargs["ctx"].state["planner:rounds"] = 1
+        ctx = kwargs["ctx"]
+        ctx.state["planner:rounds"] = 1
+        (origin,) = {
+            r.source_spec_id
+            for r in authored(
+                PlannerPlan.model_validate(kwargs["prior_plan"])
+            ).evidence_requirements
+            if isinstance(r, DatasetRequirement)
+        }
+        block = {"spec_id": _WHOLE_PIN, "resolved": {"scope_choices": None}}
+        save_aligned_pin(
+            cast(SessionState, ctx.state),
+            AlignedPin(
+                origin=cast(str, origin),
+                option_ids=(),
+                spec_id=_WHOLE_PIN,
+                digest={
+                    "part_digests": [
+                        {
+                            "variable": _WHOLE_PIN,
+                            "status": "definite",
+                            "spec_id": _WHOLE_PIN,
+                            "spec_block": block,
+                        }
+                    ]
+                },
+                whole_axis="sector",
+            ),
+        )
+        store_aligned_readings(ctx, cast(SessionState, ctx.state))
         stop = SWITCH_STOP.get()
         assert stop is not None
         stop.set()
+        return await self._stopped()
+
+    async def _stopped(self) -> dict[str, Any]:
+        """What the revision does once the Stop is set: waits to be cancelled."""
         # Cancelled at once; the bound fails the test, not the suite, if not.
         await asyncio.sleep(5)
         raise AssertionError("a stopped revision is cancelled")
+
+
+class _FinishingStoppedSeam(_StoppedSeam):
+    """A `_StoppedSeam` whose revision finishes in the step the Stop comes in,
+    so the switch's wait sees both done."""
+
+    async def _stopped(self) -> dict[str, Any]:
+        return self._revised
 
 
 async def _switch_runner(
@@ -3640,19 +3687,34 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 
 
+@pytest.mark.parametrize(
+    "seam_type",
+    [_StoppedSeam, _FinishingStoppedSeam],
+    ids=["revision-cancelled", "revision-finishes-with-the-stop"],
+)
 async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again(
-    real_schemas: list[ToolSchema],
+    real_schemas: list[ToolSchema], seam_type: type[_StoppedSeam]
 ) -> None:
     """A Stop while the revision runs (`SWITCH_STOP`) cancels it and offers
     the plan unchanged under `switch_cancelled`, which asking again can get
-    past, on a live pause, with the drafting state the revision wrote put
-    back."""
+    past, on a live pause, with the drafting state, the plan and the readings
+    the revision wrote put back, a declared whole's reading among them. A
+    revision that finishes in the same step as the Stop ends stopped too."""
     scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
+    new_pin, envelope = _switched_answer(scope)
+    revised = _scoped_plan(
+        new_pin,
+        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
+        schemas=real_schemas,
+        version=2,
+    )
     token = SWITCH_STOP.set(asyncio.Event())
     try:
         runner, seam, plan, scope, events = await _switch_runner(
-            real_schemas, SearchStub(answer={scope["id"]: envelope}), seam_type=_StoppedSeam
+            real_schemas,
+            SearchStub(answer={scope["id"]: envelope}),
+            {"plan": revised.model_dump(mode="json"), "summary": {}},
+            seam_type=seam_type,
         )
     finally:
         SWITCH_STOP.reset(token)
@@ -3669,6 +3731,9 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     }
     state = _session_state(runner)
     assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
+        scope["compiled"]["spec_id"]
+    ]
     assert state.get("planner:rounds") is None
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 

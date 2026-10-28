@@ -30,10 +30,11 @@ A switch Search refuses (`requested_option_unavailable`,
 the unchanged plan again with `switch_failed` naming the option, the
 refusal's code, one sentence saying why (`harness.sentences.
 refusal_reason` for a refused revision) and whether the same switch can
-succeed if asked again (`retryable`), and leaves the planner's drafting
-state as it was. A switch the user stops (`SWITCH_STOP`, which the studio
-sets on a Stop while the switch runs) ends the same way under
-`SWITCH_CANCELLED`, so the card stays answerable.
+succeed if asked again (`retryable`), and leaves the plan, the planner's
+drafting state and the turn's readings as they were (`_RESTORED_KEYS`). A
+switch the user stops (`SWITCH_STOP`, which the studio sets on a Stop
+while the switch runs) ends the same way under `SWITCH_CANCELLED`, so the
+card stays answerable.
 
 A chip under an answer applies one option the same way, with no plan
 (`apply_stored_choice`): the `seed` node posts the stored reading's base
@@ -78,6 +79,8 @@ from translator.discovery import DefinitionNotResolvedError, resolve_definition
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     conversation_readings,
     readable_plan,
@@ -117,6 +120,18 @@ _RETRYABLE_REVISION_CODES = frozenset(
 # The state the planner seam and the translator keep while drafting, which a
 # revision that fails leaves as it found.
 _DRAFTING_PREFIXES = ("planner:", "translator:")
+# The other state a revision writes, which a switch that fails or is stopped
+# puts back too: the plan, and the readings `store_search` stores for the
+# switched sources and for the pins the revision compiles
+# (`harness.planner_seam.store_aligned_readings`), with their blocks. Each
+# maps to the value it is put back as when unset, since the studio reads the
+# readings and blocks as a list and a mapping (`harness.studio`).
+_RESTORED_KEYS: Mapping[str, Any] = {
+    "plan": None,
+    ORCHESTRATOR_SEARCHES_KEY: [],
+    ORCHESTRATOR_SPECS_KEY: {},
+    ORCHESTRATOR_SPEC_WARNINGS_KEY: {},
+}
 
 
 # The tool name and step id the Activity feed shows a chip's application under.
@@ -184,9 +199,9 @@ def switch_node(
         plan = readable_plan(ctx, ctx.state.get("plan"))
         assert plan is not None, "approve routes a switch only for a plan it read"
         choice_id, option_id = str(pick.get("choice_id")), str(pick.get("option_id"))
-        # The drafting state as it stood, which a switch that fails or is
-        # stopped leaves as it found.
-        drafting = _drafting_state(ctx)
+        # The state as it stood, which a switch that fails or is stopped
+        # leaves as it found.
+        before = _restorable_state(ctx)
         try:
             output = await _unless_stopped(
                 ctx,
@@ -200,7 +215,7 @@ def switch_node(
                 ),
             )
         except SwitchFailedError as exc:
-            _restore(ctx, drafting)
+            _restore(ctx, before)
             logger.info(
                 "plan switch not applied: choice_id=%s option_id=%s code=%s",
                 choice_id,
@@ -229,8 +244,9 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
 
     A stopped revision is cancelled and awaited without taking its outcome, so
     a revision that ends in any way once the Stop came, an error its cleanup
-    raises included, ends stopped; the `switch` node puts the drafting state
-    back, so the plan stands unchanged. A cancellation of the node itself,
+    raises included, ends stopped, as does one that finishes in the same wait
+    as the Stop; the `switch` node puts the state it wrote back, so the plan
+    stands unchanged. A cancellation of the node itself,
     while the revision unwinds, still cancels the node.
 
     Raises:
@@ -255,10 +271,10 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
         if unfinished:
             # Never raises what the tasks raise; a cancellation of the node does.
             await asyncio.wait(unfinished)
-    if running in finished and not running.cancelled():
+    if running in finished and stopped not in finished and not running.cancelled():
         return running.result()
     if not running.cancelled() and (error := running.exception()) is not None:
-        logger.info("stopped plan switch raised while unwinding: %r", error)
+        logger.info("stopped plan switch raised: %r", error)
     raise SwitchFailedError(
         "You stopped this change, so the plan is as it was.",
         code=SWITCH_CANCELLED,
@@ -591,21 +607,21 @@ def _pin_source(
     return replaced.model_copy(update={"block": block, "earlier_turn": False})
 
 
-def _drafting_state(ctx: Context) -> dict[str, Any]:
-    """A copy of the planner's and translator's drafting state (`_DRAFTING_PREFIXES`)."""
-    return {
-        key: json.loads(json.dumps(value))
-        for key, value in ctx.state.to_dict().items()
-        if key.startswith(_DRAFTING_PREFIXES)
-    }
+def _restorable_state(ctx: Context) -> dict[str, Any]:
+    """A copy of the state a switch that fails or is stopped puts back: the
+    drafting state (`_DRAFTING_PREFIXES`) and `_RESTORED_KEYS`."""
+    state = ctx.state.to_dict()
+    kept = {key: value for key, value in state.items() if key.startswith(_DRAFTING_PREFIXES)}
+    kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}
+    return json.loads(json.dumps(kept))
 
 
-def _restore(ctx: Context, drafting: Mapping[str, Any]) -> None:
-    """Put the drafting state back as `drafting` holds it, clearing any key written since."""
+def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
+    """Put the state back as `before` holds it, clearing any drafting key written since."""
     for key in ctx.state.to_dict():
-        if key.startswith(_DRAFTING_PREFIXES) and key not in drafting:
+        if key.startswith(_DRAFTING_PREFIXES) and key not in before:
             ctx.state[key] = None
-    for key, value in drafting.items():
+    for key, value in before.items():
         ctx.state[key] = value
 
 

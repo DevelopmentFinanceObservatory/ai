@@ -84,7 +84,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
-from harness.turn_records import SearchReading
+from harness.turn_records import SearchReading, part_name
 from harness.wiring import handing_back_planner_failures
 from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
@@ -145,7 +145,7 @@ from planner.workflow import (
 )
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
-from submission.service import scope_choice_decisions
+from submission.service import AlignedPin, save_aligned_pin, scope_choice_decisions
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 from translator.referral import ReferralKind
@@ -4673,6 +4673,53 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
     assert (refused["code"], refused["final"], refused["reason"]) == (code, final, reason)
     assert (refused["code"] in switch._RETRYABLE_REVISION_CODES) is retryable
     assert f"for requirement {dataset.id!r}" in refused["text"]
+
+
+def test_a_declared_wholes_reading_is_named_by_the_whole_not_its_parts_words() -> None:
+    """US health aid, whose only scope choice is its sector, and the whole of it
+    over every sector, compiled with no entries sent, so its scope holds no
+    choice entry naming where it came from: the whole's reading is named by
+    the whole, all sectors on the part's measure, and never "US health aid"."""
+    part_scope = _switchable_scope()
+    part_scope["entries"] = []
+    part_scope["dropped_entries"] = []
+    part_scope["choices"] = part_scope["choices"][:1]
+    whole_scope = {
+        **copy.deepcopy(part_scope),
+        "id": f"{TOTAL}_base",
+        "choices": [],
+    }
+    origin = SearchReading.from_part(
+        {"variable": "US health aid", "status": "definite", "spec_id": HEALTH, "scope": part_scope}
+    )
+    block = {
+        "spec_id": TOTAL,
+        "resolved": {
+            "scope_choices": whole_scope,
+            "measure_label": "gross disbursements",
+            "shape": {"label": "gross disbursements (official development assistance)"},
+        },
+    }
+    whole = AlignedPin(
+        origin=HEALTH,
+        option_ids=(),
+        spec_id=TOTAL,
+        digest={
+            "part_digests": [
+                {"variable": TOTAL, "status": "definite", "spec_id": TOTAL, "spec_block": block}
+            ]
+        },
+        whole_axis="sector",
+    )
+    ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: [origin.model_dump(mode="json")]})
+    planner_state: dict[str, Any] = {}
+    save_aligned_pin(cast(SessionState, planner_state), whole)
+
+    planner_seam.store_aligned_readings(cast(Any, ctx), cast(SessionState, planner_state))
+
+    stored = SearchReading.model_validate(ctx.state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert stored.spec_id == TOTAL
+    assert part_name(stored, block) == '"gross disbursements in all sectors"'
 
 
 async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(

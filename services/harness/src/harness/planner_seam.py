@@ -1722,7 +1722,10 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     names yet joins this turn's readings through `store_search`, as the
     `switch` node stores a switched one: under the words of the reading it
     was compiled from, keeping that reading's asked, held-open and share
-    roles, with its compiled scope on `SearchReading.scope`. Its block marks
+    roles, with its compiled scope on `SearchReading.scope`. A declared
+    whole (`AlignedPin.whole_axis`) is no reading of its part's words, so
+    it is named as the plan card names it, on its measure
+    (`harness.plan_display.whole_name`). Its block marks
     the axes it was compiled on as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
     so the reading reads it in `SearchReading.planner_axes` and
     `harness.scope_choices.carried_entries` leaves that entry out.
@@ -1754,8 +1757,13 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
             (reading for reading in reversed(readings) if reading.spec_id == pin.origin), None
         )
         digest = copy.deepcopy(pin.digest)
-        if origin is not None:
-            (part,) = digest["part_digests"]
+        (part,) = digest["part_digests"]
+        if pin.whole_axis is not None:
+            measure = ((part.get("spec_block") or {}).get("resolved") or {}).get("measure_label")
+            part["variable"] = plan_display.whole_name(
+                pin.whole_axis, measure=measure if isinstance(measure, str) else None
+            )
+        elif origin is not None:
             part["variable"] = origin.text
         store_search(
             cast(SessionState, ctx.state),
