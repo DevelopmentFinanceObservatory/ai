@@ -180,7 +180,6 @@ from submission.service import (
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
-    aligned_pins,
     first_year_reads,
     identity_on_record,
     save_aligned_pin,
@@ -6173,23 +6172,35 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     assert stated.slot in whole_requirement.decision_ids
 
 
+@pytest.mark.parametrize(
+    ("declared_after", "whole"),
+    [((), True), ((False,), False), ((False, True), True)],
+    ids=["declared", "undeclared-later", "declared-again"],
+)
 async def test_a_declared_whole_offers_no_row_on_the_axis_it_leaves_open(
-    decision: DecisionFactory,
+    decision: DecisionFactory, declared_after: tuple[bool, ...], whole: bool
 ) -> None:
     """The declared whole over every sector comes back from Search with a sector
     choice of its own: the plan states no sector row on the whole, whose
-    caveat says it counts every sector, while the part keeps its own."""
+    caveat says it counts every sector, while the part keeps its own. Amended
+    to a plain requirement on the same pin, with no `whole_of`, it is no
+    whole, and its sector row returns; declared a whole again, it cites that
+    row no more."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"))
+    propose = _tools_reading(WholeCompiles(opened=True))["propose_plan"].func
 
-    result = await _us_2023(
-        _tools_reading(WholeCompiles(opened=True))["propose_plan"].func,
-        ctx,
-        decision(),
-        part="health",
-        whole=None,
-        declared=True,
-    )
+    result = await _us_2023(propose, ctx, decision(), part="health", whole=None, declared=True)
+    whole_of = load_plan(ctx.state).requirement(_WHOLE).whole_of  # type: ignore[union-attr]
+    for declared in declared_after:
+        restated = load_plan(ctx.state).requirement(_WHOLE)  # type: ignore[union-attr]
+        result = await propose(
+            evidence_requirements=[
+                restated.model_copy(update={"whole_of": whole_of if declared else None})
+            ],
+            amends_version=result["version"],
+            tool_context=ctx,
+        )
 
     assert result["outcome"] == Outcome.OK.value, result
     plan = load_plan(ctx.state)
@@ -6199,7 +6210,9 @@ async def test_a_declared_whole_offers_no_row_on_the_axis_it_leaves_open(
         for d in plan.decisions
         if d.scope is not None and d.scope.axis == "sector" and d.fixes is not None
     }
-    assert sectors == {us_2023_block("health")["spec_id"]}
+    whole_pin = dict(_pins(ctx))[_WHOLE]
+    assert sectors == {us_2023_block("health")["spec_id"], *([] if whole else [whole_pin])}
+    assert any(d.caveat == "derived_whole" for d in plan.decisions) is whole
 
 
 @pytest.mark.parametrize(
@@ -6295,154 +6308,6 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     assert len(stated) == 2
     assert "health incl. population and reproductive health" in named[_WHOLE]
     assert "health, CRS 120 alone" in named["narrow_whole"]
-
-
-@pytest.mark.parametrize("restated_pin", [True, False], ids=["pinned", "restated-unpinned"])
-async def test_a_declared_whole_keeps_the_choice_switched_on_its_own_row(
-    decision: DecisionFactory, restated_pin: bool
-) -> None:
-    """US health aid compared with a declared whole, the part over every sector, the
-    comparison taking each input as its dataset counts it, which the user then
-    switched to bilateral plus imputed multilateral on the whole's own row:
-    the switch holds Search's answer as the whole compiled from the part with that
-    option, and the plan re-pinned to it keeps it with no compile, and so does a
-    later amendment restating the whole with `whole_of` and no pin, as the
-    planner's prompt has it. When the part moves to malaria aid, the whole is
-    compiled again from the new part, with the whole's own option held."""
-    surface = WholeCompiles()
-    ctx = _FakeToolContext()
-    _show_blocks(ctx, us_2023_block("health"), _malaria_block())
-    propose = _tools_reading(surface)["propose_plan"].func
-    first = await _us_2023(
-        propose,
-        ctx,
-        decision(),
-        part="health",
-        whole=None,
-        declared=True,
-        share=False,
-        accept=True,
-    )
-    assert first["outcome"] == Outcome.OK.value, first
-    switched = us_2023_block("whole_inclusive")
-    save_pin_sources(
-        ctx.state,
-        {**pin_sources(ctx.state), switched["spec_id"]: PinSource(block=switched, settled=True)},
-    )
-    save_aligned_pin(
-        ctx.state,
-        AlignedPin(
-            origin=us_2023_block("health")["spec_id"],
-            option_ids=("provider:inclusive",),
-            spec_id=switched["spec_id"],
-            digest={},
-            whole_axis="sector",
-        ),
-    )
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    whole = plan.requirement(_WHOLE)
-
-    kept = await propose(
-        evidence_requirements=[whole.model_copy(update={"source_spec_id": switched["spec_id"]})],
-        amends_version=first["version"],
-        tool_context=ctx,
-    )
-    if not restated_pin:
-        restated = load_plan(ctx.state).requirement(_WHOLE)  # type: ignore[union-attr]
-        kept = await propose(
-            evidence_requirements=[restated.model_copy(update={"source_spec_id": None})],
-            amends_version=kept["version"],
-            tool_context=ctx,
-        )
-
-    assert kept["outcome"] == Outcome.OK.value, kept
-    assert len(surface.calls) == 1
-    assert _pins(ctx) == [
-        (_PART, us_2023_block("health")["spec_id"]),
-        (_WHOLE, switched["spec_id"]),
-    ]
-
-    part = load_plan(ctx.state).requirement(_PART)  # type: ignore[union-attr]
-    moved = await propose(
-        evidence_requirements=[
-            part.model_copy(update={"source_spec_id": _malaria_block()["spec_id"]})
-        ],
-        amends_version=kept["version"],
-        tool_context=ctx,
-    )
-
-    assert moved["outcome"] == Outcome.OK.value, moved
-    recompiled = surface.calls[-1]
-    assert [e["option_id"] for e in recompiled["scope_entries"] if e["axis"] == "provider"] == [
-        "provider:inclusive"
-    ]
-    assert aligned_pins(ctx.state)[-1].key == (
-        _malaria_block()["spec_id"],
-        ("provider:inclusive",),
-        "sector",
-    )
-
-
-async def test_a_declared_whole_switched_on_its_own_row_is_never_realigned(
-    decision: DecisionFactory,
-) -> None:
-    """US health aid as a share of a declared whole, the share aligning its inputs,
-    whose whole the user switched to bilateral plus imputed multilateral on its own
-    row. The whole is an answer of its own, compiled from the part, so alignment
-    leaves it on the user's option: it keeps its switched pin and its decision
-    saying it is the part's own total, and the share divides by a total other than
-    the part. Its one scope row is the option switched there, as the user's."""
-    surface = WholeCompiles()
-    ctx = _FakeToolContext()
-    _show_blocks(ctx, us_2023_block("health"))
-    propose = _tools_reading(surface)["propose_plan"].func
-    first = await _us_2023(propose, ctx, decision(), part="health", whole=None, declared=True)
-    assert first["outcome"] == Outcome.OK.value, first
-    switched = us_2023_block("whole_inclusive")
-    save_pin_sources(
-        ctx.state,
-        {**pin_sources(ctx.state), switched["spec_id"]: PinSource(block=switched, settled=True)},
-    )
-    save_aligned_pin(
-        ctx.state,
-        AlignedPin(
-            origin=us_2023_block("health")["spec_id"],
-            option_ids=("provider:inclusive",),
-            spec_id=switched["spec_id"],
-            digest={},
-            whole_axis="sector",
-        ),
-    )
-    whole = load_plan(ctx.state).requirement(_WHOLE)  # type: ignore[union-attr]
-
-    kept = await propose(
-        evidence_requirements=[whole.model_copy(update={"source_spec_id": switched["spec_id"]})],
-        amends_version=first["version"],
-        tool_context=ctx,
-    )
-
-    assert kept["outcome"] == Outcome.OK.value, kept
-    assert _pins(ctx) == [
-        (_PART, us_2023_block("health")["spec_id"]),
-        (_WHOLE, switched["spec_id"]),
-    ]
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    (stated,) = [d for d in plan.decisions if d.caveat == "derived_whole"]
-    assert stated.slot in plan.requirement(_WHOLE).decision_ids
-    assert stated.rationale.endswith(
-        "so both sides count the same donors, recipients and measure basis."
-    )
-    rows = [
-        (d.scope.axis, d.rationale)
-        for d in plan.decisions
-        if d.scope is not None
-        and d.fixes is not None
-        and d.fixes.source_spec_id == switched["spec_id"]
-    ]
-    # The whole's one row of its own is the option switched there, the user's.
-    assert rows == [("provider", "The user chose bilateral plus imputed multilateral on the plan.")]
 
 
 def _uk_total(spec_id: str, *, active: str, gross: str = "available") -> dict[str, Any]:

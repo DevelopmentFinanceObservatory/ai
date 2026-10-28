@@ -3359,6 +3359,57 @@ def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
     assert plan_words(plan).names["gap"] == f"{us} against {uk}"
 
 
+@pytest.mark.parametrize(
+    ("donors", "labels"),
+    [
+        pytest.param(
+            ("United States", "United Kingdom"),
+            [
+                "Fetch grant equivalents for United States",
+                "Fetch grant equivalents for United Kingdom",
+            ],
+            id="parties-differ",
+        ),
+        pytest.param(
+            ("United States", "United States"),
+            [
+                "Fetch grant equivalents for United States (1)",
+                "Fetch grant equivalents for United States (2)",
+            ],
+            id="parties-equal",
+        ),
+    ],
+)
+def test_retrievals_named_alike_name_their_parties_once(
+    decision: DecisionFactory, donors: tuple[str, str], labels: list[str]
+) -> None:
+    """Two retrievals of one concept, as "compare US and UK health aid" plans
+    them: the concept names each one's parties, so the retrieval's label
+    adds them no second time."""
+    plan = Plan(
+        question="Compare US and UK grant equivalents in 2023.",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=f"dac1_{number}",
+                decision_ids=["measure"],
+                measure="grant equivalents",
+                entities=[Entity(name=donor, role="donor")],
+                period=Period(start=2023, end=2023),
+            )
+            for number, donor in enumerate(donors)
+        ],
+    )
+    concepts, shapes = _concepts(plan), frame_shapes(plan)
+
+    shown = [
+        _card_label(requirement, plan, concepts=concepts, shapes=shapes)
+        for requirement in plan.evidence_requirements
+    ]
+
+    assert shown == labels
+
+
 def test_a_card_answering_an_ask_of_only_whitespace_takes_the_plans_title() -> None:
     plan = _recorded_plan("short")
     plan = Plan.model_validate({**plan.model_dump(), "asks": [" \n "]})

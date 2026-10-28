@@ -15,10 +15,6 @@ and the plan compiles again. The node stores each new reading, so later
 searches carry the switch, and offers the revised plan back to `approve`
 with what else moved (`harness.scope_choices.moved_choices`).
 
-A switch of a declared whole's own row holds Search's answer as the whole
-compiled from its part on the switched option (`_hold_switched_wholes`), so
-the revision keeps it (`submission.service._declared_wholes`).
-
 Each requirement the switch re-pins drops the source it stated
 (`source`, `source_ref`, `source_exclude`, and `source_code` unless the new
 dataset is exactly that series): the user chose the dataset, so its pin is
@@ -77,7 +73,6 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.tool_results import ProblemCode
 from pydantic import ValidationError
-from submission.service import AlignedPin, aligned_pins, save_aligned_pin
 from translator.discovery import DefinitionNotResolvedError, resolve_definition
 
 from harness.graph.seams import PlannerModel
@@ -95,7 +90,6 @@ from harness.scope_choices import (
     ScopeChoice,
     mark_planner_axes,
     moved_choices,
-    option_axis,
     switch_entries,
 )
 from harness.sentences import SeamCode
@@ -310,15 +304,6 @@ async def _switched_plan(
         raise SwitchFailedError(
             f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
         )
-    # A whole compiled from its part counts every option on the axis it
-    # leaves open (`AlignedPin.whole_axis`); one option there would count a
-    # slice of it under the caveat that it counts the whole.
-    opened = {pin.spec_id for pin in aligned_pins(state) if pin.whole_axis == axis}
-    if any(pin in opened for pin, *_ in targets):
-        raise SwitchFailedError(
-            f"This total counts every {axis}, so it cannot be narrowed to {label}.",
-            code=SCOPE_CHOICE_NOT_APPLIED,
-        )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
     switched = await asyncio.gather(
@@ -340,7 +325,6 @@ async def _switched_plan(
     )
     moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
-    _hold_switched_wholes(state, switched, digests, option_id=option_id)
     save_pin_sources(
         state,
         {
@@ -399,37 +383,6 @@ async def _switched_plan(
         "revision": plan_revision(revised_plan),
         "moved": _moved_entries(revised_plan, switched, axis=axis),
     }
-
-
-def _hold_switched_wholes(
-    state: SessionState,
-    switched: Sequence[_Switched],
-    digests: Sequence[dict[str, Any]],
-    *,
-    option_id: str,
-) -> None:
-    """Hold each switched pin that is a declared whole compiled from its part
-    (`submission.service.AlignedPin.whole_axis`) as the whole compiled on its
-    options with `option_id` in place of its option on that axis, so
-    `submission.service._declared_wholes` keeps the answer and compiles a
-    whole of a later part on the same options."""
-    wholes = {pin.spec_id: pin for pin in aligned_pins(state) if pin.whole_axis is not None}
-    axis = option_axis(option_id)
-    for item, digest in zip(switched, digests, strict=True):
-        whole = wholes.get(item.pin)
-        if whole is None:
-            continue
-        options = {option_axis(held): held for held in whole.option_ids} | {axis: option_id}
-        save_aligned_pin(
-            state,
-            AlignedPin(
-                origin=whole.origin,
-                option_ids=tuple(sorted(options.values())),
-                spec_id=item.spec_id,
-                digest=digest,
-                whole_axis=whole.whole_axis,
-            ),
-        )
 
 
 def _moved_entries(
@@ -687,7 +640,9 @@ async def apply_stored_choice(
     it), the option is not one Search can serve, or Search refuses or fails
     the resubmit, fetches nothing: the hand-back carries the note a plan-card
     switch shows, and the `APPLY_CHOICE_STEP_TOOL` step fails with it under
-    `SCOPE_CHOICE_NOT_APPLIED`.
+    the code the switch reports (`SwitchFailedError.code`), to be retried
+    after a delay where the same chip can succeed later
+    (`SwitchFailedError.retryable`) and never otherwise.
 
     Returns:
         `{"status", "text"}` for the `orchestrate` node.
@@ -727,15 +682,20 @@ async def apply_stored_choice(
         )
     except SwitchFailedError as exc:
         note = str(exc)
-        logger.info("scope choice not applied: choice_id=%s option_id=%s", choice_id, option_id)
+        logger.info(
+            "scope choice not applied: choice_id=%s option_id=%s code=%s",
+            choice_id,
+            option_id,
+            exc.code,
+        )
         _apply_step(
             record_step,
             args=args,
             result={
                 "outcome": "refusal",
                 "refusal": {
-                    "code": SCOPE_CHOICE_NOT_APPLIED,
-                    "retry_mode": "do_not_retry",
+                    "code": exc.code,
+                    "retry_mode": "retry_after_delay" if exc.retryable else "do_not_retry",
                     "fix": None,
                     "message": note,
                 },

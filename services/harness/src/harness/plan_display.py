@@ -858,7 +858,7 @@ def _card_label(
     by = f" by {' and '.join(kept)}" if kept else ""
     match requirement:
         case DatasetRequirement():
-            label = f"Fetch {concepts[requirement.id]} for {_parties(requirement, plan)}"
+            label = f"Fetch {_fetched(requirement, plan, concepts)}"
         case AggregateRequirement():
             label = f"{_REDUCTION_WORDS[requirement.reduction]} {of(requirement.input_id)}{by}"
         case GrowthRequirement():
@@ -888,6 +888,16 @@ def _card_label(
         case _:
             raise AssertionError(f"unhandled requirement kind: {requirement!r}")
     return f"{label[0].upper()}{label[1:]}"
+
+
+def _fetched(requirement: DatasetRequirement, plan: Plan, concepts: Mapping[str, str]) -> str:
+    """What a retrieval fetches and for whom: its name in `concepts`
+    (`_concepts`), which already names its parties when another retrieval
+    shares its concept, else that name with its parties (`_parties`)."""
+    name = concepts[requirement.id]
+    if name != _concept(requirement, plan):
+        return name
+    return f"{name} for {_parties(requirement, plan)}"
 
 
 def _card_filter_label(requirement: FilterRequirement, concept: str) -> str:

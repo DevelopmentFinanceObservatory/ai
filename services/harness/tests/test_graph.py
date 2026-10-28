@@ -146,7 +146,6 @@ from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, 
 from pydantic import ValidationError
 from submission.service import (
     AlignedPin,
-    aligned_pins,
     save_aligned_pin,
     scope_choice_decisions,
 )
@@ -3279,14 +3278,14 @@ async def _switch_runner(
     aligned: bool = False,
     entity_groups: dict[str, Any] | None = None,
     seam_type: type[_RevisingSeam] = _RevisingSeam,
-    whole_of: AlignedPin | None = None,
+    earlier_whole: AlignedPin | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
     `aligned`) beside its block naming `entity_groups` when given, held as the
-    whole `whole_of` compiled from its part when given, then answered with a
-    switch to `option_id`, by default its sector to CRS 120 and 130, through
-    `search`. Returns the runner, the seam, the plan, the scope and the
+    whole `earlier_whole` an earlier plan compiled from its part when given,
+    then answered with a switch to `option_id`, by default its sector to CRS
+    120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
     resumed turn's events."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
@@ -3312,9 +3311,10 @@ async def _switch_runner(
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-    if whole_of is not None:
+    if earlier_whole is not None:
         save_aligned_pin(
-            cast(SessionState, _session_state(runner)), whole_of.model_copy(update={"spec_id": pin})
+            cast(SessionState, _session_state(runner)),
+            earlier_whole.model_copy(update={"spec_id": pin}),
         )
     if entity_groups is not None:
         _session_state(runner)[ORCHESTRATOR_SPECS_KEY] = {
@@ -3450,13 +3450,13 @@ def test_one_move_across_two_switched_sources_with_no_row_is_listed_once(
     assert [entry["choice_id"] for entry in moved] == ["first:measure_basis"]
 
 
-async def test_a_switch_on_a_declared_wholes_row_holds_the_answer_as_its_whole(
+async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """The switched source is a whole compiled from its part with its region
-    left open and its measure basis switched before: Search's answer is held as
-    the whole compiled from that part on the earlier option and the switched
-    one, so the plan's next proposal keeps it as the whole."""
+    """The switched source was compiled for an earlier plan as a whole with its
+    sector left open, and the plan now pins it as a plain requirement with no
+    `whole_of`: it is no whole, so the user's pick of one sector is posted to
+    Search and the revised plan offered."""
     scope = _hashed_scope()
     new_pin, envelope = _switched_answer(scope)
     revised = _scoped_plan(
@@ -3467,54 +3467,20 @@ async def test_a_switch_on_a_declared_wholes_row_holds_the_answer_as_its_whole(
     )
     search = SearchStub(answer={scope["id"]: envelope})
     part = "spec_" + "4" * 32
-    whole = AlignedPin(
-        origin=part,
-        option_ids=("measure_basis:net",),
-        spec_id="",
-        digest={},
-        whole_axis="region",
-    )
+    whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
 
-    runner, *_ = await _switch_runner(
+    _, seam, _, _, events = await _switch_runner(
         real_schemas,
         search,
         {"plan": revised.model_dump(mode="json"), "summary": {}},
-        whole_of=whole,
+        earlier_whole=whole,
     )
 
-    held = aligned_pins(cast(SessionState, _session_state(runner)))
-    assert [(pin.key, pin.spec_id) for pin in held] == [
-        ((part, ("measure_basis:net",), "region"), scope["compiled"]["spec_id"]),
-        ((part, ("measure_basis:net", "sector:120+130"), "region"), new_pin),
-    ]
-
-
-async def test_a_switch_on_the_axis_a_declared_whole_leaves_open_is_never_applied(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The switched source is a whole compiled from its part with its sector
-    left open, and the user picks one sector on it: Search is never asked,
-    the whole stays held as it was, and the plan is offered unchanged with
-    the switch refused, since one sector would count a slice of the total
-    the whole's caveat says it counts."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-    part = "spec_" + "4" * 32
-    whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
-
-    runner, seam, plan, scope, events = await _switch_runner(real_schemas, search, whole_of=whole)
-
-    assert search.posted == []
-    assert seam.revisions == []
+    assert len(search.posted) == 1
+    assert len(seam.revisions) == 1
     offered = _output_of(events, "switch")
-    assert offered["revision"] == plan_revision(plan)
-    failed = offered["switch_failed"]
-    assert (failed["code"], failed["retryable"]) == (SCOPE_CHOICE_NOT_APPLIED, False)
-    held = aligned_pins(cast(SessionState, _session_state(runner)))
-    assert [(pin.key, pin.spec_id) for pin in held] == [
-        ((part, (), "sector"), scope["compiled"]["spec_id"])
-    ]
+    assert "switch_failed" not in offered
+    assert offered["revision"] == plan_revision(revised)
 
 
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
@@ -4076,16 +4042,29 @@ async def test_a_chip_whose_fetch_raises_answers_as_the_agents_own_fetch_would()
     assert HarnessCode.RAISED.value in first
 
 
-async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing() -> None:
+@pytest.mark.parametrize(
+    ("code", "retryable", "step_code", "retry_mode"),
+    [
+        ("requested_option_unavailable", False, "requested_option_unavailable", "do_not_retry"),
+        # A Search that did not answer states no code of its own.
+        ("transient_unavailable", True, SCOPE_CHOICE_NOT_APPLIED, "retry_after_delay"),
+    ],
+    ids=["refused", "transient"],
+)
+async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing(
+    code: str, retryable: bool, step_code: str, retry_mode: str
+) -> None:
+    """The chip's step fails with the code and retryability the plan card's
+    switch reports for the same refusal."""
     scope = _hashed_scope()
     search = SearchStub(
         refuse={
             scope["id"]: {
-                "code": "requested_option_unavailable",
+                "code": code,
                 "title": "Requested Option Unavailable",
                 "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
                 "pointer": "/input/entries/0/scope_entries/1",
-                "retryable": False,
+                "retryable": retryable,
             }
         }
     )
@@ -4093,14 +4072,15 @@ async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_no
     runner, model, executor, _ = await _chip_turn(search)
 
     note = (
-        "Search cannot count health (CRS 120) and population and reproductive health "
-        "(CRS 130) for this source."
+        f"Search {'could not' if retryable else 'cannot'} count health (CRS 120) and "
+        "population and reproductive health (CRS 130) "
+        f"{'just now' if retryable else 'for this source'}."
     )
     assert note in request_text(model.requests[0])
     (step,) = executor.steps
     assert step["result"]["refusal"] == {
-        "code": SCOPE_CHOICE_NOT_APPLIED,
-        "retry_mode": "do_not_retry",
+        "code": step_code,
+        "retry_mode": retry_mode,
         "fix": None,
         "message": note,
     }

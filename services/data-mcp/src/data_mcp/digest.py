@@ -853,7 +853,8 @@ def _dropped_cause_words(cause: str, *, axis: str, availability: Mapping[str, An
         words = _DROPPED_CAUSE_WORDS[cause]
     elif (
         availability.get("code") == "conflicts_with"
-        and (availability.get("detail") or {}).get("cause") == cause
+        and isinstance(detail := availability.get("detail"), Mapping)
+        and detail.get("cause") == cause
     ):
         words = f"{REASON_COPY['conflicts_with']} [{cause}]"
     else:

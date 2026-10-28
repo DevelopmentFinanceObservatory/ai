@@ -1520,19 +1520,17 @@ async def compile_whole(
     its choice on that axis binds (`submission.service.axis_slot`) set
     unbound, under the spec_id that identity hashes to, the part's entity
     groups, and one explicit entry from each of its other choices holding
-    its active option, with the concept of the part's entry on that axis,
-    or the option of `realignment.option_ids` on that choice's axis, one
-    the user switched on the whole's own row. Search then keeps the part's
-    measure basis, provider scope and region, which an option the whole
-    cannot serve would otherwise leave to Search's default. No model call
-    is made. The answer is shown to the planner as a source of its own,
-    whose choices the whole takes from its part: each choice not switched on
-    the whole's row carries the part's provenance, and the block marks as
-    the planner's (`harness.scope_choices.mark_planner_axes`) the axes the
+    its active option, with the concept of the part's entry on that axis.
+    Search then keeps the part's measure basis, provider scope and region,
+    which an option the whole cannot serve would otherwise leave to
+    Search's default. No model call is made. The answer is shown to the
+    planner as a source of its own, whose choices the whole takes from its
+    part: each carries the part's provenance, and the block marks as the
+    planner's (`harness.scope_choices.mark_planner_axes`) the axes the
     part's block marks, so the whole reads as the part was settled and a
     later search carries what the part's carries. It is held as a
-    `submission.service.AlignedPin` from the part on that axis and those
-    options, which every whole declaring the part and the axis on them pins.
+    `submission.service.AlignedPin` from the part on that axis, which every
+    whole declaring the part and the axis pins.
 
     Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
     did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` under a cause
@@ -1562,11 +1560,10 @@ async def compile_whole(
         if held.get("property") == slot:
             held["binding"] = {"state": "unbound"}
     concepts = {entry.axis: entry.concept for entry in scope.entries}
-    switched = {option_axis(option_id): option_id for option_id in realignment.option_ids}
     entries = [
         ScopeEntry(
             axis=choice.axis,
-            option_id=switched.get(choice.axis, choice.active),
+            option_id=choice.active,
             provenance="explicit",
             concept=concepts.get(choice.axis),
             origin=ChoiceOrigin(choice_id=choice.id),
@@ -1594,9 +1591,7 @@ async def compile_whole(
     if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
         return underivable(f"Search holds no one dataset counting every {axis} of {part_pin}")
     inherited: dict[str, str] = {
-        choice.axis: choice.provenance
-        for choice in scope.choices
-        if choice.axis != axis and choice.axis not in switched
+        choice.axis: choice.provenance for choice in scope.choices if choice.axis != axis
     }
     digest = resolver_digest({"parts": [_with_provenance(part, inherited)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
@@ -1606,13 +1601,7 @@ async def compile_whole(
     save_pin_sources(state, {**sources, spec_id: whole_source})
     save_aligned_pin(
         state,
-        AlignedPin(
-            origin=part_pin,
-            option_ids=realignment.option_ids,
-            spec_id=spec_id,
-            digest=digest,
-            whole_axis=axis,
-        ),
+        AlignedPin(origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis),
     )
     return None
 
