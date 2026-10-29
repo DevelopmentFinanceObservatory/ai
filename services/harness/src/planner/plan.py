@@ -2382,7 +2382,9 @@ def _entity_whole_fault(
     group, as DAC1 binds DAC countries' total, the translator names the group on
     the side in place of the word (`translator.discovery.name_pinned_groups`), so
     a whole naming one entity on that side, other than the part's, and stating
-    only the part's `across` words holds the part too.
+    only the part's `across` words holds the part too. Which group Search binds
+    is known only once the whole is compiled, so admission refuses a whole
+    naming any other entity there (`submission.service._misnamed_total`).
     """
     side = role_party(axis)
     named = [e for e in part.entities if e.role is not None and role_party(e.role) == side]

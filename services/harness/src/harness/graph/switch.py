@@ -519,8 +519,9 @@ async def _resubmit(
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
     so Search names them again. They are `block`'s groups, read for what the
     resubmit posts alone (`compiler.sources.readable_wire_groups`), where `block`
-    is at hand and they read, else the groups `reading` was resolved with
-    (`SearchReading.entity_groups`).
+    is at hand and names sets that read, else the groups `reading` was resolved
+    with (`SearchReading.entity_groups`) where those read, else none where
+    `block` reads and names none.
 
     Raises:
         SwitchFailedError: If neither reads: what `block`'s groups post is not
@@ -534,13 +535,17 @@ async def _resubmit(
         "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
     )
     groups = readable_wire_groups(block) if block is not None else None
-    if groups is None:
-        # A block whose sets do not read falls back only to stored sets that do.
-        # An empty stored tuple beside such a block would post the part without them.
-        if reading.entity_groups_unreadable or (block is not None and not reading.entity_groups):
-            logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
-            raise unreadable
+    # A block naming no sets says nothing of the reading's, so readable stored sets
+    # stand. A block whose sets do not read falls back only to stored sets that
+    # do: an empty stored tuple beside it would post the part without them.
+    stored_stands = not reading.entity_groups_unreadable and (
+        groups is not None or block is None or bool(reading.entity_groups)
+    )
+    if not groups and stored_stands:
         groups = reading.entity_groups
+    if groups is None:
+        logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
+        raise unreadable
     try:
         part = await resolve_definition(
             surface,

@@ -8644,12 +8644,15 @@ async def _share_over_every(
     decision: DecisionFactory,
     *,
     year: int = 2023,
+    whole_names: str | None = None,
 ) -> dict[str, object]:
     """Propose the part `block` as a share of its whole over every `axis`, a donor or
     recipient, summed by year, over `year`, with `surface` answering the whole; `block`
     is shown.
     The part names its donor by Search's label for it, and Africa as its recipient
-    where `block` names Africa's set there, else Search's label for its recipient."""
+    where `block` names Africa's set there, else Search's label for its recipient.
+    With `whole_names`, the whole names that entity on `axis` in place of stating
+    `axis` in `across`, the form `name_pinned_groups` rewrites a whole to."""
     _show_blocks(ctx, block)
     resolved = block["resolved"]
     labels = {e["role"]: e["label"] for e in resolved["entities"]}
@@ -8678,8 +8681,11 @@ async def _share_over_every(
                 id=_WHOLE,
                 decision_ids=["measure"],
                 measure="total aid",
-                entities=[e for e in named if role_party(cast(str, e.role)) != side],
-                across=(axis,),
+                entities=[
+                    *(e for e in named if role_party(cast(str, e.role)) != side),
+                    *([Entity(name=whole_names, role=axis)] if whole_names else []),
+                ],
+                across=() if whole_names else (axis,),
                 period=period,
                 whole_of=WholeOf(part=_PART, axis=axis),
             ),
@@ -9311,6 +9317,42 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert stated.caveat == "derived_whole"
     assert stated.chosen.endswith(total), stated.chosen
     assert stated.rationale.endswith(f"count {alike}"), stated.rationale
+
+
+@pytest.mark.parametrize(
+    ("name", "whole_names", "refused"),
+    [
+        # DAC1 binds DAC countries' total: the whole may name that total, as
+        # `name_pinned_groups` rewrites it to, and no other donor.
+        pytest.param("dac1", "DAC countries", False, id="dac1-names-its-total"),
+        pytest.param("dac1", "France", True, id="dac1-names-another-donor"),
+        # DAC2a binds no donor, so the whole names none.
+        pytest.param("dac2a", "France", True, id="dac2a-names-a-donor"),
+    ],
+)
+async def test_a_donor_whole_names_on_its_opened_side_only_the_total_search_bound(
+    decision: DecisionFactory, name: str, whole_names: str, refused: bool
+) -> None:
+    """US ODA as a share of its whole over every donor, the whole naming one donor
+    in place of `across` donor: admitted where Search's answer for the whole binds
+    the donor side to that total, and refused under `whole_names_another_total`
+    where it names any other party, as [France (donor), Kenya] over US ODA to Kenya,
+    which would read as France's total while dividing by every donor's."""
+    surface = _RecordedWhole(name)
+    ctx = _FakeToolContext()
+    block = json.loads(json.dumps(surface.recorded["part"]))
+
+    result = await _share_over_every(
+        cast(Any, surface), ctx, block, "donor", decision, whole_names=whole_names
+    )
+
+    if not refused:
+        assert result["outcome"] == Outcome.OK.value, result
+        assert dict(_pins(ctx))[_WHOLE] == surface.recorded["whole"]["spec_id"]
+        return
+    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"]["cause"] == "whole_names_another_total"
+    assert load_plan(ctx.state) is None
 
 
 def test_a_dac1_donor_whole_with_no_choices_says_nothing_both_sides_count_alike() -> None:
@@ -10345,6 +10387,76 @@ def test_sides_read_one_series_only_through_one_derivation(
     assert plan is not None
     differ = {d.slot for d in plan.decisions if d.caveat == "bases_differ"}
     assert differ & set(plan.requirement(steps[-1].id).decision_ids)
+
+
+@pytest.mark.parametrize(
+    ("wholes", "kept_apart"),
+    [
+        # Two declared wholes: each is its own series, so the sides differ.
+        pytest.param(("whole_a", "whole_b"), False, id="two-wholes"),
+        # One whole on both sides still reads one series with itself.
+        pytest.param(("whole_a", "whole_a"), True, id="one-whole-twice"),
+    ],
+)
+def test_two_unpinned_leaves_read_one_series_only_when_they_are_one_leaf(
+    wholes: tuple[str, str], kept_apart: bool
+) -> None:
+    """Two sides each reading a US total ODA input and a declared whole, which has
+    no basis and no reads (`_Reads`) while alignment runs: moving the net input onto
+    gross puts the two sides on one series only where the wholes are one
+    requirement, since two different wholes count different totals."""
+    gross = basis_block(TOTAL, narrow=False, active="measure_basis:gross", provenance="explicit")
+    net = json.loads(
+        json.dumps(
+            basis_block(_TOTAL_NET_DEFAULT, narrow=False, active="measure_basis:net")
+        ).replace(f"{_TOTAL_NET_DEFAULT}_base", f"{TOTAL}_base")
+    )
+    reads = submission_service._Reads.of(
+        DatasetRequirement(
+            id="first",
+            decision_ids=["measure"],
+            measure="US total ODA",
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2023),
+            source_spec_id=TOTAL,
+        ),
+        None,
+    )
+
+    def basis(requirement_id: str, block: dict[str, Any]) -> Any:
+        scope = submission_service.part_scope(block["spec_id"], block)
+        assert scope is not None
+        (choice,) = [c for c in scope.choices if c.axis == "measure_basis"]
+        return submission_service._InputBasis(
+            requirement_id=requirement_id,
+            pin=block["spec_id"],
+            origin=block["spec_id"],
+            choice=choice,
+            stated=False,
+            held=submission_service._Origin(block=block, scope=scope),
+            reads=reads,
+        )
+
+    group = submission_service._InputGroup(
+        members=frozenset({"first", "second", *wholes}),
+        sides=(
+            submission_service._Derivation(b"s", (("first", TOTAL), (wholes[0], None))),
+            submission_service._Derivation(
+                b"s", (("second", _TOTAL_NET_DEFAULT), (wholes[1], None))
+            ),
+        ),
+    )
+
+    moved = submission_service._sides_one_series(
+        group,
+        {"first": basis("first", gross), "second": basis("second", net)},
+        {"first": reads, "second": reads},
+        "measure_basis",
+        {},
+        {"second": {"measure_basis:gross"}},
+    )
+
+    assert moved == ({("second", "measure_basis:gross")} if kept_apart else set())
 
 
 def test_a_chain_reading_each_step_twice_is_derived_once_per_step(

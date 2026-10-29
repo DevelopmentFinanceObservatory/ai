@@ -93,6 +93,7 @@ from planner.parties import (
     flow_side,
     party_among,
     party_role,
+    role_party,
 )
 from planner.plan import (
     MAX_DECISION_OPTIONS,
@@ -4911,7 +4912,8 @@ def _sides_one_series(
     frame), and hold one option on every axis (`_Origin.actives`), which on `axis`
     is an option `counted` gives or the input's own, and on an earlier axis the
     one in `targets`, or where neither has a choice on `axis`, both pin one
-    spec_id and read it alike (`reads`, by requirement id). A part and its
+    spec_id and read it alike (`reads`, by requirement id), or, where `reads`
+    holds nothing for either, as a declared whole, are one requirement. A part and its
     options are what a pin compiles to. `counted` holds every option any aligning group counts an input on, so a pair is
     caught on whichever group moves it, in any step order. Two sides on one
     series before alignment moves an input are left alone, since alignment did
@@ -4929,7 +4931,9 @@ def _sides_one_series(
         requirement_id, pin = leaf
         basis = bases.get(requirement_id)
         if basis is None:
-            return [(None, (pin, reads.get(requirement_id)))]
+            read = reads.get(requirement_id)
+            # A leaf with nothing read of it, as a declared whole, is only itself.
+            return [(None, (pin, read) if read is not None else requirement_id)]
         others = {
             held: targets.get((requirement_id, held), (active, ""))[0]
             for held, active in basis.held.actives
@@ -5387,9 +5391,11 @@ def _declared_wholes(
         _Unservable: With `BASES_UNALIGNED`, naming each whole not compiled
             yet, once per part pin and axis (`Realignment.whole_axis`),
             or `SHARE_WHOLE_UNDERIVABLE` when Search's scope records for a
-            part's pin hold nothing on the axis to leave open.
+            part's pin hold nothing on the axis to leave open, or when a
+            compiled whole names an entity on the side it leaves open other
+            than the total Search bound there (`_misnamed_total`).
     """
-    pins = {pin.key: pin.spec_id for pin in compiled}
+    pins = {pin.key: pin for pin in compiled}
     wanted: dict[tuple[str, str], Realignment] = {}
     wholes: dict[str, str] = {}
     for whole, part, axis in declared:
@@ -5405,7 +5411,16 @@ def _declared_wholes(
             )
         held = pins.get((pin, (), axis))
         if held is not None:
-            wholes[whole.id] = held
+            if reason := _misnamed_total(whole, axis, held):
+                raise _Unservable(
+                    share_whole_underivable(
+                        whole_id=whole.id,
+                        part_spec_id=pin,
+                        reason=reason,
+                        cause="whole_names_another_total",
+                    )
+                )
+            wholes[whole.id] = held.spec_id
         else:
             wanted.setdefault(
                 (pin, axis), Realignment(pin, (), whole.id, whole.id, whole_axis=axis)
@@ -5413,6 +5428,44 @@ def _declared_wholes(
     if wanted:
         raise _Unservable(_bases_unaligned(list(wanted.values()), {}))
     return wholes
+
+
+def _misnamed_total(whole: DatasetRequirement, axis: str, held: AlignedPin) -> str | None:
+    """Why the entity `whole`, compiled as `held` over every `axis`, names on that
+    side is not the total Search bound there, as a clause; `None` where it names
+    none there, or names that total.
+
+    A whole over every donor or recipient states the side in `across`, or names
+    the one group Search's answer binds the side to, by its label case-folded
+    (`compiler.evidence.resolve_group`), as `translator.discovery.name_pinned_groups`
+    rewrites it (`planner.plan._entity_whole_fault`). The whole is compiled over
+    every party there whatever it names, so a name other than that group's
+    would label the total as one party's.
+    """
+    column = WHOLE_COLUMNS.get(axis)
+    side = role_party(axis)
+    named = [e.name for e in whole.entities if e.role is not None and role_party(e.role) == side]
+    if column is None or not named:
+        return None
+    try:
+        group = block_group(cast(Mapping[str, Any], held.digest.get("spec_block") or {}), column)
+    except ValueError:
+        group = None
+    label = group.label.casefold() if group is not None else None
+    others = [name for name in named if name.casefold() != label]
+    if not others:
+        return None
+    names = f"{whole.id!r} names {', '.join(map(repr, others))} as its {axis}"
+    if group is None:
+        return (
+            f"{names}, and Search counts the whole over every {axis} of {held.origin} "
+            f"with no total named there; state {axis!r} in `across` and name no {axis}"
+        )
+    return (
+        f"{names}, and Search counts the whole over every {axis} of {held.origin} as "
+        f"{group.label!r}; name {group.label!r} as its {axis}, or state {axis!r} in "
+        f"`across` and name no {axis}"
+    )
 
 
 def _whole_slot(requirement_id: str) -> str:
@@ -5691,15 +5744,13 @@ def _providers_counted(whole: Option | None, part: Option | None) -> str:
 
 def _dataset_holds(block: Mapping[str, Any] | None, scope: PartScope | None, name: str) -> bool:
     """Whether the dataset of `block`, a part's spec block, `scope` its scope record,
-    has what `name` of `_WHOLE_ALIKE` counts: a party side the part names parties on
-    or Search states open (`resolved.role_axis_facts`), or a scope axis the part's
-    records hold a choice on."""
+    has what `name` of `_WHOLE_ALIKE` counts: a party side the part binds parties on
+    (`bound_parties`) or Search states open (`resolved.role_axis_facts`), or a scope
+    axis the part's records hold a choice on."""
     column = _ALIKE_COLUMNS.get(name)
     if column is not None:
-        definition = (block or {}).get("definition") or {}
-        entities = (definition.get("identity") or {}).get("entities") or {}
         facts = ((block or {}).get("resolved") or {}).get("role_axis_facts") or ()
-        return bool(entities.get(column)) or any(
+        return (scope is not None and bool(bound_parties(scope, column))) or any(
             isinstance(fact, Mapping) and fact.get("role") == column for fact in facts
         )
     return scope is not None and any(c.axis == _ALIKE_AXES[name] for c in scope.choices)
@@ -6130,9 +6181,11 @@ def share_whole_underivable(
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
       (`planner.agent._uncontained`).
+    - `whole_names_another_total`: the whole names an entity on the side it
+      leaves open other than the total Search bound there (`_misnamed_total`).
 
-    `_declared_wholes` answers the first two kinds, and
-    `planner.agent.compile_whole` every kind but the first.
+    `_declared_wholes` answers the first two kinds and the last, and
+    `planner.agent.compile_whole` every kind but the first and the last.
     `detail.requirement_id` names the whole for the refusal's sentence
     (`harness.sentences`).
     """

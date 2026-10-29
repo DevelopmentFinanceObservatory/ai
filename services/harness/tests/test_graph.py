@@ -3543,27 +3543,45 @@ _AFRICA_UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sover
 _AFRICA_UNPOSTABLE = {"label": "Africa", "ref": "africa", "group_id": 7}
 
 
+_AFRICA_POSTED = {"destination": {"label": "Africa", "ref": "africa"}}
+
+
 @pytest.mark.parametrize(
-    ("group", "stored_unreadable", "stored_groups"),
+    ("group", "stored_unreadable", "stored_groups", "posted"),
     [
-        pytest.param(_AFRICA_TOTAL, False, None, id="block-reads-stored-readable"),
-        pytest.param(_AFRICA_TOTAL, True, None, id="block-reads-stored-unreadable"),
+        pytest.param(_AFRICA_TOTAL, False, None, _AFRICA_POSTED, id="block-reads-stored-readable"),
+        pytest.param(_AFRICA_TOTAL, True, None, _AFRICA_POSTED, id="block-reads-stored-unreadable"),
         pytest.param(
-            _AFRICA_UNKNOWN_CLASS, True, None, id="block-of-an-unknown-class-stored-unreadable"
+            _AFRICA_UNKNOWN_CLASS,
+            True,
+            None,
+            _AFRICA_POSTED,
+            id="block-of-an-unknown-class-stored-unreadable",
         ),
         pytest.param(
             _AFRICA_UNPOSTABLE,
             False,
             [{"role": "destination", **_AFRICA_TOTAL}],
+            _AFRICA_POSTED,
             id="block-unreadable-stored-readable",
+        ),
+        # The block names no sets and the reading was stored with the G7 on its
+        # donors: the stored set is posted, since the block's none says nothing of it.
+        pytest.param(
+            None,
+            False,
+            [{"role": "origin", "label": "G7"}],
+            {"origin": {"label": "G7"}},
+            id="block-names-none-stored-readable",
         ),
     ],
 )
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
-    group: dict[str, Any],
+    group: dict[str, Any] | None,
     stored_unreadable: bool,
     stored_groups: list[dict[str, Any]] | None,
+    posted: dict[str, Any],
 ) -> None:
     """The part's block names Africa as the set its recipients were asked for,
     with the total party Search states for it. The switch posts the set as a
@@ -3573,8 +3591,8 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     once this release can. A set naming a class of party this release does not
     know is posted by its label and ref, all the resubmit sends of it. Where what
     the block's set posts does not read, as a set stating a registry id that is
-    not text, it posts the
-    readable set the reading was stored with."""
+    not text, or where the block names no sets, it posts the
+    readable sets the reading was stored with."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
@@ -3582,14 +3600,14 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     await _switch_runner(
         real_schemas,
         search,
-        entity_groups={"destination": group},
+        entity_groups={"destination": group} if group is not None else {},
         stored_unreadable=stored_unreadable,
         stored_groups=stored_groups,
     )
 
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert entry.get("entity_groups") == {"destination": {"label": "Africa", "ref": "africa"}}
+    (sent,) = search.posted
+    (entry,) = sent["input"]["entries"]
+    assert entry.get("entity_groups") == posted
 
 
 async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(

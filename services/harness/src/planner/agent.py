@@ -1764,8 +1764,10 @@ def _parties_outside(
     members nor a whole class. Where Search's group on `column` is not
     readable (`compiler.sources.block_group`), as one naming a class of party
     outside `PartyClass`, every party it does not bind is unshown; a group on
-    another role is not read. The part's parties are those it binds on
-    `column` (`submission.service.bound_parties`), a choice's among them.
+    another role is not read. The parties the part and the whole bind on
+    `column` are those their scope records bind
+    (`submission.service.bound_parties`), a choice's among them; where the
+    whole's record does not read, every party the part names is unshown.
 
     A party of the part the whole neither binds nor lists is read through the
     part's own group on `column` where it is that group's total (the G7's): the
@@ -1773,13 +1775,14 @@ def _parties_outside(
     not where one is outside, and nothing shows it does where Search lists no
     members, or the part's group there is not readable.
     """
-    definition = spec.get("definition")
-    identity = definition.get("identity") if isinstance(definition, Mapping) else None
-    entities = identity.get("entities") if isinstance(identity, Mapping) else None
-    bound = entities.get(column) if isinstance(entities, Mapping) else None
+    named = bound_parties(scope, column)
+    whole = part_scope(str(spec.get("spec_id")), spec)
+    if whole is None:
+        # Nothing reads what the whole binds on `column`.
+        return _Containment(unshown=named)
+    bound = bound_parties(whole, column)
     if not bound:
         return _Containment()
-    named = bound_parties(scope, column)
     try:
         group = block_group(spec, column)
     except ValueError:
