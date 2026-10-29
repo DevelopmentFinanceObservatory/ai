@@ -1175,6 +1175,105 @@ def test_a_pick_on_another_decision_keeps_a_share_an_earlier_pick_made() -> None
         version = result["version"]
 
 
+@pytest.mark.parametrize(
+    ("reads", "refused"),
+    [
+        # The replan points the numerator's mean at the denominator's input: the share
+        # step and its denominator are kept, but a step between them was rewritten
+        # onto the denominator's series.
+        pytest.param("second", True, id="rewired-onto-the-denominator"),
+        pytest.param("first", False, id="kept-on-its-input"),
+    ],
+)
+def test_a_pick_rewriting_a_step_beneath_a_share_onto_its_denominator_is_refused(
+    reads: str, refused: bool
+) -> None:
+    """The card divides US multilateral ODA summed over its years by the US total's
+    mean. The user picks the mean for the numerator too, and the replan rewrites the
+    numerator's step. Read from the total, both sides are the total's mean, a share of
+    itself the pick did not make, and it is refused; read from its own input, the
+    share is admitted."""
+    measure = Decision(
+        slot="measure",
+        description="What the share measures.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    how = Decision(
+        slot="how",
+        description="How the numerator folds its years.",
+        options=["sum", "mean"],
+        chosen="sum",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(reduction=Reduction.SUM),
+    )
+    numerator = AggregateRequirement(
+        id="num",
+        decision_ids=("measure", "how"),
+        input_id="first",
+        reduction=Reduction.SUM,
+        group_by=(),
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, how]),
+        evidence_requirements=[
+            _dac_countries("first", _US_MULTILATERAL),
+            _dac_countries("second", _US_TOTAL),
+            numerator,
+            AggregateRequirement(
+                id="den",
+                decision_ids=("measure",),
+                input_id="second",
+                reduction=Reduction.MEAN,
+                group_by=(),
+            ),
+            _share("first", "second").model_copy(update={"id": "share_two"}),
+            _share("num", "den").model_copy(update={"accept_provider_difference": True}),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    shown = load_plan(ctx.state)
+    assert shown is not None
+    pick = decision_pick(
+        shown,
+        choice_id="decision/how",
+        option_id=decision_option_id("mean"),
+        to_origin={},
+        alignments={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+
+    result = propose(
+        amends_version=card["version"],
+        decisions=drafts(
+            [
+                how.model_copy(
+                    update={"chosen": "mean", "fixes": DecisionFixes(reduction=Reduction.MEAN)}
+                )
+            ]
+        ),
+        evidence_requirements=[
+            numerator.model_copy(update={"input_id": reads, "reduction": Reduction.MEAN})
+        ],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
+
+
 # A ranking decision whose options differ only in how many donors it keeps.
 RANKING = Decision(
     slot="donor_scope",

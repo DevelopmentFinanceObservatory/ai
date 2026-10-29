@@ -4862,18 +4862,21 @@ def _share_of_itself(
     refusal would only send it round again. Where the replan rewrote both sides,
     as a pick of the year both inputs cite does, the planner put them on one
     series, and the share is refused. A share the pick keeps whole, the step and
-    every leaf of both its sides in `DecisionPick.kept_requirements`, is left
-    alone: the card holds it as admitted before, such as one an earlier pick put
+    every requirement it reads (`reached`) in `DecisionPick.kept_requirements`,
+    is left alone: the card holds it as admitted before, such as one an earlier pick put
     on one series, and the planner may not change it while the pick stands.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
 
-    def kept_whole(step: EvidenceRequirement, sides: tuple[_Derivation, _Derivation]) -> bool:
-        """Whether the pick keeps `step` and every leaf of both `sides` as the card holds them."""
-        return pick is not None and all(
-            requirement_id in pick.kept_requirements
-            for requirement_id in (step.id, *(rid for side in sides for rid, _ in side.leaves))
-        )
+    # An input the plan does not state reads nothing here, and `Plan` refuses it.
+    reads: dict[str, Sequence[str]] = {
+        input_id: () for requirement in requirements for input_id in inputs_of(requirement)
+    }
+    reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
+
+    def kept_whole(step: EvidenceRequirement) -> bool:
+        """Whether the pick keeps `step` and everything it reads as the card holds them."""
+        return pick is not None and reached(step.id, reads) <= pick.kept_requirements.keys()
 
     def picked_onto(side: _Derivation, other: _Derivation) -> bool:
         """Whether the pick rewrote every leaf of `side` and kept every leaf of `other`."""
@@ -4909,7 +4912,7 @@ def _share_of_itself(
         ):
             continue
         sides = _side_derivations(step, by_id, sources.get)
-        if sides is None or kept_whole(step, sides):
+        if sides is None or kept_whole(step):
             continue
         first, second = sides
         if (
