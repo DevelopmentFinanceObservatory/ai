@@ -30,7 +30,6 @@ from harness import plan_display
 from harness.conversation import current_conversation_id
 from harness.graph import execute as execute_module
 from harness.graph import plan_done as plan_done_module
-from harness.graph.orchestrate import priced_options
 from harness.graph.plan_done import (
     HandBack,
     StepSummary,
@@ -58,7 +57,6 @@ from harness.graph.state import (
     AskQuestion,
     GraphState,
     PendingAsk,
-    PricedOption,
     ask_questions,
     pending_action,
 )
@@ -398,19 +396,20 @@ def _usd_block(spec_id: str) -> dict[str, Any]:
     return {"spec_id": spec_id, "resolved": {"facets": {"unit": _USD_BLOCK_UNIT}}}
 
 
-async def test_a_prices_question_is_marked_with_its_part_and_prices_in_code():
-    """The model labels the prices options as `open_prices` does and copies
-    nothing else: the `ask` node marks each with the part it prices and its
-    prices, and a pick of constant prices no search listed asks for a search
-    of that part."""
+_OTHER = "spec_" + "b" * 32
+
+
+async def test_a_prices_question_takes_its_options_from_its_part_s_open_prices():
+    """Two parts whose prices are open, worded alike. Each prices question
+    names its part, and code gives it that part's `open_prices` entries,
+    marked with the part and their prices. A pick of constant prices no
+    search listed asks for a search of that part."""
     runner, model = orchestrator_runner(
         call(
             "ask_user",
             questions=[
-                {
-                    "question": "In which prices?",
-                    "options": [{"label": "current prices"}, {"label": "constant prices"}],
-                }
+                {"question": "Aid in which prices?", "prices_of": _GROSS},
+                {"question": "GDP in which prices?", "prices_of": _OTHER},
             ],
         ),
         types.Part.from_text(text="Done."),
@@ -418,70 +417,35 @@ async def test_a_prices_question_is_marked_with_its_part_and_prices_in_code():
     await open_session(
         runner,
         **{
-            ORCHESTRATOR_SPECS_KEY: {_GROSS: _usd_block(_GROSS)},
-            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_GROSS)],
+            ORCHESTRATOR_SPECS_KEY: {spec: _usd_block(spec) for spec in (_GROSS, _OTHER)},
+            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(spec) for spec in (_GROSS, _OTHER)],
         },
     )
 
-    pause = single_pause(await run_turn(runner, types.UserContent("Aid to Kenya, 2018-2022?")))
-    assert pause.args["payload"]["questions"][0]["candidates"] == [
-        {"spec_id": "o1", "label": "current prices", "part": _GROSS, "prices": "current"},
-        {"spec_id": "o2", "label": "constant prices", "part": _GROSS, "prices": "constant"},
+    pause = single_pause(await run_turn(runner, types.UserContent("Aid and GDP, 2018-2022?")))
+    assert [q["candidates"] for q in pause.args["payload"]["questions"]] == [
+        [
+            {"spec_id": "o1", "label": "current prices", "part": part, "prices": "current"},
+            {"spec_id": "o2", "label": "constant prices", "part": part, "prices": "constant"},
+        ]
+        for part in (_GROSS, _OTHER)
     ]
-    reply = create_request_input_response(pause.id, {"result": {"spec_id": "o2"}})
+    reply = create_request_input_response(
+        pause.id,
+        {
+            "result": _answers(
+                q1={"kind": "option", "spec_id": "o1"}, q2={"kind": "option", "spec_id": "o2"}
+            )
+        },
+    )
     await run_turn(runner, types.Content(role="user", parts=[reply]))
 
+    asked = request_text(model.requests[-1])
     assert (
         f"The user chose: constant prices, which no search listed. Search once for that part "
-        f"({_GROSS}) in constant prices." in request_text(model.requests[-1])
+        f"({_OTHER}) in constant prices." in asked
     )
-
-
-_OTHER = "spec_" + "b" * 32
-
-
-@pytest.mark.parametrize(
-    ("parts", "options", "expected"),
-    [
-        (
-            [_GROSS, _OTHER],
-            [{"label": "Current prices"}, {"label": "constant prices"}],
-            {},
-        ),
-        (
-            [_GROSS],
-            [{"label": "Current US dollars"}, {"label": "constant prices"}],
-            {1: PricedOption(_GROSS, "constant")},
-        ),
-        ([_GROSS], [{"label": "Either"}, {"label": "Neither"}], {}),
-    ],
-    ids=["two-parts-alike", "one-label-matches", "no-prices"],
-)
-def test_a_prices_option_is_read_off_the_turn_s_open_prices(
-    parts: list[str], options: list[dict[str, str]], expected: dict[int, PricedOption]
-):
-    """An option prices a part only where code can tell which: a question
-    whose options could price either of two parts prices neither."""
-    state = {
-        ORCHESTRATOR_SPECS_KEY: {part: _usd_block(part) for part in parts},
-        ORCHESTRATOR_SEARCHES_KEY: [_open_reading(part) for part in parts],
-    }
-    question = AskQuestion(question="In which prices?", options=options)
-
-    assert priced_options([question], state) == [expected]
-
-
-def test_a_prices_option_carrying_another_prices_spec_id_prices_the_block_offering_it():
-    """An option carrying the spec_id a block offers as its count in other
-    prices prices that block, at the offer's `measurementQualifier`."""
-    block = _france_kenya_with_constant_prices(net_qualifier="Nominal")
-    state = {ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: block}, ORCHESTRATOR_SEARCHES_KEY: []}
-    question = AskQuestion(
-        question="In which prices?",
-        options=[{"label": "Constant US dollars", "spec_id": _FK_CONSTANT}],
-    )
-
-    assert priced_options([question], state) == [{0: PricedOption(_FK_GROSS, "constant")}]
+    assert f"({_GROSS}) in constant prices" not in asked
 
 
 _COUNT_AND_PRICES = [

@@ -1218,17 +1218,35 @@ def card_questions(plan: Plan) -> dict[str, str]:
     Where another row settles the same axis, as for two sources Search
     offers different options on, each adds the inputs it governs, named as
     the card's labels name them (`_concepts` of `shown_plan`, so a rolling
-    copy never numbers its origin): "Basis: health". Any other
-    row asks the planner's question (`card_decision_text`).
+    copy never numbers its origin): "Basis: health". Where the plan
+    holds the user's prices for several parts (`DecisionFixes.prices`,
+    `submission.prices_choice`), each such row names the inputs citing it
+    the same way: "Prices: health". Any other row asks the planner's
+    question (`card_decision_text`).
     """
     rows = [decision for decision in shown_decisions(plan) if decision.caveat is None]
     axes = Counter(decision.scope.axis for decision in rows if decision.scope is not None)
+    priced = {
+        decision.slot
+        for decision in rows
+        if decision.fixes is not None and decision.fixes.prices is not None
+    }
     concepts = (
-        _concepts(shown_plan(plan)).names if any(count > 1 for count in axes.values()) else {}
+        _concepts(shown_plan(plan)).names
+        if any(count > 1 for count in axes.values()) or len(priced) > 1
+        else {}
     )
     questions: dict[str, str] = {}
     for decision in rows:
         name = CHOICE_NAMES.get(decision.scope.axis) if decision.scope is not None else None
+        citing = [
+            label
+            for requirement_id, label in concepts.items()
+            if decision.slot in plan.requirement(requirement_id).decision_ids
+        ]
+        if len(priced) > 1 and decision.slot in priced and citing:
+            questions[decision.slot] = f"Prices: {_joined(citing)}"
+            continue
         if name is None:
             questions[decision.slot] = card_decision_text(
                 decision.description, plan, decision=decision

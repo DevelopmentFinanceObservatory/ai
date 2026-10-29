@@ -47,7 +47,7 @@ import json
 import logging
 import re
 import weakref
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
@@ -144,7 +144,9 @@ from harness.graph.state import (
     conversation_readings,
     count_call,
     frame_store_ref,
+    open_parts,
     pending_action,
+    prices_question,
     register_frames,
     store_search,
     turn_budgets,
@@ -1322,11 +1324,16 @@ def _named_spec_ids(tool_context: ToolContext) -> set[str]:
 MAX_ASK_QUESTIONS = 3
 
 
-def _questions_refusal(questions: list[AskQuestion], named: set[str]) -> dict[str, Any] | None:
+def _questions_refusal(
+    questions: list[AskQuestion], named: set[str], parts: Collection[str] = ()
+) -> dict[str, Any] | None:
     """The refusal of an `ask_user` call that asks no question or more than
-    `MAX_ASK_QUESTIONS`, asks a question with no option, offers a spec_id no
-    search result this turn named (`_named_spec_ids`), or offers one spec_id
-    on two options of the call; None when it asks well."""
+    `MAX_ASK_QUESTIONS`, asks a question with no option, prices a part that
+    is none of `parts`, the spec_ids of the readings whose prices are open
+    (`harness.graph.state.open_parts`), offers a spec_id no search result
+    this turn named (`_named_spec_ids`), or offers one spec_id on two options
+    of the call; None when it asks well. `questions` hold the options a
+    prices question is given (`harness.graph.state.prices_question`)."""
     options = [option for question in questions for option in question.options]
     spec_ids = [option.spec_id for option in options if option.spec_id is not None]
     problems = []
@@ -1335,9 +1342,15 @@ def _questions_refusal(questions: list[AskQuestion], named: set[str]) -> dict[st
             f"it asks {len(questions)} questions, and ask_user takes 1 to {MAX_ASK_QUESTIONS}"
         )
     problems += [
+        f"question {question.question!r} prices {question.prices_of}, which lists no "
+        "`open_prices` this turn"
+        for question in questions
+        if question.prices_of is not None and question.prices_of not in parts
+    ]
+    problems += [
         f"question {question.question!r} offers no option"
         for question in questions
-        if not question.options
+        if not question.options and question.prices_of is None
     ]
     problems += [
         f"option {option.label!r} carries {option.spec_id}, which no search result named this turn"
@@ -2407,11 +2420,14 @@ def build_orchestrator_tools(
         Ask only what changes the answer. Each question offers at least one
         option. An option for a count or prices that a search result names
         carries the spec_id the result gives it, and the answer names that
-        spec_id when the user picks it. Each spec_id goes on one option. End
+        spec_id when the user picks it. A prices question names its part in
+        `prices_of`, and its options are filled in. Each spec_id goes on one option. End
         your turn after calling ask_user. Every answer comes back as the next
         message.
         """
-        refused = _questions_refusal(questions, _named_spec_ids(tool_context))
+        parts = open_parts(tool_context.state)
+        questions = [prices_question(question, parts) for question in questions]
+        refused = _questions_refusal(questions, _named_spec_ids(tool_context), parts)
         if refused:
             return refused
         spent = _spend(tool_context, "ask_user")

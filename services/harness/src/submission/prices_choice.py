@@ -1,20 +1,22 @@
 """The prices the user chose for a part answering an ask, held on the plan as their decision.
 
 A part is a search reading whose prices were open (`harness.turn_records.
-open_prices`). The `ask` node marks each option of a prices question with
-the part it prices and the prices it offers, read in code off the turn's
-search results (`harness.graph.orchestrate.priced_options`), and the planner
+open_prices`). The orchestrator's prices question names its part, and code
+gives it the part's `open_prices` entries as options, each marked with the
+part and its prices (`harness.graph.state.priced_options`). The planner
 reads the user's picks off the answered interrupt, one per part
 (`planner.agent._prices_chosen`).
 
 `prices_decisions` writes each pick as a `resolved_by=user` decision fixing
 the price basis alone (`DecisionFixes.prices`), cited by every dataset
-requirement pinning the part's series or a series the part offers, so each
-keeps its own currency and base year. It refuses a plan in which one of
-those leaves its unit out or states other prices, naming the unit to state:
-the base year comes from the requirement's own pin, or from the series the
-user picked once the requirement is moved to it. Once recorded, the decision
-stands as every user decision does (`submission.service._user_decision_refused`).
+requirement the planner pinned to the part's series or a series the part
+offers, so each keeps its own currency and base year. A pin alignment moved
+is read as the planner wrote it (`Parts.origin_of`). It refuses a plan in
+which one of those leaves its unit out, states other prices or pins a series
+in other prices, naming the unit to state: the base year comes from the
+requirement's own pin, or from the series it is told to move to. Once
+recorded, the decision stands as every user decision does
+(`submission.service._user_decision_refused`).
 
 `base_year_refusal` gives the same instruction for a unit in constant prices
 with no base year on such a requirement. A requirement reading no part the
@@ -24,7 +26,8 @@ user priced is left as it was.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
@@ -45,15 +48,21 @@ from planner.workflow import SelectedSource
 from pydantic import ValidationError
 
 _LABELS: dict[PriceBasis, str] = {"current": CURRENT_PRICES, "constant": CONSTANT_PRICES}
-_BASES: dict[str, PriceBasis] = {"Nominal": "current", "RealValue": "constant"}
+# Each measurement qualifier a series states its prices by.
+BASES: dict[str, PriceBasis] = {"Nominal": "current", "RealValue": "constant"}
 _SPEC_ID = re.compile(r"spec_[0-9a-f]{32}")
 
 # What the decision for a part's prices is recorded under, the part's spec_id after it.
 PRICES_SLOT_PREFIX = "user_prices_"
 
-# The source a spec_id's block states, and the block itself; `None` when none is on record.
-SourceOf = Callable[[str], SelectedSource | None]
-BlockOf = Callable[[str], Mapping[str, Any] | None]
+# The fixed choices of the planner's ask a prices refusal sends it to, by
+# the prices each picks. A pick sets the part's prices
+# (`planner.agent._prices_chosen`).
+PRICES_OPTIONS: tuple[dict[str, str], ...] = tuple(
+    {"id": f"prices:{basis}", "label": f"{label[:1].upper()}{label[1:]}"}
+    for basis, label in _LABELS.items()
+)
+PRICES_PICKS: dict[str, PriceBasis] = {f"prices:{basis}": basis for basis in _LABELS}
 
 
 def prices_slot(part: str) -> str:
@@ -88,6 +97,73 @@ class PricesChoice(NamedTuple):
         return _LABELS[self.prices]
 
 
+@dataclass(frozen=True)
+class Parts:
+    """What the prices rules read of the datasets on record.
+
+    `source_of` and `block_of` answer a spec_id's source and block, `None`
+    when none is held. `shown` is every spec_id the planner was shown.
+    `aligned` maps each pin alignment compiled to the pin it was compiled
+    from (`submission.service.AlignedPin`).
+    """
+
+    source_of: Callable[[str], SelectedSource | None]
+    block_of: Callable[[str], Mapping[str, Any] | None]
+    shown: Collection[str] = ()
+    aligned: Mapping[str, str] | None = None
+
+    def origin_of(self, pin: str | None) -> str | None:
+        """The pin as the planner wrote it, before alignment moved it."""
+        return (self.aligned or {}).get(pin, pin) if pin is not None else None
+
+    def alternatives(self, part: str) -> list[Mapping[str, Any]]:
+        """The series `part`'s block offers in its place, another count or other prices."""
+        resolved = (self.block_of(part) or {}).get("resolved") or {}
+        offered = resolved.get("alternative_measures") or ()
+        return [alt for alt in offered if isinstance(alt, Mapping)]
+
+    def series(self, part: str) -> frozenset[str]:
+        """`part` and the spec_id of every series its block offers in its place."""
+        offered = ((alt.get("definition") or {}).get("spec_id") for alt in self.alternatives(part))
+        return frozenset({part, *(spec_id for spec_id in offered if isinstance(spec_id, str))})
+
+    def unit_offered(self, part: str, spec_id: str) -> bool:
+        """Whether `part`'s block offers `spec_id` as its own count in other prices (axis `unit`)."""
+        return any(
+            (alt.get("definition") or {}).get("spec_id") == spec_id and alt.get("axis") == "unit"
+            for alt in self.alternatives(part)
+        )
+
+    def constant_found(self, part: str) -> tuple[str, UnitReading] | None:
+        """A shown series measuring what `part` measures in constant prices of a
+        stated base year, such as one a later search found, with its unit; `None`
+        when none is shown. Compared on the identity with its prices left out
+        (`_priceless`)."""
+        wanted = _priceless(self.block_of(part))
+        if wanted is None:
+            return None
+        for spec_id in self.shown:
+            if spec_id == part or _priceless(self.block_of(spec_id)) != wanted:
+                continue
+            source = self.source_of(spec_id)
+            reading = source_unit(source) if source is not None else UnitReading()
+            if reading.prices == "constant" and reading.base_year is not None:
+                return spec_id, reading
+        return None
+
+
+def _priceless(block: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """A block's identity less its window, unit and measurement qualifier, `None` when it states none."""
+    identity = ((block or {}).get("definition") or {}).get("identity")
+    if not isinstance(identity, Mapping):
+        return None
+    kept = {k: v for k, v in identity.items() if k not in ("requested_window", "facets")}
+    shape = kept.get("shape")
+    if isinstance(shape, Mapping):
+        kept["shape"] = {k: v for k, v in shape.items() if k != "measurement_qualifier"}
+    return kept
+
+
 def source_unit(source: SelectedSource) -> UnitReading:
     """What `source`'s unit states outside its label: a unit it binds by request,
     else its unit id's structure, else its measure's `measurement_qualifier`
@@ -100,33 +176,11 @@ def source_unit(source: SelectedSource) -> UnitReading:
         shape = (source.identity or {}).get("shape")
         qualifier = shape.get("measurement_qualifier") if isinstance(shape, dict) else None
         reading = reading._replace(
-            prices=_BASES.get(qualifier) if isinstance(qualifier, str) else None
+            prices=BASES.get(qualifier) if isinstance(qualifier, str) else None
         )
     if reading.currency is None:
         reading = reading._replace(currency=read_unit_currency(source.unit_ref, source.unit_label))
     return reading
-
-
-def _alternatives(part: str, block_of: BlockOf) -> list[Mapping[str, Any]]:
-    """The series `part`'s block offers in its place, another count or other prices."""
-    resolved = (block_of(part) or {}).get("resolved") or {}
-    return [alt for alt in resolved.get("alternative_measures") or () if isinstance(alt, Mapping)]
-
-
-def _series(part: str, block_of: BlockOf) -> frozenset[str]:
-    """`part` and the spec_id of every series its block offers in its place."""
-    offered = (
-        (alt.get("definition") or {}).get("spec_id") for alt in _alternatives(part, block_of)
-    )
-    return frozenset({part, *(spec_id for spec_id in offered if isinstance(spec_id, str))})
-
-
-def _unit_offered(part: str, spec_id: str, block_of: BlockOf) -> bool:
-    """Whether `part`'s block offers `spec_id` as its own count in other prices (axis `unit`)."""
-    return any(
-        (alt.get("definition") or {}).get("spec_id") == spec_id and alt.get("axis") == "unit"
-        for alt in _alternatives(part, block_of)
-    )
 
 
 class _Wanted(NamedTuple):
@@ -139,23 +193,18 @@ class _Wanted(NamedTuple):
 
 
 def _wanted(
-    pin: str | None,
-    currency: str | None,
-    part: str,
-    choice: PricesChoice,
-    *,
-    source_of: SourceOf,
-    block_of: BlockOf,
+    pin: str | None, currency: str | None, part: str, choice: PricesChoice, parts: Parts
 ) -> _Wanted:
     """The unit, and the series, a requirement pinning `pin` states in `choice`'s prices.
 
     The pin's own unit gives the currency, when the requirement states none,
     and the base year of constant prices. A requirement pinned to the part's
-    own series moves, for constant prices, to the series the user picked,
+    own series moves, for constant prices, to the series the user picked, or
+    else to a series a search found in those prices (`Parts.constant_found`),
     with that series' base year. One pinned to the part's count in constant
     prices moves back to the part for current prices.
     """
-    source = source_of(pin) if pin is not None else None
+    source = parts.source_of(pin) if pin is not None else None
     own = source_unit(source) if source is not None else UnitReading()
     currency = currency or own.currency
     if currency is None:
@@ -163,17 +212,31 @@ def _wanted(
     if choice.prices == "current":
         if own.prices != "constant":
             return _Wanted(Unit(currency=currency, prices="current"))
-        moved = pin is not None and _unit_offered(part, pin, block_of)
+        moved = pin is not None and parts.unit_offered(part, pin)
         return _Wanted(Unit(currency=currency, prices="current"), part) if moved else _Wanted(None)
     if own.prices == "constant" and own.base_year is not None:
         return _Wanted(Unit(currency=currency, prices="constant", base_year=own.base_year))
-    picked = source_of(choice.spec_id) if pin == part and choice.spec_id is not None else None
-    reading = source_unit(picked) if picked is not None else UnitReading()
-    if reading.prices != "constant" or reading.base_year is None:
+    found = _constant_series(part, choice, parts) if pin == part else None
+    if found is None:
         return _Wanted(None)
-    return _Wanted(
-        Unit(currency=currency, prices="constant", base_year=reading.base_year), choice.spec_id
-    )
+    return _Wanted(Unit(currency=currency, prices="constant", base_year=found[1]), found[0])
+
+
+def _constant_series(part: str, choice: PricesChoice, parts: Parts) -> tuple[str, int] | None:
+    """The series of `part` in constant prices to move to, with its base year:
+    the one the user picked, else one a search found (`Parts.constant_found`)."""
+    picked = parts.source_of(choice.spec_id) if choice.spec_id is not None else None
+    reading = source_unit(picked) if picked is not None else UnitReading()
+    if (
+        choice.spec_id is not None
+        and reading.prices == "constant"
+        and reading.base_year is not None
+    ):
+        return choice.spec_id, reading.base_year
+    found = parts.constant_found(part)
+    if found is None or found[1].base_year is None:
+        return None
+    return found[0], found[1].base_year
 
 
 def _refusal(
@@ -192,7 +255,8 @@ def _refusal(
     `detail` names the decision's `slot`, what the user `chose`, the `part`
     and the `requirement_id`, and the `unit` to state and the series to
     `pin`, when one is named. With no unit to state, no series shown serves
-    the prices, and the planner asks the user whether to go on in the other.
+    the prices, and the planner asks the user which prices to go on in,
+    offering `PRICES_OPTIONS`.
     """
     detail: dict[str, Any] = {
         "slot": prices_slot(part),
@@ -201,14 +265,17 @@ def _refusal(
         "requirement_id": requirement_id,
     }
     if wanted.unit is None:
-        other = _LABELS["current" if choice.prices == "constant" else "constant"]
         return problem(
             code,
             f"{lead} No series shown serves it in {choice.label}. Ask the user through "
-            f"`{REQUEST_INPUT_FUNCTION_CALL_NAME}` whether to go on in {other}; once they "
-            "answer, a patch may state those.",
+            f"`{REQUEST_INPUT_FUNCTION_CALL_NAME}`, with the action's `options`, which prices "
+            "to go on in; once they pick, a patch states those.",
             outcome=outcome,
-            action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME),
+            action=Action(
+                call=REQUEST_INPUT_FUNCTION_CALL_NAME,
+                arguments={"options": [dict(option) for option in PRICES_OPTIONS]},
+                needs=("message",),
+            ),
             detail=detail,
         )
     detail["unit"] = wanted.unit.model_dump(mode="json", exclude_none=True)
@@ -230,42 +297,42 @@ def prices_decisions(
     patch: Sequence[EvidenceRequirement],
     requirements: Sequence[EvidenceRequirement],
     *,
-    source_of: SourceOf,
-    block_of: BlockOf,
+    parts: Parts,
     propose: str,
 ) -> tuple[list[Decision], list[EvidenceRequirement]] | dict[str, object]:
     """The user's prices `choices`, by part, as their decisions, with `patch` citing them, or the refusal of the plan.
 
     `requirements` is every requirement of the patched plan, `patch` this
-    call's own. A dataset requirement reads a part when it pins the part's
-    series or one the part offers in its place (`_series`). Each part that
-    some requirement reads states one decision fixing `prices`, which each
-    of those cites. A requirement citing one that `patch` does not state is
-    appended, so `Plan.amend` replaces it. A part no requirement reads
-    states nothing.
+    call's own. A dataset requirement reads a part when the pin the planner
+    wrote (`Parts.origin_of`) is the part's series or one the part offers in
+    its place (`Parts.series`). Each part that some requirement reads states
+    one decision fixing `prices`, which each of those cites. A requirement
+    citing one that `patch` does not state is appended, so `Plan.amend`
+    replaces it. A part no requirement reads states nothing.
 
     The refusal is `USER_DECISION_DROPPED` when such a requirement states no
     unit, and `USER_DECISION_CONTRADICTED` when it states other prices or
-    pins a series that cannot serve them (`_refusal`, `_wanted`). `propose` is the tool a refusal naming a unit calls.
+    pins a series that cannot serve them (`_refusal`, `_wanted`). `propose`
+    is the tool a refusal naming a unit calls.
     """
     decisions: list[Decision] = []
     slots: dict[str, list[str]] = {}
     for part, choice in choices.items():
-        series = _series(part, block_of)
+        series = parts.series(part)
         reading = [
             requirement
             for requirement in requirements
-            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id in series
+            if isinstance(requirement, DatasetRequirement)
+            and parts.origin_of(requirement.source_spec_id) in series
         ]
         for requirement in reading:
             unit = requirement.unit
             wanted = _wanted(
-                requirement.source_spec_id,
+                parts.origin_of(requirement.source_spec_id),
                 unit.currency if unit is not None else None,
                 part,
                 choice,
-                source_of=source_of,
-                block_of=block_of,
+                parts,
             )
             if unit is None:
                 code, opening = ProblemCode.USER_DECISION_DROPPED, "states no `unit`"
@@ -324,8 +391,7 @@ def base_year_refusal(
     requirements: Sequence[Any],
     *,
     choices: Mapping[str, PricesChoice],
-    source_of: SourceOf,
-    block_of: BlockOf,
+    parts: Parts,
     propose: str,
 ) -> dict[str, object] | None:
     """The refusal of a requirement reading a part the user priced whose `unit`
@@ -349,7 +415,7 @@ def base_year_refusal(
         pin = raw.get("source_spec_id")
         if not isinstance(pin, str):
             continue
-        part = next((part for part in choices if pin in _series(part, block_of)), None)
+        part = next((part for part in choices if pin in parts.series(part)), None)
         if part is None:
             continue
         choice = choices[part]
@@ -363,12 +429,7 @@ def base_year_refusal(
             choice=choice,
             requirement_id=raw.get("id"),
             wanted=_wanted(
-                pin,
-                currency if isinstance(currency, str) else None,
-                part,
-                choice,
-                source_of=source_of,
-                block_of=block_of,
+                pin, currency if isinstance(currency, str) else None, part, choice, parts
             ),
             propose=propose,
             outcome=Outcome.INVALID_INPUT,

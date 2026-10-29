@@ -79,7 +79,7 @@ from harness.scope_choices import (
 from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
-from submission.prices_choice import PRICES_SLOT_PREFIX, PricesChoice
+from submission.prices_choice import PRICES_OPTIONS, PRICES_PICKS, PRICES_SLOT_PREFIX, PricesChoice
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
@@ -781,42 +781,58 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
     nearest preceding call sharing its `id`, as `_elected_spec_ids` pairs
     them. A choice stands until the user answers the same question again,
     a question pricing the same part: a pick of other prices replaces it,
-    and any other answer, a skip aside, releases it. The planner's own ask
-    after a refusal of a part's prices (`detail.part`, `submission.
-    prices_choice`) is that question too, so any answer to it releases the
-    part. A message the user typed (`_user_message`) or an amendment of the
-    approval card (`_is_amendment`) releases every choice. An answer to any
-    other question leaves them standing. A Studio turn is one session, so a
-    choice holds for the turn it was made in.
+    and any other answer, a skip aside, releases it.
+
+    A prices refusal that sends the planner to the user (`detail.part`,
+    `submission.prices_choice`) binds the planner's next ask offering
+    `PRICES_OPTIONS` to its part, and the user's pick there sets the part's
+    prices: current prices replace the choice, constant prices keep it. Any
+    other `propose_plan` response, the plan landing included, clears the
+    refusal, so no later ask of another kind is read as that one. A message
+    the user typed (`_user_message`) or an amendment of the approval card
+    (`_is_amendment`) releases every choice. An answer to any other question
+    leaves them standing. A Studio turn is one session, so a choice holds for
+    the turn it was made in.
     """
     chosen: dict[str, PricesChoice] = {}
     refused: str | None = None
     asked: dict[str, str] = {}
+    offered = [dict(option) for option in PRICES_OPTIONS]
     for step in _session_steps(tool_context):
         if step.kind == "message":
             chosen.clear()
         elif step.kind == "response":
-            refused = _prices_refused(step.body) or refused
+            if step.name == PROPOSE_PLAN:
+                refused = _prices_refused(step.body)
         elif step.kind == "call":
-            if refused is not None and step.call_id is not None:
-                asked[step.call_id], refused = refused, None
-        elif _is_amendment(body := dict(step.body)):
+            if refused is not None and (step.args or {}).get("options") == offered:
+                asked[str(step.call_id)], refused = refused, None
+        elif _is_amendment(dict(step.body)):
             chosen.clear()
         elif step.call_id in asked:
-            if _is_answer(body):
-                chosen.pop(asked.pop(step.call_id), None)
+            part = asked.pop(step.call_id)
+            answer = _answers(step.body.get("result")).get("q1") or {}
+            basis = PRICES_PICKS.get(str(answer.get("spec_id")))
+            if answer.get("kind") == "option" and basis is not None:
+                chosen[part] = PricesChoice(basis)
         else:
             _priced_answers(step.args or {}, step.body, chosen)
     return chosen
 
 
 def _prices_refused(body: Mapping[str, Any]) -> str | None:
-    """The part a `propose_plan` refusal of the user's prices names (`detail.part`), or `None`."""
+    """The part a `propose_plan` refusal of the user's prices sending the planner
+    to the user names (`detail.part`), or `None`."""
     detail = body.get("detail")
-    slot = detail.get("slot") if isinstance(detail, dict) else None
-    if not (isinstance(slot, str) and slot.startswith(PRICES_SLOT_PREFIX)):
+    action = body.get("action")
+    if not (
+        isinstance(detail, dict)
+        and isinstance(action, dict)
+        and action.get("call") == REQUEST_INPUT_FUNCTION_CALL_NAME
+        and str(detail.get("slot")).startswith(PRICES_SLOT_PREFIX)
+    ):
         return None
-    part = detail.get("part") if isinstance(detail, dict) else None
+    part = detail.get("part")
     return part if isinstance(part, str) else None
 
 
@@ -851,16 +867,17 @@ class _Step(NamedTuple):
     """One step of a session's history, as the readers of what the user answered walk it.
 
     `message` is a message the user typed (`_user_message`). `call` is an
-    `adk_request_input` call, with its id. `answer` is a response to one,
-    with its id, the `args` of the nearest preceding call sharing that id
-    (`None` when none precedes it) and the response body. `response` is any
-    other tool's response, with its body.
+    `adk_request_input` call, with its id and `args`. `answer` is a response
+    to one, with its id, the `args` of the nearest preceding call sharing
+    that id (`None` when none precedes it) and the response body. `response`
+    is any other tool's response, with its `name` and body.
     """
 
     kind: Literal["message", "call", "answer", "response"]
     call_id: str | None = None
     args: dict[str, Any] | None = None
     body: Mapping[str, Any] = MappingProxyType({})
+    name: str | None = None
 
 
 def _session_steps(tool_context: ToolContext) -> Iterator[_Step]:
@@ -889,7 +906,7 @@ def _session_steps(tool_context: ToolContext) -> Iterator[_Step]:
             if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
                 yield _Step("answer", response.id, calls.get(response.id or ""), body)
             else:
-                yield _Step("response", body=body)
+                yield _Step("response", body=body, name=response.name)
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:
@@ -2416,15 +2433,16 @@ def build_planner_tools(
                 `{"spec_id": ..., "label": ...}` -- `label` is the
                 candidate's own `sentence`, not invented text. Omit it for
                 a referral that carries none.
-            options: The `options` a `combination_unasked` refusal's action
-                carries, unchanged. Omit it otherwise.
+            options: The `options` a refusal's action carries, unchanged.
+                Omit it otherwise.
             recommended_spec_id: The candidate you favour, when you favour
                 one -- must name one of `candidates`.
             rationale: Why you favour it, for the user to read, when
                 `recommended_spec_id` is given.
         """
         del message, rationale  # carried through to the wire frame, not read back here
-        if options and (candidates or options != [dict(o) for o in COMBINATION_OPTIONS]):
+        fixed = ([dict(o) for o in COMBINATION_OPTIONS], [dict(o) for o in PRICES_OPTIONS])
+        if options and (candidates or options not in fixed):
             return problem(
                 ProblemCode.INVALID_ARGUMENTS,
                 "`options` must be the ones a refusal's action carries, unchanged, "

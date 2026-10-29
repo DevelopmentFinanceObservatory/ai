@@ -226,6 +226,7 @@ from translator.tool import authored_answer
 
 from submission.prices_choice import (
     PRICES_SLOT_PREFIX,
+    Parts,
     PricesChoice,
     base_year_refusal,
     prices_decisions,
@@ -457,13 +458,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             }
         )
     except ValidationError as exc:
-        shown = SourceReadings.of_shown(pin_sources(view.state))
+        shown = pin_sources(view.state)
+        readings = SourceReadings.of_shown(shown)
         return base_year_refusal(
             exc,
             proposal.evidence_requirements,
             choices=view.prices_chosen(),
-            source_of=shown.get,
-            block_of=shown.block,
+            parts=Parts(readings.get, readings.block, shown=shown.keys()),
             propose=proposer.call,
         ) or _invalid_data(exc, proposer)
     reads_user_words = reads_user_words or amendment_entry(view.state)
@@ -601,16 +602,20 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         view.prices_chosen(),
         evidence_requirements,
         requirements_after,
-        source_of=sources.get,
-        block_of=sources.block,
+        parts=Parts(
+            sources.get,
+            sources.block,
+            shown=pins.keys(),
+            aligned={pin.spec_id: pin.origin for pin in aligned_pins(view.state)},
+        ),
         propose=proposer.call,
     )
     if isinstance(priced, dict):
         return priced
     prices, evidence_requirements = priced
     if prices:
-        written = {decision.slot for decision in prices}
-        settled = [*(d for d in settled if d.slot not in written), *prices]
+        priced_slots = {decision.slot for decision in prices}
+        settled = [*(d for d in settled if d.slot not in priced_slots), *prices]
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
