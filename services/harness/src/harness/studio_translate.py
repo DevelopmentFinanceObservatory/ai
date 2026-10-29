@@ -1415,7 +1415,8 @@ class _Translator:
             # replan's, and may reuse the requirement ids the choice ids are
             # built from, so no earlier card's labels describe its choices.
             # A pick's replan that raises, is stopped or is refused leaves the
-            # plan unchanged, so it drops them only once it lands (below).
+            # plan unchanged, so it drops them only once it lands, and then
+            # only the scope choices' (below).
             self._pick_replan = bool(started.get("pick"))
             if not self._pick_replan:
                 self._conversation.turn_choice_baseline = {}
@@ -1438,8 +1439,20 @@ class _Translator:
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
             if event.actions.route == "ok":
-                # A drafted plan, a pick's replan's included.
-                self._conversation.turn_choice_baseline = {}
+                # A drafted plan, whose requirement ids, and so its scope
+                # choice ids, may be reused. A planner decision's row is
+                # named by its slot and its options by their labels, so a
+                # pick's replan keeps those rows' labels, and the row the
+                # user switched names the label it was switched from.
+                self._conversation.turn_choice_baseline = (
+                    {
+                        choice_id: label
+                        for choice_id, label in self._conversation.turn_choice_baseline.items()
+                        if choice_id.startswith(plan_display.DECISION_CHOICE_PREFIX)
+                    }
+                    if self._pick_replan
+                    else {}
+                )
             frames.extend(self._close_status())
         return frames
 

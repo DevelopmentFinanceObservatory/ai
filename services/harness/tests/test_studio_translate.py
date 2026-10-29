@@ -1649,29 +1649,80 @@ def test_a_planner_draft_drops_the_labels_the_turns_switches_kept(revising: bool
     assert translator._conversation.turn_choice_baseline == {}
 
 
+_PICKED_ROW = "decision/donor_scope"
+
+
 @pytest.mark.parametrize(
     ("ending", "kept"),
     [
-        pytest.param(None, True, id="raised"),
-        pytest.param("pending_refusal", True, id="stopped-or-refused"),
-        pytest.param("ok", False, id="landed"),
+        pytest.param(None, {"aid:sector", _PICKED_ROW}, id="raised"),
+        pytest.param("pending_refusal", {"aid:sector", _PICKED_ROW}, id="stopped-or-refused"),
+        pytest.param("ok", {_PICKED_ROW}, id="landed"),
     ],
 )
-def test_a_pick_replan_drops_the_labels_the_turns_switches_kept_only_once_it_lands(
-    ending: str | None, kept: bool
+def test_a_pick_replan_drops_the_scope_labels_the_turns_switches_kept_only_once_it_lands(
+    ending: str | None, kept: set[str]
 ) -> None:
     """A replan for a pick on the card that raises, is stopped or is refused
     leaves the plan unchanged, so an earlier switch's label still names what
-    the approved plan changed. Only a plan the replan drafts drops it."""
+    the approved plan changed. A plan the replan drafts drops the scope
+    choices' labels, whose ids it may reuse, and keeps the planner decision
+    rows', named by slot."""
     translator = _translator()
-    baseline = {"aid:sector": "health (CRS 120)"}
+    baseline = {"aid:sector": "health (CRS 120)", _PICKED_ROW: "the DAC total"}
     translator._conversation.turn_choice_baseline = dict(baseline)
 
     translator.translate(_node_event("planner", planner_started={"revising": True, "pick": True}))
     if ending is not None:
         translator.translate(_node_event("planner", route=ending, output={"version": 2}))
 
-    assert translator._conversation.turn_choice_baseline == (baseline if kept else {})
+    assert translator._conversation.turn_choice_baseline == {
+        choice_id: label for choice_id, label in baseline.items() if choice_id in kept
+    }
+
+
+def test_an_approved_plan_a_pick_replan_drafted_names_the_label_the_pick_was_made_from() -> None:
+    """The user picks the top 10 donors on a card showing the DAC total, the
+    replan lands, and the user approves it: the switched row says what it
+    held before."""
+    translator = _translator()
+    translator._conversation.turn_choice_baseline = {_PICKED_ROW: "the DAC total"}
+    translator.translate(_node_event("planner", planner_started={"revising": True, "pick": True}))
+    translator.translate(_node_event("planner", route="ok", output={"version": 2}))
+    labels = ("the DAC total", "the top 10 donors")
+    card = PlanProposed(
+        event="plan.proposed",
+        seq=3,
+        interrupt_id="int_1",
+        plan_version_id="plan_1",
+        version=2,
+        title="Research plan",
+        summary="The top 10 donors to Kenya.",
+        steps=[PlanStep(id="s1", label="Rank donors", gives_answer=True)],
+        actions=[PlanAction.APPROVE],
+        decisions=[
+            PlanDecision(
+                id="d_donors",
+                question="Donors",
+                chosen=labels[1],
+                reason="The user picked it.",
+                resolved_by="user",
+                choice_id=_PICKED_ROW,
+                active_option_id=decision_option_id(labels[1]),
+                options=[
+                    PlanDecisionOption(
+                        option_id=decision_option_id(label), label=label, status="available"
+                    )
+                    for label in labels
+                ],
+            )
+        ],
+        revision="rev_2",
+    )
+
+    frame = plan_approved(card, seq=9, baseline=translator._conversation.turn_choice_baseline)
+
+    assert [choice.changed_from for choice in frame.choices] == ["the DAC total"]
 
 
 def test_the_planner_starting_a_first_draft_opens_working_on_a_plan() -> None:

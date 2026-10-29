@@ -27,6 +27,7 @@ from planner.plan import (
     pick_of,
     plan_revision,
     save_decision_pick,
+    windowed_pins,
 )
 from planner.plan import Plan as PlannerPlan
 
@@ -436,6 +437,10 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
             plan,
             choice_id=str(switch.get("choice_id")),
             option_id=str(switch.get("option_id")),
+            to_origin={
+                copy.spec_id: copy.windowed_from
+                for copy in windowed_pins(cast(SessionState, ctx.state)).values()
+            },
         )
         if pick is not None:
             # A planner decision's pick changes what the plan states, so the

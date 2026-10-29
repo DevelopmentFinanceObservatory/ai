@@ -6299,16 +6299,58 @@ class DecisionPick(StrictModel):
     """The option `chosen` the user picked on the plan card for the planner
     decision under `slot`, exactly as the decision's `options` states it.
 
-    `origin_chosen` and `origin_fixes` are that decision as the card showed
-    it when the user picked: every proposal of the replan is held against
-    them (`submission.service._picked_decision`), so a later proposal cannot
-    return the old plan under the picked label.
+    `origin_chosen` is that decision's `chosen` as the card showed it when
+    the user picked, and `origin_reading` the `slot_reading` of the card's
+    requirements: every proposal of the replan is held against them
+    (`submission.service._picked_decision`), so no proposal can return the
+    old plan under the picked label.
     """
 
     slot: str
     chosen: str
     origin_chosen: str
-    origin_fixes: DecisionFixes
+    origin_reading: str
+
+
+def slot_reading(
+    requirements: Sequence[EvidenceRequirement],
+    slot: str,
+    *,
+    to_origin: Mapping[str, str],
+) -> str:
+    """The digest of what the requirements of `requirements` citing `slot` read.
+
+    Each requirement enters as its content less `id` and `decision_ids`,
+    with every input it reads (`inputs_of`) standing for that input's own
+    content, read the same way, and every pin of a windowed copy
+    (`to_origin`, `WindowedPin.windowed_from` by copy spec_id) standing for
+    the pin it copies. So the digest moves only when a requirement citing
+    `slot`, or a requirement under it, reads something else: renaming one,
+    citing other decisions from it, or recording a pin over another period
+    leaves it as it was. `requirements` must not read one another in a
+    cycle. Canonical JSON (RFC 8785) under SHA-256, as `plan_revision`.
+    """
+    by_id = {requirement.id: requirement for requirement in requirements}
+    digests: dict[str, str] = {}
+
+    def digest(requirement: EvidenceRequirement) -> str:
+        if requirement.id not in digests:
+            read = _reading(
+                requirement,
+                {
+                    input_id: digest(by_id[input_id])
+                    for input_id in inputs_of(requirement)
+                    if input_id in by_id
+                },
+            )
+            content = read.model_dump(mode="json", exclude={"id", "decision_ids"})
+            if isinstance(read, DatasetRequirement) and read.source_spec_id is not None:
+                content["source_spec_id"] = to_origin.get(read.source_spec_id, read.source_spec_id)
+            digests[requirement.id] = hashlib.sha256(rfc8785.dumps(content)).hexdigest()
+        return digests[requirement.id]
+
+    citing = sorted(digest(r) for r in requirements if slot in r.decision_ids)
+    return hashlib.sha256(rfc8785.dumps(citing)).hexdigest()
 
 
 def decision_pick(state: SessionState) -> DecisionPick | None:

@@ -5,10 +5,9 @@ DECISION_PICK_STATE_KEY`), with the decision as the card showed it.
 `propose_plan` then refuses a plan whose decision under the pick's slot
 states another option (`submission.service._picked_decision`) or whose
 requirements citing it fix nothing or what they fixed on the card, and
-records that decision as the user's. The pick lets go of another user
-decision only when the picked option sets every field that decision fixed,
-every requirement that cited it also cited the picked decision, and the new
-plan drops them all (`submission.service._released_by_pick`).
+records that decision as the user's. The pick speaks for its own slot
+alone: every other decision of the user's stands as they made it
+(`submission.service._user_decision_refused`).
 """
 
 from __future__ import annotations
@@ -29,16 +28,15 @@ from planner.plan import (
     DecisionPick,
     Entity,
     Period,
-    Plan,
     RankRequirement,
     ResolvedBy,
     Unit,
     load_plan,
     save_decision_pick,
+    slot_reading,
 )
 from planner.records import RankAmong, RankDirection, Reduction
 from planner.tool_results import Outcome, ProblemCode
-from submission.service import _released_by_pick
 
 from ..decision_drafts import drafts
 from ..session_events import response_event
@@ -79,12 +77,13 @@ TOP_TEN = DONOR_SCOPE.model_copy(
         "fixes": DecisionFixes(limit=10, among=RankAmong.POPULATION),
     }
 )
-# The pick of the top 10 donors on the card showing the DAC total.
-PICK = DecisionPick(
-    slot="donor_scope",
-    chosen="the top 10 donors",
-    origin_chosen="the DAC total",
-    origin_fixes=DONOR_SCOPE.fixes,
+# The DAC total's decision under the picked label, listing the period beside
+# the entities, so its fixes differ from the card's though it reads the same.
+RELABELLED_WIDER = DONOR_SCOPE.model_copy(
+    update={
+        "chosen": "the top 10 donors",
+        "fixes": DONOR_SCOPE.fixes.model_copy(update={"period": YEAR}),
+    }
 )
 
 
@@ -101,6 +100,15 @@ def _dac_total() -> DatasetRequirement:
         unit=USD,
         source_spec_id=DAC_TOTAL,
     )
+
+
+# The pick of the top 10 donors on the card showing the DAC total.
+PICK = DecisionPick(
+    slot="donor_scope",
+    chosen="the top 10 donors",
+    origin_chosen="the DAC total",
+    origin_reading=slot_reading([_dac_total()], "donor_scope", to_origin={}),
+)
 
 
 def _ranked_donors() -> list[Any]:
@@ -194,17 +202,36 @@ def test_a_pick_that_changes_the_plans_shape_is_admitted_as_the_users(
             "the top 10 donors",
             id="relabelled-over-the-same-requirements",
         ),
+        pytest.param(
+            {"decisions": [RELABELLED_WIDER]},
+            "the top 10 donors",
+            id="relabelled-listing-more-fields",
+        ),
+        pytest.param(
+            {
+                "decisions": [DONOR_SCOPE.model_copy(update={"chosen": "the top 10 donors"})],
+                "renamed": True,
+            },
+            "the top 10 donors",
+            id="relabelled-over-the-same-requirement-renamed",
+        ),
     ],
 )
 def test_a_plan_that_does_not_state_the_pick_is_refused(
     decision: Callable[..., Decision], patch: dict[str, Any], stated: str | None
 ) -> None:
+    """A plan carrying or restating the DAC total, or dropping the decision,
+    is refused. So is the DAC total under the picked label, however many
+    fields the decision lists and whatever the requirement is called: what
+    the requirements citing it read is unchanged."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
     save_decision_pick(ctx.state, PICK)
     requirements = (
         [_dac_total().model_copy(update={"decision_ids": ("measure", "year")})]
         if "removed_decisions" in patch
+        else [_dac_total().model_copy(update={"id": "dac_total"})]
+        if patch.get("renamed")
         else [_dac_total()]
     )
 
@@ -213,6 +240,7 @@ def test_a_plan_that_does_not_state_the_pick_is_refused(
         decisions=drafts(patch.get("decisions", [])),
         removed_decisions=patch.get("removed_decisions", []),
         evidence_requirements=requirements,
+        removed_evidence_requirements=["dac"] if patch.get("renamed") else [],
         amends_version=first["version"],
     )
 
@@ -339,58 +367,29 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
     assert result["detail"]["slot"] == "year"
 
 
-def test_a_pick_releases_no_user_decision_no_requirement_cited() -> None:
-    """A user decision no requirement of the plan on record cites rests on
-    nothing the pick changed, so the pick does not let it go."""
-    previous = Plan.model_construct(
-        decisions=(DONOR_SCOPE, USER_YEAR),
-        evidence_requirements=(
-            _dac_total().model_copy(update={"decision_ids": ("measure", "donor_scope")}),
-        ),
-    )
-
-    released = _released_by_pick(previous, _ranked_donors(), slot="donor_scope", picked=TOP_TEN)
-
-    assert released == {"donor_scope"}
-
-
 @pytest.mark.parametrize(
-    ("fixes", "released"),
+    "picked",
     [
-        pytest.param(DecisionFixes(limit=5), {"donor_scope", "size"}, id="settled-by-the-pick"),
+        pytest.param(TOP_TEN, id="fixing-the-rank"),
         pytest.param(
-            DecisionFixes(limit=5, period=YEAR), {"donor_scope"}, id="fixing-more-than-the-pick"
+            TOP_TEN.model_copy(
+                update={
+                    "fixes": DecisionFixes(
+                        limit=10, among=RankAmong.POPULATION, period=Period(start=2022, end=2022)
+                    )
+                }
+            ),
+            id="listing-the-period",
         ),
-        pytest.param(None, {"donor_scope"}, id="fixing-nothing"),
     ],
 )
-def test_a_pick_releases_a_user_decision_only_when_the_picked_option_sets_all_it_fixed(
-    fixes: DecisionFixes | None, released: set[str]
+def test_a_pick_releases_no_other_user_decision(
+    decision: Callable[..., Decision], picked: Decision
 ) -> None:
-    """Every requirement citing the user's decision also cites the picked one,
-    and the new plan drops them all. The pick lets it go only when the
-    picked option, as the proposal states it, sets every field it fixed."""
-    size = USER_YEAR.model_copy(update={"slot": "size", "fixes": fixes})
-    previous = Plan.model_construct(
-        decisions=(DONOR_SCOPE, size),
-        evidence_requirements=(
-            _dac_total().model_copy(update={"decision_ids": ("measure", "donor_scope", "size")}),
-        ),
-    )
-
-    assert (
-        _released_by_pick(previous, _ranked_donors(), slot="donor_scope", picked=TOP_TEN)
-        == released
-    )
-
-
-def test_a_pick_releases_no_user_decision_it_does_not_settle(
-    decision: Callable[..., Decision],
-) -> None:
-    """The pick fixes a rank's limit and population; the user's year fixes a
-    period. A replan that drops the DAC total, and with it the only citation
-    of the year, while reading the donors over 2022 is refused: the pick
-    does not settle the period the user decided."""
+    """The user's year fixes a period. A replan that drops the DAC total, and
+    with it the only citation of the year, while reading the donors over
+    2022 under the picked decision is refused, whatever fields that decision
+    lists: the pick speaks for its own slot alone."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
     save_decision_pick(ctx.state, PICK)
@@ -398,9 +397,14 @@ def test_a_pick_releases_no_user_decision_it_does_not_settle(
 
     result = _propose_plan(
         ctx,
-        decisions=drafts([TOP_TEN]),
+        decisions=drafts([picked]),
         evidence_requirements=[
-            aid.model_copy(update={"period": Period(start=2022, end=2022)}),
+            aid.model_copy(
+                update={
+                    "period": Period(start=2022, end=2022),
+                    "decision_ids": ("measure", "donor_scope"),
+                }
+            ),
             top,
         ],
         removed_evidence_requirements=["dac"],
@@ -410,6 +414,64 @@ def test_a_pick_releases_no_user_decision_it_does_not_settle(
     assert result["outcome"] == Outcome.REFUSED.value, result
     assert result["code"] == ProblemCode.USER_DECISION_DROPPED.value
     assert result["detail"]["slot"] == "year"
+
+
+def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
+    decision: Callable[..., Decision],
+) -> None:
+    """The user's own decision fixes who the DAC total is about. A replan
+    for the pick that reads the donors to Ghana under the picked decision,
+    listing its entities, is refused: the pick does not speak for the
+    recipient."""
+    ctx = _context()
+    recipient = USER_YEAR.model_copy(
+        update={
+            "slot": "recipient",
+            "description": "Which country the aid goes to.",
+            "options": ["Kenya", "Ghana"],
+            "chosen": "Kenya",
+            "fixes": DONOR_SCOPE.fixes,
+        }
+    )
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), DONOR_SCOPE, recipient]),
+        evidence_requirements=[
+            _dac_total().model_copy(
+                update={"decision_ids": ("measure", "donor_scope", "recipient")}
+            )
+        ],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.session.events = [response_event("propose_plan", first)]
+    save_decision_pick(ctx.state, PICK)
+    aid, top = _ranked_donors()
+    ghana = (Entity(name="Ghana", role="recipient"),)
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts(
+            [
+                TOP_TEN.model_copy(
+                    update={
+                        "fixes": DecisionFixes(limit=10, among=RankAmong.POPULATION, entities=ghana)
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[
+            aid.model_copy(update={"entities": ghana, "decision_ids": ("measure", "donor_scope")}),
+            top,
+        ],
+        removed_evidence_requirements=["dac"],
+        amends_version=first["version"],
+    )
+
+    assert result["outcome"] == Outcome.REFUSED.value, result
+    assert result["code"] == ProblemCode.USER_DECISION_DROPPED.value
+    assert result["detail"]["slot"] == "recipient"
 
 
 @pytest.mark.parametrize(
@@ -423,6 +485,7 @@ def test_a_pick_releases_no_user_decision_it_does_not_settle(
             DONOR_SCOPE.model_copy(update={"chosen": "the top 10 donors"}),
             id="fixing-what-the-dac-total-fixed",
         ),
+        pytest.param(RELABELLED_WIDER, id="listing-more-than-the-dac-total-fixed"),
     ],
 )
 def test_a_later_proposal_of_the_pick_replan_holds_the_pick_against_the_plan_picked_on(

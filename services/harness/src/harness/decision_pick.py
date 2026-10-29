@@ -9,7 +9,9 @@ pick off the plan the card showed, as the planner states it.
 
 from __future__ import annotations
 
-from planner.plan import DecisionPick, Plan
+from collections.abc import Mapping
+
+from planner.plan import DecisionPick, Plan, authored, slot_reading
 
 from harness.plan_display import (
     DECISION_CHOICE_PREFIX,
@@ -23,12 +25,18 @@ def is_decision_choice(choice_id: str) -> bool:
     return choice_id.startswith(DECISION_CHOICE_PREFIX)
 
 
-def decision_pick(plan: Plan, *, choice_id: str, option_id: str) -> DecisionPick | None:
+def decision_pick(
+    plan: Plan, *, choice_id: str, option_id: str, to_origin: Mapping[str, str]
+) -> DecisionPick | None:
     """The pick a switch of row `choice_id` to option `option_id` makes on `plan`.
 
-    The pick records the decision as `plan` states it, the origin every
-    proposal of the replan is held against. `None` when `choice_id` names no
-    switchable planner decision of `plan`, or `option_id` none of its options.
+    The pick records the decision's `chosen` as `plan` states it, and what
+    `plan`'s requirements citing it read as the model wrote them
+    (`planner.plan.slot_reading` over `planner.plan.authored`, with
+    `to_origin` mapping each windowed copy's spec_id to the pin it copies):
+    the origin every proposal of the replan is held against. `None` when
+    `choice_id` names no switchable planner decision of `plan`, or
+    `option_id` none of its options.
     """
     if not is_decision_choice(choice_id):
         return None
@@ -42,7 +50,9 @@ def decision_pick(plan: Plan, *, choice_id: str, option_id: str) -> DecisionPick
                 slot=slot,
                 chosen=option,
                 origin_chosen=decision.chosen,
-                origin_fixes=decision.fixes,
+                origin_reading=slot_reading(
+                    authored(plan).evidence_requirements, slot, to_origin=to_origin
+                ),
             )
             for option in decision.options
             if decision_option_id(option) == option_id

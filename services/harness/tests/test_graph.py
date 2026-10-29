@@ -139,6 +139,7 @@ from planner.plan import (
     plan_revision,
     repinned,
     save_decision_pick,
+    slot_reading,
     windowed_pins,
     with_authored_requirements,
 )
@@ -1770,14 +1771,18 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     assert redrafted["restarted"] is True
 
 
-# A planner decision the card offers to switch (`plan_display.switchable_decision`):
-# `_seam_plan`'s window, fixing the period, and the switch to its other option.
-_PICKED_WINDOW = DecisionPick(
-    slot="window",
-    chosen="2018-2024",
-    origin_chosen="2015-2024",
-    origin_fixes=DecisionFixes(period=Period(start=2015, end=2024)),
-)
+def _picked_window(plan: PlannerPlan) -> DecisionPick:
+    """The pick of a planner decision the card offers to switch
+    (`plan_display.switchable_decision`): `_seam_plan`'s window, fixing the
+    period, switched to its other option on `plan`."""
+    return DecisionPick(
+        slot="window",
+        chosen="2018-2024",
+        origin_chosen="2015-2024",
+        origin_reading=slot_reading(authored(plan).evidence_requirements, "window", to_origin={}),
+    )
+
+
 _PICK_SWITCH = {"choice_id": "decision/window", "option_id": decision_option_id("2018-2024")}
 # A drafting key the replan writes, which a replan that does not land puts back.
 _DRAFTING_KEY = "planner:replan_scratch"
@@ -1840,7 +1845,7 @@ async def test_a_planner_decisions_pick_replans_with_the_pick_held(
 
     events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
 
-    assert seam.calls[1]["pick"] == _PICKED_WINDOW
+    assert seam.calls[1]["pick"] == _picked_window(plan)
     assert seam.calls[1]["amendment"] is None
     assert seam.calls[1]["prior_plan"] == plan.model_dump(mode="json")
     offered = _output_of(events, "planner")
@@ -1978,7 +1983,7 @@ async def test_a_planner_ask_during_a_pick_replan_keeps_its_state_and_resumes_wi
 
     events = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
 
-    assert seam.calls[2]["pick"] == _PICKED_WINDOW
+    assert seam.calls[2]["pick"] == _picked_window(plan)
     assert _output_of(events, "planner")["revision"] == plan_revision(replanned)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 

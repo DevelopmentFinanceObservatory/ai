@@ -105,7 +105,6 @@ from planner.plan import (
     AskBreakdown,
     DatasetRequirement,
     Decision,
-    DecisionFixes,
     Entity,
     FullHistory,
     GrowthRequirement,
@@ -2125,7 +2124,7 @@ _PICKED = DecisionPick(
     slot="donor_scope",
     chosen="the top 10 donors",
     origin_chosen="the DAC total",
-    origin_fixes=DecisionFixes(entities=(Entity(name="DAC countries", role="donor"),)),
+    origin_reading="0" * 64,
 )
 
 

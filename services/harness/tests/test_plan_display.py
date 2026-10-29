@@ -88,6 +88,7 @@ from planner.plan import (
     frame_shapes,
     scope_choice_slot,
     search_pin_slot,
+    slot_reading,
     split_of,
 )
 from planner.records import (
@@ -4603,7 +4604,7 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
     assert measure.fixes is not None
 
     picks = [
-        decision_pick(plan, choice_id=choice, option_id=option)
+        decision_pick(plan, choice_id=choice, option_id=option, to_origin={})
         for choice, option in [
             ("decision/measure", decision_option_id(healthy)),
             ("decision/measure", decision_option_id(birth)),
@@ -4614,7 +4615,10 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
         ]
     ]
 
-    origin = {"origin_chosen": measure.chosen, "origin_fixes": measure.fixes}
+    origin = {
+        "origin_chosen": measure.chosen,
+        "origin_reading": slot_reading(plan.evidence_requirements, "measure", to_origin={}),
+    }
     assert picks == [
         DecisionPick(slot="measure", chosen=healthy, **origin),
         DecisionPick(slot="measure", chosen=birth, **origin),
@@ -4624,6 +4628,11 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
         None,
     ]
     assert (
-        decision_pick(unfixed, choice_id="decision/measure", option_id=decision_option_id(healthy))
+        decision_pick(
+            unfixed,
+            choice_id="decision/measure",
+            option_id=decision_option_id(healthy),
+            to_origin={},
+        )
         is None
     )
