@@ -119,20 +119,61 @@ _RELEASE_ROWS = json.loads(
 )["cases"]
 
 
-@pytest.mark.parametrize("case", _RELEASE_ROWS, ids=[case["name"] for case in _RELEASE_ROWS])
-def test_a_definite_parts_block_stores_the_bound_rows_the_release_writes(
-    case: dict[str, Any],
-) -> None:
-    """The release reads `_bound_refs` only as `BoundEntity` rows, so a block
-    stored here is one it reads with the same refs."""
-    envelope = _envelope(
-        "definite",
-        spec=_spec(),
-        restatement={"entities": case["restatement_entities"]},
-        entity_refs=case["entity_refs"],
-    )
+def _restated(*texts: str, entity_refs: list[dict[str, Any]]) -> dict[str, Any]:
+    """A part restating one entity row per text, with the `entity_refs` Search states beside it."""
+    return {
+        "restatement": {"entities": [{"text": text} for text in texts]},
+        "entity_refs": entity_refs,
+    }
 
-    assert resolver_digest(envelope)["spec_block"]["_bound_refs"] == case["bound_refs"]
+
+# "aid from G7 to Africa and Africa": Search states one `entity_refs` entry per
+# distinct text, so the restatement holds one row more than the entries.
+_REPEATED_TEXT = _restated(
+    "G7",
+    "Africa",
+    "Africa",
+    entity_refs=[
+        {"text": "G7", "refs": ["GroupOfSeven"]},
+        {"text": "Africa", "refs": ["DACAfrica"]},
+    ],
+)
+
+
+def test_a_definite_parts_block_stores_one_bound_row_per_text() -> None:
+    """The release reads `_bound_refs` only as `BoundEntity` rows. A block stored
+    here holds one per text, the rows the migration writes for a stored mapping."""
+    envelope = _envelope("definite", spec=_spec(), **_REPEATED_TEXT)
+
+    assert resolver_digest(envelope)["spec_block"]["_bound_refs"] == [
+        {"identity": "g7", "text": "g7", "role": None, "refs": ["GroupOfSeven"]},
+        {"identity": "africa", "text": "africa", "role": None, "refs": ["DACAfrica"]},
+    ]
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        _REPEATED_TEXT,
+        _restated(
+            "G7",
+            "Atlantis",
+            entity_refs=[
+                {"text": "G7", "refs": ["GroupOfSeven"]},
+                {"text": "Atlantis", "refs": []},
+            ],
+        ),
+    ],
+    ids=["repeated-text", "unbound-text"],
+)
+def test_a_part_binds_the_same_refs_live_and_from_its_stored_block(part: dict[str, Any]) -> None:
+    envelope = _envelope("definite", spec=_spec(), **part)
+
+    (live,) = outcome_from_envelope(envelope).sources
+    stored = source_from_spec_block(resolver_digest(envelope)["spec_block"])
+
+    assert live.bound_refs
+    assert stored.bound_refs == live.bound_refs
 
 
 @pytest.mark.parametrize(

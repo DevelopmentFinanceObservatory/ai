@@ -33,6 +33,7 @@ import pytest
 from common.unit_refs import PERCENT_UNIT
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
+from compiler.evidence import resolve_group
 from compiler.sources import member_digest, outcome_from_envelope, source_from_spec_block
 from compiler.surface import ToolSchema
 from data_mcp.definition_writes import windowed_identity
@@ -1070,6 +1071,23 @@ def test_a_set_search_labels_otherwise_is_named_by_the_ref_its_text_bound(
     )
 
     assert [issue.finding for issue in result.issues] == expected
+
+
+def test_a_stored_block_names_a_set_by_its_bound_ref_when_a_text_repeats() -> None:
+    """Search states one `entity_refs` entry per distinct text, so a restatement
+    writing "Africa" twice holds one row more than the entries. The stored block
+    still binds "G7" to the set Search labels "Group of Seven"."""
+    envelope = copy.deepcopy(_G7_PART)
+    (part,) = envelope["parts"]
+    part["restatement"]["entities"].append({"role_text": "to", "text": "Africa"})
+    state: dict[str, Any] = {}
+    store_search(state, resolver_digest(envelope))
+    (block,) = state[ORCHESTRATOR_SPECS_KEY].values()
+
+    group = resolve_group(Entity(name="G7", role="donor"), source_from_spec_block(block))
+
+    assert group is not None
+    assert (group.label, group.ref) == ("Group of Seven", "GroupOfSeven")
 
 
 def test_a_filter_naming_a_group_keeps_its_members(

@@ -20,7 +20,8 @@ from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
     block_groups,
-    bound_entities,
+    bound_refs,
+    bound_rows,
     open_entity_axes_of,
     resolved_source_mentions,
     total_reading,
@@ -484,11 +485,11 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     candidate its digest offers keyed by its spec_id (`_offered_specs`).
     `harness.graph.state.store_search` stores them, so `fetch` and the
     planner's pins read a part's or a picked candidate's block with no
-    second `search` call. Each block a part carries holds the refs each
-    of the part's entity rows bound (`compiler.sources.bound_entities`), one
-    `BoundEntity` per row in row order, under `_bound_refs`, which
-    `compiler.sources.source_from_spec_block` reads back, so a pin names
-    an entity by the refs its text bound. The
+    second `search` call. Each block a part carries holds the refs the
+    part's entity texts bound (`compiler.sources.bound_refs`), one
+    `BoundEntity` per text (`compiler.sources.bound_rows`), under
+    `_bound_refs`, which `compiler.sources.source_from_spec_block` reads
+    back, so a pin names an entity by the refs its text bound. The
     top-level `spec_block` holds the first part's block the same way. `kind` is what the envelope says
     of itself: a resolution, a catalogue, or a declined question, `resolution`
     when it states none. The skills it names for `get_skill` are
@@ -518,8 +519,8 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
 
 
 def _with_bound_refs(part: Mapping[str, Any], spec: Any) -> Any:
-    """`spec`, a block `part` carries, with the part's `bound_entities` rows under `_bound_refs` when it has any."""
-    rows = bound_entities(part)
+    """`spec`, a block `part` carries, with the part's `bound_refs` as rows (`bound_rows`) under `_bound_refs` when it has any."""
+    rows = bound_rows(bound_refs(part))
     if not rows or not isinstance(spec, Mapping):
         return spec
     return {**spec, "_bound_refs": [row.model_dump(mode="json") for row in rows]}

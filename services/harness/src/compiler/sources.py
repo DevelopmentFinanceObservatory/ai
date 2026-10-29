@@ -147,76 +147,80 @@ def source_constraint_matches(
 def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
     """The refs Search bound for each entity text of `part`, by the text case-folded.
 
-    Search states, beside the part's `restatement`, one `entity_refs` row
-    per entity text it restates: the text and the refs it finally bound.
-    "G7" binds `GroupOfSeven`, whatever label Search gives the set. A text
-    bound to nothing, being ambiguous, not held or not found, states no
-    refs and is left out, and so is every text of a part without
-    `entity_refs`, from a Search that predates the field. Such a name is
-    matched by label or through the graph's resolve door. A text stated
-    twice binds every ref either row states.
+    Search states, beside the part's `restatement`, `entity_refs` rows: an
+    entity text and the refs it finally bound. "G7" binds `GroupOfSeven`,
+    whatever label Search gives the set. A text bound to nothing, being
+    ambiguous, not held or not found, states no refs and is left out, and so
+    is every text of a part without `entity_refs`, from a Search that
+    predates the field. Such a name is matched by label or through the
+    graph's resolve door. A text stated twice binds every ref either row
+    states.
     """
-    refs: dict[str, tuple[str, ...]] = {}
-    for row in _sequence(part.get("entity_refs")):
-        text, bound = _text(row.get("text")), _strings(row.get("refs"))
-        if text is not None and bound:
-            key = text.casefold()
-            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
-    return refs
+    return _fold_bound_refs(
+        (text, _strings(row.get("refs")))
+        for row in _sequence(part.get("entity_refs"))
+        if (text := _text(row.get("text"))) is not None
+    )
 
 
-def bound_entities(part: Mapping[str, object]) -> tuple[BoundEntity, ...]:
-    """The refs Search bound for each entity row of `part`, one `BoundEntity` per row, in row order.
+def bound_rows(refs: Mapping[str, object]) -> tuple[BoundEntity, ...]:
+    """`refs`, a mapping from each entity text to the refs it bound (`bound_refs`), as
+    the `BoundEntity` rows a spec block stores under `_bound_refs`.
 
-    Search states one `entity_refs` entry per `restatement.entities` row,
-    at the row's position: the row's text and the refs it finally bound.
-    Each entry is kept with its row's identity (`dcid`, else `name`, else
-    `text`) and `role_text`. A row bound to nothing states no refs and is
-    left out, and so is every row of a part whose `entity_refs` does not
-    hold one entry per row, as a Search that predates the field or states
-    one entry per text answers. A spec block stores these rows under
-    `_bound_refs` (`harness.tool_contracts.resolver_digest`).
+    Each entry `text: refs` becomes `BoundEntity(identity=text, text=text,
+    role=None, refs=refs)`: the mapping keeps no row's pinned `dcid`, stated
+    `name` or `role_text`, so `identity` takes the text and `role` is
+    unstated. A reader finds the row by its text, case-folded, with any role
+    fitting, as it read the mapping. Only the string refs of an entry count,
+    each once, and an entry with no text or no such ref is left out. Blocks
+    stored as the mapping are rewritten by this rule too
+    (`harness.bound_refs_migration`), so a stored block holds the same rows
+    whichever way it was written.
     """
-    rows = _sequence(_mapping(part.get("restatement")).get("entities"))
-    entries = _sequence(part.get("entity_refs"))
-    if len(entries) != len(rows):
-        return ()
-    bound: list[BoundEntity] = []
-    for row, entry in zip(rows, entries, strict=True):
-        text, refs = _text(row.get("text")), _strings(entry.get("refs"))
-        if text is None or not refs:
-            continue
-        identity = _text(row.get("dcid")) or _text(row.get("name")) or text
-        bound.append(
-            BoundEntity(
-                identity=identity,
-                text=text,
-                role=_text(row.get("role_text")),
-                refs=tuple(dict.fromkeys(refs)),
-            )
+    rows: list[BoundEntity] = []
+    for text, value in refs.items():
+        strings = (
+            [ref for ref in value if isinstance(ref, str)]
+            if isinstance(value, list | tuple)
+            else []
         )
-    return tuple(bound)
+        if text and strings:
+            rows.append(
+                BoundEntity(identity=text, text=text, role=None, refs=tuple(dict.fromkeys(strings)))
+            )
+    return tuple(rows)
 
 
 def stored_bound_refs(raw: object) -> dict[str, tuple[str, ...]]:
     """A spec block's stored `_bound_refs` as `SelectedSource.bound_refs`: each
-    entity text, case-folded, to the refs it bound.
+    entity text, case-folded, to the refs it bound, as `bound_refs` reads
+    the part the block came from.
 
-    A block holds either a list of `BoundEntity` rows (`bound_entities`), or
-    a mapping from each text, case-folded, to its refs, as blocks stored
-    before the rows were kept hold it. Rows written alike bind every ref
-    either row states, and an absent `_bound_refs` binds none.
+    A block holds either a list of `BoundEntity` rows (`bound_rows`), or a
+    mapping from each text, case-folded, to its refs, as blocks stored before
+    the rows were kept hold it. An absent `_bound_refs` binds none.
 
     Raises:
         ValueError: If a list holds a row that is no `BoundEntity`.
     """
     if isinstance(raw, list | tuple):
-        refs: dict[str, tuple[str, ...]] = {}
-        for row in _BOUND_ENTITIES.validate_python(raw):
-            key = row.text.casefold()
-            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *row.refs)))
-        return refs
-    return {text: tuple(refs) for text, value in _mapping(raw).items() if (refs := _strings(value))}
+        return _fold_bound_refs(
+            (row.text, row.refs) for row in _BOUND_ENTITIES.validate_python(raw)
+        )
+    return _fold_bound_refs((text, _strings(value)) for text, value in _mapping(raw).items())
+
+
+def _fold_bound_refs(
+    pairs: Iterable[tuple[str, Sequence[str]]],
+) -> dict[str, tuple[str, ...]]:
+    """Each text of `pairs`, case-folded, to every ref the pairs stating it bind, in
+    order; a text binding no ref is left out."""
+    refs: dict[str, tuple[str, ...]] = {}
+    for text, bound in pairs:
+        if bound:
+            key = text.casefold()
+            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
+    return refs
 
 
 def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
