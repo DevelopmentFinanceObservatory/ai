@@ -84,5 +84,5 @@ precision = 2
 analysis_mcp = { workspace = true }
 common = { workspace = true }
 data_mcp = { workspace = true }
-dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "0cb55e31d8aa319345d4ff42b6dabba823a82cf6", subdirectory = "python/frame-grammar" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "6b606ec02d67def6851aae913a733da31e0183be", subdirectory = "python/frame-grammar" }
 presentation_mcp = { workspace = true }
