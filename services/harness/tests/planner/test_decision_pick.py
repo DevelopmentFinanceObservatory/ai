@@ -1070,6 +1070,111 @@ def test_a_pick_both_sides_cite_leaves_no_share_of_itself_admitted() -> None:
     assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
 
 
+def test_a_pick_on_another_decision_keeps_a_share_an_earlier_pick_made() -> None:
+    """The user's pick put the first share's numerator on the US total, a share of
+    itself admitted as theirs. A second pick, of the year a second share's inputs
+    cite, keeps the first share as the card holds it, which the planner may not
+    change, so the replan is admitted."""
+    measure = Decision(
+        slot="measure",
+        description="What the share measures.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    first = _dac_countries("first", _US_MULTILATERAL)
+    part = Decision(
+        slot="part",
+        description="Which figure leads the share.",
+        options=[first.measure, "another figure"],
+        chosen=first.measure,
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(measure=first.measure),
+    )
+    year = Decision(
+        slot="year",
+        description="Which year the second share reads.",
+        options=["2019", "2018"],
+        chosen="2019",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(period=Period(start=2019, end=2019)),
+    )
+    cites_year = {"decision_ids": ("measure", "year")}
+    third = _dac_countries("third", _US_MULTILATERAL).model_copy(update=cites_year)
+    fourth = _dac_countries("fourth", _US_TOTAL).model_copy(update=cites_year)
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, part, year]),
+        evidence_requirements=[
+            first.model_copy(update={"decision_ids": ("measure", "part")}),
+            _dac_countries("second", _US_TOTAL),
+            third,
+            fourth,
+            _share("first", "second"),
+            _share("third", "fourth").model_copy(update={"id": "share_two"}),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    picks = [("part", "another figure"), ("year", "2018")]
+    replans = [
+        (
+            part.model_copy(
+                update={
+                    "chosen": "another figure",
+                    "fixes": DecisionFixes(measure="another figure"),
+                }
+            ),
+            [
+                _dac_countries("first", _US_TOTAL).model_copy(
+                    update={"measure": "another figure", "decision_ids": ("measure", "part")}
+                )
+            ],
+        ),
+        (
+            year.model_copy(
+                update={
+                    "chosen": "2018",
+                    "fixes": DecisionFixes(period=Period(start=2018, end=2018)),
+                }
+            ),
+            [
+                held.model_copy(update={"period": Period(start=2018, end=2018)})
+                for held in (third, fourth)
+            ],
+        ),
+    ]
+
+    version = card["version"]
+    for (slot, chosen), (picked, requirements) in zip(picks, replans, strict=True):
+        shown = load_plan(ctx.state)
+        assert shown is not None
+        pick = decision_pick(
+            shown,
+            choice_id=f"decision/{slot}",
+            option_id=decision_option_id(chosen),
+            to_origin={},
+            alignments={},
+        )
+        assert pick is not None
+        save_decision_pick(ctx.state, pick)
+        result = propose(
+            amends_version=version,
+            decisions=drafts([picked]),
+            evidence_requirements=requirements,
+            tool_context=ctx,
+        )
+        assert result["outcome"] == Outcome.OK.value, (slot, result)
+        version = result["version"]
+
+
 # A ranking decision whose options differ only in how many donors it keeps.
 RANKING = Decision(
     slot="donor_scope",
