@@ -7,13 +7,16 @@ holds under it, and the dataset's versions in apis.
 
 Recoverable:
 
-- The apis pair. A frame minted with the default columns is held under the
-  apis pair itself. A frame minted with `options.columns` or `options.groupby`
-  is held under a `content_version` that is a one-way hash of the apis
-  `content_version`, the columns and the groupby (`frame_ref_for`), so the routine
-  recomputes that hash for each stored version of the dataset, each column selection
-  `get_data` can send (`RECOVERABLE_COLUMNS`), and no groupby or the one apis
-  recorded for the version, and takes the one that matches.
+- The apis pair. A frame minted with the default options is held under the
+  apis pair itself. A frame minted with `options.columns`, `options.groupby` or
+  `options.without_party_totals` is held under a `content_version` that is a one-way
+  hash of the apis `content_version`, the columns, the groupby and the cut
+  (`frame_ref_for`), so the routine recomputes that hash for each stored version of
+  the dataset, each column selection `get_data` can send (`RECOVERABLE_COLUMNS`), and
+  no groupby or the one apis recorded for the version, and takes the one that matches.
+  A groupby is tried with its `by` in each order `named_groupbys` lists, since a frame
+  registered before `frame_ref_for` sorted `by` is named with the order get_data sent,
+  and the record keeps the order that matched.
 - `options.columns`, by the same match.
 - `enrichment_stamp` of a frame minted with `KIND_COLUMNS`: the stamp its pair is named
   under. Each candidate above is tried under the stamp the versions answer lists on its
@@ -53,7 +56,8 @@ Recoverable:
 Not recoverable:
 
 - A summed or cut frame whose options apis recorded on no stored file. Its
-  version lists as `not_recorded`, and it fails with `groupby_unrecorded`.
+  version lists as `not_recorded`, and it fails with `groupby_unrecorded`, as does a
+  summed version whose recorded `groupby.by` is no list of axis names.
 - Whether a frame under an unsummed version was a `groupby` sum. apis serves a
   sum over a dataset one StatVar contributes to under the unsummed
   `content_version`, so a frame there holding one StatVar may have been minted
@@ -88,6 +92,7 @@ from common.materialisation import (
     MaterialisationTrace,
     MintRecord,
     MintRecordUnrecoverableError,
+    groupby_axes,
 )
 from dfo_frame_grammar import Frame
 
@@ -98,6 +103,7 @@ from data_mcp.frame_materialisation import (
     TYPE_COLUMN_SELECTIONS,
     WITHOUT_PARTY_TOTALS,
     frame_ref_for,
+    named_groupbys,
     observed_shape,
     recorded_stamp,
 )
@@ -202,7 +208,8 @@ async def recover_mint_record(
     """
     versions = await dataset_versions(spec_id=ref.spec_id)
     for version in versions:
-        groupbys = (None,) if version.groupby is None else (None, version.groupby)
+        recorded = _recorded_groupby(version)
+        groupbys = (None,) if recorded is None else (None, *named_groupbys(recorded))
         for groupby, cut, columns, stamp in product(
             groupbys, (False, True), RECOVERABLE_COLUMNS, _listed_or_none(version)
         ):
@@ -213,15 +220,18 @@ async def recover_mint_record(
                 groupby=groupby,
                 without_party_totals=cut,
                 enrichment_stamp=stamp,
+                keep_by_order=True,
             )
             if candidate != ref:
                 continue
             options: dict[str, Any] = dict(DEFAULT_MINT_OPTIONS)
-            if version.base_content_version is not None:
-                if version.groupby is None and not version.without_party_totals:
+            if groupby is not None:
+                options["groupby"] = groupby
+            elif version.base_content_version is not None:
+                if recorded is None and not version.without_party_totals:
                     raise MintRecordUnrecoverableError(ref, reason="groupby_unrecorded")
-                if version.groupby is not None:
-                    options["groupby"] = dict(version.groupby)
+                if recorded is not None:
+                    options["groupby"] = dict(recorded)
             if cut or version.without_party_totals:
                 options[WITHOUT_PARTY_TOTALS] = True
             if columns:
@@ -237,6 +247,18 @@ async def recover_mint_record(
                 enrichment_stamp=recorded_stamp(columns, stamp),
             )
     return await _recover_from_trace(ref, versions=versions, store=store)
+
+
+def _recorded_groupby(version: DatasetVersion) -> Mapping[str, Any] | None:
+    """The `groupby` apis recorded for `version`, or `None` when it recorded none or one
+    whose `by` is no list of axis names, which names no pair."""
+    if version.groupby is None:
+        return None
+    try:
+        groupby_axes(version.groupby)
+    except ValueError:
+        return None
+    return version.groupby
 
 
 def _named_cuts(options: Mapping[str, Any]) -> tuple[bool, ...]:
@@ -263,20 +285,25 @@ async def _recover_from_trace(
     if held is None or not isinstance(trace, MaterialisationTrace) or trace.options is None:
         raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
     options = trace.options
+    try:
+        groupbys = (None,) if options.get("groupby") is None else named_groupbys(options["groupby"])
+    except ValueError as exc:
+        raise MintRecordUnrecoverableError(ref, reason="no_version_matches") from exc
     for version in versions:
         stamps = (
             (trace.enrichment_stamp,)
             if trace.enrichment_stamp is not None
             else _listed_or_none(version)
         )
-        for stamp, cut in product(stamps, _named_cuts(options)):
+        for stamp, cut, groupby in product(stamps, _named_cuts(options), groupbys):
             candidate = frame_ref_for(
                 spec_id=ref.spec_id,
                 content_version=version.content_version,
                 columns=tuple(options.get("columns") or ()),
-                groupby=options.get("groupby"),
+                groupby=groupby,
                 without_party_totals=cut,
                 enrichment_stamp=stamp,
+                keep_by_order=True,
             )
             if candidate == ref:
                 return MintRecord(

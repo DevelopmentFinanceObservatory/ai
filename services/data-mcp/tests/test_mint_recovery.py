@@ -363,8 +363,12 @@ async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
 
 @pytest.mark.parametrize(
     "options",
-    [None, _DEFAULT_OPTIONS | {"groupby": {"by": ["donor"], "op": "sum"}}],
-    ids=["trace-without-options", "trace-naming-another-groupby"],
+    [
+        None,
+        _DEFAULT_OPTIONS | {"groupby": {"by": ["donor"], "op": "sum"}},
+        _DEFAULT_OPTIONS | {"groupby": {"op": "sum"}},
+    ],
+    ids=["trace-without-options", "trace-naming-another-groupby", "trace-groupby-without-by"],
 )
 async def test_a_sum_that_kept_its_version_is_unrecoverable_without_its_options(
     options: dict[str, object] | None,
@@ -376,6 +380,53 @@ async def test_a_sum_that_kept_its_version_is_unrecoverable_without_its_options(
         await recover_mint_record(ref, dataset_versions=_Versions(), store=store)
 
     assert raised.value.reason == "no_version_matches"
+
+
+# A breakdown's groupby as get_data sent it before it sorted `by`, and as apis records it.
+_SENT_BREAKDOWN = {"by": ["time_period", "crsPurpose"], "op": "sum", "levels": {"crsPurpose": 0}}
+_RECORDED_BREAKDOWN = _SENT_BREAKDOWN | {"by": ["crsPurpose", "time_period"]}
+
+
+@pytest.mark.parametrize("from_trace", [False, True], ids=["from-a-version", "from-the-trace"])
+async def test_a_breakdown_named_before_by_was_sorted_recovers_in_the_order_that_named_it(
+    from_trace: bool,
+) -> None:
+    """The pair hashes `by` in the order get_data sent. A version lists it sorted, so
+    recovery tries every order and the record keeps the one the pair was named with."""
+    content_version = _OLDER if from_trace else _SUMMED
+    ref = frame_ref_for(
+        spec_id=_SPEC_ID,
+        content_version=content_version,
+        groupby=_SENT_BREAKDOWN,
+        keep_by_order=True,
+    )
+    options = _DEFAULT_OPTIONS | {"groupby": _SENT_BREAKDOWN}
+    versions = (
+        DatasetVersion(_SUMMED, _NEWER, "groupby", _RECORDED_BREAKDOWN),
+        DatasetVersion(_OLDER, None, "plain", None),
+    )
+    store = await _holding(ref, "dcid:A", options=options if from_trace else None)
+
+    record = await recover_mint_record(ref, dataset_versions=_Versions(versions), store=store)
+
+    assert record == MintRecord(
+        frame=ref,
+        dataset=FrameRef(spec_id=_SPEC_ID, content_version=content_version),
+        options=options,
+        stat_var_count=1,
+    )
+
+
+async def test_a_version_whose_groupby_has_no_axes_is_a_sum_apis_did_not_record() -> None:
+    ref = FrameRef(spec_id=_SPEC_ID, content_version=_SUMMED)
+    versions = (DatasetVersion(_SUMMED, _NEWER, "groupby", {"by": [1, "crsPurpose"]}),)
+
+    with pytest.raises(MintRecordUnrecoverableError) as raised:
+        await recover_mint_record(
+            ref, dataset_versions=_Versions(versions), store=await _holding(ref, "dcid:A")
+        )
+
+    assert raised.value.reason == "groupby_unrecorded"
 
 
 _KINDS = ("party_kind",)

@@ -34,7 +34,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from functools import partial
-from itertools import combinations
+from itertools import combinations, permutations
 from types import MappingProxyType
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -54,6 +54,8 @@ from common.materialisation import (
     MintRecord,
     frame_from_verified_parquet_bytes,
     get_store,
+    groupby_axes,
+    normal_groupby,
 )
 from common.place_type import (
     FLOW_ROLE_COLUMNS,
@@ -108,6 +110,7 @@ __all__ = [
     "frame_from_parquet_bytes",
     "frame_ref_for",
     "materialise_and_register",
+    "named_groupbys",
     "recorded_stamp",
 ]
 
@@ -220,8 +223,10 @@ def replayed_mint_options(
     guessing other role columns. A root recorded with `without_party_totals` and kinds
     alone is the rendering `get_data(without_party_totals=True)` mints, and replays with
     `KIND_COLUMNS`. Every other selection is unchanged. A flow frame without this metadata
-    cannot prove that a sum or rank leaves group totals out.
+    cannot prove that a sum or rank leaves group totals out. A recorded `groupby` is sent
+    with its `by` sorted, so the mint record the replay writes holds the options it sent.
     """
+    options = _sorted_by(options)
     columns = options.get("columns") or ()
     kind_tokens = {_LEGACY_KIND_COLUMN, *KIND_COLUMNS}
     if options.get(WITHOUT_PARTY_TOTALS) and columns and set(columns) <= kind_tokens:
@@ -368,7 +373,7 @@ async def materialise_and_register(
                 dataset=FrameRef(
                     spec_id=manifest.definition.spec_id, content_version=manifest.content_version
                 ),
-                options=dict(options),
+                options=_sorted_by(options),
                 scope=dict(scope or {}),
                 stat_var_count=outcome.stat_var_count,
                 enrichment_stamp=stamp,
@@ -376,6 +381,20 @@ async def materialise_and_register(
             deadline=deadline,
         )
     return replace(outcome, frame_ref=ref)
+
+
+def _sorted_by(options: Mapping[str, Any]) -> dict[str, Any]:
+    """`options` with `groupby.by` sorted, as apis records it, the form a mint sends and
+    its record keeps.
+
+    Raises:
+        ValueError: When `by` is no list of axis names
+            (`common.materialisation.groupby_axes`).
+    """
+    groupby = options.get("groupby")
+    if groupby is None:
+        return dict(options)
+    return {**options, "groupby": normal_groupby(groupby)}
 
 
 async def _write_mint_record(record: MintRecord, *, deadline: CallDeadline | None) -> None:
@@ -865,6 +884,7 @@ def frame_ref_for(
     groupby: Mapping[str, Any] | None = None,
     without_party_totals: bool = False,
     enrichment_stamp: str | None = None,
+    keep_by_order: bool = False,
 ) -> FrameRef:
     """The frame reference of the frame a mint names as `{spec_id, content_version}`,
     minted with `options.columns` set to `columns`, `options.groupby` to `groupby` and
@@ -873,8 +893,8 @@ def frame_ref_for(
     apis keeps one `content_version` for every rendering of a materialisation,
     so a frame minted with extra columns (`get_data(place_types=True)`), a sum that
     keeps the version, and one minted with the default columns come back under one
-    pair. The default rendering, with no columns and no groupby, keeps the mint's own
-    pair and holds the version's canonical frame. Any other names its options in its
+    pair. The default rendering, with no columns, no groupby and no cut, keeps the
+    mint's own pair and holds the version's canonical frame. Any other names its options in its
     `content_version`: `cv_` and the first 32 hex digits of the SHA-256 of the
     RFC 8785 form of `{"columns": [...], "content_version": ...}`, with `columns`
     sorted, a `"groupby"` member holding `groupby` with its `by` sorted when it is set,
@@ -899,16 +919,22 @@ def frame_ref_for(
     replays the cut, so the frame is named apart from the one read without it. apis'
     `analysis_roots.frame_ref_for` names root frames the same way.
 
+    `keep_by_order` names `groupby` with `by` in the order it holds, the pair of a frame
+    registered before this function sorted `by` (`named_groupbys`).
+
     Raises:
-        pydantic.ValidationError: When `spec_id` and `content_version` do not fit
-            `FrameRef`'s pair shape.
+        ValueError: When `spec_id` and `content_version` do not fit `FrameRef`'s pair
+            shape (`pydantic.ValidationError`), or `groupby`'s `by` is no list of axis
+            names (`common.materialisation.groupby_axes`).
     """
     ref = FrameRef(spec_id=spec_id, content_version=content_version)
     if not columns and groupby is None and not without_party_totals:
         return ref
     preimage: dict[str, Any] = {"columns": sorted(columns), "content_version": content_version}
     if groupby is not None:
-        preimage["groupby"] = {**groupby, "by": sorted(groupby["by"])}
+        preimage["groupby"] = (
+            {**groupby, "by": groupby_axes(groupby)} if keep_by_order else normal_groupby(groupby)
+        )
     if without_party_totals:
         preimage[WITHOUT_PARTY_TOTALS] = True
     if enrichment_stamp is not None and requests_kinds(columns):
@@ -917,6 +943,30 @@ def frame_ref_for(
     return FrameRef(
         spec_id=spec_id, content_version=f"cv_{hashlib.sha256(rendering).hexdigest()[:32]}"
     )
+
+
+# The longest `by` whose every order `named_groupbys` lists: 4 axes give 24 orders. get_data
+# sums by two axes at most, and a longer `by` is listed in its sorted and recorded orders.
+_MAX_PERMUTED_BY = 4
+
+
+def named_groupbys(groupby: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """`groupby` with `by` in each order a held frame's pair may name it in, for
+    `frame_ref_for(keep_by_order=True)`: sorted, as `frame_ref_for` names it, then as
+    `groupby` records it, then, for a `by` of at most `_MAX_PERMUTED_BY` axes, every other
+    order. A frame registered before `frame_ref_for` sorted `by` is held under the pair
+    named with the order get_data sent, which a record or a version may no longer keep.
+
+    Raises:
+        ValueError: When `by` is no list of axis names
+            (`common.materialisation.groupby_axes`).
+    """
+    by = groupby_axes(groupby)
+    orders = [sorted(by), by]
+    if len(by) <= _MAX_PERMUTED_BY:
+        orders.extend(list(order) for order in permutations(by))
+    unique = dict.fromkeys(tuple(order) for order in orders)
+    return tuple({**groupby, "by": list(order)} for order in unique)
 
 
 def _ref_or_refusal(

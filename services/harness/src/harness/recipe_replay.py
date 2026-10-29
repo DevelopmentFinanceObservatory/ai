@@ -102,7 +102,7 @@ from common.recipe import (
 from common.rolling import canonical_populations, rolling_roots
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, RowBudgetExhausted
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, CallDeadline, use_call_budget
-from data_mcp.frame_materialisation import frame_ref_for
+from data_mcp.frame_materialisation import WITHOUT_PARTY_TOTALS, frame_ref_for, named_groupbys
 from data_mcp.get_data_tool import RootMint, mint_recorded_root
 from data_mcp.operations import QueuedOperation
 from dfo_frame_grammar import FrameError, RollingError, shift_period
@@ -945,13 +945,22 @@ async def replay_recipe(
 
 def _names_its_groupby(record: MintRecord) -> bool:
     """Whether `record` is a groupby root whose frame is held under the pair
-    `frame_ref_for` derives from its dataset, columns, groupby and the enrichment
-    stamp the record keeps."""
+    `frame_ref_for` derives from its dataset, columns, groupby, cut and the enrichment
+    stamp the record keeps. The groupby is tried with its `by` in each order
+    `named_groupbys` lists, since a record written before `frame_ref_for` sorted `by`
+    names its frame with the order get_data sent. `MintRecord` has checked the
+    groupby's shape."""
     groupby = record.options.get("groupby")
-    return groupby is not None and record.frame == frame_ref_for(
-        spec_id=record.dataset.spec_id,
-        content_version=record.dataset.content_version,
-        columns=tuple(record.options.get("columns") or ()),
-        groupby=groupby,
-        enrichment_stamp=record.enrichment_stamp,
+    return groupby is not None and any(
+        record.frame
+        == frame_ref_for(
+            spec_id=record.dataset.spec_id,
+            content_version=record.dataset.content_version,
+            columns=tuple(record.options.get("columns") or ()),
+            groupby=named,
+            without_party_totals=record.options.get(WITHOUT_PARTY_TOTALS) is True,
+            enrichment_stamp=record.enrichment_stamp,
+            keep_by_order=True,
+        )
+        for named in named_groupbys(groupby)
     )

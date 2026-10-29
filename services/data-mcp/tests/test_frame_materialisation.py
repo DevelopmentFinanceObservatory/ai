@@ -43,6 +43,7 @@ from data_mcp.frame_materialisation import (
     MaterialisationOutcome,
     frame_ref_for,
     materialise_and_register,
+    named_groupbys,
 )
 from data_mcp.manifest import Manifest, strip_manifest
 from data_mcp.settings import Settings
@@ -887,6 +888,16 @@ async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> Non
 # A done operation lists every rendering apis stores under the pair. Dev listed
 # another caller's groupby sum first, then the plain rendering and its statistics.
 _SUM_GROUPBY: dict[str, object] = {"by": ["time_period", "crsPurpose"], "op": "sum"}
+
+
+def _as_recorded(options: dict[str, object]) -> dict[str, object]:
+    """`options` as a mint record keeps them: with `groupby.by` sorted, as apis records it."""
+    groupby = options.get("groupby")
+    if not isinstance(groupby, dict):
+        return options
+    return options | {"groupby": groupby | {"by": sorted(groupby["by"])}}
+
+
 _SUM_SIBLING_RENDERING: dict[str, object] = {
     "bundle": False,
     "format": "parquet",
@@ -959,7 +970,7 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
     assert outcome.frame_ref == ref
     # The mint record sits under the frame's pair and names apis' own.
     assert await get_frame_store().get_mint_record(ref) == MintRecord(
-        frame=ref, dataset=_FRAME_REF, options=options, stat_var_count=1
+        frame=ref, dataset=_FRAME_REF, options=_as_recorded(options), stat_var_count=1
     )
 
 
@@ -2483,8 +2494,12 @@ def test_the_default_columns_keep_the_mints_own_pair() -> None:
 
 
 # apis' `tests/datasets_api/test_analysis_roots.py` pins the same pair for the same
-# rendering, so the two producers of a root frame's pair cannot drift apart.
+# rendering. Each repo checks its own `frame_ref_for` against its own copy, so a change
+# to the preimage in one repo shows here only once this constant is compared with apis'.
 _SHARED_PAIR = "cv_bb722d06259f357e6961a081f1c1f141"
+# The pair of the same version read with the cut alone: `{"columns": [],
+# "content_version": ..., "without_party_totals": true}`.
+_CUT_ONLY_PAIR = "cv_613c1d4ba3b0c2f1dd76c395584d858c"
 
 
 @pytest.mark.parametrize("by", [["origin", "time_period"], ["time_period", "origin"]])
@@ -2499,11 +2514,11 @@ def test_a_frame_cut_of_party_totals_is_named_by_the_cut_and_its_groupby_in_any_
         without_party_totals=True,
     )
     bare = frame_ref_for(
-        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, without_party_totals=True
+        spec_id="spec_" + "a" * 32, content_version="cv_" + "1" * 32, without_party_totals=True
     )
 
     assert ref.content_version == _SHARED_PAIR
-    assert bare.content_version.startswith("cv_") and bare != _FRAME_REF
+    assert bare.content_version == _CUT_ONLY_PAIR
 
 
 def test_extra_columns_name_a_frame_of_their_own() -> None:
@@ -2578,6 +2593,59 @@ def test_a_groupby_names_a_frame_apart_from_the_plain_and_the_typed_pair() -> No
         ).hexdigest()[:32]
     )
     assert len({ref.content_version for ref in (_FRAME_REF, summed, summed_typed, typed)}) == 4
+    # The pair of a frame registered before `by` was sorted names the order sent.
+    assert (
+        frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            groupby=_SUM_GROUPBY,
+            keep_by_order=True,
+        ).content_version
+        == "cv_"
+        + hashlib.sha256(
+            b'{"columns":[],"content_version":"'
+            + _CONTENT_VERSION.encode()
+            + b'","groupby":{"by":["time_period","crsPurpose"],"op":"sum"}}'
+        ).hexdigest()[:32]
+    )
+
+
+@pytest.mark.parametrize(
+    ("by", "orders"),
+    [
+        (
+            ["time_period", "crsPurpose"],
+            [["crsPurpose", "time_period"], ["time_period", "crsPurpose"]],
+        ),
+        (
+            ["b", "a", "c"],
+            [
+                ["a", "b", "c"],
+                ["b", "a", "c"],
+                ["b", "c", "a"],
+                ["a", "c", "b"],
+                ["c", "b", "a"],
+                ["c", "a", "b"],
+            ],
+        ),
+        (["e", "d", "c", "b", "a"], [["a", "b", "c", "d", "e"], ["e", "d", "c", "b", "a"]]),
+    ],
+    ids=["two-axes", "three-axes-every-order", "five-axes-sorted-and-recorded"],
+)
+def test_a_groupby_is_named_in_its_sorted_and_recorded_order_and_every_order_of_a_short_by(
+    by: list[str], orders: list[list[str]]
+) -> None:
+    assert named_groupbys({"by": by, "op": "sum"}) == tuple(
+        {"by": order, "op": "sum"} for order in orders
+    )
+
+
+@pytest.mark.parametrize(
+    "groupby", [{"op": "sum"}, {"by": "time_period"}, {"by": [1, "time_period"]}]
+)
+def test_a_groupby_without_a_list_of_axes_names_no_pair(groupby: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        frame_ref_for(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, groupby=groupby)
 
 
 _KIND_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["party_kind"]}
@@ -3033,5 +3101,8 @@ async def test_a_groupby_mint_registers_its_rendering_under_the_pair_naming_it(
     assert held[1].options == _SUM_SIBLING_RENDERING
     assert await get_frame_store().get(_FRAME_REF) is None
     assert await get_frame_store().get_mint_record(expected) == MintRecord(
-        frame=expected, dataset=_FRAME_REF, options=_SUM_SIBLING_RENDERING, stat_var_count=1
+        frame=expected,
+        dataset=_FRAME_REF,
+        options=_as_recorded(_SUM_SIBLING_RENDERING),
+        stat_var_count=1,
     )
