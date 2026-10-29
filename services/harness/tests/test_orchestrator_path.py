@@ -1179,7 +1179,7 @@ _COUNT_ONLY_SHAPES = {
     "aggregate": (
         "aggregate: sum grouped by reporter",
         "6 group(s):",
-        "  reporter=dcid:USA [n=1]: 1.0",
+        "  reporter=dcid:USA [1 row]: 1.0",
     ),
     "growth": (
         "growth: 2020..2023, entity_by reporter",

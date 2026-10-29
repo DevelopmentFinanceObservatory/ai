@@ -1231,28 +1231,34 @@ def test_the_basis_line_states_a_composite_frame_from_its_served_components(
 
 
 @pytest.mark.parametrize(
-    ("contributions", "clause"),
+    ("published", "clause"),
     [
-        (False, "bilateral aid only"),
-        (True, f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+        (None, "bilateral aid only"),
+        ("contributions", f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+        ("multilateral", f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
     ],
-    ids=["bilateral-the-only-other", "a-contributions-total-offered-too"],
+    ids=[
+        "bilateral-the-only-other",
+        "a-contributions-total-offered-too",
+        "a-multilateral-total-offered-too",
+    ],
 )
 def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else_fits(
-    contributions: bool, clause: str
+    published: str | None, clause: str
 ) -> None:
     """An inclusive choice served with no imputed component: the figures are
     bilateral flows alone or a published total counting core contributions to
-    multilaterals, which the record does not tell apart. With only a
-    bilateral option besides, they read as it; with a contributions option
-    offered too, the choice says the figures differ from it."""
+    multilaterals, with or without bilateral flows, which the record does not
+    tell apart. With only a bilateral option besides, they read as it; with
+    such a total's option offered too, the choice says the figures differ
+    from it."""
     choice = copy.deepcopy(_INCLUSIVE)
-    if contributions:
+    if published is not None:
         choice["options"].append(
             {
-                "option_id": "provider:contributions",
-                "label": "with core contributions to multilaterals",
-                "binding": {"kind": "provider", "scope": "contributions"},
+                "option_id": f"provider:{published}",
+                "label": "core contributions to multilaterals",
+                "binding": {"kind": "provider", "scope": published},
                 "availability": {"status": "available"},
             }
         )
@@ -1269,13 +1275,14 @@ def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else
 
 def _total_block(spec_id: str, netting: str) -> dict[str, Any]:
     """The spec block Search returns for US ODA counted on `netting`, with
-    the label it names the measure by, as dfo-apis writes it."""
+    the labels it names the measure and the concept by, as dfo-apis writes it."""
     label = f"{netting.lower()} disbursements (official development assistance)"
     return {
         "spec_id": spec_id,
         "resolved": {
             "measure_label": f"{netting.lower()} disbursements",
             "shape": {"label": label},
+            "concept_label": "official development assistance",
         },
     }
 
@@ -1318,11 +1325,16 @@ def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_s
     )
 
 
-def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept() -> None:
-    """A share of health aid in all official development assistance. The total
-    was compiled again from its basis choice, so Search's label for its block
-    names it, "gross disbursements (official development assistance)": the
-    concept alone, since its measure is one of its clauses."""
+_BEFORE_CONCEPTS = {
+    "measure_label": "gross disbursements",
+    "shape": {"label": "gross disbursements (official development assistance)"},
+}
+
+
+def _health_share_basis_line(resolved: dict[str, object]) -> str:
+    """The basis line of a share of health aid in all official development
+    assistance, whose total was compiled again from its basis choice and so
+    is named by Search's names for its block, `resolved`."""
     health = _example_part(sector="sector:120+130")
     scope = health["scope"]
     scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
@@ -1348,20 +1360,35 @@ def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
             "origin": {"kind": "choice", "choice_id": basis["id"]},
         }
     ]
-    specs = {
-        "spec_total": {
-            "spec_id": "spec_total",
-            "resolved": {
-                "measure_label": "gross disbursements",
-                "shape": {"label": "gross disbursements (official development assistance)"},
-            },
-        }
-    }
+    specs = {"spec_total": {"spec_id": "spec_total", "resolved": resolved}}
+    return basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[])
 
-    assert basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[]) == (
-        'Counted as: "health aid": health incl. population and reproductive health '
-        "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
-        "official development assistance: gross disbursements, current USD."
+
+_HEALTH_CLAUSES = (
+    'Counted as: "health aid": health incl. population and reproductive health '
+    "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
+)
+
+
+def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept() -> None:
+    """A share of health aid in all official development assistance. The total
+    was compiled again from its basis choice, so Search's names for its block
+    name it: its `concept_label`, which states no measure, since its measure is
+    one of its clauses."""
+    resolved = {**_BEFORE_CONCEPTS, "concept_label": "official development assistance"}
+
+    assert _health_share_basis_line(resolved) == (
+        f"{_HEALTH_CLAUSES}official development assistance: gross disbursements, current USD."
+    )
+
+
+def test_a_total_from_a_search_stating_no_concept_is_named_by_searchs_label_as_written() -> None:
+    """The same share from a Search that sends no `concept_label`: the total is
+    named by its shape label as Search composed it, measure included, so the
+    measure reads in the name and again as its clause."""
+    assert _health_share_basis_line(_BEFORE_CONCEPTS) == (
+        f"{_HEALTH_CLAUSES}gross disbursements (official development assistance): "
+        "gross disbursements, current USD."
     )
 
 

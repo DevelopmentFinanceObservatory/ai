@@ -707,43 +707,74 @@ def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_se
     assert dropped[0]["served"] is None
 
 
+_IMPUTED_BASIS_WORDS = "imputed multilateral aid is not published on that measure basis"
+
+
+def _declared_conflict(cause: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "code": "conflicts_with",
+        "detail": {"entry": "measure_basis:net", "cause": cause},
+    }
+
+
 @pytest.mark.parametrize(
-    ("availability", "because"),
+    ("cause", "availability", "because"),
     [
         (
-            {
-                "status": "unavailable",
-                "code": "conflicts_with",
-                "detail": {
-                    "entry": "measure_basis:net",
-                    "cause": "imputed_gross_disbursements_only",
-                },
-            },
-            "it conflicts with another choice [imputed_gross_disbursements_only]",
+            "imputed_gross_disbursements_only",
+            _declared_conflict("imputed_gross_disbursements_only"),
+            _IMPUTED_BASIS_WORDS,
         ),
         (
+            "imputed_gross_disbursements_only",
             {"status": "available", "detail": {}},
-            "Search could not apply it [imputed_gross_disbursements_only]",
+            _IMPUTED_BASIS_WORDS,
         ),
         (
+            "both_composite_sources",
+            _declared_conflict("both_composite_sources"),
+            "imputed multilateral aid cannot be added to the OECD headline series",
+        ),
+        (
+            "unworded_conflict",
+            _declared_conflict("unworded_conflict"),
+            "it conflicts with another choice [unworded_conflict]",
+        ),
+        (
+            "unworded_conflict",
+            {"status": "available", "detail": {}},
+            "Search could not apply it [unworded_conflict]",
+        ),
+        (
+            "unworded_conflict",
             {"status": "unavailable", "code": "conflicts_with", "detail": "measure_basis:net"},
-            "Search could not apply it [imputed_gross_disbursements_only]",
+            "Search could not apply it [unworded_conflict]",
         ),
     ],
-    ids=["declared-conflict", "no-conflict-stated", "detail-not-a-mapping"],
+    ids=[
+        "imputed-basis-declared",
+        "imputed-basis-no-conflict-stated",
+        "both-composite-sources",
+        "unworded-declared",
+        "unworded-no-conflict-stated",
+        "unworded-detail-not-a-mapping",
+    ],
 )
 def test_a_dropped_entry_a_declared_conflict_kept_out_reads_as_a_conflict(
-    availability: dict[str, Any], because: str
+    cause: str, availability: dict[str, Any], because: str
 ) -> None:
-    """An entry dropped under a declared conflict's own cause, which the option
-    it asked for names as the conflict blocking it, reads as a conflict; the
-    same cause on an option naming no conflict, or naming one in a `detail`
-    that is no mapping, says only that Search could not apply it."""
+    """An entry dropped under a conflict cause Search declares reads as that
+    cause's words, whatever the option's availability states. A cause with no
+    words, which the option it asked for names as the conflict blocking it,
+    reads as a conflict; the same cause on an option naming no conflict, or
+    naming one in a `detail` that is no mapping, says only that Search could
+    not apply it."""
     spec = _inclusive_request_served_bilateral()
     scope = spec["resolved"]["scope_choices"]
     (provider,) = [c for c in scope["choices"] if c["axis"] == "provider"]
     provider["options"][1]["availability"] = availability
-    scope["dropped_entries"][0]["cause"] = "imputed_gross_disbursements_only"
+    scope["dropped_entries"][0]["cause"] = cause
 
     envelope = _envelope("definite", spec=spec)
 

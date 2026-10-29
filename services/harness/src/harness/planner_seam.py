@@ -95,12 +95,12 @@ import logging
 import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
+from compiler.sources import readable_source
 from compiler.surface import ToolSurface
 from executor.classify import ExecutorCode
 from google.adk import Context, Event
@@ -123,7 +123,6 @@ from planner.plan import (
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
-    DatasetRequirement,
     PinSource,
     Plan,
     PlanStatus,
@@ -150,13 +149,16 @@ from planner.plan import (
 from planner.records import Severity
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
-from planner.workflow import ElectedMeasure
-from pydantic import ValidationError
+from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
     ALIGNED_PINS_STATE_KEY,
     SEARCHED_PINS_STATE_KEY,
+    AlignedPin,
     Proposal,
+    SourceReadings,
     aligned_pins,
+    held_sector,
+    pinned_sources,
     searched_pins,
     submit,
 )
@@ -173,7 +175,6 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    conversation_readings,
     store_search,
 )
 from harness.prefix_cache import PrefixCache
@@ -195,7 +196,6 @@ from harness.turn_records import (
     measure_choice_text,
     named_spec_ids,
     newest_per_spec_id,
-    part_name,
     render_readings,
 )
 from harness.usage import log_usage
@@ -844,7 +844,7 @@ class PlannerSeam:
         )
         store_aligned_readings(ctx, state)
         if recorded.get("outcome") != Outcome.OK.value:
-            return self._revision_refused(recorded, words=_plan_words(state, prior))
+            return self._revision_refused(recorded, words=plan_display.plan_words(prior))
         translation = await self._translate(ctx)
         referral = PlannerSeam._referral_dict(translation)
         if referral is not None:
@@ -852,7 +852,7 @@ class PlannerSeam:
                 PlannerSeam._closing_refusal(referral)
                 or _unanswered(referral)
                 or _not_ready(referral),
-                words=_plan_words(state, load_plan(state)),
+                words=_revision_words(load_plan(state), prior, state=state),
             )
         answer = declare_ready({**recorded, "translation": translation}, ctx)
         plan = load_plan(state)
@@ -860,7 +860,7 @@ class PlannerSeam:
             blocked = answer.get("submission") or answer.get("translation")
             return self._revision_refused(
                 cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer),
-                words=_plan_words(state, plan or prior),
+                words=_revision_words(plan, prior, state=state),
             )
         return {"plan": plan.model_dump(mode="json"), "summary": answer["summary"]}
 
@@ -1215,7 +1215,7 @@ class PlannerSeam:
     def _revision_refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
         """What `revise` answers for a refusal: `_refused`'s, with why alone
         as one sentence for the user (`harness.sentences.refusal_reason`),
-        naming requirements by `words` (`_plan_words`), under `reason`, which
+        naming requirements by `words` (`harness.plan_display.plan_words`), under `reason`, which
         a switch that did not apply shows under its choice."""
         answer = PlannerSeam._refused(refused)
         answer["refused"]["reason"] = refusal_reason(refused, words=words)
@@ -1416,33 +1416,47 @@ class PlannerSeam:
         )
 
 
-def _plan_words(state: SessionState, plan: Plan | None) -> PlanWords:
-    """How a sentence about `plan` names its requirements
-    (`harness.plan_display.plan_words`): a retrieval by the name the "Counted
-    as" line gives the newest reading of its pin (`harness.turn_records.
-    part_name`), a pin copied over its first years by its origin's."""
-    if plan is None:
-        return PlanWords()
-    to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
-    readings: dict[str, SearchReading] = {}
-    for raw in conversation_readings(state):
-        with suppress(ValidationError):
-            reading = SearchReading.model_validate(raw)
-            if reading.spec_id is not None and reading.scope is not None:
-                readings[reading.spec_id] = reading
-    blocks = {
-        **{spec_id: source.spec_block(spec_id) for spec_id, source in pin_sources(state).items()},
-        **(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) -> PlanWords:
+    """How a sentence about `revision`, which did not compile, names its
+    requirements (`harness.plan_display.plan_words`): each `prior`, the plan the
+    card shows, holds by its name there, and each new one by its own, read off
+    the source Search answered for its pin (`_sources_by_spec_id`)."""
+    if revision is None:
+        return plan_display.plan_words(prior)
+    return plan_display.plan_words(
+        revision, shown_as=prior, pinned=_sources_by_spec_id(state, revision)
+    )
+
+
+def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
+    """Every spec block `state` holds a pin's source in, by spec_id: those of
+    the datasets the planner was shown (`pin_sources`), then this turn's
+    searches (`ORCHESTRATOR_SPECS_KEY`), then the pins compiled for a
+    calculation's inputs (`aligned_pins`), each later one in place of an
+    earlier one for its spec_id."""
+    blocks: dict[str, Mapping[str, Any]] = {
+        spec_id: block
+        for spec_id, shown in pin_sources(state).items()
+        if (block := shown.spec_block(spec_id)) is not None
     }
-    names: dict[str, str] = {}
-    for requirement in plan.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
-            continue
-        pin = to_origin.get(requirement.source_spec_id, requirement.source_spec_id)
-        reading = readings.get(pin)
-        if reading is not None:
-            names[requirement.id] = part_name(reading, blocks.get(pin))
-    return plan_display.plan_words(plan, names=names)
+    blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    for pin in aligned_pins(state):
+        (part,) = pin.digest["part_digests"]
+        if (block := part.get("spec_block")) is not None:
+            blocks[pin.spec_id] = block
+    return blocks
+
+
+def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
+    """The source each spec_id a retrieval of `plan` pins reads, by spec_id,
+    from the block `state` holds for it (`_spec_blocks`). A pin copied over
+    its requirement's window (`planner.plan.windowed_pins`) reads its
+    origin's block. A block not readable as a source is left out, so the
+    retrieval is named by its composed label."""
+    to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
+    blocks = _spec_blocks(state)
+    sources = SourceReadings(lambda spec_id: blocks.get(to_origin.get(spec_id, spec_id)))
+    return pinned_sources(plan.evidence_requirements, sources)
 
 
 def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
@@ -1857,9 +1871,10 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     `switch` node stores a switched one: under the words of the reading it
     was compiled from, keeping that reading's asked, held-open and share
     roles, with its compiled scope on `SearchReading.scope`. A declared
-    whole (`AlignedPin.whole_axis`) is no reading of its part's words, so
-    it is named as the plan card names it, on its measure
-    (`harness.plan_display.whole_name`). Its block marks
+    whole (`AlignedPin.whole_axis`) is no reading of its part's words. It
+    is named off its own block and its part's (`_whole_reading_name`),
+    whatever plan the turn ends on, "health from official donors (DAC) to
+    Kenya" over every donor. Its block marks
     the axes it was compiled on as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
     so the reading reads it in `SearchReading.planner_axes` and
     `harness.scope_choices.carried_entries` leaves that entry out.
@@ -1884,6 +1899,7 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         )
     ]
     stored = {reading.spec_id for reading in readings}
+    sources: SourceReadings | None = None
     for pin in held:
         if pin.spec_id in stored:
             continue
@@ -1893,10 +1909,9 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         digest = copy.deepcopy(pin.digest)
         (part,) = digest["part_digests"]
         if pin.whole_axis is not None:
-            measure = ((part.get("spec_block") or {}).get("resolved") or {}).get("measure_label")
-            part["variable"] = plan_display.whole_name(
-                pin.whole_axis, measure=measure if isinstance(measure, str) else None
-            )
+            if sources is None:
+                sources = SourceReadings(_spec_blocks(planner_state).get)
+            part["variable"] = _whole_reading_name(pin, part.get("spec_block"), sources=sources)
         elif origin is not None:
             part["variable"] = origin.text
         store_search(
@@ -1917,6 +1932,35 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
             held_open=[found.open_roles],
         )
         stored.add(found.spec_id)
+
+
+def _whole_reading_name(
+    pin: AlignedPin, block: Mapping[str, Any] | None, *, sources: SourceReadings
+) -> str:
+    """The name a declared whole's reading is stored under, read off its own
+    `block` and its part's (`pin.origin` in `sources`, read as a source once
+    however many wholes read it) alone, so it holds
+    whatever plan the turn ends on. Over every donor or recipient, as the
+    plan card names it (`harness.plan_display.source_whole_name`), on the
+    sector option the whole's scope holds, else the part's. Over every
+    sector, or from a block not readable as a source, by the axis the whole
+    opens, on its measure (`harness.plan_display.whole_name`)."""
+    assert pin.whole_axis is not None
+    raw = ((block or {}).get("resolved") or {}).get("measure_label")
+    measure = raw if isinstance(raw, str) and raw else None
+    by_axis = plan_display.whole_name(pin.whole_axis, measure=measure)
+    if pin.whole_axis == "sector" or block is None:
+        return by_axis
+    source = readable_source(block)
+    if source is None:
+        return by_axis
+    part = sources.get(pin.origin)
+    held = held_sector(block) or held_sector(sources.block(pin.origin))
+    sector = held.label if held is not None else None
+    named = plan_display.source_whole_name(
+        pin.whole_axis, source=source, part=part, sector=sector, measure=measure
+    )
+    return named or by_axis
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:

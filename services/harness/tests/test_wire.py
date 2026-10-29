@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -1095,6 +1096,24 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
                 "side_classes": ("official", "private", "residual"),
             },
         ),
+        (
+            {
+                "label": "Africa",
+                "ref": "africa",
+                "left_out": ["Africa, unallocated by country (DAC)"],
+                "sum_differs": True,
+            },
+            {
+                "label": "Africa",
+                "ref": "africa",
+                "left_out": ("Africa, unallocated by country (DAC)",),
+                "sum_differs": True,
+            },
+        ),
+        (
+            {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "left_out": []},
+            {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "left_out": ()},
+        ),
     ],
     ids=[
         "single-total",
@@ -1102,6 +1121,8 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
         "without-the-field",
         "empty-field-is-absent",
         "with-the-sides-classes",
+        "members-leaving-out-residuals",
+        "registry-set-leaving-nothing-out",
     ],
 )
 def test_a_seed_carries_the_classes_a_whole_total_holds(
@@ -1116,27 +1137,103 @@ def test_a_seed_carries_the_classes_a_whole_total_holds(
     assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == kept
 
 
+# A dcid past the 256 characters of any other seed text, within the 1,024 apis
+# bounds every identity string at.
+_LONG_REF = "dcid:" + "x" * 900
+
+
 @pytest.mark.parametrize(
-    "whole_of",
-    ["official", [""], list(range(2)), ["party"]],
-    ids=["a-string", "blank-class", "not-text", "a-party-kind"],
+    "group",
+    [
+        {"label": "Africa", "ref": _LONG_REF},
+        {"label": "DAC countries", "total": "DACCountriesTotal", "members": [_LONG_REF]},
+        {"label": "Africa", "ref": "africa", "left_out": ["L" * 2_000]},
+    ],
+    ids=["long-ref", "long-member", "long-left-out-label"],
 )
-def test_a_set_whose_whole_of_is_not_a_list_of_classes_is_dropped(whole_of: object) -> None:
+def test_a_set_within_search_s_own_bounds_seeds_whole(group: dict[str, Any]) -> None:
+    """A set Search's `EntityGroup` can serve seeds with every key as served: refs
+    and members up to apis' 1,024-character identity strings, and residual labels,
+    which apis does not bound."""
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {"observationAbout": group}
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert (
+        seed.spec.entity_groups["observationAbout"].model_dump(mode="json", exclude_none=True)
+        == group
+    )
+
+
+@pytest.mark.parametrize("case", ["dac1", "dac1_non_dac", "dac1_bilateral_uncovered"])
+def test_a_seed_takes_every_key_search_serves_on_a_set(case: str) -> None:
+    """DAC countries' total as Search serves it, with its registry id, its members and
+    whether it holds a multilateral, seeds with every key it was served."""
+    fixture = Path(__file__).parent / "fixtures" / "share_whole_dac_donor_wholes.json"
+    block = json.loads(fixture.read_text())[case]["whole"]
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert {
+        role: group.model_dump(mode="json", exclude_none=True)
+        for role, group in seed.spec.entity_groups.items()
+    } == block["resolved"]["entity_groups"]
+
+
+@pytest.mark.parametrize(
+    "unread",
+    [
+        {"whole_of": "official"},
+        {"whole_of": [""]},
+        {"whole_of": list(range(2))},
+        {"whole_of": ["party"]},
+        {"side_classes": ["sovereign"]},
+        {"total": 7},
+        {"members": "country/KEN"},
+        {"left_out": [f"residual {n}" for n in range(65)]},
+        {"sum_differs": "often"},
+        {"holds_multilaterals": [True]},
+    ],
+    ids=[
+        "whole-of-a-string",
+        "whole-of-blank-class",
+        "whole-of-not-text",
+        "whole-of-a-party-kind",
+        "side-classes-unknown-class",
+        "total-not-text",
+        "members-not-a-list",
+        "left-out-past-64",
+        "sum-differs-not-a-flag",
+        "holds-multilaterals-not-a-flag",
+    ],
+)
+def test_a_set_keeps_its_posted_identity_past_a_field_it_does_not_post(
+    unread: dict[str, object],
+) -> None:
+    """A resubmit posts a set's label and node alone (`compiler.sources.wire_groups`),
+    so a field it does not post that does not parse is dropped and the set stands."""
     block = _region_members_block()
     block["resolved"]["entity_groups"] = {
-        "observationAbout": {"label": "Africa", "whole_of": whole_of}
+        "observationAbout": {"label": "Africa", "ref": "africa", **unread}
     }
 
     seed = Seed.model_validate({"spec": block, "operations": []})
 
-    assert seed.spec.entity_groups is None
+    assert seed.spec.entity_groups is not None
+    assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == {
+        "label": "Africa",
+        "ref": "africa",
+    }
 
 
 @pytest.mark.parametrize(
     "group",
     [
         {"dcid": "africa", "label": "Africa"},
-        {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
+        {"ref": "africa", "label": "Africa", "member_dcids": ["country/KEN"]},
         {"label": "all donors", "side_kinds": ["official"]},
     ],
     ids=["dcid-before-ref", "unknown-member", "earlier-name-of-side-classes"],
@@ -1157,20 +1254,36 @@ def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: obje
         {"label": ""},
         {"label": None, "ref": "africa"},
         {"label": "A" * 121, "ref": "africa"},
+        {"label": "Africa", "ref": ""},
+        {"label": "Africa", "group_id": 7},
         "Africa",
     ],
-    ids=["empty-label", "null-label", "label-too-long", "not-an-object"],
+    ids=[
+        "empty-label",
+        "null-label",
+        "label-too-long",
+        "empty-ref",
+        "group-id-not-text",
+        "not-an-object",
+    ],
 )
-def test_a_set_search_would_not_take_is_dropped_and_the_seed_stands(group: object) -> None:
+def test_a_set_search_would_not_take_is_dropped_and_the_seed_stands(
+    group: object, caplog: pytest.LogCaptureFixture
+) -> None:
     # A set with no usable name is left out, as `compiler.sources` leaves out a
-    # nameless one; the seed's spec_id and identity still hand over.
+    # nameless one; the seed's spec_id and identity still hand over, and the drop
+    # is logged with the role.
     block = _region_members_block()
     block["resolved"]["entity_groups"] = {"observationAbout": group}
 
-    seed = Seed.model_validate({"spec": block, "operations": []})
+    with caplog.at_level(logging.WARNING, logger="harness.wire"):
+        seed = Seed.model_validate({"spec": block, "operations": []})
 
     assert seed.spec.entity_groups is None
     assert seed.spec.definition.spec_id == block["spec_id"]
+    assert [record.args[0] for record in caplog.records if record.name == "harness.wire"] == [
+        "observationAbout"
+    ]
 
 
 def test_a_set_on_a_role_the_identity_binds_nothing_on_is_dropped() -> None:

@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import block_groups
+from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from planner.plan import (
@@ -517,20 +517,41 @@ async def _resubmit(
     (`planner.agent.compile_on_basis`), through
     `translator.discovery.resolve_definition`: the part's entity groups
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
-    so Search names them again. They are the groups `reading` was resolved
-    with (`SearchReading.entity_groups`), or `block`'s for a reading stored
-    without them.
+    so Search names them again. They are `block`'s groups, read for what the
+    resubmit posts alone (`compiler.sources.readable_wire_groups`), where `block`
+    is at hand and names sets that read, else the groups `reading` was resolved
+    with (`SearchReading.entity_groups`) where those read, else none where
+    `block` reads and names none.
 
     Raises:
-        SwitchFailedError: If the call does not complete, Search refuses it,
-            or its answer is not one definite part with a scope.
+        SwitchFailedError: If neither reads: what `block`'s groups post is not
+            readable or there is no `block`, and `reading`'s were not readable when it was
+            stored (`SearchReading.entity_groups_unreadable`) or, beside a block
+            naming sets, it holds none, since the switch would post the part
+            without them. Also if the call does not complete,
+            Search refuses it, or its answer is not one definite part with a scope.
     """
+    unreadable = SwitchFailedError(
+        "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
+    )
+    groups = readable_wire_groups(block) if block is not None else None
+    # A block naming no sets says nothing of the reading's, so readable stored sets
+    # stand. A block whose sets do not read falls back only to stored sets that
+    # do: an empty stored tuple beside it would post the part without them.
+    stored_stands = not reading.entity_groups_unreadable and (
+        groups is not None or block is None or bool(reading.entity_groups)
+    )
+    if not groups and stored_stands:
+        groups = reading.entity_groups
+    if groups is None:
+        logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
+        raise unreadable
     try:
         part = await resolve_definition(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=reading.entity_groups or (block_groups(block) if block is not None else ()),
+            groups=groups,
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:

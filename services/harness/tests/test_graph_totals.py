@@ -654,20 +654,14 @@ _G7_MEMBERS = (("country/FRA", "France"), ("country/JPN", "Japan"))
             _G7_MEMBERS,
             None,
             (),
-            [
-                "The figure for G7 adds up its members' figures and leaves out amounts the data "
-                "allocates to no single country."
-            ],
+            ["The figure for G7 adds up its members' figures."],
             Reduction.SUM,
         ),
         (
             _G7_MEMBERS,
             None,
             (),
-            [
-                "The figure for G7 is computed from its members' figures and leaves out amounts "
-                "the data allocates to no single country."
-            ],
+            ["The figure for G7 is computed from its members' figures."],
             Reduction.MEAN,
         ),
         (
@@ -681,10 +675,7 @@ _G7_MEMBERS = (("country/FRA", "France"), ("country/JPN", "Japan"))
             _G7_MEMBERS,
             None,
             None,
-            [
-                "The figures for G7 are its members' figures, not a total the source publishes "
-                "for the group."
-            ],
+            ["The figures for G7 come from its members' figures."],
             Reduction.SUM,
         ),
     ],
@@ -704,6 +695,8 @@ async def test_a_retrieval_of_a_named_group_states_how_it_reads_the_group(
                 *(ResolvedEntity(role="origin", ref=ref, label=label) for ref, label in donors),
                 ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
             ),
+            # Search names no residual for the G7, which has no published total
+            # its members leave anything out of.
             "groups": (ResolvedGroup(role="origin", label="G7", total=total),),
         }
     )

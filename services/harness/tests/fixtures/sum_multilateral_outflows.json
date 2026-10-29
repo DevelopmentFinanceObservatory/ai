@@ -1,0 +1,6140 @@
+{
+  "comment": "Spec blocks dfo-apis's offline Search engine answers over the fixture graph and coverage of its tests/engine/test_multilateral_donors.py, with DAC1 bilateral and multilateral ODA beside total ODA: DAC1 series for the United States and DAC countries' total, CRS health series to Kenya from the United States, France and IDA. `dac_countries_contributions` is aid in 2019 naming no donor, which binds DAC countries' total (`holds_multilaterals` false), resubmitted on gross disbursements; `dac_countries_bilateral` and `dac_countries_multilateral` are that total switched to bilateral ODA (aid type 1015) and multilateral ODA (aid type 2000). `ida_health_to_kenya` is health aid from IDA to Kenya in 2019, IDA's origin entity marked `multilateral`; `us_health_to_kenya` the same from the United States.",
+  "dac_countries_contributions": {
+    "spec_id": "spec_88775d27aa3a36534fa154230512daba",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_88775d27aa3a36534fa154230512daba",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "property": "dac1AidType",
+            "binding": {
+              "state": "value",
+              "ref": "DAC1AidType1010"
+            }
+          },
+          {
+            "property": "financialFlowType",
+            "binding": {
+              "state": "value",
+              "ref": "Disbursement"
+            }
+          },
+          {
+            "property": "nettingBasis",
+            "binding": {
+              "state": "value",
+              "ref": "Gross"
+            }
+          }
+        ],
+        "entities": {
+          "origin": [
+            "DACCountriesTotal"
+          ]
+        },
+        "requested_window": {
+          "kind": "range",
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "financialflow_amount_measuredvalue_nominal_family_f1112b09",
+        "label": "gross disbursements (official development assistance)",
+        "population_type": {
+          "ref": "FinancialFlow",
+          "label": "financial flow"
+        },
+        "measured_property": {
+          "ref": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "ref": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_qualifier": {
+          "ref": "Nominal",
+          "label": "nominal"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 1,
+        "member_digest": "f672c85bd3f7b4372ccbfd60d67f9a9957ab4adc17ee1525b97eb718c41329b2",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        ]
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "DAC1AidType1010",
+                "label": "official development assistance"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Gross",
+                "label": "Gross"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "value_kind": "time_window",
+              "time_window": {
+                "start_year": 2019,
+                "end_year": 2019
+              }
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "inapplicable_slots": [],
+      "unresolved_slots": [],
+      "stat_vars": {
+        "member_count": 1,
+        "member_count_exact": true,
+        "served_count": 1,
+        "data_date_range": {
+          "start": "2019",
+          "end": "2019"
+        }
+      },
+      "entities": [
+        {
+          "ref": "DACCountriesTotal",
+          "label": "DAC countries, total",
+          "entity_type": "Organization",
+          "role": "origin"
+        }
+      ],
+      "entity_groups": {
+        "origin": {
+          "label": "DAC countries",
+          "total": "DACCountriesTotal",
+          "group_id": "groups/OECD.DAC",
+          "members": [
+            "country/AUS",
+            "country/AUT",
+            "country/BEL",
+            "country/CAN",
+            "country/CHE",
+            "country/CZE",
+            "country/DEU",
+            "country/DNK",
+            "country/ESP",
+            "country/EST",
+            "country/FIN",
+            "country/FRA",
+            "country/GBR",
+            "country/GRC",
+            "country/HUN",
+            "country/IRL",
+            "country/ISL",
+            "country/ITA",
+            "country/JPN",
+            "country/KOR",
+            "country/LTU",
+            "country/LUX",
+            "country/LVA",
+            "country/NLD",
+            "country/NOR",
+            "country/NZL",
+            "country/POL",
+            "country/PRT",
+            "country/SVK",
+            "country/SVN",
+            "country/SWE",
+            "country/USA"
+          ],
+          "holds_multilaterals": false
+        }
+      },
+      "coverage": {
+        "kind": "exact",
+        "has_data": true,
+        "observation_count": 1,
+        "evidence": "facet_metadata",
+        "dimensions": [
+          {
+            "label": "sources",
+            "count": 1
+          },
+          {
+            "label": "observations",
+            "count": 1
+          },
+          {
+            "label": "variables",
+            "count": 1
+          }
+        ],
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "headline": {
+        "year": 2019,
+        "year_named": true,
+        "named_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "observations": 1,
+        "series": 1,
+        "role_counts": {
+          "financingProvider": 1
+        },
+        "recent_years": [
+          {
+            "year": 2019,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          },
+          {
+            "year": 2018,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          },
+          {
+            "year": 2017,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          }
+        ]
+      },
+      "download": {
+        "rows": 1,
+        "rows_exact": true,
+        "series": 1,
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "coverage_stamp": "test-coverage-stamp",
+      "facets": {
+        "provenance": {
+          "basis": "fallback",
+          "ref": "provenance/OECDDAC1",
+          "documentation": "/api/graph/documentation/provenance/OECDDAC1",
+          "account": "provider"
+        },
+        "unit": {
+          "basis": "fallback",
+          "ref": "USD"
+        }
+      },
+      "slot_options": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "DAC1AidType1015",
+                  "label": "bilateral ODA"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "DAC1AidType1010",
+              "member_count": 8,
+              "served_rows": 1,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "DAC1AidType2000",
+                  "label": "multilateral ODA"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "DAC1AidType1010",
+              "member_count": 8,
+              "served_rows": 1,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "entity_options": [],
+      "facet_options": [
+        {
+          "axis": "provenance",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "provenance/OECDDAC1",
+                  "label": "provenance/OECDDAC1"
+                },
+                "value_kind": "source"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "axis": "unit",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "USD",
+                  "label": "USD"
+                },
+                "value_kind": "enum_value"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "rendered_sentence": "Gross disbursements from DAC countries, total for official development assistance in 2019.",
+      "sentence_plan": [
+        {
+          "kind": "slot",
+          "text": "Gross disbursements",
+          "axis": "what",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": [
+            "how:financialFlowType",
+            "how:nettingBasis",
+            "axis:populationType",
+            "axis:measuredProperty",
+            "axis:measurementQualifier"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " from ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "DAC countries, total",
+          "segment": "heading",
+          "role": "origin",
+          "binding_ref": "origin:",
+          "entity_refs": [
+            "DACCountriesTotal"
+          ],
+          "states": [
+            "origin:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " for ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "official development assistance",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "dac1AidType",
+          "binding_ref": "how:dac1AidType",
+          "entity_refs": [],
+          "states": [
+            "how:dac1AidType"
+          ]
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "financialFlowType",
+          "binding_ref": "how:financialFlowType",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "nettingBasis",
+          "binding_ref": "how:nettingBasis",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "where",
+          "segment": "heading",
+          "binding_ref": "where:",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "in 2019",
+          "axis": "when",
+          "segment": "heading",
+          "binding_ref": "when:",
+          "entity_refs": [],
+          "states": [
+            "when:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "source",
+          "segment": "byline",
+          "binding_ref": "source:",
+          "entity_refs": [],
+          "states": []
+        }
+      ],
+      "trace": {
+        "resolved_entities": [
+          {
+            "ref": "DACCountriesTotal",
+            "label": "DAC countries, total"
+          }
+        ],
+        "resolved_sources": [],
+        "slot_filters": [
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "dac1AidType",
+                "label": "dac1AidType"
+              },
+              "label": "aid type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "DAC1AidType1010",
+                "label": "official development assistance"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "financialFlowType",
+                "label": "financialFlowType"
+              },
+              "label": "financial flow type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "nettingBasis",
+                "label": "nettingBasis"
+              },
+              "label": "netting basis"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Gross",
+                "label": "Gross"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "where",
+              "label": "place"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "when",
+              "label": "time window"
+            },
+            "binding_kind": "value",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "source",
+              "label": "data source"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          }
+        ],
+        "query_qualifiers": [],
+        "requested_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "capability_version": "cap_932ba7fffa549da3"
+      },
+      "confidence": "high",
+      "alternative_measures": [],
+      "measure_label": "gross disbursements",
+      "measure_label_axes": [
+        "populationType",
+        "measuredProperty",
+        "measurementQualifier",
+        "financialFlowType",
+        "nettingBasis"
+      ],
+      "measure_axis_values": [
+        {
+          "axis": "populationType",
+          "value": {
+            "ref": "FinancialFlow",
+            "label": "financial flow"
+          }
+        },
+        {
+          "axis": "measuredProperty",
+          "value": {
+            "ref": "amount",
+            "label": "amount"
+          }
+        },
+        {
+          "axis": "measurementQualifier",
+          "value": {
+            "ref": "Nominal",
+            "label": "nominal"
+          }
+        },
+        {
+          "axis": "financialFlowType",
+          "value": {
+            "ref": "Disbursement",
+            "label": "disbursement"
+          }
+        },
+        {
+          "axis": "nettingBasis",
+          "value": {
+            "ref": "Gross",
+            "label": "gross"
+          }
+        }
+      ],
+      "concept_label": "official development assistance",
+      "published_tables": "OECD DAC1",
+      "scope_choices": {
+        "id": "spec_4f3df621f84d9af58b0563b36c16c6e3",
+        "base": {
+          "schema_version": 1,
+          "spec_id": "spec_4f3df621f84d9af58b0563b36c16c6e3",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "grantEquivalent",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "dac1AidType",
+                "binding": {
+                  "state": "value",
+                  "ref": "DAC1AidType1010"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              }
+            ],
+            "entities": {
+              "origin": [
+                "DACCountriesTotal"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          }
+        },
+        "rule_version": "scope1:7e3840869db43d1aa704e53f55ff21de",
+        "entries": [
+          {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {
+              "kind": "choice",
+              "choice_id": "spec_4f3df621f84d9af58b0563b36c16c6e3:measure_basis"
+            }
+          }
+        ],
+        "dropped_entries": [],
+        "choices": [
+          {
+            "id": "spec_4f3df621f84d9af58b0563b36c16c6e3:measure_basis",
+            "axis": "measure_basis",
+            "rule": "measure_basis_convention",
+            "provenance": "explicit",
+            "active": "measure_basis:gross",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "label": "gross disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Gross"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:net",
+                "label": "net disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Net"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:grant_equivalent",
+                "label": "grant equivalents (OECD headline), current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "grantEquivalent",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:commitments",
+                "label": "commitments, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "option_not_covered",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_4f3df621f84d9af58b0563b36c16c6e3:provider",
+            "axis": "provider",
+            "rule": "contribution_total",
+            "provenance": "default",
+            "active": "provider:contributions",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "label": "bilateral flows only",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "dac1AidType",
+                  "state": "value",
+                  "refs": [
+                    "DAC1AidType1015"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:inclusive",
+                "label": "bilateral plus imputed multilateral",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "inclusive"
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "contributions_counted",
+                  "detail": {
+                    "dataset": "provenance/OECDDAC1"
+                  }
+                }
+              },
+              {
+                "option_id": "provider:contributions",
+                "label": "bilateral plus core contributions to multilaterals",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "contributions"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:multilateral",
+                "label": "core contributions to multilaterals",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "dac1AidType",
+                  "state": "value",
+                  "refs": [
+                    "DAC1AidType2000"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "spec_id": "spec_88775d27aa3a36534fa154230512daba",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "dac1AidType",
+                "binding": {
+                  "state": "value",
+                  "ref": "DAC1AidType1010"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "origin": [
+                "DACCountriesTotal"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          },
+          "components": [
+            {
+              "role": "whole",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "FinancialFlow",
+                  "measured_property": "amount",
+                  "stat_type": "measuredValue",
+                  "measurement_qualifier": "Nominal"
+                },
+                "slots": [
+                  {
+                    "property": "dac1AidType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "DAC1AidType1010"
+                    }
+                  },
+                  {
+                    "property": "financialFlowType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Disbursement"
+                    }
+                  },
+                  {
+                    "property": "nettingBasis",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Gross"
+                    }
+                  }
+                ],
+                "entities": {
+                  "origin": [
+                    "DACCountriesTotal"
+                  ]
+                },
+                "requested_window": {
+                  "kind": "range",
+                  "start_year": 2019,
+                  "end_year": 2019
+                }
+              }
+            }
+          ]
+        },
+        "ledger": []
+      }
+    }
+  },
+  "dac_countries_bilateral": {
+    "spec_id": "spec_33f8fdd3079ef7889cdc3d9738ef7073",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_33f8fdd3079ef7889cdc3d9738ef7073",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "property": "dac1AidType",
+            "binding": {
+              "state": "value",
+              "ref": "DAC1AidType1015"
+            }
+          },
+          {
+            "property": "financialFlowType",
+            "binding": {
+              "state": "value",
+              "ref": "Disbursement"
+            }
+          },
+          {
+            "property": "nettingBasis",
+            "binding": {
+              "state": "value",
+              "ref": "Gross"
+            }
+          }
+        ],
+        "entities": {
+          "origin": [
+            "DACCountriesTotal"
+          ]
+        },
+        "requested_window": {
+          "kind": "range",
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "financialflow_amount_measuredvalue_nominal_family_f1112b09",
+        "label": "gross disbursements (bilateral ODA)",
+        "population_type": {
+          "ref": "FinancialFlow",
+          "label": "financial flow"
+        },
+        "measured_property": {
+          "ref": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "ref": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_qualifier": {
+          "ref": "Nominal",
+          "label": "nominal"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 1,
+        "member_digest": "a8c0cf693969a26333bf3dc375aa02fea6c05a68c06359e4383554084dff2438",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        ]
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "DAC1AidType1015",
+                "label": "bilateral ODA"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Gross",
+                "label": "Gross"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "value_kind": "time_window",
+              "time_window": {
+                "start_year": 2019,
+                "end_year": 2019
+              }
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "inapplicable_slots": [],
+      "unresolved_slots": [],
+      "stat_vars": {
+        "member_count": 1,
+        "member_count_exact": true,
+        "served_count": 1,
+        "data_date_range": {
+          "start": "2019",
+          "end": "2019"
+        }
+      },
+      "entities": [
+        {
+          "ref": "DACCountriesTotal",
+          "label": "DAC countries, total",
+          "entity_type": "Organization",
+          "role": "origin"
+        }
+      ],
+      "entity_groups": {
+        "origin": {
+          "label": "DAC countries",
+          "total": "DACCountriesTotal",
+          "group_id": "groups/OECD.DAC",
+          "members": [
+            "country/AUS",
+            "country/AUT",
+            "country/BEL",
+            "country/CAN",
+            "country/CHE",
+            "country/CZE",
+            "country/DEU",
+            "country/DNK",
+            "country/ESP",
+            "country/EST",
+            "country/FIN",
+            "country/FRA",
+            "country/GBR",
+            "country/GRC",
+            "country/HUN",
+            "country/IRL",
+            "country/ISL",
+            "country/ITA",
+            "country/JPN",
+            "country/KOR",
+            "country/LTU",
+            "country/LUX",
+            "country/LVA",
+            "country/NLD",
+            "country/NOR",
+            "country/NZL",
+            "country/POL",
+            "country/PRT",
+            "country/SVK",
+            "country/SVN",
+            "country/SWE",
+            "country/USA"
+          ],
+          "holds_multilaterals": false
+        }
+      },
+      "coverage": {
+        "kind": "exact",
+        "has_data": true,
+        "observation_count": 1,
+        "evidence": "facet_metadata",
+        "dimensions": [
+          {
+            "label": "sources",
+            "count": 1
+          },
+          {
+            "label": "observations",
+            "count": 1
+          },
+          {
+            "label": "variables",
+            "count": 1
+          }
+        ],
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "headline": {
+        "year": 2019,
+        "year_named": true,
+        "named_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "observations": 1,
+        "series": 1,
+        "role_counts": {
+          "financingProvider": 1
+        },
+        "recent_years": [
+          {
+            "year": 2019,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          },
+          {
+            "year": 2018,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          },
+          {
+            "year": 2017,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          }
+        ]
+      },
+      "download": {
+        "rows": 1,
+        "rows_exact": true,
+        "series": 1,
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "coverage_stamp": "test-coverage-stamp",
+      "facets": {
+        "provenance": {
+          "basis": "fallback",
+          "ref": "provenance/OECDDAC1",
+          "documentation": "/api/graph/documentation/provenance/OECDDAC1",
+          "account": "provider"
+        },
+        "unit": {
+          "basis": "fallback",
+          "ref": "USD"
+        }
+      },
+      "slot_options": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "DAC1AidType1010",
+                  "label": "official development assistance"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "parent",
+              "parent": "DAC1AidType5",
+              "member_count": 10,
+              "served_rows": 1,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "entity_options": [],
+      "facet_options": [
+        {
+          "axis": "provenance",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "provenance/OECDDAC1",
+                  "label": "provenance/OECDDAC1"
+                },
+                "value_kind": "source"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "axis": "unit",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "USD",
+                  "label": "USD"
+                },
+                "value_kind": "enum_value"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "rendered_sentence": "Gross disbursements from DAC countries, total for bilateral ODA in 2019.",
+      "sentence_plan": [
+        {
+          "kind": "slot",
+          "text": "Gross disbursements",
+          "axis": "what",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": [
+            "how:financialFlowType",
+            "how:nettingBasis",
+            "axis:populationType",
+            "axis:measuredProperty",
+            "axis:measurementQualifier"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " from ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "DAC countries, total",
+          "segment": "heading",
+          "role": "origin",
+          "binding_ref": "origin:",
+          "entity_refs": [
+            "DACCountriesTotal"
+          ],
+          "states": [
+            "origin:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " for ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "bilateral ODA",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "dac1AidType",
+          "binding_ref": "how:dac1AidType",
+          "entity_refs": [],
+          "states": [
+            "how:dac1AidType"
+          ]
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "financialFlowType",
+          "binding_ref": "how:financialFlowType",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "nettingBasis",
+          "binding_ref": "how:nettingBasis",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "where",
+          "segment": "heading",
+          "binding_ref": "where:",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "in 2019",
+          "axis": "when",
+          "segment": "heading",
+          "binding_ref": "when:",
+          "entity_refs": [],
+          "states": [
+            "when:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "source",
+          "segment": "byline",
+          "binding_ref": "source:",
+          "entity_refs": [],
+          "states": []
+        }
+      ],
+      "trace": {
+        "resolved_entities": [
+          {
+            "ref": "DACCountriesTotal",
+            "label": "DAC countries, total"
+          }
+        ],
+        "resolved_sources": [],
+        "slot_filters": [
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "dac1AidType",
+                "label": "dac1AidType"
+              },
+              "label": "aid type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "DAC1AidType1015",
+                "label": "bilateral ODA"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "financialFlowType",
+                "label": "financialFlowType"
+              },
+              "label": "financial flow type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "nettingBasis",
+                "label": "nettingBasis"
+              },
+              "label": "netting basis"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Gross",
+                "label": "Gross"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "where",
+              "label": "place"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "when",
+              "label": "time window"
+            },
+            "binding_kind": "value",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "source",
+              "label": "data source"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          }
+        ],
+        "query_qualifiers": [],
+        "requested_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "capability_version": "cap_932ba7fffa549da3"
+      },
+      "confidence": "high",
+      "alternative_measures": [],
+      "measure_label": "gross disbursements",
+      "measure_label_axes": [
+        "populationType",
+        "measuredProperty",
+        "measurementQualifier",
+        "financialFlowType",
+        "nettingBasis"
+      ],
+      "measure_axis_values": [
+        {
+          "axis": "populationType",
+          "value": {
+            "ref": "FinancialFlow",
+            "label": "financial flow"
+          }
+        },
+        {
+          "axis": "measuredProperty",
+          "value": {
+            "ref": "amount",
+            "label": "amount"
+          }
+        },
+        {
+          "axis": "measurementQualifier",
+          "value": {
+            "ref": "Nominal",
+            "label": "nominal"
+          }
+        },
+        {
+          "axis": "financialFlowType",
+          "value": {
+            "ref": "Disbursement",
+            "label": "disbursement"
+          }
+        },
+        {
+          "axis": "nettingBasis",
+          "value": {
+            "ref": "Gross",
+            "label": "gross"
+          }
+        }
+      ],
+      "concept_label": "bilateral ODA",
+      "published_tables": "OECD DAC1",
+      "scope_choices": {
+        "id": "spec_4f3df621f84d9af58b0563b36c16c6e3",
+        "base": {
+          "schema_version": 1,
+          "spec_id": "spec_4f3df621f84d9af58b0563b36c16c6e3",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "grantEquivalent",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "dac1AidType",
+                "binding": {
+                  "state": "value",
+                  "ref": "DAC1AidType1010"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              }
+            ],
+            "entities": {
+              "origin": [
+                "DACCountriesTotal"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          }
+        },
+        "rule_version": "scope1:7e3840869db43d1aa704e53f55ff21de",
+        "entries": [
+          {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {
+              "kind": "choice",
+              "choice_id": "spec_4f3df621f84d9af58b0563b36c16c6e3:measure_basis"
+            }
+          },
+          {
+            "axis": "provider",
+            "option_id": "provider:bilateral",
+            "provenance": "explicit",
+            "origin": {
+              "kind": "choice",
+              "choice_id": "spec_4f3df621f84d9af58b0563b36c16c6e3:provider"
+            }
+          }
+        ],
+        "dropped_entries": [],
+        "choices": [
+          {
+            "id": "spec_4f3df621f84d9af58b0563b36c16c6e3:measure_basis",
+            "axis": "measure_basis",
+            "rule": "measure_basis_convention",
+            "provenance": "explicit",
+            "active": "measure_basis:gross",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "label": "gross disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Gross"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:net",
+                "label": "net disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Net"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:grant_equivalent",
+                "label": "grant equivalents (OECD headline), current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "grantEquivalent",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:commitments",
+                "label": "commitments, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "option_not_covered",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_4f3df621f84d9af58b0563b36c16c6e3:provider",
+            "axis": "provider",
+            "rule": "bilateral_total",
+            "provenance": "explicit",
+            "active": "provider:bilateral",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "label": "bilateral flows only",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "dac1AidType",
+                  "state": "value",
+                  "refs": [
+                    "DAC1AidType1015"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:inclusive",
+                "label": "bilateral plus imputed multilateral",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "inclusive"
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "contributions_counted",
+                  "detail": {
+                    "dataset": "provenance/OECDDAC1"
+                  }
+                }
+              },
+              {
+                "option_id": "provider:contributions",
+                "label": "bilateral plus core contributions to multilaterals",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "contributions"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:multilateral",
+                "label": "core contributions to multilaterals",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "dac1AidType",
+                  "state": "value",
+                  "refs": [
+                    "DAC1AidType2000"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "spec_id": "spec_33f8fdd3079ef7889cdc3d9738ef7073",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "dac1AidType",
+                "binding": {
+                  "state": "value",
+                  "ref": "DAC1AidType1015"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "origin": [
+                "DACCountriesTotal"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          },
+          "components": [
+            {
+              "role": "whole",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "FinancialFlow",
+                  "measured_property": "amount",
+                  "stat_type": "measuredValue",
+                  "measurement_qualifier": "Nominal"
+                },
+                "slots": [
+                  {
+                    "property": "dac1AidType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "DAC1AidType1015"
+                    }
+                  },
+                  {
+                    "property": "financialFlowType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Disbursement"
+                    }
+                  },
+                  {
+                    "property": "nettingBasis",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Gross"
+                    }
+                  }
+                ],
+                "entities": {
+                  "origin": [
+                    "DACCountriesTotal"
+                  ]
+                },
+                "requested_window": {
+                  "kind": "range",
+                  "start_year": 2019,
+                  "end_year": 2019
+                }
+              }
+            }
+          ]
+        },
+        "ledger": []
+      }
+    }
+  },
+  "dac_countries_multilateral": {
+    "spec_id": "spec_67beb4daa2a4eacbd5f8d29ace026064",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_67beb4daa2a4eacbd5f8d29ace026064",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "property": "dac1AidType",
+            "binding": {
+              "state": "value",
+              "ref": "DAC1AidType2000"
+            }
+          },
+          {
+            "property": "financialFlowType",
+            "binding": {
+              "state": "value",
+              "ref": "Disbursement"
+            }
+          },
+          {
+            "property": "nettingBasis",
+            "binding": {
+              "state": "value",
+              "ref": "Gross"
+            }
+          }
+        ],
+        "entities": {
+          "origin": [
+            "DACCountriesTotal"
+          ]
+        },
+        "requested_window": {
+          "kind": "range",
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "financialflow_amount_measuredvalue_nominal_family_f1112b09",
+        "label": "gross disbursements (multilateral ODA)",
+        "population_type": {
+          "ref": "FinancialFlow",
+          "label": "financial flow"
+        },
+        "measured_property": {
+          "ref": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "ref": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_qualifier": {
+          "ref": "Nominal",
+          "label": "nominal"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 1,
+        "member_digest": "cee6daa65862f7601e268bcfa492e04488f9c8daa7f8b9075f2e0e97f4a5d54a",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        ]
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "DAC1AidType2000",
+                "label": "multilateral ODA"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Gross",
+                "label": "Gross"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "value_kind": "time_window",
+              "time_window": {
+                "start_year": 2019,
+                "end_year": 2019
+              }
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "inapplicable_slots": [],
+      "unresolved_slots": [],
+      "stat_vars": {
+        "member_count": 1,
+        "member_count_exact": true,
+        "served_count": 1,
+        "data_date_range": {
+          "start": "2019",
+          "end": "2019"
+        }
+      },
+      "entities": [
+        {
+          "ref": "DACCountriesTotal",
+          "label": "DAC countries, total",
+          "entity_type": "Organization",
+          "role": "origin"
+        }
+      ],
+      "entity_groups": {
+        "origin": {
+          "label": "DAC countries",
+          "total": "DACCountriesTotal",
+          "group_id": "groups/OECD.DAC",
+          "members": [
+            "country/AUS",
+            "country/AUT",
+            "country/BEL",
+            "country/CAN",
+            "country/CHE",
+            "country/CZE",
+            "country/DEU",
+            "country/DNK",
+            "country/ESP",
+            "country/EST",
+            "country/FIN",
+            "country/FRA",
+            "country/GBR",
+            "country/GRC",
+            "country/HUN",
+            "country/IRL",
+            "country/ISL",
+            "country/ITA",
+            "country/JPN",
+            "country/KOR",
+            "country/LTU",
+            "country/LUX",
+            "country/LVA",
+            "country/NLD",
+            "country/NOR",
+            "country/NZL",
+            "country/POL",
+            "country/PRT",
+            "country/SVK",
+            "country/SVN",
+            "country/SWE",
+            "country/USA"
+          ],
+          "holds_multilaterals": false
+        }
+      },
+      "coverage": {
+        "kind": "exact",
+        "has_data": true,
+        "observation_count": 1,
+        "evidence": "facet_metadata",
+        "dimensions": [
+          {
+            "label": "sources",
+            "count": 1
+          },
+          {
+            "label": "observations",
+            "count": 1
+          },
+          {
+            "label": "variables",
+            "count": 1
+          }
+        ],
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "headline": {
+        "year": 2019,
+        "year_named": true,
+        "named_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "observations": 1,
+        "series": 1,
+        "role_counts": {
+          "financingProvider": 1
+        },
+        "recent_years": [
+          {
+            "year": 2019,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          },
+          {
+            "year": 2018,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          },
+          {
+            "year": 2017,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1
+            }
+          }
+        ]
+      },
+      "download": {
+        "rows": 1,
+        "rows_exact": true,
+        "series": 1,
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "coverage_stamp": "test-coverage-stamp",
+      "facets": {
+        "provenance": {
+          "basis": "fallback",
+          "ref": "provenance/OECDDAC1",
+          "documentation": "/api/graph/documentation/provenance/OECDDAC1",
+          "account": "provider"
+        },
+        "unit": {
+          "basis": "fallback",
+          "ref": "USD"
+        }
+      },
+      "slot_options": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "dac1AidType",
+              "label": "dac1AidType"
+            },
+            "label": "aid type"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "DAC1AidType1010",
+                  "label": "official development assistance"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "parent",
+              "parent": "DAC1AidType5",
+              "member_count": 10,
+              "served_rows": 1,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "entity_options": [],
+      "facet_options": [
+        {
+          "axis": "provenance",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "provenance/OECDDAC1",
+                  "label": "provenance/OECDDAC1"
+                },
+                "value_kind": "source"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "axis": "unit",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "USD",
+                  "label": "USD"
+                },
+                "value_kind": "enum_value"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "rendered_sentence": "Gross disbursements from DAC countries, total for multilateral ODA in 2019.",
+      "sentence_plan": [
+        {
+          "kind": "slot",
+          "text": "Gross disbursements",
+          "axis": "what",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": [
+            "how:financialFlowType",
+            "how:nettingBasis",
+            "axis:populationType",
+            "axis:measuredProperty",
+            "axis:measurementQualifier"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " from ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "DAC countries, total",
+          "segment": "heading",
+          "role": "origin",
+          "binding_ref": "origin:",
+          "entity_refs": [
+            "DACCountriesTotal"
+          ],
+          "states": [
+            "origin:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " for ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "multilateral ODA",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "dac1AidType",
+          "binding_ref": "how:dac1AidType",
+          "entity_refs": [],
+          "states": [
+            "how:dac1AidType"
+          ]
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "financialFlowType",
+          "binding_ref": "how:financialFlowType",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "nettingBasis",
+          "binding_ref": "how:nettingBasis",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "where",
+          "segment": "heading",
+          "binding_ref": "where:",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "in 2019",
+          "axis": "when",
+          "segment": "heading",
+          "binding_ref": "when:",
+          "entity_refs": [],
+          "states": [
+            "when:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "source",
+          "segment": "byline",
+          "binding_ref": "source:",
+          "entity_refs": [],
+          "states": []
+        }
+      ],
+      "trace": {
+        "resolved_entities": [
+          {
+            "ref": "DACCountriesTotal",
+            "label": "DAC countries, total"
+          }
+        ],
+        "resolved_sources": [],
+        "slot_filters": [
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "dac1AidType",
+                "label": "dac1AidType"
+              },
+              "label": "aid type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "DAC1AidType2000",
+                "label": "multilateral ODA"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "financialFlowType",
+                "label": "financialFlowType"
+              },
+              "label": "financial flow type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "nettingBasis",
+                "label": "nettingBasis"
+              },
+              "label": "netting basis"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Gross",
+                "label": "Gross"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "where",
+              "label": "place"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "when",
+              "label": "time window"
+            },
+            "binding_kind": "value",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "source",
+              "label": "data source"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          }
+        ],
+        "query_qualifiers": [],
+        "requested_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "capability_version": "cap_932ba7fffa549da3"
+      },
+      "confidence": "high",
+      "alternative_measures": [],
+      "measure_label": "gross disbursements",
+      "measure_label_axes": [
+        "populationType",
+        "measuredProperty",
+        "measurementQualifier",
+        "financialFlowType",
+        "nettingBasis"
+      ],
+      "measure_axis_values": [
+        {
+          "axis": "populationType",
+          "value": {
+            "ref": "FinancialFlow",
+            "label": "financial flow"
+          }
+        },
+        {
+          "axis": "measuredProperty",
+          "value": {
+            "ref": "amount",
+            "label": "amount"
+          }
+        },
+        {
+          "axis": "measurementQualifier",
+          "value": {
+            "ref": "Nominal",
+            "label": "nominal"
+          }
+        },
+        {
+          "axis": "financialFlowType",
+          "value": {
+            "ref": "Disbursement",
+            "label": "disbursement"
+          }
+        },
+        {
+          "axis": "nettingBasis",
+          "value": {
+            "ref": "Gross",
+            "label": "gross"
+          }
+        }
+      ],
+      "concept_label": "multilateral ODA",
+      "published_tables": "OECD DAC1",
+      "scope_choices": {
+        "id": "spec_4f3df621f84d9af58b0563b36c16c6e3",
+        "base": {
+          "schema_version": 1,
+          "spec_id": "spec_4f3df621f84d9af58b0563b36c16c6e3",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "grantEquivalent",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "dac1AidType",
+                "binding": {
+                  "state": "value",
+                  "ref": "DAC1AidType1010"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              }
+            ],
+            "entities": {
+              "origin": [
+                "DACCountriesTotal"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          }
+        },
+        "rule_version": "scope1:7e3840869db43d1aa704e53f55ff21de",
+        "entries": [
+          {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {
+              "kind": "choice",
+              "choice_id": "spec_4f3df621f84d9af58b0563b36c16c6e3:measure_basis"
+            }
+          },
+          {
+            "axis": "provider",
+            "option_id": "provider:multilateral",
+            "provenance": "explicit",
+            "origin": {
+              "kind": "choice",
+              "choice_id": "spec_4f3df621f84d9af58b0563b36c16c6e3:provider"
+            }
+          }
+        ],
+        "dropped_entries": [],
+        "choices": [
+          {
+            "id": "spec_4f3df621f84d9af58b0563b36c16c6e3:measure_basis",
+            "axis": "measure_basis",
+            "rule": "measure_basis_convention",
+            "provenance": "explicit",
+            "active": "measure_basis:gross",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "label": "gross disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Gross"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:net",
+                "label": "net disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Net"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:grant_equivalent",
+                "label": "grant equivalents (OECD headline), current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "grantEquivalent",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:commitments",
+                "label": "commitments, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "option_not_covered",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_4f3df621f84d9af58b0563b36c16c6e3:provider",
+            "axis": "provider",
+            "rule": "multilateral_total",
+            "provenance": "explicit",
+            "active": "provider:multilateral",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "label": "bilateral flows only",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "dac1AidType",
+                  "state": "value",
+                  "refs": [
+                    "DAC1AidType1015"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:inclusive",
+                "label": "bilateral plus imputed multilateral",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "inclusive"
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "contributions_counted",
+                  "detail": {
+                    "dataset": "provenance/OECDDAC1"
+                  }
+                }
+              },
+              {
+                "option_id": "provider:contributions",
+                "label": "bilateral plus core contributions to multilaterals",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "contributions"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:multilateral",
+                "label": "core contributions to multilaterals",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "dac1AidType",
+                  "state": "value",
+                  "refs": [
+                    "DAC1AidType2000"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "spec_id": "spec_67beb4daa2a4eacbd5f8d29ace026064",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "dac1AidType",
+                "binding": {
+                  "state": "value",
+                  "ref": "DAC1AidType2000"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "origin": [
+                "DACCountriesTotal"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          },
+          "components": [
+            {
+              "role": "whole",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "FinancialFlow",
+                  "measured_property": "amount",
+                  "stat_type": "measuredValue",
+                  "measurement_qualifier": "Nominal"
+                },
+                "slots": [
+                  {
+                    "property": "dac1AidType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "DAC1AidType2000"
+                    }
+                  },
+                  {
+                    "property": "financialFlowType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Disbursement"
+                    }
+                  },
+                  {
+                    "property": "nettingBasis",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Gross"
+                    }
+                  }
+                ],
+                "entities": {
+                  "origin": [
+                    "DACCountriesTotal"
+                  ]
+                },
+                "requested_window": {
+                  "kind": "range",
+                  "start_year": 2019,
+                  "end_year": 2019
+                }
+              }
+            }
+          ]
+        },
+        "ledger": []
+      }
+    }
+  },
+  "ida_health_to_kenya": {
+    "spec_id": "spec_2ab1c1790d2adffb874af93408b2a528",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_2ab1c1790d2adffb874af93408b2a528",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "property": "crsCooperationModality",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsPurpose",
+            "binding": {
+              "state": "set",
+              "refs": [
+                "CRSPurposeCode120",
+                "CRSPurposeCode130"
+              ]
+            }
+          },
+          {
+            "property": "crsTypeOfFinance",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsTypeOfFlow",
+            "binding": {
+              "state": "value",
+              "ref": "CRSTypeOfFlow10"
+            }
+          },
+          {
+            "property": "financialFlowType",
+            "binding": {
+              "state": "value",
+              "ref": "Disbursement"
+            }
+          },
+          {
+            "property": "nettingBasis",
+            "binding": {
+              "state": "value",
+              "ref": "Gross"
+            }
+          }
+        ],
+        "entities": {
+          "destination": [
+            "country/KEN"
+          ],
+          "origin": [
+            "InternationalDevelopmentAssociation"
+          ]
+        },
+        "requested_window": {
+          "kind": "range",
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "financialflow_amount_measuredvalue_nominal",
+        "label": "gross disbursements (health and population policy, programme, and reproductive health, official development assistance, general budget support, standard loan)",
+        "population_type": {
+          "ref": "FinancialFlow",
+          "label": "financial flow"
+        },
+        "measured_property": {
+          "ref": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "ref": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_qualifier": {
+          "ref": "Nominal",
+          "label": "nominal"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "crsCooperationModality"
+            },
+            "label": "modality"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "crsPurpose"
+            },
+            "label": "sector"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "crsTypeOfFinance"
+            },
+            "label": "instrument"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "crsTypeOfFlow"
+            },
+            "label": "flow"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 375,
+        "member_digest": "769b7fe44c1a9ab15a477d24c1c844335549f39826dc86428fa6274a50798849",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        ]
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "crsCooperationModality"
+            },
+            "label": "modality"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "crsPurpose"
+            },
+            "label": "sector"
+          },
+          "binding": {
+            "kind": "set",
+            "values": [
+              {
+                "ref": {
+                  "ref": "CRSPurposeCode120",
+                  "label": "health"
+                },
+                "value_kind": "enum_value"
+              },
+              {
+                "ref": {
+                  "ref": "CRSPurposeCode130",
+                  "label": "population policy, programme, and reproductive health"
+                },
+                "value_kind": "enum_value"
+              }
+            ]
+          },
+          "expansion": {
+            "added": [
+              {
+                "ref": "CRSPurposeCode121",
+                "label": "general health"
+              },
+              {
+                "ref": "CRSPurposeCode122",
+                "label": "basic health"
+              },
+              {
+                "ref": "CRSPurposeCode123",
+                "label": "noncommunicable disease"
+              },
+              {
+                "ref": "CRSPurposeCode12110",
+                "label": "health policy and administrative management"
+              },
+              {
+                "ref": "CRSPurposeCode12181",
+                "label": "medical education and training"
+              },
+              {
+                "ref": "CRSPurposeCode12182",
+                "label": "medical research"
+              },
+              {
+                "ref": "CRSPurposeCode12191",
+                "label": "medical service"
+              },
+              {
+                "ref": "CRSPurposeCode12220",
+                "label": "basic health care"
+              },
+              {
+                "ref": "CRSPurposeCode12230",
+                "label": "basic health infrastructure"
+              },
+              {
+                "ref": "CRSPurposeCode12240",
+                "label": "basic nutrition"
+              },
+              {
+                "ref": "CRSPurposeCode12250",
+                "label": "infectious disease control"
+              },
+              {
+                "ref": "CRSPurposeCode12261",
+                "label": "health education"
+              },
+              {
+                "ref": "CRSPurposeCode12262",
+                "label": "malaria control"
+              },
+              {
+                "ref": "CRSPurposeCode12263",
+                "label": "tuberculosis control"
+              },
+              {
+                "ref": "CRSPurposeCode12264",
+                "label": "COVID-19 control"
+              },
+              {
+                "ref": "CRSPurposeCode12281",
+                "label": "health personnel development"
+              },
+              {
+                "ref": "CRSPurposeCode12310",
+                "label": "general noncommunicable disease control"
+              },
+              {
+                "ref": "CRSPurposeCode12320",
+                "label": "tobacco use control"
+              },
+              {
+                "ref": "CRSPurposeCode12330",
+                "label": "control of harmful use of alcohol and drugs"
+              },
+              {
+                "ref": "CRSPurposeCode12340",
+                "label": "mental health and well-being promotion"
+              },
+              {
+                "ref": "CRSPurposeCode12350",
+                "label": "other noncommunicable disease prevention and treatment"
+              },
+              {
+                "ref": "CRSPurposeCode12382",
+                "label": "research for noncommunicable disease prevention and control"
+              },
+              {
+                "ref": "CRSPurposeCode13010",
+                "label": "population policy and administrative management"
+              },
+              {
+                "ref": "CRSPurposeCode13020",
+                "label": "reproductive health care"
+              },
+              {
+                "ref": "CRSPurposeCode13030",
+                "label": "family planning"
+              },
+              {
+                "ref": "CRSPurposeCode13040",
+                "label": "sexually transmitted disease control"
+              },
+              {
+                "ref": "CRSPurposeCode13081",
+                "label": "personnel development for population and reproductive health"
+              }
+            ]
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "crsTypeOfFinance"
+            },
+            "label": "instrument"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "crsTypeOfFlow"
+            },
+            "label": "flow"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "CRSTypeOfFlow10",
+                "label": "official development assistance"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Gross",
+                "label": "Gross"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "country/KEN",
+                "label": "Kenya"
+              },
+              "value_kind": "entity"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "value_kind": "time_window",
+              "time_window": {
+                "start_year": 2019,
+                "end_year": 2019
+              }
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "inapplicable_slots": [
+        "financialObligationType"
+      ],
+      "unresolved_slots": [],
+      "stat_vars": {
+        "member_count": 2,
+        "member_count_exact": true,
+        "served_count": 375,
+        "data_date_range": {
+          "start": "2019",
+          "end": "2019"
+        }
+      },
+      "entities": [
+        {
+          "ref": "country/KEN",
+          "label": "Kenya",
+          "entity_type": "Country",
+          "role": "destination"
+        },
+        {
+          "ref": "InternationalDevelopmentAssociation",
+          "label": "IDA",
+          "entity_type": "Organization",
+          "role": "origin",
+          "multilateral": true
+        }
+      ],
+      "coverage": {
+        "kind": "exact",
+        "has_data": true,
+        "observation_count": 2,
+        "evidence": "facet_metadata",
+        "dimensions": [
+          {
+            "label": "sources",
+            "count": 1
+          },
+          {
+            "label": "observations",
+            "count": 1
+          },
+          {
+            "label": "variables",
+            "count": 2
+          }
+        ],
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "headline": {
+        "year": 2019,
+        "year_named": true,
+        "named_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "observations": 2,
+        "series": 2,
+        "role_counts": {
+          "financingProvider": 1,
+          "financingRecipient": 1
+        },
+        "recent_years": [
+          {
+            "year": 2019,
+            "observations": 2,
+            "series": 2,
+            "role_counts": {
+              "financingProvider": 1,
+              "financingRecipient": 1
+            }
+          },
+          {
+            "year": 2018,
+            "observations": 2,
+            "series": 2,
+            "role_counts": {
+              "financingProvider": 1,
+              "financingRecipient": 1
+            }
+          },
+          {
+            "year": 2017,
+            "observations": 2,
+            "series": 2,
+            "role_counts": {
+              "financingProvider": 1,
+              "financingRecipient": 1
+            }
+          }
+        ]
+      },
+      "download": {
+        "rows": 2,
+        "rows_exact": true,
+        "series": 2,
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "coverage_stamp": "test-coverage-stamp",
+      "facets": {
+        "provenance": {
+          "basis": "fallback",
+          "ref": "provenance/OECDCreditorReportingSystem",
+          "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem",
+          "account": "provider"
+        },
+        "unit": {
+          "basis": "fallback",
+          "ref": "USD"
+        }
+      },
+      "slot_options": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "crsCooperationModality"
+            },
+            "label": "modality"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSCooperationModalityA",
+                  "label": "budget support"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 0,
+              "served_rows": 2,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSCooperationModalityA01",
+                  "label": "general budget support"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSCooperationModalityA",
+              "member_count": 289,
+              "served_rows": 2,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "crsPurpose"
+            },
+            "label": "sector"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSPurposeCode100",
+                  "label": "social infrastructure and services"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 13,
+              "served_rows": 2,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSPurposeCode120",
+                  "label": "health"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSPurposeCode100",
+              "member_count": 6,
+              "served_rows": 1,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSPurposeCode130",
+                  "label": "population policy, programme, and reproductive health"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSPurposeCode100",
+              "member_count": 5,
+              "served_rows": 1,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "crsTypeOfFinance"
+            },
+            "label": "instrument"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSTypeOfFinance420",
+                  "label": "debt instrument"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 0,
+              "served_rows": 2,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSTypeOfFinance421",
+                  "label": "standard loan"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSTypeOfFinance420",
+              "member_count": 4620,
+              "served_rows": 2,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "crsTypeOfFlow"
+            },
+            "label": "flow"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSTypeOfFlow10",
+                  "label": "official development assistance"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 14098,
+              "served_rows": 2,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "entity_options": [],
+      "facet_options": [
+        {
+          "axis": "provenance",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "provenance/OECDCreditorReportingSystem",
+                  "label": "provenance/OECDCreditorReportingSystem"
+                },
+                "value_kind": "source"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "axis": "unit",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "USD",
+                  "label": "USD"
+                },
+                "value_kind": "enum_value"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "rendered_sentence": "IDA's gross ODA disbursements to Kenya for health and population policy, programme, and reproductive health in 2019.",
+      "sentence_plan": [
+        {
+          "kind": "slot",
+          "text": "IDA",
+          "segment": "heading",
+          "role": "origin",
+          "binding_ref": "origin:",
+          "entity_refs": [
+            "InternationalDevelopmentAssociation"
+          ],
+          "states": [
+            "origin:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": "'s",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "gross ODA disbursements",
+          "axis": "what",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": [
+            "how:crsCooperationModality",
+            "how:crsTypeOfFinance",
+            "how:crsTypeOfFlow",
+            "how:financialFlowType",
+            "how:nettingBasis",
+            "axis:populationType",
+            "axis:measuredProperty",
+            "axis:measurementQualifier"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " to ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "Kenya",
+          "axis": "where",
+          "segment": "heading",
+          "role": "destination",
+          "binding_ref": "where:",
+          "entity_refs": [
+            "country/KEN"
+          ],
+          "states": [
+            "where:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " for ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "health and population policy, programme, and reproductive health",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsPurpose",
+          "binding_ref": "how:crsPurpose",
+          "entity_refs": [],
+          "states": [
+            "how:crsPurpose"
+          ]
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsCooperationModality",
+          "binding_ref": "how:crsCooperationModality",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsTypeOfFinance",
+          "binding_ref": "how:crsTypeOfFinance",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsTypeOfFlow",
+          "binding_ref": "how:crsTypeOfFlow",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "financialFlowType",
+          "binding_ref": "how:financialFlowType",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "nettingBasis",
+          "binding_ref": "how:nettingBasis",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "in 2019",
+          "axis": "when",
+          "segment": "heading",
+          "binding_ref": "when:",
+          "entity_refs": [],
+          "states": [
+            "when:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "source",
+          "segment": "byline",
+          "binding_ref": "source:",
+          "entity_refs": [],
+          "states": []
+        }
+      ],
+      "trace": {
+        "resolved_entities": [
+          {
+            "ref": "country/KEN",
+            "label": "Kenya"
+          },
+          {
+            "ref": "InternationalDevelopmentAssociation",
+            "label": "IDA"
+          }
+        ],
+        "resolved_sources": [],
+        "slot_filters": [
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsCooperationModality",
+                "label": "crsCooperationModality"
+              },
+              "label": "modality"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsPurpose",
+                "label": "crsPurpose"
+              },
+              "label": "sector"
+            },
+            "binding_kind": "set",
+            "refs": [
+              {
+                "ref": "CRSPurposeCode120",
+                "label": "health"
+              },
+              {
+                "ref": "CRSPurposeCode130",
+                "label": "population policy, programme, and reproductive health"
+              }
+            ],
+            "provenance": "declared_grouping"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsTypeOfFinance",
+                "label": "crsTypeOfFinance"
+              },
+              "label": "instrument"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsTypeOfFlow",
+                "label": "crsTypeOfFlow"
+              },
+              "label": "flow"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "CRSTypeOfFlow10",
+                "label": "official development assistance"
+              }
+            ],
+            "provenance": "declared_default"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "financialFlowType",
+                "label": "financialFlowType"
+              },
+              "label": "financial flow type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "nettingBasis",
+                "label": "nettingBasis"
+              },
+              "label": "netting basis"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Gross",
+                "label": "Gross"
+              }
+            ],
+            "provenance": "measure_elected"
+          },
+          {
+            "key": {
+              "axis": "where",
+              "label": "place"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "country/KEN",
+                "label": "Kenya"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "when",
+              "label": "time window"
+            },
+            "binding_kind": "value",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "source",
+              "label": "data source"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          }
+        ],
+        "query_qualifiers": [
+          {
+            "text": "health",
+            "named": [
+              {
+                "ref": "CRSPurposeCode120",
+                "label": "health"
+              }
+            ],
+            "slot": "crsPurpose",
+            "disposition": "bound",
+            "selected": []
+          }
+        ],
+        "requested_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "capability_version": "cap_932ba7fffa549da3",
+        "default_reading": {
+          "applied": true,
+          "removed_stat_vars": []
+        }
+      },
+      "confidence": "high",
+      "available_at_place": true,
+      "alternative_measures": [],
+      "measure_label": "gross disbursements",
+      "measure_label_axes": [
+        "populationType",
+        "measuredProperty",
+        "measurementQualifier",
+        "financialFlowType",
+        "nettingBasis"
+      ],
+      "measure_axis_values": [
+        {
+          "axis": "populationType",
+          "value": {
+            "ref": "FinancialFlow",
+            "label": "financial flow"
+          }
+        },
+        {
+          "axis": "measuredProperty",
+          "value": {
+            "ref": "amount",
+            "label": "amount"
+          }
+        },
+        {
+          "axis": "measurementQualifier",
+          "value": {
+            "ref": "Nominal",
+            "label": "nominal"
+          }
+        },
+        {
+          "axis": "financialFlowType",
+          "value": {
+            "ref": "Disbursement",
+            "label": "disbursement"
+          }
+        },
+        {
+          "axis": "nettingBasis",
+          "value": {
+            "ref": "Gross",
+            "label": "gross"
+          }
+        }
+      ],
+      "concept_label": "health",
+      "published_tables": "OECD Creditor Reporting System (CRS)",
+      "open_axis_facts": [
+        {
+          "property": "crsCooperationModality",
+          "varies": false,
+          "value": {
+            "ref": "CRSCooperationModalityA01",
+            "label": "general budget support"
+          },
+          "distinct_count": 1,
+          "undeclared_count": 0,
+          "values": [
+            {
+              "value": {
+                "ref": "CRSCooperationModalityA01",
+                "label": "general budget support"
+              },
+              "count": 2
+            }
+          ]
+        },
+        {
+          "property": "crsTypeOfFinance",
+          "varies": false,
+          "value": {
+            "ref": "CRSTypeOfFinance421",
+            "label": "standard loan"
+          },
+          "distinct_count": 1,
+          "undeclared_count": 0,
+          "values": [
+            {
+              "value": {
+                "ref": "CRSTypeOfFinance421",
+                "label": "standard loan"
+              },
+              "count": 2
+            }
+          ]
+        }
+      ],
+      "scope_choices": {
+        "id": "spec_2ab1c1790d2adffb874af93408b2a528",
+        "base": {
+          "schema_version": 1,
+          "spec_id": "spec_2ab1c1790d2adffb874af93408b2a528",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "crsCooperationModality",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsPurpose",
+                "binding": {
+                  "state": "set",
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ]
+                }
+              },
+              {
+                "property": "crsTypeOfFinance",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsTypeOfFlow",
+                "binding": {
+                  "state": "value",
+                  "ref": "CRSTypeOfFlow10"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "destination": [
+                "country/KEN"
+              ],
+              "origin": [
+                "InternationalDevelopmentAssociation"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          }
+        },
+        "rule_version": "scope1:7e3840869db43d1aa704e53f55ff21de",
+        "entries": [],
+        "dropped_entries": [],
+        "choices": [
+          {
+            "id": "spec_2ab1c1790d2adffb874af93408b2a528:sector",
+            "axis": "sector",
+            "rule": "sector_grouping",
+            "provenance": "default",
+            "active": "sector:120+130",
+            "options": [
+              {
+                "option_id": "sector:120+130",
+                "label": "health incl. population and reproductive health (CRS 120 + 130)",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "crsPurpose",
+                  "state": "set",
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "sector:120",
+                "label": "health, CRS 120 alone",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "crsPurpose",
+                  "state": "value",
+                  "refs": [
+                    "CRSPurposeCode120"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "sector:130",
+                "label": "population policy, programme, and reproductive health, CRS 130 alone",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "crsPurpose",
+                  "state": "value",
+                  "refs": [
+                    "CRSPurposeCode130"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_2ab1c1790d2adffb874af93408b2a528:measure_basis",
+            "axis": "measure_basis",
+            "rule": "measure_basis_convention",
+            "provenance": "default",
+            "active": "measure_basis:gross",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "label": "gross disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Gross"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:net",
+                "label": "net disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Net"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:grant_equivalent",
+                "label": "grant equivalents (OECD headline), current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "grantEquivalent",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:commitments",
+                "label": "commitments, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "option_not_covered",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_2ab1c1790d2adffb874af93408b2a528:provider",
+            "axis": "provider",
+            "rule": "bilateral_flows",
+            "provenance": "default",
+            "active": "provider:bilateral",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "label": "bilateral flows only",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "bilateral"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:inclusive",
+                "label": "bilateral plus imputed multilateral",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "inclusive"
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "provider_not_offered",
+                  "detail": {
+                    "why": "provider"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "spec_id": "spec_2ab1c1790d2adffb874af93408b2a528",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "crsCooperationModality",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsPurpose",
+                "binding": {
+                  "state": "set",
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ]
+                }
+              },
+              {
+                "property": "crsTypeOfFinance",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsTypeOfFlow",
+                "binding": {
+                  "state": "value",
+                  "ref": "CRSTypeOfFlow10"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "destination": [
+                "country/KEN"
+              ],
+              "origin": [
+                "InternationalDevelopmentAssociation"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          },
+          "components": [
+            {
+              "role": "whole",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "FinancialFlow",
+                  "measured_property": "amount",
+                  "stat_type": "measuredValue",
+                  "measurement_qualifier": "Nominal"
+                },
+                "slots": [
+                  {
+                    "property": "crsCooperationModality",
+                    "binding": {
+                      "state": "unbound"
+                    }
+                  },
+                  {
+                    "property": "crsPurpose",
+                    "binding": {
+                      "state": "set",
+                      "refs": [
+                        "CRSPurposeCode120",
+                        "CRSPurposeCode130"
+                      ]
+                    }
+                  },
+                  {
+                    "property": "crsTypeOfFinance",
+                    "binding": {
+                      "state": "unbound"
+                    }
+                  },
+                  {
+                    "property": "crsTypeOfFlow",
+                    "binding": {
+                      "state": "value",
+                      "ref": "CRSTypeOfFlow10"
+                    }
+                  },
+                  {
+                    "property": "financialFlowType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Disbursement"
+                    }
+                  },
+                  {
+                    "property": "nettingBasis",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Gross"
+                    }
+                  }
+                ],
+                "entities": {
+                  "destination": [
+                    "country/KEN"
+                  ],
+                  "origin": [
+                    "InternationalDevelopmentAssociation"
+                  ]
+                },
+                "requested_window": {
+                  "kind": "range",
+                  "start_year": 2019,
+                  "end_year": 2019
+                }
+              }
+            }
+          ]
+        },
+        "ledger": []
+      }
+    }
+  },
+  "us_health_to_kenya": {
+    "spec_id": "spec_bca847b6145e1044717de4e9cd6e4ee8",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_bca847b6145e1044717de4e9cd6e4ee8",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "property": "crsCooperationModality",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsPurpose",
+            "binding": {
+              "state": "set",
+              "refs": [
+                "CRSPurposeCode120",
+                "CRSPurposeCode130"
+              ]
+            }
+          },
+          {
+            "property": "crsTypeOfFinance",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsTypeOfFlow",
+            "binding": {
+              "state": "value",
+              "ref": "CRSTypeOfFlow10"
+            }
+          },
+          {
+            "property": "financialFlowType",
+            "binding": {
+              "state": "value",
+              "ref": "Disbursement"
+            }
+          },
+          {
+            "property": "nettingBasis",
+            "binding": {
+              "state": "value",
+              "ref": "Gross"
+            }
+          }
+        ],
+        "entities": {
+          "destination": [
+            "country/KEN"
+          ],
+          "origin": [
+            "country/USA"
+          ]
+        },
+        "requested_window": {
+          "kind": "range",
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "financialflow_amount_measuredvalue_nominal",
+        "label": "gross disbursements (health and population policy, programme, and reproductive health, official development assistance, general budget support, standard loan)",
+        "population_type": {
+          "ref": "FinancialFlow",
+          "label": "financial flow"
+        },
+        "measured_property": {
+          "ref": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "ref": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_qualifier": {
+          "ref": "Nominal",
+          "label": "nominal"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "crsCooperationModality"
+            },
+            "label": "modality"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "crsPurpose"
+            },
+            "label": "sector"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "crsTypeOfFinance"
+            },
+            "label": "instrument"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "crsTypeOfFlow"
+            },
+            "label": "flow"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 375,
+        "member_digest": "769b7fe44c1a9ab15a477d24c1c844335549f39826dc86428fa6274a50798849",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        ]
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "crsCooperationModality"
+            },
+            "label": "modality"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "crsPurpose"
+            },
+            "label": "sector"
+          },
+          "binding": {
+            "kind": "set",
+            "values": [
+              {
+                "ref": {
+                  "ref": "CRSPurposeCode120",
+                  "label": "health"
+                },
+                "value_kind": "enum_value"
+              },
+              {
+                "ref": {
+                  "ref": "CRSPurposeCode130",
+                  "label": "population policy, programme, and reproductive health"
+                },
+                "value_kind": "enum_value"
+              }
+            ]
+          },
+          "expansion": {
+            "added": [
+              {
+                "ref": "CRSPurposeCode121",
+                "label": "general health"
+              },
+              {
+                "ref": "CRSPurposeCode122",
+                "label": "basic health"
+              },
+              {
+                "ref": "CRSPurposeCode123",
+                "label": "noncommunicable disease"
+              },
+              {
+                "ref": "CRSPurposeCode12110",
+                "label": "health policy and administrative management"
+              },
+              {
+                "ref": "CRSPurposeCode12181",
+                "label": "medical education and training"
+              },
+              {
+                "ref": "CRSPurposeCode12182",
+                "label": "medical research"
+              },
+              {
+                "ref": "CRSPurposeCode12191",
+                "label": "medical service"
+              },
+              {
+                "ref": "CRSPurposeCode12220",
+                "label": "basic health care"
+              },
+              {
+                "ref": "CRSPurposeCode12230",
+                "label": "basic health infrastructure"
+              },
+              {
+                "ref": "CRSPurposeCode12240",
+                "label": "basic nutrition"
+              },
+              {
+                "ref": "CRSPurposeCode12250",
+                "label": "infectious disease control"
+              },
+              {
+                "ref": "CRSPurposeCode12261",
+                "label": "health education"
+              },
+              {
+                "ref": "CRSPurposeCode12262",
+                "label": "malaria control"
+              },
+              {
+                "ref": "CRSPurposeCode12263",
+                "label": "tuberculosis control"
+              },
+              {
+                "ref": "CRSPurposeCode12264",
+                "label": "COVID-19 control"
+              },
+              {
+                "ref": "CRSPurposeCode12281",
+                "label": "health personnel development"
+              },
+              {
+                "ref": "CRSPurposeCode12310",
+                "label": "general noncommunicable disease control"
+              },
+              {
+                "ref": "CRSPurposeCode12320",
+                "label": "tobacco use control"
+              },
+              {
+                "ref": "CRSPurposeCode12330",
+                "label": "control of harmful use of alcohol and drugs"
+              },
+              {
+                "ref": "CRSPurposeCode12340",
+                "label": "mental health and well-being promotion"
+              },
+              {
+                "ref": "CRSPurposeCode12350",
+                "label": "other noncommunicable disease prevention and treatment"
+              },
+              {
+                "ref": "CRSPurposeCode12382",
+                "label": "research for noncommunicable disease prevention and control"
+              },
+              {
+                "ref": "CRSPurposeCode13010",
+                "label": "population policy and administrative management"
+              },
+              {
+                "ref": "CRSPurposeCode13020",
+                "label": "reproductive health care"
+              },
+              {
+                "ref": "CRSPurposeCode13030",
+                "label": "family planning"
+              },
+              {
+                "ref": "CRSPurposeCode13040",
+                "label": "sexually transmitted disease control"
+              },
+              {
+                "ref": "CRSPurposeCode13081",
+                "label": "personnel development for population and reproductive health"
+              }
+            ]
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "crsTypeOfFinance"
+            },
+            "label": "instrument"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "crsTypeOfFlow"
+            },
+            "label": "flow"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "CRSTypeOfFlow10",
+                "label": "official development assistance"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "financialFlowType",
+              "label": "financialFlowType"
+            },
+            "label": "financial flow type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "nettingBasis",
+              "label": "nettingBasis"
+            },
+            "label": "netting basis"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "Gross",
+                "label": "Gross"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "ref": "country/KEN",
+                "label": "Kenya"
+              },
+              "value_kind": "entity"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "value_kind": "time_window",
+              "time_window": {
+                "start_year": 2019,
+                "end_year": 2019
+              }
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "inapplicable_slots": [
+        "financialObligationType"
+      ],
+      "unresolved_slots": [],
+      "stat_vars": {
+        "member_count": 2,
+        "member_count_exact": true,
+        "served_count": 375,
+        "data_date_range": {
+          "start": "2019",
+          "end": "2019"
+        }
+      },
+      "entities": [
+        {
+          "ref": "country/KEN",
+          "label": "Kenya",
+          "entity_type": "Country",
+          "role": "destination"
+        },
+        {
+          "ref": "country/USA",
+          "label": "United States",
+          "entity_type": "Country",
+          "role": "origin"
+        }
+      ],
+      "coverage": {
+        "kind": "exact",
+        "has_data": true,
+        "observation_count": 2,
+        "evidence": "facet_metadata",
+        "dimensions": [
+          {
+            "label": "sources",
+            "count": 1
+          },
+          {
+            "label": "observations",
+            "count": 1
+          },
+          {
+            "label": "variables",
+            "count": 2
+          }
+        ],
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "headline": {
+        "year": 2019,
+        "year_named": true,
+        "named_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "observations": 2,
+        "series": 2,
+        "role_counts": {
+          "financingProvider": 1,
+          "financingRecipient": 1
+        },
+        "recent_years": [
+          {
+            "year": 2019,
+            "observations": 2,
+            "series": 2,
+            "role_counts": {
+              "financingProvider": 1,
+              "financingRecipient": 1
+            }
+          },
+          {
+            "year": 2018,
+            "observations": 2,
+            "series": 2,
+            "role_counts": {
+              "financingProvider": 1,
+              "financingRecipient": 1
+            }
+          },
+          {
+            "year": 2017,
+            "observations": 2,
+            "series": 2,
+            "role_counts": {
+              "financingProvider": 1,
+              "financingRecipient": 1
+            }
+          }
+        ]
+      },
+      "download": {
+        "rows": 2,
+        "rows_exact": true,
+        "series": 2,
+        "window": {
+          "start_year": 2019,
+          "end_year": 2019
+        }
+      },
+      "coverage_stamp": "test-coverage-stamp",
+      "facets": {
+        "provenance": {
+          "basis": "fallback",
+          "ref": "provenance/OECDCreditorReportingSystem",
+          "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem",
+          "account": "provider"
+        },
+        "unit": {
+          "basis": "fallback",
+          "ref": "USD"
+        }
+      },
+      "slot_options": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsCooperationModality",
+              "label": "crsCooperationModality"
+            },
+            "label": "modality"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSCooperationModalityA",
+                  "label": "budget support"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 0,
+              "served_rows": 2,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSCooperationModalityA01",
+                  "label": "general budget support"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSCooperationModalityA",
+              "member_count": 289,
+              "served_rows": 2,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsPurpose",
+              "label": "crsPurpose"
+            },
+            "label": "sector"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSPurposeCode100",
+                  "label": "social infrastructure and services"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 13,
+              "served_rows": 2,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSPurposeCode120",
+                  "label": "health"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSPurposeCode100",
+              "member_count": 6,
+              "served_rows": 1,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSPurposeCode130",
+                  "label": "population policy, programme, and reproductive health"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSPurposeCode100",
+              "member_count": 5,
+              "served_rows": 1,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFinance",
+              "label": "crsTypeOfFinance"
+            },
+            "label": "instrument"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSTypeOfFinance420",
+                  "label": "debt instrument"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 0,
+              "served_rows": 2,
+              "served_rows_exact": true
+            },
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSTypeOfFinance421",
+                  "label": "standard loan"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "child",
+              "parent": "CRSTypeOfFinance420",
+              "member_count": 4620,
+              "served_rows": 2,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "ref": "crsTypeOfFlow",
+              "label": "crsTypeOfFlow"
+            },
+            "label": "flow"
+          },
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "CRSTypeOfFlow10",
+                  "label": "official development assistance"
+                },
+                "value_kind": "enum_value"
+              },
+              "relation": "root",
+              "member_count": 14098,
+              "served_rows": 2,
+              "served_rows_exact": true
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "entity_options": [],
+      "facet_options": [
+        {
+          "axis": "provenance",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "provenance/OECDCreditorReportingSystem",
+                  "label": "provenance/OECDCreditorReportingSystem"
+                },
+                "value_kind": "source"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        },
+        {
+          "axis": "unit",
+          "options": [
+            {
+              "value": {
+                "ref": {
+                  "ref": "USD",
+                  "label": "USD"
+                },
+                "value_kind": "enum_value"
+              }
+            }
+          ],
+          "truncated": false,
+          "source": "observed"
+        }
+      ],
+      "rendered_sentence": "United States' gross ODA disbursements to Kenya for health and population policy, programme, and reproductive health in 2019.",
+      "sentence_plan": [
+        {
+          "kind": "slot",
+          "text": "United States",
+          "segment": "heading",
+          "role": "origin",
+          "binding_ref": "origin:",
+          "entity_refs": [
+            "country/USA"
+          ],
+          "states": [
+            "origin:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": "'",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "gross ODA disbursements",
+          "axis": "what",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": [
+            "how:crsCooperationModality",
+            "how:crsTypeOfFinance",
+            "how:crsTypeOfFlow",
+            "how:financialFlowType",
+            "how:nettingBasis",
+            "axis:populationType",
+            "axis:measuredProperty",
+            "axis:measurementQualifier"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " to ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "Kenya",
+          "axis": "where",
+          "segment": "heading",
+          "role": "destination",
+          "binding_ref": "where:",
+          "entity_refs": [
+            "country/KEN"
+          ],
+          "states": [
+            "where:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " for ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "health and population policy, programme, and reproductive health",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsPurpose",
+          "binding_ref": "how:crsPurpose",
+          "entity_refs": [],
+          "states": [
+            "how:crsPurpose"
+          ]
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsCooperationModality",
+          "binding_ref": "how:crsCooperationModality",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsTypeOfFinance",
+          "binding_ref": "how:crsTypeOfFinance",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "crsTypeOfFlow",
+          "binding_ref": "how:crsTypeOfFlow",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "financialFlowType",
+          "binding_ref": "how:financialFlowType",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "how",
+          "segment": "heading",
+          "property_dcid": "nettingBasis",
+          "binding_ref": "how:nettingBasis",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "in 2019",
+          "axis": "when",
+          "segment": "heading",
+          "binding_ref": "when:",
+          "entity_refs": [],
+          "states": [
+            "when:"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "",
+          "axis": "source",
+          "segment": "byline",
+          "binding_ref": "source:",
+          "entity_refs": [],
+          "states": []
+        }
+      ],
+      "trace": {
+        "resolved_entities": [
+          {
+            "ref": "country/KEN",
+            "label": "Kenya"
+          },
+          {
+            "ref": "country/USA",
+            "label": "United States"
+          }
+        ],
+        "resolved_sources": [],
+        "slot_filters": [
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsCooperationModality",
+                "label": "crsCooperationModality"
+              },
+              "label": "modality"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsPurpose",
+                "label": "crsPurpose"
+              },
+              "label": "sector"
+            },
+            "binding_kind": "set",
+            "refs": [
+              {
+                "ref": "CRSPurposeCode120",
+                "label": "health"
+              },
+              {
+                "ref": "CRSPurposeCode130",
+                "label": "population policy, programme, and reproductive health"
+              }
+            ],
+            "provenance": "declared_grouping"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsTypeOfFinance",
+                "label": "crsTypeOfFinance"
+              },
+              "label": "instrument"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "crsTypeOfFlow",
+                "label": "crsTypeOfFlow"
+              },
+              "label": "flow"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "CRSTypeOfFlow10",
+                "label": "official development assistance"
+              }
+            ],
+            "provenance": "declared_default"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "financialFlowType",
+                "label": "financialFlowType"
+              },
+              "label": "financial flow type"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Disbursement",
+                "label": "Disbursement"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "how",
+              "property": {
+                "ref": "nettingBasis",
+                "label": "nettingBasis"
+              },
+              "label": "netting basis"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "Gross",
+                "label": "Gross"
+              }
+            ],
+            "provenance": "measure_elected"
+          },
+          {
+            "key": {
+              "axis": "where",
+              "label": "place"
+            },
+            "binding_kind": "value",
+            "refs": [
+              {
+                "ref": "country/KEN",
+                "label": "Kenya"
+              }
+            ],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "when",
+              "label": "time window"
+            },
+            "binding_kind": "value",
+            "refs": [],
+            "provenance": "binder"
+          },
+          {
+            "key": {
+              "axis": "source",
+              "label": "data source"
+            },
+            "binding_kind": "unbound",
+            "refs": [],
+            "provenance": "binder"
+          }
+        ],
+        "query_qualifiers": [
+          {
+            "text": "health",
+            "named": [
+              {
+                "ref": "CRSPurposeCode120",
+                "label": "health"
+              }
+            ],
+            "slot": "crsPurpose",
+            "disposition": "bound",
+            "selected": []
+          }
+        ],
+        "requested_window": {
+          "start_year": 2019,
+          "end_year": 2019
+        },
+        "capability_version": "cap_932ba7fffa549da3",
+        "default_reading": {
+          "applied": true,
+          "removed_stat_vars": []
+        }
+      },
+      "confidence": "high",
+      "available_at_place": true,
+      "alternative_measures": [],
+      "measure_label": "gross disbursements",
+      "measure_label_axes": [
+        "populationType",
+        "measuredProperty",
+        "measurementQualifier",
+        "financialFlowType",
+        "nettingBasis"
+      ],
+      "measure_axis_values": [
+        {
+          "axis": "populationType",
+          "value": {
+            "ref": "FinancialFlow",
+            "label": "financial flow"
+          }
+        },
+        {
+          "axis": "measuredProperty",
+          "value": {
+            "ref": "amount",
+            "label": "amount"
+          }
+        },
+        {
+          "axis": "measurementQualifier",
+          "value": {
+            "ref": "Nominal",
+            "label": "nominal"
+          }
+        },
+        {
+          "axis": "financialFlowType",
+          "value": {
+            "ref": "Disbursement",
+            "label": "disbursement"
+          }
+        },
+        {
+          "axis": "nettingBasis",
+          "value": {
+            "ref": "Gross",
+            "label": "gross"
+          }
+        }
+      ],
+      "concept_label": "health",
+      "published_tables": "OECD Creditor Reporting System (CRS)",
+      "open_axis_facts": [
+        {
+          "property": "crsCooperationModality",
+          "varies": false,
+          "value": {
+            "ref": "CRSCooperationModalityA01",
+            "label": "general budget support"
+          },
+          "distinct_count": 1,
+          "undeclared_count": 0,
+          "values": [
+            {
+              "value": {
+                "ref": "CRSCooperationModalityA01",
+                "label": "general budget support"
+              },
+              "count": 2
+            }
+          ]
+        },
+        {
+          "property": "crsTypeOfFinance",
+          "varies": false,
+          "value": {
+            "ref": "CRSTypeOfFinance421",
+            "label": "standard loan"
+          },
+          "distinct_count": 1,
+          "undeclared_count": 0,
+          "values": [
+            {
+              "value": {
+                "ref": "CRSTypeOfFinance421",
+                "label": "standard loan"
+              },
+              "count": 2
+            }
+          ]
+        }
+      ],
+      "scope_choices": {
+        "id": "spec_bca847b6145e1044717de4e9cd6e4ee8",
+        "base": {
+          "schema_version": 1,
+          "spec_id": "spec_bca847b6145e1044717de4e9cd6e4ee8",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "crsCooperationModality",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsPurpose",
+                "binding": {
+                  "state": "set",
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ]
+                }
+              },
+              {
+                "property": "crsTypeOfFinance",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsTypeOfFlow",
+                "binding": {
+                  "state": "value",
+                  "ref": "CRSTypeOfFlow10"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "destination": [
+                "country/KEN"
+              ],
+              "origin": [
+                "country/USA"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          }
+        },
+        "rule_version": "scope1:7e3840869db43d1aa704e53f55ff21de",
+        "entries": [],
+        "dropped_entries": [],
+        "choices": [
+          {
+            "id": "spec_bca847b6145e1044717de4e9cd6e4ee8:sector",
+            "axis": "sector",
+            "rule": "sector_grouping",
+            "provenance": "default",
+            "active": "sector:120+130",
+            "options": [
+              {
+                "option_id": "sector:120+130",
+                "label": "health incl. population and reproductive health (CRS 120 + 130)",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "crsPurpose",
+                  "state": "set",
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "sector:120",
+                "label": "health, CRS 120 alone",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "crsPurpose",
+                  "state": "value",
+                  "refs": [
+                    "CRSPurposeCode120"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "sector:130",
+                "label": "population policy, programme, and reproductive health, CRS 130 alone",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "crsPurpose",
+                  "state": "value",
+                  "refs": [
+                    "CRSPurposeCode130"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_bca847b6145e1044717de4e9cd6e4ee8:measure_basis",
+            "axis": "measure_basis",
+            "rule": "measure_basis_convention",
+            "provenance": "default",
+            "active": "measure_basis:gross",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "label": "gross disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Gross"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:net",
+                "label": "net disbursements, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "Net"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:grant_equivalent",
+                "label": "grant equivalents (OECD headline), current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "grantEquivalent",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "measure_basis:commitments",
+                "label": "commitments, current USD",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": null
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "option_not_covered",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_bca847b6145e1044717de4e9cd6e4ee8:provider",
+            "axis": "provider",
+            "rule": "bilateral_flows",
+            "provenance": "default",
+            "active": "provider:bilateral",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "label": "bilateral flows only",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "bilateral"
+                },
+                "availability": {
+                  "status": "available",
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "provider:inclusive",
+                "label": "bilateral plus imputed multilateral",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "inclusive"
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "code": "provider_not_offered",
+                  "detail": {
+                    "why": "provider"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "spec_id": "spec_bca847b6145e1044717de4e9cd6e4ee8",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "crsCooperationModality",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsPurpose",
+                "binding": {
+                  "state": "set",
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ]
+                }
+              },
+              {
+                "property": "crsTypeOfFinance",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "crsTypeOfFlow",
+                "binding": {
+                  "state": "value",
+                  "ref": "CRSTypeOfFlow10"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "destination": [
+                "country/KEN"
+              ],
+              "origin": [
+                "country/USA"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2019,
+              "end_year": 2019
+            }
+          },
+          "components": [
+            {
+              "role": "whole",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "FinancialFlow",
+                  "measured_property": "amount",
+                  "stat_type": "measuredValue",
+                  "measurement_qualifier": "Nominal"
+                },
+                "slots": [
+                  {
+                    "property": "crsCooperationModality",
+                    "binding": {
+                      "state": "unbound"
+                    }
+                  },
+                  {
+                    "property": "crsPurpose",
+                    "binding": {
+                      "state": "set",
+                      "refs": [
+                        "CRSPurposeCode120",
+                        "CRSPurposeCode130"
+                      ]
+                    }
+                  },
+                  {
+                    "property": "crsTypeOfFinance",
+                    "binding": {
+                      "state": "unbound"
+                    }
+                  },
+                  {
+                    "property": "crsTypeOfFlow",
+                    "binding": {
+                      "state": "value",
+                      "ref": "CRSTypeOfFlow10"
+                    }
+                  },
+                  {
+                    "property": "financialFlowType",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Disbursement"
+                    }
+                  },
+                  {
+                    "property": "nettingBasis",
+                    "binding": {
+                      "state": "value",
+                      "ref": "Gross"
+                    }
+                  }
+                ],
+                "entities": {
+                  "destination": [
+                    "country/KEN"
+                  ],
+                  "origin": [
+                    "country/USA"
+                  ]
+                },
+                "requested_window": {
+                  "kind": "range",
+                  "start_year": 2019,
+                  "end_year": 2019
+                }
+              }
+            }
+          ]
+        },
+        "ledger": []
+      }
+    }
+  }
+}
