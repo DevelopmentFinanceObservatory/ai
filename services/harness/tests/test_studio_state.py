@@ -1463,6 +1463,33 @@ def test_a_ledger_turn_holding_keys_this_release_does_not_declare_still_loads():
     )
 
 
+def test_a_ledger_turn_a_later_release_stored_reads_whole_into_the_next_turn(caplog):
+    """A later release stores readings with their scope choices, served counts and
+    named sets, and named sets with their members, residuals and registry ids on
+    plan sources and recorded identities. The fixture is that release's own dump.
+    The next turn closes, and reads every record back unchanged with none skipped."""
+    turn = json.loads(
+        (Path(__file__).parent / "fixtures" / "ledger_turn_later_release.json").read_text()
+    )
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [turn]
+
+    with caplog.at_level(logging.WARNING, logger="harness.studio_state"):
+        state.close_turn(final_text="Done.")
+        ledger = state.prior_ledger_state()
+        ((spec_id, identity),) = turn["identities"].items()
+        recorded = state.recorded_identity(spec_id)
+
+    assert "skipping a stored" not in caplog.text
+    assert ledger is not None
+    assert ledger["readings"] == turn["readings"]
+    assert recorded is not None
+    assert recorded.model_dump(mode="json") == identity
+    ((plan_source,),) = [plan["sources"] for plan in turn["plans"]]
+    ((source,),) = [PlanRecord.model_validate(plan).sources for plan in turn["plans"]]
+    assert source.model_dump(mode="json")["groups"] == plan_source["groups"]
+
+
 def _recallable() -> ConversationState:
     state = ConversationState(conversation_id=CONVERSATION)
     state.turns = [

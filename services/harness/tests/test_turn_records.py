@@ -620,6 +620,19 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
     assert lines[-1] == "   fetch refused: frame_too_large"
 
 
+def test_a_stored_plan_step_retrieval_renders_as_no_fetch() -> None:
+    """A later release stores a plan step's retrieval on the reading as a fetch
+    marked `plan_step`, which the planner's ledger text leaves out."""
+    stored = json.loads(
+        (Path(__file__).parent / "fixtures" / "ledger_turn_later_release.json").read_text()
+    )["readings"][1]
+    assert stored["fetch"] == {"plan_step": True, "summary": None, "refusal_code": None}
+    planned = SearchReading.model_validate(stored)
+    unfetched = planned.model_copy(update={"fetch": None})
+
+    assert render_readings([planned], budget=10_000) == render_readings([unfetched], budget=10_000)
+
+
 def test_a_reading_with_no_text_heads_its_line_with_its_status() -> None:
     """A seed's reading has no question text, so its head names no quoted text."""
     reading = SearchReading.from_part(

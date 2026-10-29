@@ -1,0 +1,497 @@
+{
+  "user": "health aid to Asia from DAC countries",
+  "assistant": "Here it is.",
+  "readings": [
+    {
+      "text": "health aid to Asia",
+      "status": "definite",
+      "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sentence": null,
+      "warnings": [],
+      "departures": [],
+      "candidates": [],
+      "window": null,
+      "wide": null,
+      "skills": [],
+      "coverage_kind": null,
+      "requested_window_kind": null,
+      "roles": [],
+      "open_axes": [],
+      "asked_roles": [],
+      "recent_years": [],
+      "refusal_code": null,
+      "unbound_qualifiers": [],
+      "flagged_match": null,
+      "fetch": {
+        "summary": "2 series",
+        "refusal_code": null,
+        "served": {
+          "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "roles": [
+            {
+              "role": "destination",
+              "members": 2,
+              "residuals": [
+                "Asia_regional"
+              ],
+              "narrowed": true
+            }
+          ],
+          "measured_property": "amount",
+          "netting_basis": "gross",
+          "components": [
+            {
+              "role": "total",
+              "periods": [
+                [
+                  2010,
+                  2022
+                ]
+              ]
+            }
+          ]
+        },
+        "args": [
+          {
+            "scope": {
+              "sector": "sector:120+130"
+            },
+            "breakdown": null
+          }
+        ]
+      },
+      "counted_as": null,
+      "alternatives": [],
+      "scope": {
+        "id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "base": {
+          "schema_version": 1,
+          "spec_id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "identity": {
+            "schema_version": 1,
+            "what": {
+              "measured_property": "amount"
+            },
+            "entities": {
+              "origin": [
+                "DACCountries"
+              ]
+            }
+          }
+        },
+        "rule_version": "1",
+        "entries": [
+          {
+            "axis": "sector",
+            "option_id": "sector:120+130",
+            "provenance": "explicit",
+            "concept": "health",
+            "origin": {
+              "kind": "text",
+              "text": "health aid",
+              "start": 0,
+              "end": 6
+            }
+          }
+        ],
+        "dropped_entries": [
+          {
+            "entry": {
+              "axis": "provider",
+              "option_id": "provider:inclusive",
+              "provenance": "carried",
+              "concept": null,
+              "origin": {
+                "kind": "choice",
+                "choice_id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:provider"
+              }
+            },
+            "code": "carried_choice_not_applied",
+            "cause": "an earlier choice did not apply here"
+          }
+        ],
+        "choices": [
+          {
+            "id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:sector",
+            "axis": "sector",
+            "rule": "sector_rollup",
+            "provenance": "explicit",
+            "active": "sector:120+130",
+            "options": [
+              {
+                "option_id": "sector:120+130",
+                "label": "Health and population",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "sector",
+                  "state": "set",
+                  "refs": [
+                    "120",
+                    "130"
+                  ]
+                },
+                "availability": {
+                  "status": "available",
+                  "years": null,
+                  "code": null,
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "sector:120",
+                "label": "Health",
+                "binding": {
+                  "kind": "slot",
+                  "slot": "sector",
+                  "state": "value",
+                  "refs": [
+                    "120"
+                  ]
+                },
+                "availability": {
+                  "status": "partial",
+                  "years": [
+                    [
+                      2015,
+                      2022
+                    ]
+                  ],
+                  "code": "option_not_covered",
+                  "detail": {
+                    "from": "2015"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:region",
+            "axis": "region",
+            "rule": "region_residuals",
+            "provenance": "default",
+            "active": "region:members",
+            "options": [
+              {
+                "option_id": "region:members",
+                "label": "Countries only",
+                "binding": {
+                  "kind": "entities",
+                  "role": "destination",
+                  "add": []
+                },
+                "availability": {
+                  "status": "available",
+                  "years": null,
+                  "code": null,
+                  "detail": {}
+                }
+              },
+              {
+                "option_id": "region:members_and_residuals",
+                "label": "With regional aid",
+                "binding": {
+                  "kind": "entities",
+                  "role": "destination",
+                  "add": [
+                    "Asia_regional"
+                  ]
+                },
+                "availability": {
+                  "status": "unavailable",
+                  "years": null,
+                  "code": "residuals_need_summed_region",
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:measure_basis",
+            "axis": "measure_basis",
+            "rule": "basis",
+            "provenance": "default",
+            "active": "measure_basis:gross",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "label": "Gross",
+                "binding": {
+                  "kind": "shape",
+                  "measured_property": "amount",
+                  "netting_basis": "gross"
+                },
+                "availability": {
+                  "status": "available",
+                  "years": null,
+                  "code": null,
+                  "detail": {}
+                }
+              }
+            ]
+          },
+          {
+            "id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:provider",
+            "axis": "provider",
+            "rule": "provider",
+            "provenance": "carried",
+            "active": "provider:bilateral",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "label": "Bilateral",
+                "binding": {
+                  "kind": "provider",
+                  "scope": "bilateral"
+                },
+                "availability": {
+                  "status": "available",
+                  "years": null,
+                  "code": null,
+                  "detail": {}
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "identity": {
+            "schema_version": 1,
+            "what": {
+              "measured_property": "amount"
+            },
+            "entities": {
+              "origin": [
+                "DACCountries"
+              ]
+            }
+          },
+          "components": [
+            {
+              "role": "total",
+              "periods": [
+                [
+                  2010,
+                  2022
+                ]
+              ],
+              "provenance": "provenance/OECDCRS",
+              "content_version": "v1",
+              "identity": {
+                "schema_version": 1,
+                "what": {
+                  "measured_property": "amount"
+                },
+                "entities": {
+                  "origin": [
+                    "DACCountries"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "ledger": [
+          {
+            "axis": "sector",
+            "prior": null,
+            "applied": {
+              "axis": "sector",
+              "option_id": "sector:120+130",
+              "provenance": "explicit",
+              "concept": "health",
+              "origin": {
+                "kind": "text",
+                "text": "health aid",
+                "start": 0,
+                "end": 6
+              }
+            },
+            "revision": 1
+          }
+        ]
+      },
+      "planner_axes": [
+        "sector"
+      ],
+      "entity_groups": [
+        {
+          "role": "origin",
+          "label": "DAC countries",
+          "ref": "DACCountries",
+          "total": "DACCountries",
+          "members": [
+            "country/FRA",
+            "country/DEU"
+          ],
+          "holds_multilaterals": false
+        },
+        {
+          "role": "destination",
+          "label": "Asia (DAC)",
+          "ref": null,
+          "group_id": "groups/OECD.DAC.Region.Asia",
+          "members": [
+            "country/AFG",
+            "country/BGD"
+          ],
+          "left_out": [
+            "Asia, regional (DAC)"
+          ],
+          "sum_differs": true
+        }
+      ],
+      "origin": "search",
+      "observed_at": "2026-10-28T00:00:00Z"
+    },
+    {
+      "text": "aid to Asia",
+      "status": "definite",
+      "spec_id": "spec_cccccccccccccccccccccccccccccccc",
+      "sentence": null,
+      "warnings": [],
+      "departures": [],
+      "candidates": [],
+      "window": null,
+      "wide": null,
+      "skills": [],
+      "coverage_kind": null,
+      "requested_window_kind": null,
+      "roles": [],
+      "open_axes": [],
+      "asked_roles": [],
+      "recent_years": [],
+      "refusal_code": null,
+      "unbound_qualifiers": [],
+      "flagged_match": null,
+      "fetch": {
+        "summary": null,
+        "refusal_code": null,
+        "plan_step": true
+      },
+      "counted_as": null,
+      "alternatives": [],
+      "entity_groups_unreadable": true,
+      "origin": "search",
+      "observed_at": "2026-10-28T00:00:00Z"
+    }
+  ],
+  "plans": [
+    {
+      "question": "health aid to Asia from DAC countries",
+      "status": "approved",
+      "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "approved_revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "periods": [],
+      "sources": [
+        {
+          "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "name": "OECD CRS",
+          "measure": "Health aid",
+          "coverage_kind": null,
+          "coverage": null,
+          "coverage_source": null,
+          "members": null,
+          "origin": "search",
+          "identity": {
+            "schema_version": 1,
+            "what": {
+              "measured_property": "amount"
+            },
+            "entities": {
+              "origin": [
+                "DACCountries"
+              ]
+            }
+          },
+          "groups": [
+            {
+              "role": "origin",
+              "label": "DAC countries",
+              "ref": "DACCountries",
+              "total": "DACCountries",
+              "members": [
+                "country/FRA",
+                "country/DEU"
+              ],
+              "holds_multilaterals": false
+            },
+            {
+              "role": "destination",
+              "label": "Asia (DAC)",
+              "ref": null,
+              "group_id": "groups/OECD.DAC.Region.Asia",
+              "members": [
+                "country/AFG",
+                "country/BGD"
+              ],
+              "left_out": [
+                "Asia, regional (DAC)"
+              ],
+              "sum_differs": true
+            }
+          ],
+          "windowed_from": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "decisions": [],
+      "asks": [],
+      "declined": [],
+      "warnings": [],
+      "outputs": [
+        "r1"
+      ],
+      "steps": [
+        {
+          "id": "r1",
+          "label": "Health aid",
+          "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reading": null,
+          "failed": false
+        }
+      ]
+    }
+  ],
+  "identities": {
+    "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+      "identity": {
+        "schema_version": 1,
+        "what": {
+          "measured_property": "amount"
+        },
+        "entities": {
+          "origin": [
+            "DACCountries"
+          ]
+        }
+      },
+      "groups": [
+        {
+          "role": "origin",
+          "label": "DAC countries",
+          "ref": "DACCountries",
+          "total": "DACCountries",
+          "members": [
+            "country/FRA",
+            "country/DEU"
+          ],
+          "holds_multilaterals": false
+        },
+        {
+          "role": "destination",
+          "label": "Asia (DAC)",
+          "ref": null,
+          "group_id": "groups/OECD.DAC.Region.Asia",
+          "members": [
+            "country/AFG",
+            "country/BGD"
+          ],
+          "left_out": [
+            "Asia, regional (DAC)"
+          ],
+          "sum_differs": true
+        }
+      ]
+    }
+  }
+}

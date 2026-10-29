@@ -75,7 +75,10 @@ class ResolvedGroup(StrictModel):
     `search` names the set it bound, keyed by the role column it fills
     (`resolved.entity_groups`). `label` is the set's name, and `ref` its own
     graph node, `None` when the graph holds none (a resolver group such as
-    "G7"). `total` is the party the dataset publishes as the set's own total
+    "G7"). `group_id` is the membership registry's id for a set the graph holds
+    no node for ("groups/OECD.DAC.Region.Asia"), `None` when `ref` is set or
+    the set is no registry group.
+    `total` is the party the dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
     when the role binds the set's members, one entity each. `whole_of` names
     the classes of party (`common.place_type.PartyClass`) the bound total holds
@@ -84,6 +87,19 @@ class ResolvedGroup(StrictModel):
     `side_classes` names the classes of party, totals aside, the source publishes
     on the side such a set is read on, so a reading can say what the population
     leaves out; empty for any other set and on a search answer without it.
+    `members` are the parties a bound total holds where Search lists them
+    (DAC countries' total lists the DAC members); empty where it lists none.
+    For a set read as its members, `left_out` labels the residuals the set's
+    published total counts that the members leave out ("Africa, unallocated
+    by country (DAC)"). It is empty where Search names none, as for a set whose
+    members leave nothing out of its total and for one with no published total.
+    `sum_differs` says the source publishes its own figure for the set, which
+    can differ from the members' sum, and is false where Search does not say
+    so. `holds_multilaterals` says, for a donor set read
+    as a published total or a whole population, whether that population holds a
+    multilateral organisation; `None` where Search states nothing.
+    `group_id`, `members`, `left_out`, `sum_differs` and `holds_multilaterals`
+    arrive only on records a later release stored; no code here sets or reads them.
     A requirement's `Entity` naming the label, case-folded, on the set's side
     of the flow is met by the source under either reading
     (`compiler.evidence.resolve_group`), except that one asking for the members
@@ -95,6 +111,9 @@ class ResolvedGroup(StrictModel):
     ref: str | None = None
     # Left out of every dump while unset, so a source saved without it keeps
     # its serialised form.
+    group_id: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda group_id: group_id is None
+    )
     total: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda total: total is None
     )
@@ -104,12 +123,42 @@ class ResolvedGroup(StrictModel):
     side_classes: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
         default=(), exclude_if=lambda classes: not classes
     )
+    members: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda members: not members
+    )
+    left_out: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda labels: not labels
+    )
+    sum_differs: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda differs: not differs
+    )
+    holds_multilaterals: Annotated[bool | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda holds: holds is None
+    )
 
     @property
     def reads_total(self) -> bool:
         """Whether the role binds a total, the set's own (`total`) or a whole
         population's (`whole_of`), and no member."""
         return self.total is not None or bool(self.whole_of)
+
+
+class BoundEntity(StrictModel):
+    """One entity row of a search part's restatement and the refs Search bound for it.
+
+    `identity` is the row's identity within the part, as Search keys it:
+    the `dcid` the row pins, else its `name`, else its `text`. `text` is
+    the row's words and `role` its `role_text`, `None` when it states
+    none. `refs` are the part's `entity_refs` entry at the row's position:
+    a place's node, a set's own node or published total, or a set's ref
+    followed by its members. Two rows written alike, "Congo" pinned to
+    `country/COD` and to `country/COG`, are two entities.
+    """
+
+    identity: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    role: str | None = None
+    refs: tuple[str, ...] = Field(min_length=1)
 
 
 class OpenAxis(StrictModel):

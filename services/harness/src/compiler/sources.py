@@ -33,6 +33,7 @@ from planner.records import (
     StrictModel,
 )
 from planner.workflow import (
+    BoundEntity,
     ElectedMeasure,
     MeasureAlternative,
     OpenAxis,
@@ -164,6 +165,60 @@ def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
     return refs
 
 
+def bound_entities(part: Mapping[str, object]) -> tuple[BoundEntity, ...]:
+    """The refs Search bound for each entity row of `part`, one `BoundEntity` per row, in row order.
+
+    Search states one `entity_refs` entry per `restatement.entities` row,
+    at the row's position: the row's text and the refs it finally bound.
+    Each entry is kept with its row's identity (`dcid`, else `name`, else
+    `text`) and `role_text`. A row bound to nothing states no refs and is
+    left out, and so is every row of a part whose `entity_refs` does not
+    hold one entry per row, as a Search that predates the field or states
+    one entry per text answers. A spec block stores these rows under
+    `_bound_refs` (`harness.tool_contracts.resolver_digest`).
+    """
+    rows = _sequence(_mapping(part.get("restatement")).get("entities"))
+    entries = _sequence(part.get("entity_refs"))
+    if len(entries) != len(rows):
+        return ()
+    bound: list[BoundEntity] = []
+    for row, entry in zip(rows, entries, strict=True):
+        text, refs = _text(row.get("text")), _strings(entry.get("refs"))
+        if text is None or not refs:
+            continue
+        identity = _text(row.get("dcid")) or _text(row.get("name")) or text
+        bound.append(
+            BoundEntity(
+                identity=identity,
+                text=text,
+                role=_text(row.get("role_text")),
+                refs=tuple(dict.fromkeys(refs)),
+            )
+        )
+    return tuple(bound)
+
+
+def stored_bound_refs(raw: object) -> dict[str, tuple[str, ...]]:
+    """A spec block's stored `_bound_refs` as `SelectedSource.bound_refs`: each
+    entity text, case-folded, to the refs it bound.
+
+    A block holds either a list of `BoundEntity` rows (`bound_entities`), or
+    a mapping from each text, case-folded, to its refs, as blocks stored
+    before the rows were kept hold it. Rows written alike bind every ref
+    either row states, and an absent `_bound_refs` binds none.
+
+    Raises:
+        ValueError: If a list holds a row that is no `BoundEntity`.
+    """
+    if isinstance(raw, list | tuple):
+        refs: dict[str, tuple[str, ...]] = {}
+        for row in _BOUND_ENTITIES.validate_python(raw):
+            key = row.text.casefold()
+            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *row.refs)))
+        return refs
+    return {text: tuple(refs) for text, value in _mapping(raw).items() if (refs := _strings(value))}
+
+
 def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     """Read a single-part `search` envelope into a `DiscoveryOutcome`.
 
@@ -245,8 +300,9 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     `exact`; a `breadth` or `bare` coverage carries none.
 
     Raises:
-        ValueError: If the block lacks a usable `spec_id`, or an entity it
-            resolves lacks its role, value or label.
+        ValueError: If the block lacks a usable `spec_id`, an entity it
+            resolves lacks its role, value or label, or its `_bound_refs`
+            list holds a row that is no `BoundEntity`.
     """
     resolved = _mapping(block.get("resolved"))
     coverage = _mapping(resolved.get("coverage"))
@@ -271,11 +327,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
             groups=_groups(_mapping(resolved.get("entity_groups"))),
-            bound_refs={
-                text: tuple(refs)
-                for text, raw in _mapping(block.get("_bound_refs")).items()
-                if (refs := _strings(raw))
-            },
+            bound_refs=stored_bound_refs(block.get("_bound_refs")),
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
@@ -1032,6 +1084,7 @@ def _strings(value: object) -> list[str]:
 
 
 _PARTY_CLASSES: TypeAdapter[tuple[PartyClass, ...]] = TypeAdapter(tuple[PartyClass, ...])
+_BOUND_ENTITIES: TypeAdapter[tuple[BoundEntity, ...]] = TypeAdapter(tuple[BoundEntity, ...])
 
 
 def _party_classes(value: object) -> tuple[PartyClass, ...]:

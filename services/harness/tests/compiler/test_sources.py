@@ -21,6 +21,7 @@ from compiler.sources import (
     total_reading,
     wire_groups,
 )
+from harness.tool_contracts import resolver_digest
 from planner.records import Period
 from planner.workflow import OpenEntityAxis
 
@@ -111,6 +112,59 @@ def test_each_entity_text_maps_to_the_refs_it_bound(
     part: dict[str, Any], expected: dict[str, tuple[str, ...]]
 ) -> None:
     assert bound_refs(part) == expected
+
+
+_RELEASE_ROWS = json.loads(
+    (Path(__file__).parent.parent / "fixtures" / "bound_refs_release_rows.json").read_text()
+)["cases"]
+
+
+@pytest.mark.parametrize("case", _RELEASE_ROWS, ids=[case["name"] for case in _RELEASE_ROWS])
+def test_a_definite_parts_block_stores_the_bound_rows_the_release_writes(
+    case: dict[str, Any],
+) -> None:
+    """The release reads `_bound_refs` only as `BoundEntity` rows, so a block
+    stored here is one it reads with the same refs."""
+    envelope = _envelope(
+        "definite",
+        spec=_spec(),
+        restatement={"entities": case["restatement_entities"]},
+        entity_refs=case["entity_refs"],
+    )
+
+    assert resolver_digest(envelope)["spec_block"]["_bound_refs"] == case["bound_refs"]
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (
+            {"g7": ["GroupOfSeven"], "africa": ["DACAfrica"]},
+            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+        ),
+        (
+            _RELEASE_ROWS[0]["bound_refs"],
+            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+        ),
+        # Two rows written alike bind every ref either row states.
+        (_RELEASE_ROWS[1]["bound_refs"], {"congo": ("country/COD", "country/COG")}),
+        (None, {}),
+    ],
+    ids=["mapping", "rows", "rows-written-alike", "absent"],
+)
+def test_a_stored_block_reads_its_bound_refs_as_rows_or_as_the_older_mapping(
+    stored: Any, expected: dict[str, tuple[str, ...]]
+) -> None:
+    block = _spec() if stored is None else {**_spec(), "_bound_refs": stored}
+
+    assert source_from_spec_block(block).bound_refs == expected
+
+
+def test_a_stored_bound_row_missing_its_refs_makes_the_block_unusable() -> None:
+    block = {**_spec(), "_bound_refs": [{"identity": "G7", "text": "G7", "refs": []}]}
+
+    with pytest.raises(ValueError, match="not usable as a source"):
+        source_from_spec_block(block)
 
 
 def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:
