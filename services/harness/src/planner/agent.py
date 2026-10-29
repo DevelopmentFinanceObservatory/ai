@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, override
 
+from compiler.evidence import PriceBasis
 from compiler.sources import block_group, party_class, readable_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
@@ -66,6 +67,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
+from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.scope_choices import (
     PROVIDER_AXIS,
     EntitiesBinding,
@@ -80,6 +82,7 @@ from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
 from submission.prices_choice import (
+    PRICES_BY_LABEL,
     PRICES_OPTIONS,
     PRICES_PICKS,
     PRICES_SLOT_PREFIX,
@@ -796,9 +799,12 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
     A prices refusal that sends the planner to the user (`detail.part`,
     `submission.prices_choice`) binds the planner's next ask offering
     `PRICES_OPTIONS` to its part, and the user's pick there sets the part's
-    prices: current prices replace the choice, constant prices keep it. Any
-    answer to that ask marks the part's choice `asked`, so the planner does
-    not ask it again (`submission.prices_choice`). Any other `propose_plan`
+    prices, marked `asked` so the planner does not ask it again
+    (`submission.prices_choice`). The user's own words there release the
+    part's choice, as they do on the orchestrator's question, and a skip
+    keeps it, marking a constant choice `asked`. A switch of the part's
+    prices row on the plan card (`_prices_switched`) is a new answer for the
+    part, marked `asked` too. Any other `propose_plan`
     response, the plan landing included, clears the refusal, so no later ask
     of another kind is read as that one. A message the user typed
     (`_user_message`) releases every choice and clears the refusal, and an
@@ -827,6 +833,10 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
                 asked[str(step.call_id)], refused = refused, None
         elif _is_amendment(dict(step.body)):
             chosen.clear()
+        elif (switched := _prices_switched(step.body)) is not None:
+            part, basis = switched
+            _release_measure(chosen, part, measures)
+            chosen[part] = PricesChoice(basis, asked=True)
         elif step.call_id in asked:
             part = asked.pop(step.call_id)
             answer = _answers(step.body.get("result")).get("q1") or {}
@@ -834,11 +844,35 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
             if answer.get("kind") == "option" and basis is not None:
                 _release_measure(chosen, part, measures)
                 chosen[part] = PricesChoice(basis, asked=True)
-            elif part in chosen:
+            elif _said(answer):
+                _release_measure(chosen, part, measures)
+            elif part in chosen and chosen[part].prices == "constant":
                 chosen[part] = chosen[part]._replace(asked=True)
         else:
             _priced_answers(step.args or {}, step.body, chosen, measures)
     return chosen
+
+
+def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
+    """The part and prices a switch of a part's prices row on the plan card
+    picks (`harness.studio`'s `{"result": {"switch": {"choice_id",
+    "option_id"}}}` answer to the approval card), or `None` for any other answer."""
+    result = body.get("result")
+    switch = result.get("switch") if isinstance(result, dict) else None
+    if not isinstance(switch, dict):
+        return None
+    slot = str(switch.get("choice_id")).removeprefix(DECISION_CHOICE_PREFIX)
+    if not slot.startswith(PRICES_SLOT_PREFIX):
+        return None
+    basis = next(
+        (
+            basis
+            for label, basis in PRICES_BY_LABEL.items()
+            if decision_option_id(label) == switch.get("option_id")
+        ),
+        None,
+    )
+    return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
 
 
 def _release_measure(

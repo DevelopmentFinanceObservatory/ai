@@ -98,6 +98,7 @@ from planner.plan import (
     dataset_of,
     frame_shapes,
     inputs_of,
+    is_code_written,
     is_scope_choice,
     is_search_pin,
     side_entities,
@@ -1320,17 +1321,17 @@ def switchable_decision(decision: Decision) -> bool:
     """Whether the card offers `decision`'s other options as a switch.
 
     A decision the planner wrote that settles requirement fields (`fixes`)
-    is switchable. A switch of it replans with the user's pick held. The
-    decisions `propose_plan` writes are not: a search pin's measure
-    (`planner.plan.is_search_pin`) and a scope choice switch through Search
-    (`choice_id`), and one qualifying the answer (`Decision.caveat`) reaches
-    the card only as a caveat.
+    is switchable. A switch of it replans with the user's pick held. So is
+    the prices the user chose for a part (`DecisionFixes.prices`): a switch
+    of it is a new answer to the part's prices question
+    (`planner.agent._prices_chosen`). The other decisions `propose_plan`
+    writes (`planner.plan.is_code_written`) are not: a search pin's measure
+    and a scope choice switch through Search (`choice_id`), and one
+    qualifying the answer (`Decision.caveat`) reaches the card only as a
+    caveat.
     """
-    return (
-        decision.fixes is not None
-        and decision.scope is None
-        and decision.caveat is None
-        and not is_search_pin(decision)
+    return decision.fixes is not None and (
+        decision.fixes.prices is not None or not is_code_written(decision)
     )
 
 

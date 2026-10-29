@@ -68,6 +68,9 @@ PRICES_OPTIONS: tuple[dict[str, str], ...] = tuple(
     for basis, label in _LABELS.items()
 )
 PRICES_PICKS: dict[str, PriceBasis] = {f"prices:{basis}": basis for basis in _LABELS}
+# The prices each option of a part's prices decision states, by its label
+# (`Decision.options`), as a switch of the card row picks them.
+PRICES_BY_LABEL: dict[str, PriceBasis] = {label: basis for basis, label in _LABELS.items()}
 
 
 def prices_slot(part: str) -> str:

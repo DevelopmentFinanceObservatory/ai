@@ -6350,7 +6350,8 @@ class DecisionPick(StrictModel):
     decision of the user's every member of C cited, and `cited_by_any` each
     other decision of the user's some member of C cited, which some
     replacing requirement cites. Decisions code writes (`is_code_written`)
-    are left out of both: admission derives their citations. Everything
+    are left out of both, `slot` too when code writes it, as it writes the
+    user's prices: admission derives their citations. Everything
     else on the card stands as the planner wrote it: `kept_requirements`
     holds each other requirement's `requirement_digest` by id, and
     `kept_decisions` the `content_digest` of each decision but `slot` and
@@ -6400,7 +6401,7 @@ class DecisionPick(StrictModel):
             origin_fixes=origin.fixes,
             replaced_readings=tuple(sorted({readings[r.id] for r in requirement_roots(replaced)})),
             replaced_kinds=tuple(sorted({r.kind for r in requirement_roots(replaced)})),
-            cited_by_every=tuple(sorted({slot} | every)),
+            cited_by_every=tuple(sorted(({slot} - code_written) | every)),
             cited_by_any=tuple(sorted((users & some) - every)),
             kept_requirements={
                 r.id: requirement_digest(r, code_written=code_written) for r in kept

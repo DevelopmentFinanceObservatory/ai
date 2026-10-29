@@ -25,7 +25,9 @@ from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.server import mcp as data_mcp
-from google.adk.events import EventActions
+from google.adk.events import Event, EventActions
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
+from google.genai import types
 from harness.decision_pick import decision_pick
 from harness.plan_display import decision_option_id
 from harness.studio_state import _turn_identities
@@ -1638,3 +1640,178 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     plan = load_plan(ctx.state)
     assert plan is not None
     assert priced in plan.requirement("recent").decision_ids
+
+
+def _switch_event(choice_id: str, option_id: str) -> Any:
+    """The approval card's answer switching row `choice_id` to option `option_id`."""
+    part = create_request_input_response(
+        "approve", {"result": {"switch": {"choice_id": choice_id, "option_id": option_id}}}
+    )
+    return Event(content=types.Content(role="user", parts=[part]))
+
+
+@pytest.mark.parametrize(
+    ("answered", "picked", "shown", "pin", "unit", "code"),
+    [
+        (
+            "constant",
+            "current prices",
+            True,
+            _GROSS,
+            Unit(currency="USD", prices="current"),
+            None,
+        ),
+        (
+            "current",
+            "constant prices",
+            True,
+            _CONSTANT_GROSS,
+            Unit(currency="USD", prices="constant", base_year=2023),
+            None,
+        ),
+        (
+            "current",
+            "constant prices",
+            False,
+            _GROSS,
+            None,
+            ProblemCode.PRICES_UNSERVED,
+        ),
+    ],
+    ids=["to-current", "to-constant", "to-constant-unserved"],
+)
+def test_a_switch_of_the_prices_row_is_the_users_new_prices(
+    answered: str, picked: str, shown: bool, pin: str, unit: Unit | None, code: ProblemCode | None
+) -> None:
+    """The user answered the prices question, then switched the card's prices
+    row. The switch is a new answer for the part: the replan in the picked
+    prices lands citing it, and constant prices with no constant series shown
+    hand the turn back for a search."""
+    measure = Decision(
+        slot="measure",
+        description="What to measure.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+
+    def aid(requirement_id: str, **update: Any) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=("measure",),
+            measure="French aid to Kenya",
+            entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
+            period=Period(start=2015, end=2022),
+            source_spec_id=_GROSS,
+            unit=Unit(currency="USD", prices="current"),
+        ).model_copy(update=update)
+
+    ctx = _FakeToolContext()
+    if shown:
+        _show_blocks(ctx, _offering_constant(), _constant_block())
+    else:
+        _show_blocks(ctx, _FRANCE_KENYA)
+    constant = answered == "constant"
+    ctx.session.events = _prices_ask_events(
+        constant_spec_id=_CONSTANT_GROSS if constant else None, pick=None if constant else "o1"
+    )
+    first = (
+        aid(
+            "first",
+            source_spec_id=_CONSTANT_GROSS,
+            unit=Unit(currency="USD", prices="constant", base_year=2023),
+        )
+        if constant
+        else aid("first")
+    )
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([measure]),
+        evidence_requirements=[first],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    slot = f"user_prices_{_GROSS}"
+    option = decision_option_id(picked)
+    pick = decision_pick(plan, choice_id=f"decision/{slot}", option_id=option, to_origin={})
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    ctx.session.events = [
+        *ctx.session.events,
+        response_event("propose_plan", card),
+        _switch_event(f"decision/{slot}", option),
+    ]
+
+    result = propose(
+        amends_version=card["version"],
+        evidence_requirements=[aid("second", source_spec_id=pin, unit=unit)],
+        removed_evidence_requirements=["first"],
+        tool_context=ctx,
+    )
+
+    if code is not None:
+        assert result["code"] == code.value, result
+        return
+    assert result["outcome"] == Outcome.OK.value, result
+    landed = load_plan(ctx.state)
+    assert landed is not None
+    assert slot in landed.requirement("second").decision_ids
+    assert next(d for d in landed.decisions if d.slot == slot).chosen == picked
+
+
+def test_no_pick_is_built_for_a_scope_choice_admission_writes() -> None:
+    """A decision `propose_plan` writes other than the user's prices, a scope
+    choice here, builds no pick from the card."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit"),
+    )
+    card = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts(
+            [
+                Decision(
+                    slot="measure",
+                    description="What to measure.",
+                    options=["a", "b"],
+                    chosen="a",
+                    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+                    rationale="r",
+                )
+            ]
+        ),
+        evidence_requirements=[
+            DatasetRequirement(
+                id="health",
+                decision_ids=("measure",),
+                measure="US aid to health",
+                entities=(Entity(name="United States", role="donor"),),
+                period=Period(start=2015, end=2024),
+                source_spec_id=HEALTH,
+            )
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    scoped = [d for d in plan.decisions if d.scope is not None and d.fixes is not None]
+    assert scoped, [d.slot for d in plan.decisions]
+    for decision in scoped:
+        other = next(o for o in decision.options if o != decision.chosen)
+        assert (
+            decision_pick(
+                plan,
+                choice_id=f"decision/{decision.slot}",
+                option_id=decision_option_id(other),
+                to_origin={},
+            )
+            is None
+        )

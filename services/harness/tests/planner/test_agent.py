@@ -12150,6 +12150,33 @@ def test_a_later_ask_pricing_another_window_replaces_the_measures_choice(
     assert planner_agent._prices_chosen(ctx) == held
 
 
+@pytest.mark.parametrize(
+    ("result", "held"),
+    [
+        ({"text": "use current prices"}, {}),
+        ({"skip": True}, {_GROSS: PricesChoice("constant", asked=True)}),
+        ({"spec_id": "prices:current"}, {_GROSS: PricesChoice("current", asked=True)}),
+    ],
+    ids=["free-text", "skip", "current-pick"],
+)
+def test_an_answer_to_the_planners_prices_ask_sets_or_releases_the_choice(
+    result: dict[str, Any], held: dict[str, PricesChoice]
+) -> None:
+    """The planner asked which prices to go on in after a constant choice no
+    series served. The user's own words release the choice, as words do on
+    the orchestrator's question, so the planner reads them afresh; a skip
+    keeps constant prices, now asked; a pick sets the prices it names."""
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        *_prices_ask_events(),
+        _prices_refused_event(_GROSS, asks_user=True),
+        _prices_options_ask(),
+        _ask_response("ask-prices", {"result": result}),
+    ]
+
+    assert planner_agent._prices_chosen(ctx) == held
+
+
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
     """A prices refusal sent the planner to the user, and the user then typed
     a message, which releases every choice. A later ask offering
