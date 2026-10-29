@@ -198,7 +198,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         inputs=(_FRAME_IN,),
         outputs=(_FRAME_OUT,),
         implementation_version="1",
-        input_schema_hash="c24d5d017fd241916b1dbf31107a4c160010f63a42094f0d0b1d6f3cb5f0a3be",
+        input_schema_hash="5db64a286761ec09ae433d51521523fa9ea1a550f8066478ae818fc879a3d3da",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -230,7 +230,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `per_period`, `limit`, `rolling` and `anchor_key` parameters.
-        input_schema_hash="d2798c44b763b81596eae14497ffc96c8296d3058f0fdc2a23bbe8b58ab84bfb",
+        input_schema_hash="36719bb1c4d7899606ea8603246fec74d9bf0df07630e58395368b52ac1c41bb",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -244,7 +244,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
-        input_schema_hash="819adceff5a3b7c2354543d53f7d6ff50be89f74437efd07f08f8acfc5754110",
+        input_schema_hash="54d3d32bf6eabcd66025e605d03d713f6d39b89cc1d03243d0dba53899ba75df",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
