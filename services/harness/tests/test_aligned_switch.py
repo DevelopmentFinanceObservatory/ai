@@ -43,6 +43,7 @@ from planner.plan import (
     definitions_on_record,
     load_plan,
     period_window,
+    pin_sources,
     save_pin_sources,
 )
 from planner.tool_results import Outcome
@@ -373,9 +374,14 @@ _HEALTH_INCLUSIVE = f"spec_{'7' * 32}"
 
 class _ProviderResubmits:
     """A tool surface answering each resubmit with the options it posts, each
-    posted axis explicit, an axis it does not post counted as Search's default: of
-    the US total as `_TOTAL_GROSS_INCLUSIVE`, of US health aid as
-    `_HEALTH_INCLUSIVE`. Every other tool is unreachable."""
+    posted axis explicit, and recording each resubmit's spec_id and posted
+    options in `posted`: of the US total, posting a provider scope and a basis,
+    as `_TOTAL_GROSS_INCLUSIVE`; of US health aid, which Search counts gross,
+    posting a provider scope, as `_HEALTH_INCLUSIVE`. A resubmit posting
+    anything else is refused, as is every other tool."""
+
+    def __init__(self) -> None:
+        self.posted: list[tuple[str, dict[str, str]]] = []
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -387,12 +393,15 @@ class _ProviderResubmits:
         if tool.name != "resolve_definition":
             return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
         posted = {e["axis"]: e["option_id"] for e in arguments["scope_entries"]}
+        self.posted.append((arguments["spec_id"], posted))
         health = arguments["spec_id"].startswith(HEALTH)
+        if "provider" not in posted or ("measure_basis" in posted) == health:
+            return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
         block = provider_block(
             _HEALTH_INCLUSIVE if health else _TOTAL_GROSS_INCLUSIVE,
             narrow=health,
-            active=posted.get("provider", "provider:inclusive"),
-            basis=posted.get("measure_basis", "measure_basis:gross"),
+            active=posted["provider"],
+            basis="measure_basis:gross" if health else posted["measure_basis"],
         )
         scope = block["resolved"]["scope_choices"]
         scope["id"] = scope["base"]["spec_id"] = arguments["spec_id"]
@@ -467,10 +476,11 @@ def _provider_row(plan: Plan, requirement_id: str) -> Decision:
     return row
 
 
-async def _switch_provider(ctx: _FakeToolContext, plan: Plan, row: Decision) -> _RevisingPlanner:
+async def _switch_provider(
+    ctx: _FakeToolContext, plan: Plan, row: Decision, surface: _ProviderResubmits
+) -> _RevisingPlanner:
     """Switch `row` of `plan` on the card to imputed multilateral flows, Search
-    answering as `_ProviderResubmits`. Returns the planner the revision ran through."""
-    surface = _ProviderResubmits()
+    answering through `surface`. Returns the planner the revision ran through."""
     planner = _RevisingPlanner(cast(ToolSurface, surface))
     with suppress(SwitchFailedError):
         await switch_module._switched_plan(
@@ -493,7 +503,7 @@ async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planner
     ctx = _FakeToolContext()
     plan = await _bilateral_share(ctx, decision)
 
-    planner = await _switch_provider(ctx, plan, _provider_row(plan, "total"))
+    planner = await _switch_provider(ctx, plan, _provider_row(plan, "total"), _ProviderResubmits())
 
     (admitted,) = planner.admitted
     assert admitted.requirement("total").source_spec_id == _TOTAL_GROSS_INCLUSIVE
@@ -508,14 +518,30 @@ async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planner
     }
 
 
+class _AcceptingPlanner:
+    """A `harness.graph.PlannerModel` whose revision records its arguments in
+    `revisions` and offers the plan it was given back, so the switch completes
+    and stores what it switched."""
+
+    def __init__(self) -> None:
+        self.revisions: list[dict[str, Any]] = []
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        self.revisions.append(kwargs)
+        return {"plan": kwargs["prior_plan"], "summary": "revised"}
+
+
+@pytest.mark.parametrize("origin_read", [True, False], ids=["origin-read", "origin-unread"])
 async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_compile(
-    decision: DecisionFactory,
+    decision: DecisionFactory, origin_read: bool
 ) -> None:
     """An amendment adds health's share of the gross bilateral total, pinning the compile
     alignment made for the share's total, which the planner was never shown. The card
     lists that requirement's provider row, read from the compile's block, with
-    health's. A switch of the row posts the compile's scope and re-pins each
-    requirement onto its own resubmit."""
+    health's. A switch of the row posts the compile's scope, whether or not the total
+    it was compiled from has a stored reading, re-pins each requirement onto its own
+    resubmit, and holds the switched compile under the words and parties of the
+    requirement pinning it, with none of the total's provenance."""
     ctx = _FakeToolContext()
     plan = await _bilateral_share(ctx, decision)
     amended = await _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"].func(
@@ -535,11 +561,53 @@ async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_com
     assert amended["outcome"] == Outcome.OK.value, amended
     plan = load_plan(ctx.state)
     assert plan is not None
+    shown = pin_sources(ctx.state)
+    shown[TOTAL] = shown[TOTAL].model_copy(update={"provenance_ref": "oecd-dac1"})
+    save_pin_sources(ctx.state, shown)
+    if not origin_read:
+        ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
+            r for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY] if r["spec_id"] != TOTAL
+        ]
+    surface = _ProviderResubmits()
+    planner = _AcceptingPlanner()
 
-    planner = await _switch_provider(ctx, plan, _provider_row(plan, "bilateral"))
+    await switch_module._switched_plan(
+        cast(Any, ctx),
+        plan,
+        choice_id=choice_id(plan, _provider_row(plan, "bilateral")),
+        option_id="provider:inclusive",
+        planner=cast(Any, planner),
+        surface=cast(ToolSurface, surface),
+    )
 
+    assert surface.posted == [
+        (
+            f"{HEALTH}_base",
+            {
+                "sector": "sector:120",
+                "region": "region:members_only",
+                "provider": "provider:inclusive",
+            },
+        ),
+        (
+            f"{TOTAL}_base",
+            {"measure_basis": "measure_basis:gross", "provider": "provider:inclusive"},
+        ),
+    ]
     (revision,) = planner.revisions
     assert {r["id"]: r["source_spec_id"] for r in revision["evidence_requirements"]} == {
         "health": _HEALTH_INCLUSIVE,
         "bilateral": _TOTAL_GROSS_INCLUSIVE,
     }
+    (stored,) = [
+        SearchReading.model_validate(r)
+        for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY]
+        if r["spec_id"] == _TOTAL_GROSS_INCLUSIVE
+    ]
+    assert (stored.text, stored.asked_roles, stored.provenance_ref) == (
+        "US bilateral ODA",
+        ("donor",),
+        None,
+    )
+    held = pin_sources(ctx.state)[_TOTAL_GROSS_INCLUSIVE]
+    assert (held.provenance_ref, held.asked_roles) == (None, ("donor",))

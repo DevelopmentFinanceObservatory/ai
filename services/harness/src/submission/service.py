@@ -395,13 +395,14 @@ class Admission:
     on record, or `None` when neither this plan nor the session holds any,
     so nothing is written. `alignments` is every requirement the plan pins
     to a compile in place of the pin it states (`planner.plan.AlignedInput`),
-    to replace those on record, `None` likewise.
+    to replace those on record: they belong to this plan, so a fresh plan
+    holding none writes none.
     """
 
     plan: Plan
     rounds: int
     windowed_pins: tuple[WindowedPin, ...] | None
-    alignments: tuple[AlignedInput, ...] | None
+    alignments: tuple[AlignedInput, ...]
 
 
 def submit(
@@ -514,10 +515,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     previous, rounds = resolved
     held_copies = windowed_pins(view.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
-    # Alignments belong to the plan this call amends. A fresh plan states its own
-    # pins, and its admission replaces every alignment on record.
-    recorded_alignments = alignments(view.state)
-    held_alignments = recorded_alignments if previous is not None else {}
+    # Alignments belong to the plan this call amends. A fresh plan states its own pins.
+    held_alignments = alignments(view.state) if previous is not None else {}
     if to_origin:
         _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
     evidence_requirements = [
@@ -875,7 +874,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         plan=plan,
         rounds=rounds,
         windowed_pins=tuple(copies) if copies or held_copies else None,
-        alignments=tuple(entries.values()) if entries or recorded_alignments else None,
+        alignments=tuple(entries.values()),
     )
 
 
