@@ -170,7 +170,7 @@ pause; `plan.proposed` has a second showing a failed switch).
 ### Interrupt resume protocol (delta 1)
 
 `plan.proposed` and `elicitation.request` are **terminal for their HTTP
-response**: the run is genuinely paused (nothing is retrieved or computed),
+response**: the run is genuinely paused (nothing is computed; the plan's data may already be loading),
 the frame is the last one on that stream, and the stream closes. To resume,
 POST `interrupt.response` to `/api/studio/interrupt`; the response is a
 **new SSE stream** continuing the same turn. A new stream per resume is

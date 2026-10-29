@@ -27,7 +27,7 @@ from common.caller import conversation_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
 from compiler.surface import ProgressReport
-from data_mcp import client_holder, stat_var_list
+from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
 from data_mcp.manifest import Manifest
@@ -1626,6 +1626,66 @@ async def test_the_executor_hands_a_get_data_steps_progress_to_on_progress(
         ProgressReport(progress=0, total=None, message="submitted"),
         ProgressReport(progress=4.0, total=None, message="running"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "problem", "outcome"),
+    [
+        (
+            503,
+            {"code": "service_unavailable", "constraint_id": "mint_background_declined"},
+            "declined",
+        ),
+        (503, {"code": "service_unavailable"}, "service_unavailable"),
+    ],
+    ids=["declined", "unavailable"],
+)
+async def test_a_background_get_data_marks_its_mint_post_and_is_sent_once(
+    monkeypatch: pytest.MonkeyPatch, status: int, problem: dict[str, Any], outcome: str
+) -> None:
+    """Through the real data-mcp to a fake apis: the background call's mint POST
+    carries the admission header and is not retried, apis' decline reads as
+    `declined`, and a run's own `get_data` call sends no header."""
+    posts: list[str | None] = []
+
+    def apis(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/datasets", request.url.path
+        posts.append(request.headers.get("X-DFO-Mint-Admission"))
+        body = {"title": "refused", "detail": "busy", "retryable": True, **problem}
+        return httpx2.Response(status, json=body, headers={"Retry-After": "1"})
+
+    def _in_memory_client(
+        self: McpTimeoutPolicy,
+        url: str,
+        *,
+        auth: str | None,
+        caller: str | None,
+        tool: str | None = None,
+    ) -> Any:
+        return Client(data_mcp)
+
+    monkeypatch.setattr(McpTimeoutPolicy, "client", _in_memory_client)
+    # The in-memory client has no HTTP request for the harness's loopback guard to
+    # mark, so the mark is read as set.
+    monkeypatch.setattr(mint_admission, "is_loopback_request", lambda: True)
+    client_holder.set_client(
+        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(apis))
+    )
+    executor = McpExecutor(settings=Settings(), sleep=_no_sleep)
+    try:
+        background = await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
+        assert posts == ["background"]
+        await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
+    finally:
+        await executor.aclose()
+        client_holder.set_client(None)
+
+    assert background == outcome
+    assert set(posts[1:]) == {None}
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
 
 
 # --- the period note a get_data result carries ------------------------------

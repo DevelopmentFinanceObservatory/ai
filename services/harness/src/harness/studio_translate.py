@@ -40,7 +40,7 @@ import functools
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -1037,25 +1037,49 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
     return f"{phrase} and {len(datasets) - 1} more" if len(datasets) > 1 else phrase
 
 
-def _scope_members(decision: Decision | None, plan: PlannerPlan) -> dict[str, Any]:
-    """The `PlanDecision` members a scope decision of `plan` adds: the id of
-    its row (`plan_display.choice_id`), its active option and each option
-    with its label, status, years and why it is limited (`REASON_COPY`).
-    Empty for any other decision."""
-    if decision is None or decision.scope is None:
+def _choice_members(
+    decision: Decision | None, plan: PlannerPlan, named: Callable[[str], str]
+) -> dict[str, Any]:
+    """The `PlanDecision` members a switchable decision of `plan` adds: the id
+    of its row, its active option and each option with its label and status.
+
+    A scope decision's row takes `plan_display.choice_id`, and each option
+    the status Search gave it, its years and why it is limited
+    (`REASON_COPY`). A planner decision the card can switch
+    (`plan_display.switchable_decision`) takes `plan_display.
+    decision_choice_id`, and each option `plan_display.decision_option_id`,
+    its label in the card's words (`named`) and status "available", the
+    chosen one active. Empty for any other decision.
+    """
+    if decision is None:
+        return {}
+    if decision.scope is not None:
+        return {
+            "choice_id": plan_display.choice_id(plan, decision),
+            "active_option_id": decision.active_option_id,
+            "options": [
+                PlanDecisionOption(
+                    option_id=state.option_id,
+                    label=label,
+                    status=state.status,
+                    reason=REASON_COPY.get(state.code) if state.code is not None else None,
+                    years=list(state.years) if state.years is not None else None,
+                )
+                for label, state in zip(decision.options, decision.scope.options, strict=True)
+            ],
+        }
+    if not plan_display.switchable_decision(decision):
         return {}
     return {
-        "choice_id": plan_display.choice_id(plan, decision),
-        "active_option_id": decision.active_option_id,
+        "choice_id": plan_display.decision_choice_id(decision),
+        "active_option_id": plan_display.decision_option_id(decision.chosen),
         "options": [
             PlanDecisionOption(
-                option_id=state.option_id,
-                label=label,
-                status=state.status,
-                reason=REASON_COPY.get(state.code) if state.code is not None else None,
-                years=list(state.years) if state.years is not None else None,
+                option_id=plan_display.decision_option_id(option),
+                label=named(option),
+                status="available",
             )
-            for label, state in zip(decision.options, decision.scope.options, strict=True)
+            for option in decision.options
         ],
     }
 
@@ -1070,7 +1094,8 @@ def _search_default(decision: Decision | None) -> bool:
 
 
 def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
-    """The scope choices of the card's `decisions` a switch may name, by choice id.
+    """The choices of the card's `decisions` a switch may name, by choice id:
+    scope choices and switchable planner decisions (`_choice_members`).
 
     A choice is switchable when an option other than its active one is
     available or partial. The plan card lists `PlanAction.SWITCH` only
@@ -1097,7 +1122,7 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
 
 
 def held_labels(card: PlanProposed) -> dict[str, str]:
-    """The label of the option each scope choice of `card` holds, by choice id; the
+    """The label of the option each switchable choice of `card` holds, by choice id; the
     option's id where the choice lists no option by that id."""
     return {
         decision.choice_id: next(
@@ -1122,7 +1147,7 @@ def plan_approved(
     """The `plan.approved` frame for the plan card the user approved.
 
     Built from the card, so it states what the user saw: its title, summary,
-    step labels and caveats, and for each scope choice the short name
+    step labels and caveats, and for each switchable choice the short name
     (`PlanDecision.question`) and the label of the option it held. A choice
     holding another label than the one `baseline` keeps for its choice id,
     the label on the card the turn's first switch of it was made from
@@ -1312,6 +1337,10 @@ class _Translator:
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
         self.paused = False
+        # Whether the planner's latest entry replans for a pick on the plan
+        # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
+        # resumes a stoppable replan.
+        self._pick_replan = False
         # The running status line, as (wire id, label, monotonic start).
         self._status: tuple[str, str, float] | None = None
         self._streamed_text = False
@@ -1385,7 +1414,12 @@ class _Translator:
             # The planner drafts the plan again, an amendment's or an execute
             # replan's, and may reuse the requirement ids the choice ids are
             # built from, so no earlier card's labels describe its choices.
-            self._conversation.turn_choice_baseline = {}
+            # A pick's replan that raises, is stopped or is refused leaves the
+            # plan unchanged, so it drops them only once it lands, and then
+            # only the scope choices' (below).
+            self._pick_replan = bool(started.get("pick"))
+            if not self._pick_replan:
+                self._conversation.turn_choice_baseline = {}
             label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
         output = event.output if isinstance(event.output, dict) else None
@@ -1404,6 +1438,21 @@ class _Translator:
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
+            if event.actions.route == "ok":
+                # A drafted plan, whose requirement ids, and so its scope
+                # choice ids, may be reused. A planner decision's row is
+                # named by its slot and its options by their labels, so a
+                # pick's replan keeps those rows' labels, and the row the
+                # user switched names the label it was switched from.
+                self._conversation.turn_choice_baseline = (
+                    {
+                        choice_id: label
+                        for choice_id, label in self._conversation.turn_choice_baseline.items()
+                        if choice_id.startswith(plan_display.DECISION_CHOICE_PREFIX)
+                    }
+                    if self._pick_replan
+                    else {}
+                )
             frames.extend(self._close_status())
         return frames
 
@@ -1772,7 +1821,7 @@ class _Translator:
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
             questions = plan_display.card_questions(plan)
-            scoped = {decision.slot: decision for decision in plan.decisions if decision.scope}
+            by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
             option_named = functools.partial(plan_display.card_choice_text, plan=plan)
             revision = payload.get("revision")
@@ -1853,11 +1902,15 @@ class _Translator:
                     resolved_by=_RESOLVED_BY_TO_WIRE.get(
                         decision.get("resolved_by", ""), "default"
                     ),
-                    **_scope_members(held, plan),
+                    **_choice_members(
+                        held,
+                        plan,
+                        functools.partial(option_named, decision=held, options=offered),
+                    ),
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions
-                for held in [scoped.get(decision["slot"])]
+                for held in [by_slot.get(decision["slot"])]
                 for offered in [decision.get("options") or ()]
             ]
             choices = _switchable(decisions)
@@ -1924,9 +1977,11 @@ class _Translator:
                 for question in asked
             ]
             skippable = not several
+            pick_replan = False
         else:
             questions = [_planner_question(args)]
             skippable = True
+            pick_replan = self._pick_replan
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
@@ -1947,6 +2002,7 @@ class _Translator:
                 for question in questions
             ),
             skippable=skippable,
+            pick_replan=pick_replan,
         )
         return [frame]
 

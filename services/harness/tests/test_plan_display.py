@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from compiler.sources import source_from_spec_block
 from harness import plan_display
+from harness.decision_pick import DecisionPick, decision_pick
 from harness.plan_display import (
     _card_label,
     _concepts,
@@ -32,15 +33,20 @@ from harness.plan_display import (
     card_title,
     choice_id,
     chosen_scope_decision,
+    decision_choice_id,
+    decision_option_id,
     listed_together,
     operation_rows,
+    pinned_choice_id,
     plan_words,
     requirement_rows,
     share_wholes,
     shown_decisions,
     shown_plan,
     step_rows,
+    switchable_decision,
 )
+from harness.scripted_plan import scripted_plan
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -81,6 +87,7 @@ from planner.plan import (
     WholeOf,
     frame_shapes,
     scope_choice_slot,
+    search_pin_slot,
     split_of,
 )
 from planner.records import (
@@ -4511,4 +4518,117 @@ def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> No
     assert card_summary(plan) == (
         "Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
         f"System (CRS): {side}, as a share of {side}."
+    )
+
+
+def _planner_decision(**update: Any) -> Decision:
+    """A decision the planner wrote fixing the window's first year, with `update` set."""
+    return Decision.model_validate(
+        {
+            "slot": "window",
+            "description": "Which years the answer covers.",
+            "options": ["since 2015", "since 2020"],
+            "chosen": "since 2015",
+            "resolved_by": "planner_default",
+            "rationale": "The question asks for the last decade.",
+            "fixes": {"window_start": 2015},
+            **update,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("decision", "switchable"),
+    [
+        (_planner_decision(), True),
+        (_planner_decision(fixes=None), False),
+        (
+            _planner_decision(slot=search_pin_slot(_SPEC_A), fixes={"source_spec_id": _SPEC_A}),
+            False,
+        ),
+        (_scope_decision(_SPEC_A, "sector"), False),
+        (_planner_decision(caveat="providers_differ"), False),
+    ],
+    ids=["fixes_fields", "rationale_only", "search_pin", "scope_choice", "caveat"],
+)
+def test_only_a_planner_decision_settling_fields_switches_on_the_card(
+    decision: Decision, switchable: bool
+) -> None:
+    """The decisions `propose_plan` writes switch through Search or qualify
+    the answer, and a rationale settles nothing a switch could change."""
+    assert switchable_decision(decision) is switchable
+
+
+def test_a_planner_decisions_row_id_never_names_a_scope_choice() -> None:
+    """A requirement may be called `decision`, and a planner decision's slot
+    may be a scope axis: the scope choice of that requirement on that axis
+    and the planner decision's row still take different ids."""
+    dumped = scripted_plan("kenya life expectancy", spec_id=None).model_dump()
+    for requirement in dumped["evidence_requirements"]:
+        if requirement["id"] == "life_expectancy":
+            requirement.update(id="decision", source_spec_id=_SPEC_A)
+        if requirement.get("input_id") == "life_expectancy":
+            requirement["input_id"] = "decision"
+    plan = Plan.model_validate(dumped | {"translation": None, "workflow": None})
+
+    assert decision_choice_id(_planner_decision(slot="sector")) != pinned_choice_id(
+        plan, {_SPEC_A}, "sector"
+    )
+
+
+def _fixing_measure(plan: Plan) -> Plan:
+    """`plan` (the scripted Kenya life expectancy plan) with its measure
+    decision fixing the measure its dataset reads."""
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    return Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [
+                d.model_copy(update={"fixes": DecisionFixes(measure=dataset.measure)})
+                for d in plan.decisions
+            ],
+        }
+    )
+
+
+def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it() -> None:
+    """The row `decision/measure`'s option for a label picks that label, with
+    the decision as the plan states it. A row or option the card does not
+    offer picks nothing, and nor does the option the decision has chosen."""
+    unfixed = scripted_plan("kenya life expectancy", spec_id=None)
+    plan = _fixing_measure(unfixed)
+    (measure,) = plan.decisions
+    birth, healthy = measure.options
+    assert (birth, healthy) == ("life expectancy at birth", "healthy life expectancy")
+    assert measure.fixes is not None
+    assert measure.chosen == birth
+
+    picks = [
+        decision_pick(plan, choice_id=choice, option_id=option, to_origin={})
+        for choice, option in [
+            ("decision/measure", decision_option_id(healthy)),
+            ("decision/measure", decision_option_id(birth)),
+            ("decision/measure", decision_option_id("life expectancy at 60")),
+            ("decision/measure", "option_2"),
+            ("decision/other", decision_option_id(healthy)),
+            ("measure", decision_option_id(healthy)),
+        ]
+    ]
+
+    assert picks == [
+        DecisionPick.on_card(plan, slot="measure", chosen=healthy),
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert (
+        decision_pick(
+            unfixed,
+            choice_id="decision/measure",
+            option_id=decision_option_id(healthy),
+            to_origin={},
+        )
+        is None
     )

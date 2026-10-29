@@ -35,6 +35,21 @@ from data_mcp.settings import Settings
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
+# The suffix of the `httpcore` trace event that marks a request body written
+# out, over HTTP/1.1 (`http11.`) or HTTP/2 (`http2.`).
+_REQUEST_SENT_EVENT = "send_request_body.complete"
+
+
+def _sent_trace(on_sent: Callable[[], None]) -> Callable[[str, dict[str, Any]], Awaitable[None]]:
+    """An `httpcore` trace extension that calls `on_sent` once the request body is written."""
+
+    async def trace_event(event: str, _info: dict[str, Any]) -> None:
+        if event.endswith(_REQUEST_SENT_EVENT):
+            on_sent()
+
+    return trace_event
+
+
 SEARCH_PREFIX = "/api/search"
 DATASETS_PREFIX = "/api/datasets"
 # apis mounts Graph once that surface lands.
@@ -304,6 +319,8 @@ class UpstreamClient:
         timeout: float | None = None,
         retry: bool = True,
         deadline: CallDeadline | None = None,
+        headers: Mapping[str, str] | None = None,
+        on_sent: Callable[[], None] | None = None,
     ) -> httpx2.Response:
         """Issue one apis call, retried within a wall-clock budget.
 
@@ -326,6 +343,11 @@ class UpstreamClient:
                 leaves, and the surface probe is clipped to it, or skipped
                 once it has passed. `None` bounds the call by the retry budget
                 alone.
+            headers: Headers sent on every attempt beside the auth provider's,
+                which win over a header of the same name.
+            on_sent: Called each time an attempt's request body has been
+                written to the connection (`httpcore`'s `send_request_body`
+                trace event), before any response is read.
 
         Returns:
             The 2xx `httpx2.Response`.
@@ -341,9 +363,10 @@ class UpstreamClient:
         """
         attempt_timeout = timeout if timeout is not None else self._read_timeout_s
         try:
-            headers = dict(await self._auth()) if self._auth else {}
+            auth = dict(await self._auth()) if self._auth else {}
         except ApisAuthError as exc:
             raise UpstreamAuthUnavailable(detail=f"no dfo-apis ID token: {exc}") from exc
+        sent_headers = {**(headers or {}), **auth}
         # The budget bounds retrying, not one attempt a caller asked for.
         # Mint's 125s exceeds the 120s budget and must survive it.
         call_budget_s = max(self._retry_budget_s, attempt_timeout)
@@ -373,8 +396,9 @@ class UpstreamClient:
                                 path,
                                 json=json,
                                 params=params,
-                                headers=headers,
+                                headers=sent_headers,
                                 timeout=min(attempt_timeout, remaining),
+                                on_sent=on_sent,
                             )
                     except TimeoutError:
                         # `asyncio.timeout` bounds connect, write and pool as
@@ -422,7 +446,7 @@ class UpstreamClient:
             result.attempts = attempt
             result.elapsed_s = time.monotonic() - start
             raise await self._translate_gated_surface_404(
-                path, result, headers=headers, deadline=deadline
+                path, result, headers=auth, deadline=deadline
             )
 
     async def _attempt(
@@ -434,6 +458,7 @@ class UpstreamClient:
         params: Mapping[str, Any] | None,
         headers: Mapping[str, str],
         timeout: float,
+        on_sent: Callable[[], None] | None = None,
     ) -> httpx2.Response | UpstreamError:
         """Issue one HTTP attempt, returning the response or a classified error.
 
@@ -449,6 +474,7 @@ class UpstreamClient:
                 params=params,
                 headers=headers,
                 timeout=self._attempt_timeout(timeout),
+                extensions=None if on_sent is None else {"trace": _sent_trace(on_sent)},
             )
         except httpx2.TransportError as exc:
             return UpstreamTransportError(detail=str(exc))

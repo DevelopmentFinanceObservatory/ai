@@ -359,6 +359,9 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
     ProblemCode.USER_DECISION_CONTRADICTED: _DECISION_KEPT,
     ProblemCode.USER_DECISION_DROPPED: _DECISION_KEPT,
     ProblemCode.SHARED_DECISION_CONTRADICTED: _DECISION_KEPT,
+    ProblemCode.USER_PICK_NOT_HELD: (
+        "The plan did not keep the option picked on the plan card, so nothing was recorded."
+    ),
     **dict.fromkeys(_NOT_DRAFTED_CODES, _NOT_DRAFTED),
 }
 
@@ -404,6 +407,7 @@ SEAM_REASONS: Mapping[SeamCode | ProblemCode, str] = {
     ProblemCode.SHARED_DECISION_CONTRADICTED: (
         "the plan would have changed a choice already made{at}"
     ),
+    ProblemCode.USER_PICK_NOT_HELD: "the plan did not keep the option picked on the plan card",
     **dict.fromkeys(
         _NOT_DRAFTED_CODES,
         "the plan could not be drafted{at}, a fault in the system rather than in the request",
@@ -947,6 +951,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ProblemCode.USER_DECISION_CONTRADICTED,
             ProblemCode.USER_DECISION_DROPPED,
             ProblemCode.SHARED_DECISION_CONTRADICTED,
+            ProblemCode.USER_PICK_NOT_HELD,
         }
     ),
 }

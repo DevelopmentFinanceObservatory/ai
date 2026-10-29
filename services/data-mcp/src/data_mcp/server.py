@@ -39,7 +39,7 @@ from data_mcp.definition_store import (
     set_store,
 )
 from data_mcp.describe_tool import describe
-from data_mcp.get_data_tool import get_data
+from data_mcp.get_data_tool import aclose_background_mints, get_data
 from data_mcp.get_skill_file_tool import get_skill_file
 from data_mcp.get_skill_tool import get_skill
 from data_mcp.manifest import ARTIFACT_URI_TEMPLATE
@@ -110,6 +110,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await aclose_background_mints()
         await aclose_client()
         await aclose_store()
         await aclose_frame_store()

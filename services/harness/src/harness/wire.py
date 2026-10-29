@@ -1016,8 +1016,8 @@ class InterruptResponse(_WireModel):
     payload: str | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
-    # A plan's `switch`: the scope choice, the option it moves to, and the
-    # revision of the plan the user switched on. An `approve` may carry the
+    # A plan's `switch`: the scope choice or planner decision, the option it
+    # moves to, and the revision of the plan the user switched on. An `approve` may carry the
     # revision alone.
     choice_id: str | None = Field(default=None, min_length=1)
     option_id: str | None = Field(default=None, min_length=1)
@@ -1191,9 +1191,10 @@ class DecisionResolvedBy(StrEnum):
 
 
 class PlanDecisionOption(_WireModel):
-    """One option of a scope choice on the plan card: `reason` says, in a
+    """One option of a switchable choice on the plan card: `reason` says, in a
     reader's words, why a partial or unavailable option is limited, and
-    `years` are the years a partial option covers."""
+    `years` are the years a partial option covers. A planner decision's
+    options are all available, with neither."""
 
     option_id: str
     label: str
@@ -1206,12 +1207,17 @@ class PlanDecision(_WireModel):
     """One choice made on the user's behalf, with its alternatives and a
     one-line reason -- what makes the plan reviewable.
 
-    A decision stating how Search counted a source carries the scope
-    choice's id (`choice_id`), its active option (`active_option_id`) and
-    every option (`options`), all three together. One without `choice_id`
-    is a planner decision. `choice_id` is `"<requirement id>:<axis>"`
-    (`harness.plan_display.choice_id`), the same on every plan of the
-    conversation that shows the choice, switches included.
+    A decision the user can switch carries its row's id (`choice_id`), its
+    active option (`active_option_id`) and every option (`options`), all
+    three together. A decision stating how Search counted a source has
+    `choice_id` `"<requirement id>:<axis>"` (`harness.plan_display.
+    choice_id`), the same on every plan of the conversation that shows the
+    choice, switches included. A planner decision that settles requirement
+    fields (`harness.plan_display.switchable_decision`) has `choice_id`
+    `"decision/<slot>"` and option ids derived from each option's label
+    (`harness.plan_display.decision_option_id`), the same on every plan
+    that offers that label.
+    A decision without `choice_id` cannot be switched.
     """
 
     id: str
@@ -1244,7 +1250,8 @@ class PlanAction(StrEnum):
     AMEND = "amend"
     REJECT = "reject"
     # Listed only when some decision has a `choice_id` with an option other
-    # than its active one that is available or partial.
+    # than its active one that is available or partial: a scope choice or a
+    # planner decision.
     SWITCH = "switch"
 
 
@@ -1308,9 +1315,10 @@ class PlanSwitchFailed(_WireModel):
 
 class PlanProposed(_WireModel):
     """The plan awaiting approval. The run is genuinely paused: nothing is
-    retrieved or computed until an interrupt.response arrives, and this
-    frame is terminal for its SSE response (delta 1 -- resume arrives as a
-    new stream from POST /api/studio/interrupt)."""
+    computed until an interrupt.response arrives (the plan's data may
+    already be loading), and this frame is terminal for its SSE response
+    (delta 1 -- resume arrives as a new stream from POST
+    /api/studio/interrupt)."""
 
     event: Literal["plan.proposed"]
     seq: int = Field(ge=0)

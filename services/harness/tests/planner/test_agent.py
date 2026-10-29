@@ -12116,6 +12116,40 @@ def test_two_windows_of_one_measure_are_one_part(
     assert [f"user_prices_{priced}" in reqt.decision_ids for reqt in landed[1]] == [True, True]
 
 
+@pytest.mark.parametrize("same_measure", [True, False], ids=["other-window", "other-count"])
+def test_a_later_ask_pricing_another_window_replaces_the_measures_choice(
+    same_measure: bool,
+) -> None:
+    """Two asks in one turn price two readings: constant for French aid to
+    Kenya, then current for a second reading. When the second reads the same
+    measure over other years, its answer replaces the first, so the measure
+    holds one choice. A second reading of another count keeps its own."""
+    second = (
+        _counted_net(copy.deepcopy(_FRANCE_KENYA))
+        if not same_measure
+        else (copy.deepcopy(_FRANCE_KENYA))
+    )
+    other = "spec_" + "2" * 32
+    second["spec_id"] = second["definition"]["spec_id"] = other
+    second["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start": 2010,
+        "end": 2014,
+    }
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, second)
+    ctx.session.events = [
+        *_prices_ask_events(),
+        _clarify_ask_event(_prices_candidates(other)),
+        _clarify_answer_event(_option("o1")),
+    ]
+
+    held = {other: PricesChoice("current")}
+    if not same_measure:
+        held[_GROSS] = PricesChoice("constant")
+    assert planner_agent._prices_chosen(ctx) == held
+
+
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
     """A prices refusal sent the planner to the user, and the user then typed
     a message, which releases every choice. A later ask offering

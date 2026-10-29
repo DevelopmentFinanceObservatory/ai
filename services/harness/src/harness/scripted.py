@@ -35,6 +35,7 @@ from planner.plan import load_plan, plan_revision
 from planner.tool_results import ok
 from planner.workflow import ToolId
 
+from harness.decision_pick import DecisionPick
 from harness.scripted_plan import (
     SCRIPTED_TOOL_SCHEMAS,
     scripted_aggregate_result,
@@ -290,12 +291,14 @@ class ScriptedPlannerModel:
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        pick: DecisionPick | None = None,
     ) -> dict[str, Any]:
         # Nothing to report and nothing to run through the workflow's
         # session: this seam has no model round trips to relay and no
         # agent to host via `ctx.run_node`. It drafts the same canned plan
         # whatever the readings name.
         del ctx, readings, refusal, amendment, canvas_digest, conversation_digest, on_progress
+        del pick
         plan = scripted_plan(question, spec_id=None)
         if prior_plan is not None:
             prior_version = int(prior_plan.get("version", 1))

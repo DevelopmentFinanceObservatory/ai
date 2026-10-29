@@ -24,7 +24,7 @@ import copy
 import hashlib
 import json
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,23 +59,28 @@ from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.server import mcp as data_mcp
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from google.adk.events import Event, EventActions
+from google.adk import Context
+from google.adk.events import Event, EventActions, RequestInput
 from google.adk.models.llm_response import LlmResponse
-from google.adk.sessions import BaseSessionService, InMemorySessionService
+from google.adk.sessions import BaseSessionService, DatabaseSessionService, InMemorySessionService
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
 from harness.conversation import current_conversation_id
+from harness.early_mint import EarlyMints
 from harness.graph.state import (
     AGENT_NAME,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    PICK_REPLAN_KEY,
     frame_id_for,
 )
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
+from harness.plan_display import decision_option_id
 from harness.provenance import ProvenanceStore
-from harness.scripted import ScriptedSurface
+from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
@@ -435,23 +440,32 @@ def _new_session_service() -> BaseSessionService:
 
 
 @pytest.fixture(autouse=True, params=["memory", "database"])
-def session_service_backend(
+async def session_service_backend(
     request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> str:
+) -> AsyncIterator[str]:
     """Every studio-door test in this file runs twice: once building its
     session service through `InMemorySessionService`, once through a
     sqlite-backed `DatabaseSessionService`, proving the studio door's
     durable state survives the JSON round trip a real deployment's Postgres
     also forces it through. `db_path` is per-test (`tmp_path`), so two tests
-    running the database backend never share a file."""
+    running the database backend never share a file.
+
+    Each sqlite service the test built is closed after it, so no aiosqlite
+    connection is left for the garbage collector to find during a later
+    test."""
+    opened: list[DatabaseSessionService] = []
     if request.param == "database":
         db_path = tmp_path / "studio.db"
-        monkeypatch.setattr(
-            _SessionServiceBackend,
-            "factory",
-            staticmethod(lambda: sqlite_session_service(db_path)),
-        )
-    return request.param
+
+        def opening() -> DatabaseSessionService:
+            service = sqlite_session_service(db_path)
+            opened.append(service)
+            return service
+
+        monkeypatch.setattr(_SessionServiceBackend, "factory", staticmethod(opening))
+    yield request.param
+    for service in opened:
+        await service.close()
 
 
 def _app(
@@ -466,6 +480,7 @@ def _app(
     store: StudioStore | None = None,
     served: Sequence[Mapping[str, Any]] = (),
     definition_surface: Any = None,
+    early_mints: EarlyMints | None = None,
 ) -> FastAPI:
     """`orchestrator_app` over this test's session backend, its agent's
     model answering from `script` and kept as `app.state.model`. The
@@ -485,6 +500,7 @@ def _app(
         edit_model=edit_model,
         served=served,
         definition_surface=definition_surface,
+        early_mints=early_mints,
     )
     app.state.model = model
     return app
@@ -844,6 +860,137 @@ async def test_a_malformed_drafted_plan_ends_the_turn_as_an_error_not_a_silent_s
 
 
 # --- the plan flow: pause, approve, execute --------------------------------------
+
+
+class _HeldSends:
+    """`EarlyMints`' send: records each call, then waits for `release`."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.sent: list[dict[str, Any]] = []
+
+    async def __call__(self, args: dict[str, Any]) -> str:
+        self.sent.append(args)
+        await self.release.wait()
+        return "posted"
+
+
+async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_posted() -> None:
+    """The card's frames all reach the stream, which stays open until the
+    card's early call is done and closes right after."""
+    sends = _HeldSends()
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=30.0)
+    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
+    async with _client(app) as client:
+        streaming = asyncio.ensure_future(
+            _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        )
+        for _ in range(500):
+            if sends.sent:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
+        assert sends.sent and not streaming.done()
+        sends.release.set()
+        frames = await asyncio.wait_for(streaming, timeout=10)
+    assert _events(frames)[-1] == "plan.proposed"
+
+
+async def test_the_stream_that_waits_on_early_mints_flushes_telemetry_after_they_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last flush of the card's response comes after its early call ended,
+    so the call's spans are exported while the request still has CPU."""
+    sends = _HeldSends()
+    ended: list[bool] = []
+
+    async def flush() -> None:
+        ended.append(sends.release.is_set())
+
+    monkeypatch.setattr(studio_module, "flush_telemetry", flush)
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=30.0)
+    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
+    async with _client(app) as client:
+        streaming = asyncio.ensure_future(
+            _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        )
+        for _ in range(500):
+            if ended:
+                break
+            await asyncio.sleep(0.01)
+        sends.release.set()
+        await asyncio.wait_for(streaming, timeout=10)
+
+    assert ended[-1] is True
+
+
+async def test_an_approval_posted_while_the_cards_stream_waits_on_early_mints_is_taken() -> None:
+    """The card's stream releases the conversation before it waits on the early
+    calls, so an approval posted while it still waits runs at once."""
+    sends = _HeldSends()
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=30.0)
+    app = _app(
+        *_plan("q with forks", *_charts_the_plan()),
+        tool_surface=ScriptedSurface(),
+        early_mints=early,
+    )
+    store = app.state.studio.store
+    try:
+        async with _client(app) as client:
+            first = asyncio.ensure_future(
+                _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+            )
+            # The in-process transport hands the stream over only once it has
+            # ended, so the card's pause is read off the conversation instead.
+            for _ in range(500):
+                conversation = store.current(PRINCIPAL, CONVERSATION)
+                if sends.sent and conversation.pending and not conversation.lock.locked():
+                    break
+                await asyncio.sleep(0.01)
+            (interrupt_id,) = conversation.pending
+            assert not first.done()
+
+            second = await asyncio.wait_for(
+                _stream(client, "/api/studio/interrupt", _interrupt_body(interrupt_id, "approve")),
+                timeout=10,
+            )
+
+            assert "plan.approved" in _events(second)
+            assert not first.done()
+            sends.release.set()
+            assert _events(await asyncio.wait_for(first, timeout=10))[-1] == "plan.proposed"
+    finally:
+        await early.aclose()
+
+
+async def test_the_stream_waits_no_longer_than_the_bound_for_early_mints(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A call still pending at the bound is logged and left running. The
+    stream carries the same frames as a stream with no early mints."""
+    sends = _HeldSends()
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.2)
+    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
+    try:
+        with caplog.at_level("INFO", logger="harness.early_mint"):
+            async with _client(app) as client:
+                started = time.monotonic()
+                frames = await asyncio.wait_for(
+                    _stream(client, "/api/studio/turn", _turn_body("q with forks")), timeout=10
+                )
+                waited = time.monotonic() - started
+        assert len(sends.sent) == 1
+        assert any("outcome=unsent_at_stream_end" in r.getMessage() for r in caplog.records)
+        assert waited < 5
+        plain = _app(*_plan("q with forks"), tool_surface=ScriptedSurface())
+        async with _client(plain) as client:
+            unwaited = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert _events(frames) == _events(unwaited)
+        assert (
+            _frame(frames, "plan.proposed")["steps"] == _frame(unwaited, "plan.proposed")["steps"]
+        )
+    finally:
+        await early.aclose()
 
 
 async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> None:
@@ -3236,6 +3383,41 @@ async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
     assert conversation.cancel_event is None  # disarmed on unwind
 
 
+async def test_a_new_stream_drops_a_cancel_reason_left_for_an_earlier_one() -> None:
+    """A reason recorded after the earlier stream disarmed, with no event left to
+    carry it, was aimed at that stream, so the next stream arms without it."""
+
+    async def segment():
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    conversation.cancel_reason = "segment_lost"
+    stream = _sse_stream(segment(), conversation=conversation)
+    await anext(stream)
+
+    assert conversation.cancel_reason is None
+    await stream.aclose()
+
+
+async def test_a_stream_ending_leaves_the_cancel_event_a_later_stream_armed() -> None:
+    """A request that took the conversation after the lock was released arms its
+    own cancel event. The earlier stream's `finally` runs afterwards and leaves
+    that event and its reason in place, so a Stop still reaches the new stream."""
+
+    async def segment():
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    stream = _sse_stream(segment(), conversation=conversation)
+    await anext(stream)
+    later = conversation.cancel_event = asyncio.Event()
+    conversation.cancel_reason = "cancelled"
+    await stream.aclose()
+
+    assert conversation.cancel_event is later
+    assert conversation.cancel_reason == "cancelled"
+
+
 async def test_a_switch_stream_arms_its_own_stop_and_clears_only_that_one() -> None:
     """A stream running a switch arms `switch_stop` and the `SWITCH_STOP` its
     frames read. Ending, it leaves alone a stop a later switch stream armed
@@ -4682,6 +4864,154 @@ async def test_a_switch_the_card_cannot_take_is_refused_with_its_constraint() ->
     assert answers[0].json()["current_plan"] == plan
     assert answers[-1].json()["error"] == "binding_invalid"
     assert conversation.approvals == []
+
+
+# A planner decision a plan card shows as a switchable row
+# (`harness.plan_display.switchable_decision`): the DAC total, with the top
+# 10 donors to switch to.
+_DECISION_ID = "decision/donor_scope"
+_DAC_TOTAL = decision_option_id("the DAC total")
+_TOP_TEN = decision_option_id("the top 10 donors")
+_SHOWN_DECISION = _PendingChoice(
+    active=_DAC_TOTAL,
+    options={
+        _DAC_TOTAL: _PendingOption(label="the DAC total", status="available"),
+        _TOP_TEN: _PendingOption(label="the top 10 donors", status="available"),
+    },
+)
+
+
+async def test_a_planner_decision_switch_is_checked_as_a_scope_switch_and_resumes_the_plan() -> (
+    None
+):
+    """A switch naming a planner decision's row is refused 409 on a stale
+    revision and 422 on an option the row does not offer or already holds;
+    one to another option resumes the paused plan, approving nothing, and the
+    turn's record says which option the user chose."""
+    app = _app(*_plan())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client, choices={_DECISION_ID: _SHOWN_DECISION})
+        cases = [
+            ({"plan_revision": "0" * 64}, 409, "plan_revision_stale"),
+            (
+                {"option_id": decision_option_id("the top 20 donors")},
+                422,
+                "switch_option_unavailable",
+            ),
+            ({"option_id": _DAC_TOTAL}, 422, "switch_option_unavailable"),
+        ]
+        refused = [
+            await client.post(
+                "/api/studio/interrupt",
+                json=_switch_body(plan, choice_id=_DECISION_ID, **change),
+                headers=AUTH,
+            )
+            for change, _, _ in cases
+        ]
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _switch_body(plan, choice_id=_DECISION_ID, option_id=_TOP_TEN),
+        )
+
+    assert [(r.status_code, r.json().get("constraint_id")) for r in refused] == [
+        (status, constraint) for _, status, constraint in cases
+    ]
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert conversation.approvals == []
+    assert conversation.turn_user_message.endswith("(then: use the top 10 donors)")
+
+
+def _ask_while_replanning(ctx: Context) -> Iterator[Any]:
+    """A node asking the user one question, the way the planner's ask pauses a draft."""
+    if (ctx.resume_inputs or {}).get("replan_ask") is None:
+        yield create_request_input_event(
+            RequestInput(interrupt_id="replan_ask", message="Which years?")
+        )
+        return
+    yield Event(output="answered")
+
+
+class _AskingPickPlanner(ScriptedPlannerModel):
+    """`ScriptedPlannerModel` whose measure decision fixes the measure, so the
+    card offers it to switch, and whose replan for a pick asks the user a
+    question and then drafts until it is cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.replanning = asyncio.Event()
+
+    async def __call__(self, *, ctx: Context, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("pick") is None:
+            drafted = await super().__call__(ctx=ctx, **kwargs)
+            (measure,) = drafted["plan"]["decisions"]
+            measure["fixes"] = {"measure": measure["chosen"]}
+            return drafted
+        await ctx.run_node(_ask_while_replanning)
+        self.replanning.set()
+        await asyncio.sleep(5)
+        raise AssertionError("a stopped replan is cancelled")
+
+
+@pytest.mark.parametrize("record", ["kept", "cleared"])
+async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffers_the_plan(
+    record: str,
+) -> None:
+    """The user picks another option for a planner decision, and the planner
+    asks a question while it replans. The stream that answers it runs the
+    replan, so a Stop there is a switch's Stop: the stream ends on the same
+    plan re-offered with `switch_cancelled`, and the turn stays paused on it.
+    The question's pending entry says so (`pick_replan`): with the replan's
+    record cleared from the turn's session, the answer still arms the Stop,
+    so the route reads no session to learn it."""
+    planner = _AskingPickPlanner()
+    app = _app(*_plan(), planner=planner)
+    stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body())
+        plan = _frame(first, "plan.proposed")
+        (decision,) = [d for d in plan["decisions"] if d.get("choice_id")]
+        option = next(
+            o["option_id"]
+            for o in decision["options"]
+            if o["option_id"] != decision["active_option_id"]
+        )
+        asked = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _switch_body(plan, choice_id=decision["choice_id"], option_id=option),
+        )
+        elicitation = _frame(asked, "elicitation.request")
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        assert conversation.pending[elicitation["interrupt_id"]].pick_replan
+        if record == "cleared":
+            runner = app.state.studio.runner
+            session = await runner.session_service.get_session(
+                app_name=runner.app_name, user_id=PRINCIPAL, session_id=conversation.session_id
+            )
+            assert session is not None and session.state.get(PICK_REPLAN_KEY)
+            await runner.session_service.append_event(
+                session,
+                Event(author="test", actions=EventActions(state_delta={PICK_REPLAN_KEY: None})),
+            )
+        resumed = asyncio.ensure_future(
+            _stream(
+                client,
+                "/api/studio/interrupt",
+                _interrupt_body(elicitation["interrupt_id"], "skip"),
+            )
+        )
+        await asyncio.wait_for(planner.replanning.wait(), timeout=5)
+        cancelled = await client.post("/api/studio/cancel", json=stop, headers=AUTH)
+        assert cancelled.status_code == 204
+        frames = await asyncio.wait_for(resumed, timeout=5)
+
+    assert _events(frames)[-1] == "plan.proposed"
+    again = _frame(frames, "plan.proposed")
+    assert again["revision"] == plan["revision"]
+    assert again["switch_failed"]["code"] == "switch_cancelled"
+    assert list(conversation.pending) == [again["interrupt_id"]]
+    assert conversation.awaiting_answer
 
 
 async def test_a_stale_approve_gets_the_current_card_and_the_shown_revision_approves() -> None:

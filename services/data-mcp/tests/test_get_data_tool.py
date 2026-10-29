@@ -9,6 +9,7 @@ import io
 import json
 import logging
 from collections.abc import Callable, Coroutine, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -17,6 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from common.apis_auth import AuthProvider
+from common.caller import conversation_caller, supplied_caller
 from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
@@ -26,8 +28,9 @@ from common.materialisation import (
 )
 from common.materialisation import set_store as set_frame_store
 from common.place_type import PARTY_KINDS
-from data_mcp import client_holder, get_data_tool
-from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
+from data_mcp import client_holder, get_data_tool, mint_admission
+from data_mcp.client import UpstreamClient
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, CallDeadline, use_call_budget
 from data_mcp.definition_store import (
     DefinitionStoreUnavailable,
     IdentityMismatch,
@@ -36,6 +39,7 @@ from data_mcp.definition_store import (
     set_store,
     spec_id_for,
 )
+from data_mcp.errors import UpstreamError
 from data_mcp.frame_materialisation import (
     CANONICAL_FRAME_RENDERING,
     KIND_COLUMNS,
@@ -44,6 +48,13 @@ from data_mcp.frame_materialisation import (
 )
 from data_mcp.get_data_tool import RootMint
 from data_mcp.manifest import Manifest, SeriesStatisticsModel, strip_manifest
+from data_mcp.mint_admission import (
+    BACKGROUND_MINT_SPAN_ATTRIBUTE,
+    BACKGROUND_OUTCOME_KEY,
+    MINT_ADMISSION_HEADER,
+    MINT_ADMISSION_META_KEY,
+    background_outcome,
+)
 from data_mcp.operations import QueuedOperation, ResolvedOperation
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
 from data_mcp.server import mcp
@@ -60,11 +71,12 @@ from fastmcp.client.client import CallToolResult
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .node_fixtures import load_node_fixture
 from .resolve_results import members_result, resolve_result, resolved_result
-from .test_client import _client, _problem_body, id_token_auth, text_of
+from .test_client import _client, _problem_body, _settings, id_token_auth, text_of
 from .test_operations import _FakeClock
 
 Handler = (
@@ -340,6 +352,7 @@ async def _call_get_data(
     arguments: dict[str, object],
     *,
     auth: AuthProvider | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> CallToolResult:
     async with _client(handler, auth=auth) as upstream:
         client_holder.set_client(upstream)
@@ -349,7 +362,7 @@ async def _call_get_data(
             # runs, since `get_data` only reads the store via `get_store()`
             # once the request is dispatched below.
             set_store(store)
-            return await client.call_tool("get_data", arguments, raise_on_error=False)
+            return await client.call_tool("get_data", arguments, raise_on_error=False, meta=meta)
 
 
 # Successful mint
@@ -583,6 +596,529 @@ async def test_202_operation_polled_to_done_returns_the_same_result_as_a_sync_mi
     assert calls == ["/api/datasets", _OPERATION_POLL_PATH]
     assert _OPERATION_ID in text_of(result)
     assert "queued operation" in text_of(result)
+
+
+_BACKGROUND_META = {MINT_ADMISSION_META_KEY: "background"}
+_HARNESS_CALLER = conversation_caller("principal/conversation")
+
+
+@contextmanager
+def _over_loopback(*, loopback: bool = True) -> Iterator[None]:
+    """Make the in-memory client's calls read as arriving over the harness's
+    loopback mount (`common.mcp_telemetry.is_loopback_request`), or as
+    arriving off it. The in-memory transport has no HTTP request to mark."""
+
+    def marked() -> bool:
+        return loopback
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mint_admission, "is_loopback_request", marked)
+        yield
+
+
+@pytest.mark.parametrize(
+    ("meta", "loopback", "admissions", "background"),
+    [
+        (_BACKGROUND_META, True, ["background"], "queued"),
+        ({MINT_ADMISSION_META_KEY: "foreground"}, True, [None, None], None),
+        (None, True, [None, None], None),
+        (_BACKGROUND_META, False, [None, None], None),
+    ],
+    ids=["background", "other_value", "unmarked", "off_loopback"],
+)
+async def test_a_background_call_marks_its_mint_post_and_ends_once_it_is_answered(
+    meta: dict[str, Any] | None,
+    loopback: bool,
+    admissions: list[str | None],
+    background: str | None,
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    """A harness call over loopback whose `_meta` asks for a background mint sends apis
+    the admission header on its mint POST and ends on apis' 202 without polling, its span
+    marked. Any other call, the marked call off loopback included, sends the header
+    nowhere and polls the operation to its frame."""
+    stored = _stored_definition()
+    manifest = _manifest_response(spec_id=stored.spec_id)
+    sent: list[str | None] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers.get(MINT_ADMISSION_HEADER))
+        if request.url.path == "/api/datasets":
+            operation = {
+                "operation_id": _OPERATION_ID,
+                "status": "pending",
+                "poll": _OPERATION_POLL_PATH,
+                "retry_after_ms": 1,
+            }
+            return httpx2.Response(202, json={"operation": operation})
+        if request.url.path == _OPERATION_POLL_PATH:
+            return httpx2.Response(
+                200,
+                json={
+                    "operation": {"operation_id": _OPERATION_ID, "status": "done"},
+                    "manifest": manifest,
+                },
+            )
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    with _over_loopback(loopback=loopback):
+        result = await _call_get_data(
+            handler, _StubStore(stored), {"spec_id": stored.spec_id}, meta=meta
+        )
+
+    assert result.is_error is False
+    assert sent == admissions
+    assert (result.structured_content or {}).get(BACKGROUND_OUTCOME_KEY) == background
+    marked = [
+        span
+        for span in exported_spans.get_finished_spans()
+        if (span.attributes or {}).get(BACKGROUND_MINT_SPAN_ATTRIBUTE) is True
+    ]
+    assert len(marked) == (1 if background else 0)
+
+
+class _ApisStillMinting(httpx2.AsyncBaseTransport):
+    """apis receiving the mint POST, as httpcore reports a written request body to
+    the request's trace extension, then answering only once `answer` is set: 200,
+    or `declined` apis' 503 decline of a background mint."""
+
+    def __init__(self, spec_id: str, *, declined: bool = False) -> None:
+        self.spec_id = spec_id
+        self.declined = declined
+        self.answer = asyncio.Event()
+        self.posts = 0
+        self.answered = False
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/datasets", request.url.path
+        self.posts += 1
+        trace = request.extensions.get("trace")
+        if trace is not None:
+            await trace("http11.send_request_body.complete", {"request": request})
+        await self.answer.wait()
+        self.answered = True
+        if self.declined:
+            return httpx2.Response(
+                503,
+                content=_problem_body(
+                    code="service_unavailable",
+                    retryable=True,
+                    constraint_id="mint_background_declined",
+                ),
+                headers={"Retry-After": "1"},
+            )
+        return httpx2.Response(200, json=_manifest_response(spec_id=self.spec_id))
+
+
+async def _background_call(apis: _ApisStillMinting, store: Any, *, answer: bool) -> CallToolResult:
+    """One background `get_data` call from the harness against `apis`, answered by
+    apis before the server shuts down when `answer`, and left unanswered at shutdown
+    otherwise."""
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        client_holder.set_client(upstream)
+        with supplied_caller(_HARNESS_CALLER), _over_loopback():
+            async with Client(mcp) as client:
+                set_store(store)
+                result = await asyncio.wait_for(
+                    client.call_tool(
+                        "get_data",
+                        {"spec_id": apis.spec_id},
+                        raise_on_error=False,
+                        meta=_BACKGROUND_META,
+                    ),
+                    timeout=5,
+                )
+                assert not apis.answered
+                (posting,) = get_data_tool._background_mints
+                assert not posting.done()
+                if answer:
+                    apis.answer.set()
+                    await asyncio.wait_for(posting, timeout=5)
+        if not answer:
+            assert posting.cancelled()
+    return result
+
+
+async def test_a_background_call_answers_posted_once_its_post_is_out_and_keeps_it_open() -> None:
+    """The call answers "posted" while apis is still minting; the POST stays open
+    until apis answers it, sent once."""
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id)
+
+    result = await _background_call(apis, _StubStore(stored), answer=True)
+
+    assert result.is_error is False
+    assert (result.structured_content or {})[BACKGROUND_OUTCOME_KEY] == "posted"
+    assert apis.answered
+    assert apis.posts == 1
+    assert not get_data_tool._background_mints
+
+
+async def test_apis_declining_a_posted_background_mint_is_logged_as_declined(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id, declined=True)
+
+    with caplog.at_level(logging.INFO, logger="data_mcp.get_data_tool"):
+        result = await _background_call(apis, _StubStore(stored), answer=True)
+
+    assert (result.structured_content or {})[BACKGROUND_OUTCOME_KEY] == "posted"
+    (line,) = [
+        r.getMessage() for r in caplog.records if "background mint answered" in r.getMessage()
+    ]
+    assert f"spec_id={stored.spec_id}" in line
+    assert "caller=" in line
+    assert "outcome=declined" in line
+    assert "elapsed_s=" in line
+
+
+async def test_a_background_mint_holds_no_progress_reporter_past_its_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The background mint's task outlives the request, so it is given no `on_poll`,
+    which would hold the request's `Context`."""
+    given: list[object] = []
+    attempt_mint = get_data_tool._attempt_mint
+
+    async def recording(**kwargs: Any) -> ToolResult:
+        given.append(kwargs["on_poll"])
+        return await attempt_mint(**kwargs)
+
+    monkeypatch.setattr(get_data_tool, "_attempt_mint", recording)
+    stored = _stored_definition()
+
+    await _background_call(_ApisStillMinting(stored.spec_id), _StubStore(stored), answer=True)
+
+    assert given == [None]
+
+
+@pytest.mark.parametrize(
+    ("structured", "word"),
+    [
+        ({"spec_id": "s", BACKGROUND_OUTCOME_KEY: "posted"}, "posted"),
+        (
+            {"code": "service_unavailable", "fix": {"constraint_id": "mint_background_declined"}},
+            "declined",
+        ),
+        ({"code": "service_unavailable", "fix": {}}, "service_unavailable"),
+        ({"spec_id": "s"}, "answered"),
+        (None, "answered"),
+    ],
+    ids=["outcome", "declined", "refusal", "frame", "nothing"],
+)
+def test_a_background_calls_answer_reads_as_one_word(
+    structured: dict[str, Any] | None, word: str
+) -> None:
+    assert background_outcome(structured) == word
+
+
+async def test_a_foreground_mint_of_an_open_background_post_takes_its_answer() -> None:
+    """apis would run the same mint twice, so the run's own call for the frame a
+    background POST is still minting posts nothing and answers from that POST."""
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id)
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        client_holder.set_client(upstream)
+        with supplied_caller(_HARNESS_CALLER), _over_loopback():
+            async with Client(mcp) as client:
+                set_store(_StubStore(stored))
+                arguments = {"spec_id": stored.spec_id}
+                await client.call_tool(
+                    "get_data", arguments, raise_on_error=False, meta=_BACKGROUND_META
+                )
+                foreground = asyncio.ensure_future(
+                    client.call_tool("get_data", arguments, raise_on_error=False)
+                )
+                for _ in range(20):
+                    await asyncio.sleep(0.01)
+                assert apis.posts == 1
+                assert not foreground.done()
+
+                apis.answer.set()
+                result = await asyncio.wait_for(foreground, timeout=5)
+
+    assert result.is_error is False
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_background_call_for_a_request_already_being_posted_answers_joined_unsent() -> None:
+    """A background call for the frame a foreground POST is still minting sends
+    nothing, since apis would run the same mint twice, and answers `joined` at once."""
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id)
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        client_holder.set_client(upstream)
+        with _over_loopback():
+            async with Client(mcp) as client:
+                set_store(_StubStore(stored))
+                arguments = {"spec_id": stored.spec_id}
+                foreground = asyncio.ensure_future(
+                    client.call_tool("get_data", arguments, raise_on_error=False)
+                )
+                for _ in range(20):
+                    await asyncio.sleep(0.01)
+                assert apis.posts == 1
+
+                joined = await asyncio.wait_for(
+                    client.call_tool(
+                        "get_data", arguments, raise_on_error=False, meta=_BACKGROUND_META
+                    ),
+                    timeout=5,
+                )
+                assert apis.posts == 1
+                apis.answer.set()
+                await asyncio.wait_for(foreground, timeout=5)
+
+    assert (joined.structured_content or {})[BACKGROUND_OUTCOME_KEY] == "joined"
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+class _ApisFirstPostOpen(httpx2.AsyncBaseTransport):
+    """apis holding the first mint POST open until `answer` is set, then answering it
+    `first`, and answering every later POST 200 after a short hold, long enough for
+    every call waiting on it to wake before it ends. Each POST is reported written out
+    to the request's trace extension on arrival, as httpcore reports it, except that a
+    `first` exception fails the first POST's connection before its body is written."""
+
+    def __init__(self, first: httpx2.Response | Exception) -> None:
+        self.first = first
+        self.answer = asyncio.Event()
+        self.posts = 0
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self.posts += 1
+        first = self.posts == 1
+        trace = request.extensions.get("trace")
+        if trace is not None and not (first and isinstance(self.first, Exception)):
+            await trace("http11.send_request_body.complete", {"request": request})
+        if not first:
+            await asyncio.sleep(0.05)
+            return httpx2.Response(200, json={})
+        await self.answer.wait()
+        if isinstance(self.first, Exception):
+            raise self.first
+        return self.first
+
+
+_REQUEST_BODY = {"input": {"spec_id": "spec"}}
+
+# A deadline under which `DIRECT_CALL_BUDGET`, the default, sends a mint POST.
+_DIRECT_DEADLINE_S = 120.0
+
+# A budget whose deadline runs out long before apis answers the open POST.
+_SHORT_BUDGET = CallBudget(
+    deadline_s=None,
+    pre_mint_reserve_s=0.2,
+    mint_timeout_s=0.1,
+    min_mint_timeout_s=0.1,
+    post_mint_reserve_s=0.05,
+)
+
+
+async def _open_post(
+    upstream: UpstreamClient, apis: _ApisFirstPostOpen, *, admission: Any = None
+) -> asyncio.Task[httpx2.Response | ToolResult]:
+    """A `_post_mint` of `_REQUEST_BODY` under the default budget, once apis has its POST."""
+    task = asyncio.create_task(
+        get_data_tool._post_mint(
+            upstream,
+            _REQUEST_BODY,
+            spec_id="spec",
+            settings=_settings(),
+            deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+            admission=admission,
+        )
+    )
+    while apis.posts == 0 and not task.done():
+        await asyncio.sleep(0.01)
+    assert apis.posts == 1, await task
+    return task
+
+
+async def test_a_foreground_mint_out_of_time_on_an_open_post_refuses_without_posting() -> None:
+    """A foreground call joined to an open POST of the same request waits up to its own
+    deadline. When that runs out first it refuses `mint_unanswered`, retryable, and
+    sends nothing, so apis never runs the mint twice. The open POST answers its caller."""
+    apis = _ApisFirstPostOpen(httpx2.Response(200, json={}))
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis)
+            with use_call_budget(_SHORT_BUDGET):
+                joined = await get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(0.3),
+                )
+            assert apis.posts == 1
+            apis.answer.set()
+            answered = await open_post
+
+    assert isinstance(joined, ToolResult)
+    refusal = joined.structured_content or {}
+    assert refusal["code"] == "service_unavailable"
+    assert refusal["retry_mode"] == "retry_after_delay"
+    assert refusal["fix"]["spec_id"] == "spec"
+    assert refusal["fix"]["waited_s"] >= 0.0
+    assert "elapsed_s" not in refusal["fix"]
+    assert isinstance(answered, httpx2.Response)
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_joined_to_an_open_post_raises_its_failure() -> None:
+    """A failure of the open POST reaches the call that joined it, which posts nothing."""
+    apis = _ApisFirstPostOpen(
+        httpx2.Response(404, content=_problem_body(code="spec_not_found", retryable=False))
+    )
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis)
+            joined = asyncio.ensure_future(
+                get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                )
+            )
+            await asyncio.sleep(0.05)
+            apis.answer.set()
+            with pytest.raises(UpstreamError) as from_open:
+                await open_post
+            with pytest.raises(UpstreamError) as from_joined:
+                await joined
+
+    assert from_joined.value.code == from_open.value.code == "spec_not_found"
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_joined_to_a_cancelled_post_refuses_without_posting() -> None:
+    """apis may still run a POST whose caller went away, so the call that joined it
+    refuses `mint_unanswered`, retryable, and posts nothing."""
+    apis = _ApisFirstPostOpen(httpx2.Response(200, json={}))
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis)
+            joined = asyncio.ensure_future(
+                get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                )
+            )
+            await asyncio.sleep(0.05)
+            open_post.cancel()
+            refused = await joined
+
+    assert isinstance(refused, ToolResult)
+    refusal = refused.structured_content or {}
+    assert refusal["code"] == "service_unavailable"
+    assert refusal["retry_mode"] == "retry_after_delay"
+    assert "waited_s" in refusal["fix"]
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+@pytest.mark.parametrize("joiners", [1, 3])
+async def test_foreground_mints_joined_to_a_background_post_never_written_out_post_once(
+    joiners: int,
+) -> None:
+    """A background POST whose connection failed before its body went out started
+    nothing in apis. The foreground calls that joined it wake together, and exactly one
+    posts its own request: the others join that POST and take apis' answer to it."""
+    apis = _ApisFirstPostOpen(httpx2.ConnectError("refused"))
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis, admission="background")
+            foreground = [
+                asyncio.ensure_future(
+                    get_data_tool._post_mint(
+                        upstream,
+                        _REQUEST_BODY,
+                        spec_id="spec",
+                        settings=_settings(),
+                        deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                    )
+                )
+                for _ in range(joiners)
+            ]
+            await asyncio.sleep(0.05)
+            assert apis.posts == 1
+            apis.answer.set()
+            unsent = await open_post
+            posted = await asyncio.gather(*foreground)
+
+    assert isinstance(unsent, ToolResult)
+    assert (unsent.structured_content or {})["code"] == "service_unavailable"
+    assert len(posted) == joiners
+    assert all(isinstance(each, httpx2.Response) and each.status_code == 200 for each in posted)
+    assert apis.posts == 2
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_joined_to_a_declined_background_post_posts_its_own() -> None:
+    """apis ran nothing for a background POST it declined, so the foreground call that
+    joined it posts its own request once that POST has ended."""
+    apis = _ApisFirstPostOpen(
+        httpx2.Response(
+            503,
+            content=_problem_body(
+                code="service_unavailable",
+                retryable=True,
+                constraint_id="mint_background_declined",
+            ),
+            headers={"Retry-After": "1"},
+        )
+    )
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis, admission="background")
+            joined = asyncio.ensure_future(
+                get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert apis.posts == 1
+            apis.answer.set()
+            with pytest.raises(UpstreamError):
+                await open_post
+            posted = await joined
+
+    assert isinstance(posted, httpx2.Response)
+    assert posted.status_code == 200
+    assert apis.posts == 2
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_shutdown_closes_a_background_post_apis_has_not_answered() -> None:
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id)
+
+    await _background_call(apis, _StubStore(stored), answer=False)
+
+    assert not apis.answered
+    assert not get_data_tool._background_mints
 
 
 async def test_get_data_reports_progress_during_a_polled_mint() -> None:

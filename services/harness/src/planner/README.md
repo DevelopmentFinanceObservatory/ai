@@ -1,8 +1,9 @@
 # planner
 
 The Planner Agent drafts a methodological plan for a development finance question
-and holds it at the user's approval. Nothing computes or retrieves until they say
-yes.
+and holds it at the user's approval. Nothing computes until they say yes; the harness
+may start retrieving the card's data when it offers the card
+(`harness.early_mint`).
 
 It settles methodology and states what evidence the answer rests on, then stops.
 Finding the data, proposing the operations and compiling the workflow are the

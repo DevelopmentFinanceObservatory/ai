@@ -166,6 +166,14 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 # Unset, the entry carries no amendment.
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
+# The session-state slot holding the option the user picked for a planner
+# decision on the plan card, as a `DecisionPick` dump, when the planner's
+# current entry replans to hold that pick. `harness.planner_seam.PlannerSeam`
+# writes it, or clears it, with `AMENDMENT_ENTRY_STATE_KEY` when an entry
+# starts, so an ask-the-user resume inside one entry keeps it. Admission
+# refuses a plan that does not state the pick (`submission.service.admit`).
+DECISION_PICK_STATE_KEY = "planner:decision_pick"
+
 # The session-state slot holding the `UnsupportedOperation` of every decline
 # earned in the planner's current entry that the recorded plan may make but
 # need not: a first-draft entry or a translation that refers a requirement
@@ -4164,23 +4172,27 @@ def settle_decisions(
         requirements: Every requirement the plan states once the call lands,
             carried forward or new.
     """
-    decisions: list[Decision] = []
-    for draft in drafts:
-        citing = [
-            requirement for requirement in requirements if draft.slot in requirement.decision_ids
-        ]
-        fixed: dict[str, Any] = {}
-        for field in dict.fromkeys(draft.fixes or ()):
-            stated = [_stated(r, field) for r in citing if field in type(r).model_fields]
-            if stated and stated[0] is not None and all(_same(stated[0], v) for v in stated):
-                fixed[field] = stated[0]
-        decisions.append(
-            Decision(
-                **draft.model_dump(exclude={"fixes"}),
-                fixes=DecisionFixes(**fixed) if fixed else None,
-            )
+    return [
+        Decision(
+            **draft.model_dump(exclude={"fixes"}),
+            fixes=read_fixes(requirements, slot=draft.slot, fields=draft.fixes or ()),
         )
-    return decisions
+        for draft in drafts
+    ]
+
+
+def read_fixes(
+    requirements: Sequence[EvidenceRequirement], *, slot: str, fields: Iterable[str]
+) -> DecisionFixes | None:
+    """The value of each of `fields` that the requirements citing `slot` and
+    declaring it all state, or `None` when no field settles (`settle_decisions`)."""
+    citing = [requirement for requirement in requirements if slot in requirement.decision_ids]
+    fixed: dict[str, Any] = {}
+    for field in dict.fromkeys(fields):
+        stated = [_stated(r, field) for r in citing if field in type(r).model_fields]
+        if stated and stated[0] is not None and all(_same(stated[0], v) for v in stated):
+            fixed[field] = stated[0]
+    return DecisionFixes(**fixed) if fixed else None
 
 
 class PlanStatus(TitlelessEnum):
@@ -6321,6 +6333,192 @@ def amendment_entry(state: SessionState) -> bool:
 def save_amendment_entry(state: SessionState, amended: bool) -> None:
     """Record whether the planner's current entry opened with the user's amendment of the plan."""
     state[AMENDMENT_ENTRY_STATE_KEY] = amended
+
+
+class DecisionPick(StrictModel):
+    """The option `chosen` the user picked on the plan card for the planner
+    decision under `slot`, exactly as the decision's `options` states it,
+    with the scope the replan for it may change.
+
+    `origin_fixes` is what that decision fixed on the card, which the picked
+    option must change. Call C the card's requirements citing `slot`. The
+    replan replaces them: `replaced_readings` holds what each root of C
+    read (`requirement_roots`, `requirement_readings`), `replaced_kinds`
+    the kinds of those roots, which tell a change of shape apart,
+    `cited_by_every`
+    the decisions every replacing requirement cites, `slot` and each
+    decision of the user's every member of C cited, and `cited_by_any` each
+    other decision of the user's some member of C cited, which some
+    replacing requirement cites. Decisions code writes (`is_code_written`)
+    are left out of both: admission derives their citations. Everything
+    else on the card stands as the planner wrote it: `kept_requirements`
+    holds each other requirement's `requirement_digest` by id, and
+    `kept_decisions` the `content_digest` of each decision but `slot` and
+    those code writes that the user made or a kept requirement cites, by
+    slot. Every proposal of the replan is held against them
+    (`submission.service._outside_pick`, `_picked_decision`). Built by
+    `on_card`.
+    """
+
+    slot: str
+    chosen: str
+    origin_fixes: DecisionFixes
+    replaced_readings: tuple[str, ...]
+    replaced_kinds: tuple[str, ...]
+    cited_by_every: tuple[str, ...]
+    cited_by_any: tuple[str, ...]
+    kept_requirements: dict[str, str]
+    kept_decisions: dict[str, str]
+
+    @classmethod
+    def on_card(cls, card: Plan, *, slot: str, chosen: str) -> DecisionPick:
+        """The pick of `chosen` for the decision under `slot` on `card`, which fixes something.
+
+        `card` is the plan as the model wrote it (`authored`), with every
+        windowed copy's pin moved back to the pin it copies, as admission
+        reads the plan a proposal amends.
+        """
+        requirements = card.evidence_requirements
+        replaced = [r for r in requirements if slot in r.decision_ids]
+        kept = [r for r in requirements if slot not in r.decision_ids]
+        readings = requirement_readings(requirements)
+        code_written = {d.slot for d in card.decisions if is_code_written(d)}
+        users = {
+            d.slot
+            for d in card.decisions
+            if d.resolved_by is ResolvedBy.USER and d.slot not in code_written
+        }
+        cited_by_kept = {cited for requirement in kept for cited in requirement.decision_ids}
+        every = users.intersection(*(r.decision_ids for r in replaced))
+        some = {cited for requirement in replaced for cited in requirement.decision_ids}
+        origin = next(d for d in card.decisions if d.slot == slot)
+        if origin.fixes is None:
+            raise ValueError(f"decision {slot!r} fixes nothing, so no option of it can be picked")
+        return cls(
+            slot=slot,
+            chosen=chosen,
+            origin_fixes=origin.fixes,
+            replaced_readings=tuple(sorted({readings[r.id] for r in requirement_roots(replaced)})),
+            replaced_kinds=tuple(sorted({r.kind for r in requirement_roots(replaced)})),
+            cited_by_every=tuple(sorted({slot} | every)),
+            cited_by_any=tuple(sorted((users & some) - every)),
+            kept_requirements={
+                r.id: requirement_digest(r, code_written=code_written) for r in kept
+            },
+            kept_decisions={
+                d.slot: content_digest(d)
+                for d in card.decisions
+                if d.slot != slot
+                and d.slot not in code_written
+                and (d.slot in users or d.slot in cited_by_kept)
+            },
+        )
+
+
+def requirement_roots(requirements: Sequence[EvidenceRequirement]) -> list[EvidenceRequirement]:
+    """Each of `requirements` that no other of them reads (`inputs_of`): the figures they end in."""
+    read = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
+    return [requirement for requirement in requirements if requirement.id not in read]
+
+
+def is_code_written(decision: Decision) -> bool:
+    """Whether `propose_plan` wrote `decision` itself: a search pin's measure
+    (`is_search_pin`), a scope choice (`Decision.scope`), a caveat
+    (`Decision.caveat`), or the prices the user chose for a part, the one
+    decision fixing `DecisionFixes.prices` (`submission.prices_choice`).
+    Admission rewrites these on every proposal."""
+    return (
+        decision.scope is not None
+        or decision.caveat is not None
+        or is_search_pin(decision)
+        or (decision.fixes is not None and decision.fixes.prices is not None)
+    )
+
+
+def content_digest(item: StrictModel) -> str:
+    """The digest of `item`'s whole content. Canonical JSON (RFC 8785) under SHA-256."""
+    return _digest(item.model_dump(mode="json"))
+
+
+def requirement_digest(requirement: EvidenceRequirement, *, code_written: Collection[str]) -> str:
+    """The `content_digest` of `requirement` less its citations of the decisions
+    under `code_written`, which admission derives itself."""
+    content = requirement.model_dump(mode="json")
+    content["decision_ids"] = [
+        slot for slot in requirement.decision_ids if slot not in code_written
+    ]
+    return _digest(content)
+
+
+def requirement_readings(requirements: Sequence[EvidenceRequirement]) -> dict[str, str]:
+    """The digest of what each of `requirements` reads, by id.
+
+    Each requirement enters as its content less `id` and `decision_ids`,
+    with every input it reads (`inputs_of`) standing for that input's own
+    reading. So a digest moves only when the requirement, or one under it,
+    reads something else: renaming one or citing other decisions from it
+    leaves it as it was. `requirements` must not read one another in a
+    cycle. Canonical JSON (RFC 8785) under SHA-256, as `plan_revision`.
+    """
+    by_id = {requirement.id: requirement for requirement in requirements}
+    digests: dict[str, str] = {}
+
+    def digest(requirement: EvidenceRequirement) -> str:
+        if requirement.id not in digests:
+            read = _reading(
+                requirement,
+                {
+                    input_id: digest(by_id[input_id])
+                    for input_id in inputs_of(requirement)
+                    if input_id in by_id
+                },
+            )
+            digests[requirement.id] = _digest(
+                read.model_dump(mode="json", exclude={"id", "decision_ids"})
+            )
+        return digests[requirement.id]
+
+    return {requirement.id: digest(requirement) for requirement in requirements}
+
+
+def _digest(content: dict[str, Any] | list[str]) -> str:
+    return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
+
+
+class UnreadablePickError(ValueError):
+    """A pick stored in a shape this release does not read, such as one an
+    earlier release wrote mid-entry. Read as no pick, it would let the
+    replan change the plan unchecked, so every reader refuses it."""
+
+
+def decision_pick(state: SessionState) -> DecisionPick | None:
+    """The pick on the plan card that the planner's current entry holds
+    (`DECISION_PICK_STATE_KEY`), or `None`.
+
+    Raises:
+        UnreadablePickError: If the slot holds a pick this release cannot read.
+    """
+    return pick_of(state.get(DECISION_PICK_STATE_KEY))
+
+
+def pick_of(raw: object) -> DecisionPick | None:
+    """The `DecisionPick` a pick stored as its JSON dump states, or `None` when none is stored.
+
+    Raises:
+        UnreadablePickError: If `raw` is something other than `None` or a
+            dump of a `DecisionPick` this release reads.
+    """
+    if raw is None:
+        return None
+    try:
+        return DecisionPick.model_validate(raw)
+    except ValidationError as exc:
+        raise UnreadablePickError("the pick on the plan card cannot be read") from exc
+
+
+def save_decision_pick(state: SessionState, pick: DecisionPick | None) -> None:
+    """Record the pick the planner's current entry holds, or clear it with `None`."""
+    state[DECISION_PICK_STATE_KEY] = None if pick is None else pick.model_dump(mode="json")
 
 
 def load_unsupported(state: SessionState) -> frozenset[UnsupportedOperation]:

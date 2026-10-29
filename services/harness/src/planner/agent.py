@@ -79,7 +79,13 @@ from harness.scope_choices import (
 from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
-from submission.prices_choice import PRICES_OPTIONS, PRICES_PICKS, PRICES_SLOT_PREFIX, PricesChoice
+from submission.prices_choice import (
+    PRICES_OPTIONS,
+    PRICES_PICKS,
+    PRICES_SLOT_PREFIX,
+    PricesChoice,
+    measure_key,
+)
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
@@ -135,6 +141,7 @@ from planner.plan import (
     AnswerMode,
     AskAnswer,
     DecisionDraft,
+    DecisionPick,
     Decline,
     EvidenceRequirement,
     FullHistory,
@@ -143,6 +150,7 @@ from planner.plan import (
     PlanStatus,
     SessionState,
     UnsupportedOperation,
+    decision_pick,
     full_histories,
     full_history,
     identity_on_record,
@@ -780,8 +788,10 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
     whether or not the option carries a spec_id. Each response pairs with the
     nearest preceding call sharing its `id`, as `_elected_spec_ids` pairs
     them. A choice stands until the user answers the same question again,
-    a question pricing the same part: a pick of other prices replaces it,
-    and any other answer, a skip aside, releases it.
+    a question pricing the same part or another window of its measure
+    (`submission.prices_choice.measure_key`): a pick of other prices
+    replaces it, and any other answer, a skip aside, releases it, so one
+    measure holds one choice however many asks priced it.
 
     A prices refusal that sends the planner to the user (`detail.part`,
     `submission.prices_choice`) binds the planner's next ask offering
@@ -793,9 +803,14 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
     of another kind is read as that one. A message the user typed
     (`_user_message`) releases every choice and clears the refusal, and an
     amendment of the approval card (`_is_amendment`) releases every choice.
-    An answer to any other question leaves them standing. A Studio turn is one session, so a choice holds for
-    the turn it was made in.
+    An answer to any other question leaves them standing. A Studio turn is
+    one session, so a choice holds for the turn it was made in.
     """
+    measures = {
+        spec_id: measure_key(block)
+        for spec_id, source in pin_sources(tool_context.state).items()
+        if (block := source.spec_block(spec_id)) is not None
+    }
     chosen: dict[str, PricesChoice] = {}
     refused: str | None = None
     asked: dict[str, str] = {}
@@ -817,12 +832,23 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
             answer = _answers(step.body.get("result")).get("q1") or {}
             basis = PRICES_PICKS.get(str(answer.get("spec_id")))
             if answer.get("kind") == "option" and basis is not None:
+                _release_measure(chosen, part, measures)
                 chosen[part] = PricesChoice(basis, asked=True)
             elif part in chosen:
                 chosen[part] = chosen[part]._replace(asked=True)
         else:
-            _priced_answers(step.args or {}, step.body, chosen)
+            _priced_answers(step.args or {}, step.body, chosen, measures)
     return chosen
+
+
+def _release_measure(
+    chosen: dict[str, PricesChoice], part: str, measures: Mapping[str, str | None]
+) -> None:
+    """Take out of `chosen` the choice for `part` and for every part measuring
+    what it measures (equal `measures`), as a new answer pricing it replaces them."""
+    key = measures.get(part)
+    for priced in [p for p in chosen if p == part or (key is not None and measures.get(p) == key)]:
+        del chosen[priced]
 
 
 def _prices_refused(body: Mapping[str, Any]) -> str | None:
@@ -842,9 +868,13 @@ def _prices_refused(body: Mapping[str, Any]) -> str | None:
 
 
 def _priced_answers(
-    args: dict[str, Any], body: Mapping[str, Any], chosen: dict[str, PricesChoice]
+    args: dict[str, Any],
+    body: Mapping[str, Any],
+    chosen: dict[str, PricesChoice],
+    measures: Mapping[str, str | None],
 ) -> None:
-    """Record in `chosen` what one clarify response says of each part its call priced (`_prices_chosen`)."""
+    """Record in `chosen` what one clarify response says of each part its call
+    priced, each answer replacing the choices of its part's measure (`_prices_chosen`)."""
     answers = _answers(body.get("result"))
     for question_id, candidates in _question_candidates(args).items():
         marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
@@ -862,9 +892,8 @@ def _priced_answers(
             ),
             None,
         )
-        if picked is None:
-            chosen.pop(part, None)
-        else:
+        _release_measure(chosen, part, measures)
+        if picked is not None:
             chosen[part] = picked
 
 
@@ -1330,6 +1359,10 @@ class ToolContextSession:
     def prices_chosen(self) -> dict[str, PricesChoice]:
         """`_prices_chosen` over the call's session."""
         return _prices_chosen(self.tool_context)
+
+    def decision_pick(self) -> DecisionPick | None:
+        """The pick on the plan card the call's planner entry holds (`planner.plan.decision_pick`)."""
+        return decision_pick(self.tool_context.state)
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
         """Record `operation` as answered `unsupported` in this planner entry."""

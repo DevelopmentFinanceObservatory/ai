@@ -395,6 +395,10 @@ class _PendingInterrupt:
     # `plan.approved` frame (`StudioRunner._checkpointed`), so a retry resuming
     # the same answer sends it only when the dead attempt did not.
     approved_sent: bool = False
+    # Whether this elicitation is a question the planner asked while
+    # replanning for a pick on the plan card, so the stream answering it
+    # arms the switch's Stop (`harness.graph.switch.SWITCH_STOP`).
+    pick_replan: bool = False
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -1279,6 +1283,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             },
             "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
             "approved_sent": p.approved_sent,
+            "pick_replan": p.pick_replan,
         }
         for interrupt_id, p in pending.items()
     }
@@ -1306,6 +1311,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         },
         card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
         approved_sent=bool(entry.get("approved_sent")),
+        pick_replan=bool(entry.get("pick_replan")),
     )
     if "questions" in entry:
         pending.questions = tuple(
