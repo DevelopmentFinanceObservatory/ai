@@ -11,6 +11,7 @@ import pytest
 from compiler.sources import (
     DiscoveryStatus,
     MembersAnswer,
+    block_wire_groups,
     bound_refs,
     is_family,
     measure_named_by_query,
@@ -991,6 +992,42 @@ def test_a_resubmit_posts_the_registry_id_of_a_set_the_graph_holds_no_node_for()
 
     assert wire_groups(source.groups) == {
         "destination": {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia"}
+    }
+
+
+def test_a_resubmit_reads_each_sets_posted_identity_whatever_else_it_states() -> None:
+    # Africa names a class of party this release does not know, so the full set is
+    # not readable; a resubmit posts only its label, ref and registry id.
+    africa = {**_GROUPS["destination"], "whole_of": ["sovereign_fund"], "group_id": None}
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+    with pytest.raises(ValueError, match="sovereign_fund"):
+        source_from_spec_block(block)
+
+    assert wire_groups(block_wire_groups(block)) == {
+        "destination": {"label": "Africa", "ref": "africa"},
+        "origin": {"label": "G7"},
+    }
+    assert wire_groups(block_wire_groups(block, leaving_out="destination")) == {
+        "origin": {"label": "G7"}
+    }
+
+
+@pytest.mark.parametrize(
+    "africa",
+    [
+        pytest.param({"ref": "africa", "total": "DACAfrica"}, id="no-label"),
+        pytest.param({"label": "", "ref": "africa"}, id="empty-label"),
+        pytest.param({"label": "Africa", "group_id": 7}, id="group-id-not-text"),
+        pytest.param("Africa", id="not-an-object"),
+    ],
+)
+def test_a_resubmit_refuses_a_set_whose_posted_identity_does_not_read(africa: object) -> None:
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+
+    with pytest.raises(ValueError, match="destination"):
+        block_wire_groups(block)
+    assert wire_groups(block_wire_groups(block, leaving_out="destination")) == {
+        "origin": {"label": "G7"}
     }
 
 

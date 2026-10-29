@@ -4884,34 +4884,46 @@ def _show_blocks(ctx: _FakeToolContext, *blocks: dict[str, Any]) -> None:
     )
 
 
-@pytest.mark.parametrize("set_unreadable", [False, True], ids=["no-set", "set-unreadable"])
+@pytest.mark.parametrize(
+    "named_set",
+    [
+        pytest.param(None, id="no-set"),
+        pytest.param({"whole_of": ["official"]}, id="set-unreadable"),
+        pytest.param(
+            {"label": "DAC countries", "whole_of": ["sovereign_fund"]}, id="set-of-an-unknown-class"
+        ),
+    ],
+)
 async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_basis(
-    decision: DecisionFactory, set_unreadable: bool
+    decision: DecisionFactory, named_set: dict[str, Any] | None
 ) -> None:
     """US health aid counted gross on the CRS over the US total counted in grant
     equivalents on DAC1: the total is compiled gross through the resubmit a switch
     posts, the share reads both inputs gross, and the planner's decision says the
     inputs were put on one basis. The compiled total drops the source the planner
     wrote, which discovery would otherwise search back to the grant-equivalent
-    total. A named set on the total's block that is not readable, as one naming a
-    class of party this release does not know, refuses the compile and posts
-    nothing, since a resubmit without it can bind another population."""
+    total. A named set on the total's block whose posted identity is not readable,
+    as one stating no label, refuses the compile and posts nothing, since a resubmit
+    without it can bind another population. One naming a class of party this
+    release does not know is posted by its label, all the resubmit sends of it."""
     surface = BasisCompiles()
     ctx = _FakeToolContext()
     total_block = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
-    if set_unreadable:
-        total_block["resolved"]["entity_groups"] = {
-            "origin": {"label": "DAC countries", "whole_of": ["sovereign_fund"]}
-        }
+    if named_set is not None:
+        total_block["resolved"]["entity_groups"] = {"origin": named_set}
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"), total_block)
 
     result = await _share_of_health(
         _tools_reading(surface)["propose_plan"].func, ctx, decision(), source="OECD DAC1"
     )
 
-    if set_unreadable:
+    if named_set is not None and "label" not in named_set:
         assert result.get("code") == ProblemCode.OPERATION_UNSUPPORTED.value, result
         assert surface.calls == []
+        return
+    if named_set is not None:
+        (call,) = surface.calls
+        assert call["entity_groups"] == {"origin": {"label": "DAC countries"}}
         return
     assert result["outcome"] == Outcome.OK.value, result
     (call,) = surface.calls
@@ -5457,6 +5469,54 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
         "step_id": "sum",
     }
     assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("health_donors", "total_donors", "code"),
+    [
+        # France and the US both report their own flows as countries, so on one
+        # scope the two count each money by the same streams.
+        pytest.param(
+            ["country/FRA", "country/USA"], ["country/USA"], Outcome.OK.value, id="countries"
+        ),
+        # IDA's outflows spend the core contributions the US's imputed share counts.
+        pytest.param(
+            ["country/USA"],
+            ["InternationalDevelopmentAssociation"],
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="a-country-beside-ida",
+        ),
+    ],
+)
+def test_a_donor_search_states_no_graph_type_for_reads_as_a_country_by_its_ref(
+    decision: DecisionFactory, health_donors: list[str], total_donors: list[str], code: str
+) -> None:
+    """Two figures on the inclusive scope added, Search stating no `entity_type` for
+    the donors, as it does where the graph types no node. A `country/` donor reports
+    its own flows as a country, so France's and the US's aid beside the US's counts
+    each money by the same streams and the provider scope refuses nothing. The US
+    beside IDA, which Search marks a multilateral, is refused for IDA's outflows
+    alone, and the refusal says nothing of the US being a multilateral organisation."""
+    ctx = _FakeToolContext()
+    blocks = [
+        _from_donors(provider_block(spec_id, narrow=narrow, active="provider:inclusive"), donors)
+        for spec_id, narrow, donors in ((HEALTH, True, health_donors), (TOTAL, False, total_donors))
+    ]
+    for block in blocks:
+        for donor in block["resolved"]["entities"]:
+            donor.pop("entity_type")
+            if not donor["ref"].startswith("country/"):
+                donor.update(multilateral=True)
+    _show_blocks(ctx, *blocks)
+
+    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=True)
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+    if code == Outcome.OK.value:
+        assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
+        return
+    assert "the donors of 'total' are multilateral organisations" in json.dumps(result)
+    assert "the donors of 'health'" not in json.dumps(result)
 
 
 def _from_donors(block: dict[str, Any], donors: list[str]) -> dict[str, Any]:
@@ -8667,12 +8727,25 @@ async def _share_over_every(
             None,
             id="recipient-crs",
         ),
-        # The same over every donor, where Search's set for Africa names a class of
-        # party this release does not know. The set on the recipient side the whole
-        # keeps is not readable, and a whole posted without it can bind another
-        # population, so the whole is refused with no search.
+        # The same, where Search's set for Africa names a class of party this release
+        # does not know. The whole posts the set by its label and ref, all it sends.
         pytest.param(
             "africa_unknown_class",
+            "donor",
+            None,
+            "total over every donor",
+            {"sector", "region", "measure_basis", "provider"},
+            ["destination"],
+            "recipients, sectors, measure basis and providers",
+            None,
+            id="donor-part-set-of-an-unknown-class",
+        ),
+        # The same, where Search's set for Africa states a registry id that is not
+        # text. What the whole posts of the set on the recipient side it keeps is not
+        # readable, and a whole posted without it can bind another population, so the
+        # whole is refused with no search.
+        pytest.param(
+            "africa_unreadable_id",
             "donor",
             None,
             "total over every donor",
@@ -8702,11 +8775,13 @@ async def test_a_declared_whole_over_every_donor_or_recipient_leaves_that_role_o
     one Search may drop over every donor and an explicit one over every recipient,
     whose total names the part's donor, and no search. Search's answer is the population the whole
     holds, and the caveat names it and what both sides' dataset counts alike. A
-    part whose set on a kept role is not readable refuses the whole under the cause
-    `refused`, with no search."""
+    part whose set on a kept role does not read as the whole posts it refuses the
+    whole under the cause `refused`, with no search."""
     block = _us_health_to_africa() if part.startswith("africa") else _us_block(part)
     if part == "africa_unknown_class":
         block["resolved"]["entity_groups"]["destination"]["whole_of"] = ["sovereign_fund"]
+    if part == "africa_unreadable_id":
+        block["resolved"]["entity_groups"]["destination"]["group_id"] = 7
     surface = _OpenedWholeCompiles(block, groups=groups)
     ctx = _FakeToolContext()
 
@@ -9203,6 +9278,19 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert stated.caveat == "derived_whole"
     assert stated.chosen.endswith(total), stated.chosen
     assert stated.rationale.endswith(f"count {alike}"), stated.rationale
+
+
+def test_a_dac1_donor_whole_with_no_choices_says_nothing_both_sides_count_alike() -> None:
+    """The US DAC1 total over every donor, neither side recording a scope choice: DAC1
+    has no recipient or sector, and nothing states a measure basis or providers, so
+    the caveat claims nothing the two count alike."""
+    part = _DAC_DONOR_WHOLES["dac1"]["part"]
+
+    assert submission_service._whole_shares("donor", part, None, None) == "."
+    scope = submission_service.part_scope(part["spec_id"], part)
+    assert submission_service._whole_shares("donor", part, scope, scope) == (
+        ", so both sides count the same measure basis and providers."
+    )
 
 
 class _SearchRefused:
@@ -10224,6 +10312,56 @@ def test_sides_read_one_series_only_through_one_derivation(
     assert plan is not None
     differ = {d.slot for d in plan.decisions if d.caveat == "bases_differ"}
     assert differ & set(plan.requirement(steps[-1].id).decision_ids)
+
+
+def test_a_chain_reading_each_step_twice_is_derived_once_per_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten levels over US total ODA, each adding the yearly maximum of the level below
+    to its yearly minimum, so each level is read twice: a side reading the top derives
+    each step once and reads the dataset as one leaf, where deriving each read anew
+    would take 3 * (2**10 - 1) derivations."""
+    depth = 10
+    derived: list[str] = []
+    canonical = submission_service._canonical
+
+    def counted(requirement: EvidenceRequirement) -> dict[str, Any]:
+        derived.append(requirement.id)
+        return canonical(requirement)
+
+    monkeypatch.setattr(submission_service, "_canonical", counted)
+    requirements: dict[str, EvidenceRequirement] = {
+        "s0": DatasetRequirement(
+            id="s0",
+            decision_ids=["measure"],
+            measure="US total ODA",
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2023),
+            source_spec_id=TOTAL,
+        )
+    }
+    for level in range(1, depth + 1):
+        for reduction in (Reduction.MAX, Reduction.MIN):
+            requirements[f"{reduction.value}{level}"] = AggregateRequirement(
+                id=f"{reduction.value}{level}",
+                decision_ids=["measure"],
+                input_id=f"s{level - 1}",
+                reduction=reduction,
+                group_by=(GroupBy.PERIOD,),
+            )
+        requirements[f"s{level}"] = SumOfRequirement(
+            id=f"s{level}",
+            decision_ids=["measure"],
+            left=RequirementSide(input_id=f"max{level}"),
+            right=RequirementSide(input_id=f"min{level}"),
+        )
+
+    found = submission_service._derivation(
+        RequirementSide(input_id=f"s{depth}"), requirements, lambda _pin: None
+    )
+
+    assert sorted(derived) == sorted(set(requirements) - {"s0"})
+    assert found.leaves == (("s0", TOTAL),)
 
 
 _US_DONOR = Entity(name="United States", role="donor")

@@ -1837,9 +1837,12 @@ class _Translator:
                 PlanDecision(
                     id=decision.get("slot", f"d{index + 1}"),
                     question=questions[decision.get("slot", "")],
-                    chosen=option_named(decision.get("chosen", ""), decision=held),
+                    chosen=option_named(decision.get("chosen", ""), decision=held, options=offered),
                     alternatives=(
-                        [option_named(option, decision=held) for option in decision["options"]]
+                        [
+                            option_named(option, decision=held, options=offered)
+                            for option in decision["options"]
+                        ]
                         if decision.get("options") is not None
                         else None
                     ),
@@ -1855,6 +1858,7 @@ class _Translator:
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions
                 for held in [scoped.get(decision["slot"])]
+                for offered in [decision.get("options") or ()]
             ]
             choices = _switchable(decisions)
             card = PlanProposed(

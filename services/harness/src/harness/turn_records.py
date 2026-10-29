@@ -682,10 +682,10 @@ class SearchReading(StrictModel):
     words settled on the part (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`,
     copied from its block): their entries are the planner's.
     `entity_groups` are the named sets the part's places were asked for as
-    (`resolved.entity_groups`), which a resubmit of the reading posts again
-    (`harness.graph.switch`); stored and not rendered.
-    `entity_groups_unreadable` is true when the part's block named sets this
-    release could not read (`compiler.sources.block_groups`), so
+    (`resolved.entity_groups`), each holding what a resubmit of the reading posts
+    again (`harness.graph.switch`); stored and not rendered.
+    `entity_groups_unreadable` is true when the part's block named sets whose
+    posted identity this release could not read (`compiler.sources.block_wire_groups`), so
     `entity_groups` is empty without the part having none, and that resubmit
     refuses. It is stored and not rendered, as is `observed_at`.
     """

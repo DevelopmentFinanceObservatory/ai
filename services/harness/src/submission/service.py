@@ -54,6 +54,7 @@ from compiler.sources import (
     block_concept_label,
     block_group,
     countries_apart,
+    is_country,
     measure_named_by_query,
     open_entity_axes_of,
     readable_groups,
@@ -3646,8 +3647,6 @@ ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 _NARROWING_SLOTS = frozenset({"crsPurpose", "crsTypeOfFinance", "crsCooperationModality"})
 
 _BASIS_AXIS = "measure_basis"
-# The graph type of a country, which Search never marks a multilateral (`_own_flows`).
-_COUNTRY_TYPE = "Country"
 # What a sum's double-count refusal calls each money two inputs can both count
 # (`_shared_money`).
 _MONEY_WORDS: Mapping[ProviderMoney, str] = {
@@ -4171,7 +4170,7 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
     members does. The part counts every money any of its donors counts, so DAC
     countries' total beside IDA counts both. For a donor role left open, the donors there state it
     (`role_axis_facts`). Search marks only parties the graph types `Organization`,
-    so an unmarked country is none. Anything else states nothing: an unmarked
+    so an unmarked country (`compiler.sources.is_country`) is none. Anything else states nothing: an unmarked
     organisation or total, or an open role stating nothing, may hold one, as an
     unreadable axis counts as overlapping. Where Search's donor set is not readable
     (`compiler.sources.block_group`), its marker is not read, so each donor
@@ -4212,16 +4211,18 @@ def _own_flows(scope: PartScope, block: Mapping[str, Any] | None) -> frozenset[P
         if marker is not None and covered:
             money |= ANY_REPORTERS if marker else BILATERAL_REPORTERS
         else:
-            money |= _donor_money(entity)
+            money |= _donor_money(donor, entity)
     return frozenset(money)
 
 
-def _donor_money(entity: Mapping[str, Any] | None) -> frozenset[ProviderMoney]:
-    """The money one bound donor's own flows count, `entity` its resolved entity
-    (`_own_flows`)."""
+def _donor_money(donor: str, entity: Mapping[str, Any] | None) -> frozenset[ProviderMoney]:
+    """The money the bound donor `donor`'s own flows count, `entity` its resolved
+    entity where Search states one (`_own_flows`): multilateral money where Search
+    marks it a multilateral, bilateral money where it is a country
+    (`compiler.sources.is_country`), which Search never marks one, else either."""
     if entity is not None and entity.get("multilateral") is True:
         return MULTILATERAL_REPORTERS
-    if entity is not None and entity.get("entity_type") == _COUNTRY_TYPE:
+    if is_country(donor):
         return BILATERAL_REPORTERS
     return ANY_REPORTERS
 
@@ -4461,8 +4462,8 @@ class _Derivation(NamedTuple):
     `shape` is the canonical JSON of every operation between the sources and
     the calculation, except the steps `_passed_through` drops, with its
     parameters and entity selectors, each source written as its position in
-    `leaves`. `leaves` are the dataset requirements read, in that order, each
-    with the spec_id it pins. Two sides of one `shape` read one series where
+    `leaves`. `leaves` are the dataset requirements read, each once, in the order
+    first read, each with the spec_id it pins. Two sides of one `shape` read one series where
     each pair of leaves at one position does.
     """
 
@@ -4488,11 +4489,20 @@ def _derivation(
     each list whose order computes nothing in one order (`_canonical`). A step
     that leaves its input's frame as it is (`_passed_through`) is its input's
     derivation. A dataset requirement, or one the plan does not state, is a
-    leaf.
+    leaf. A requirement read twice, as by both sides of a sum, is derived once
+    and written alike each time, so a dataset requirement is one leaf however
+    often it is read and a chain whose steps each read the one below twice
+    takes one derivation per step.
     """
     leaves: list[tuple[str, str | None]] = []
+    read_once: dict[str, JsonValue] = {}
 
     def read(requirement_id: str) -> JsonValue:
+        if requirement_id not in read_once:
+            read_once[requirement_id] = derived(requirement_id)
+        return read_once[requirement_id]
+
+    def derived(requirement_id: str) -> JsonValue:
         requirement = requirements.get(requirement_id)
         if requirement is None or isinstance(requirement, DatasetRequirement):
             pin = None if requirement is None else requirement.source_spec_id
@@ -5641,7 +5651,8 @@ def _whole_shares(
     hold the same provider option. Where they hold different options, or one states
     none, it says what each counts (`_providers_counted`), and where they share
     nothing else it says they count different providers only where both state
-    one."""
+    one. Where nothing is known alike and neither states a provider option, it
+    says nothing of what they count."""
     alike = [
         name for name in _WHOLE_ALIKE[axis] if _dataset_holds(part_block, part_scope_held, name)
     ]
@@ -5654,9 +5665,7 @@ def _whole_shares(
         alike.append("providers")
     named = ", ".join(alike[:-1]) + f" and {alike[-1]}" if len(alike) > 1 else "".join(alike)
     if same or (part is None and whole is None):
-        return (
-            f", so both sides count the same {named}." if named else ", so both sides count alike."
-        )
+        return f", so both sides count the same {named}." if named else "."
     providers = _providers_counted(whole, part)
     if named:
         return f", so both sides count the same {named}. {providers}"

@@ -584,14 +584,22 @@ def entity_scopes_disjoint(left: SelectedSource, right: SelectedSource) -> bool:
     return False
 
 
+def is_country(ref: str) -> bool:
+    """Whether the resolved party `ref` is a country: its dcid is under `country/`,
+    as Search's own catalogue counts countries. Search's `entity_type` is the
+    graph's type of the node and is absent where the graph states none, so it is
+    not read."""
+    return ref.startswith(_COUNTRY_PREFIX)
+
+
 def countries_apart(left: Collection[str], right: Collection[str]) -> bool:
     """Whether two sets of entity refs bound on one role name rows that never meet:
-    both name countries alone, at least one each, and none in common. A region
-    holds countries, so a ref that is no country proves nothing."""
+    both name countries alone (`is_country`), at least one each, and none in
+    common. A region holds countries, so a ref that is no country proves nothing."""
     return (
         bool(left)
         and bool(right)
-        and all(ref.startswith(_COUNTRY_PREFIX) for ref in (*left, *right))
+        and all(is_country(ref) for ref in (*left, *right))
         and set(left).isdisjoint(right)
     )
 
@@ -1061,12 +1069,68 @@ def block_group(block: Mapping[str, object], role: str) -> ResolvedGroup | None:
     return next(iter(_groups({role: groups[role]})), None)
 
 
+def block_wire_groups(
+    block: Mapping[str, object], *, leaving_out: str | None = None
+) -> tuple[ResolvedGroup, ...]:
+    """The named sets a spec block's `resolved.entity_groups` states, each holding only
+    what a resubmit posts of it (`wire_groups`): its role, `label`, `ref` and
+    `group_id`, skipping the set on the role column `leaving_out`. Every other field
+    keeps its default and is not read, so a set naming a class of party outside
+    `PartyClass` still reads here. What this returns is for `wire_groups` alone.
+
+    Raises:
+        ValueError: When a set's posted identity is not readable: `entity_groups`
+            is not an object, or a set is not one, states no label, or states a
+            `ref` or `group_id` that is not text. A resubmit posted without that
+            set can bind another population.
+    """
+    raw = _mapping(block.get("resolved")).get("entity_groups")
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"entity_groups is not an object: {raw!r}")
+    found = []
+    for role, held in cast(Mapping[str, object], raw).items():
+        if role == leaving_out:
+            continue
+        if not isinstance(held, Mapping):
+            raise ValueError(f"the set on {role!r} is not an object: {held!r}")
+        group = cast(Mapping[str, object], held)
+        label = _text(group.get("label"))
+        if label is None:
+            raise ValueError(f"the set on {role!r} states no label: {dict(group)!r}")
+        found.append(
+            ResolvedGroup(
+                role=role,
+                label=label,
+                ref=_optional_text(group, "ref", role=role),
+                group_id=_optional_text(group, "group_id", role=role),
+            )
+        )
+    return tuple(found)
+
+
+def _optional_text(group: Mapping[str, object], key: str, *, role: str) -> str | None:
+    """`group[key]`, `None` where it is absent or null, `group` the set on `role`.
+
+    Raises:
+        ValueError: When it is anything but non-empty text.
+    """
+    value = group.get(key)
+    if value is None:
+        return None
+    if (text := _text(value)) is None:
+        raise ValueError(f"the set on {role!r} states a {key} that is not text: {value!r}")
+    return text
+
+
 def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | None:
     """The named sets `block` states (`block_groups`), `None` with a warning logged
     where they are not readable, as a set naming a class of party outside
     `PartyClass`, for a caller that reads them and goes on without. A resubmit
-    posting them reads `block_groups` and refuses where they are not readable,
-    since a definition posted without its sets can bind another population."""
+    posts only each set's identity (`block_wire_groups`) and refuses where that is
+    not readable, since a definition posted without its sets can bind another
+    population."""
     try:
         return block_groups(block)
     except ValueError as exc:

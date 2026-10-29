@@ -523,6 +523,43 @@ def test_a_caveat_reaches_the_card_only_as_a_caveat() -> None:
     assert cited and cited <= rows
 
 
+def test_a_planner_decisions_options_one_label_would_read_alike_reach_the_card_apart() -> None:
+    """The US health share with a planner decision whose two alternatives open
+    with one sector option id: each, and the chosen one, reads that option's
+    label with the planner's words after it, since the label alone would read
+    alike; the alternative no other reads alike with reads as written."""
+    plan = _us_health_share()
+    sector = "health incl. population and reproductive health (CRS 120 + 130)"
+    which = Decision(
+        slot="health_sector_side",
+        description="Which side the health sectors count on.",
+        options=(
+            "sector:120+130 health for the numerator",
+            "sector:120+130 health for the total",
+            "every sector",
+        ),
+        chosen="sector:120+130 health for the total",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="The user asked for the health share.",
+    )
+    plan = _us_health_share(
+        decisions=[*plan.decisions, which],
+        evidence_requirements=[
+            r.model_copy(update={"decision_ids": (*r.decision_ids, which.slot)})
+            if r.id == "health_share"
+            else r
+            for r in plan.evidence_requirements
+        ],
+    )
+
+    row = next(row for row in _card_of(plan).decisions if row.id == which.slot)
+
+    assert (row.alternatives, row.chosen) == (
+        [f"{sector} health for the numerator", f"{sector} health for the total", "every sector"],
+        f"{sector} health for the total",
+    )
+
+
 def test_two_choices_on_one_axis_each_name_the_input_they_govern() -> None:
     """The US health share with the total's basis choice offering other options
     than the health figures' one, as after a switch of the health figures to a

@@ -630,27 +630,42 @@ def test_a_part_summary_offers_a_count_only_when_search_lists_a_basis_sibling(
     assert ("counted_as" in summary) is bool(offered)
 
 
-def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None:
-    """A set naming a class of party this release does not know is not readable:
-    the summary says no reading of it, and the stored reading holds no sets and
-    says they could not be read."""
+@pytest.mark.parametrize(
+    ("group", "stored", "unreadable"),
+    [
+        # A class of party this release does not know: the set is not readable, but
+        # what a resubmit posts of it is.
+        pytest.param(
+            {"ref": None, "label": "DAC", "total": "DAC", "whole_of": ["party"]},
+            [{"role": "origin", "label": "DAC", "ref": None}],
+            False,
+            id="unknown-class",
+        ),
+        # No label: what a resubmit posts of the set is not readable either.
+        pytest.param({"ref": None, "total": "DAC"}, [], True, id="no-label"),
+    ],
+)
+def test_a_part_summary_with_an_unreadable_set_says_no_reading(
+    group: dict[str, Any], stored: list[dict[str, Any]], unreadable: bool
+) -> None:
+    """A set that is not readable, as one naming a class of party this release does
+    not know: the summary says no reading of it. The stored reading holds what a
+    resubmit posts of each set, and where that is not readable it holds no sets
+    and says they could not be read."""
     part = _definite("spec_a")
-    part["spec"]["resolved"] |= {
-        "entity_groups": {
-            "origin": {"ref": None, "label": "DAC", "total": "DAC", "whole_of": ["party"]}
-        },
-    }
+    part["spec"]["resolved"] |= {"entity_groups": {"origin": group}}
 
     (summary,) = graph_envelope({"parts": [part]})["part_digests"]
 
     assert "group_readings" not in summary
     facts = reading_facts(part["spec"])
-    assert (facts["entity_groups"], facts["entity_groups_unreadable"]) == ([], True)
+    assert (facts["entity_groups"], facts["entity_groups_unreadable"]) == (stored, unreadable)
 
 
 def test_a_stored_reading_keeps_a_set_without_its_members() -> None:
-    """A resubmit posts a set by label, ref and group id, so the stored set holds no
-    member list, and posts the same sets as the block it was read from."""
+    """A resubmit posts a set by label, ref and group id, so the stored set holds
+    those alone, no member list or total, and posts the same sets as the block it
+    was read from."""
     part = _definite("spec_a")
     part["spec"]["resolved"] |= {
         "entity_groups": {
@@ -667,7 +682,7 @@ def test_a_stored_reading_keeps_a_set_without_its_members() -> None:
     stored = reading_facts(part["spec"])["entity_groups"]
 
     assert block_read[0].members == ("country/FRA", "country/DEU")
-    assert all("members" not in group for group in stored)
+    assert stored == [{"role": "origin", "label": "DAC countries", "ref": None}]
     assert wire_groups([ResolvedGroup.model_validate(group) for group in stored]) == wire_groups(
         block_read
     )

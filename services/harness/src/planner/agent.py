@@ -50,7 +50,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
-from compiler.sources import block_group, block_groups
+from compiler.sources import block_group, block_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -1420,8 +1420,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     the axis it names (`harness.scope_choices.option_axis`), as an explicit
     entry from its choice in place of the entry on that axis, the resubmit
     a switch on the plan card posts (`harness.scope_choices.switch_entries`)
-    once per option, with the part's entity groups
-    (`compiler.sources.block_groups`), through data-mcp's
+    once per option, with what the resubmit posts of the part's entity groups
+    (`compiler.sources.block_wire_groups`), through data-mcp's
     `resolve_definition`, which stores the definition it answers. One
     resubmit carries every option, so an input moving on the measure basis
     and the provider scope is compiled once. The answer is shown to the
@@ -1442,8 +1442,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     Returns `None` once the pin is held, or the refusal the proposal
     answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
     `OPERATION_UNSUPPORTED` when it refuses the options or answers with no
-    one dataset, or when the part's entity groups are not readable, since a
-    resubmit posted without them can bind another population.
+    one dataset, or when what it posts of the part's entity groups is not
+    readable, since a resubmit posted without them can bind another population.
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -1486,7 +1486,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
         )
     entries = [entry.model_dump(mode="json", exclude_none=True) for entry in switched]
     try:
-        groups = block_groups(block)
+        groups = block_wire_groups(block)
     except ValueError as exc:
         logger.warning(
             "basis compile of %s refused: named sets not readable: %s", realignment.spec_id, exc
@@ -1581,8 +1581,9 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     (`part_not_shown`), is shown with no block (`part_block_missing`), holds
     scope choices this release cannot read (`scope_unreadable`), binds
     nothing on the axis to leave open (`axis_not_held`), or names a set on a
-    role the whole keeps that this release cannot read, which the whole
-    would otherwise be posted without (`groups_unreadable`); or Search refuses
+    role the whole keeps whose posted identity (`compiler.sources.block_wire_groups`)
+    is not readable, which the whole would otherwise be posted without
+    (`groups_unreadable`); or Search refuses
     the whole (as `requested_option_unavailable` where it cannot hold an
     option the part holds), or answers with no one dataset (`whole_refused`),
     or with a donor or recipient whole that Search shows does not hold a party
@@ -1605,7 +1606,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
     column = WHOLE_COLUMNS.get(axis)
     try:
-        groups = block_groups(block, leaving_out=column)
+        groups = block_wire_groups(block, leaving_out=column)
     except ValueError as exc:
         logger.warning("whole of %s refused: named sets not readable: %s", part_pin, exc)
         return underivable(
@@ -1677,7 +1678,7 @@ def _opened(scope: PartScope, axis: str) -> tuple[dict[str, Any], list[ScopeChoi
     recipient, the base identity without that role's column
     (`WHOLE_COLUMNS`), and every choice but one adding entities to that role,
     the region's. The whole posts the part's groups on other roles
-    (`compiler.sources.block_groups`).
+    (`compiler.sources.block_wire_groups`).
     """
     identity = copy.deepcopy(scope.base.identity)
     column = WHOLE_COLUMNS.get(axis)

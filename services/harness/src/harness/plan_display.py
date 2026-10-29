@@ -731,17 +731,35 @@ CHOICE_NAMES: dict[str, str] = {
 _SLUG = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 
 
-def card_choice_text(text: str, plan: Plan, *, decision: Decision | None = None) -> str:
+def card_choice_text(
+    text: str, plan: Plan, *, options: Sequence[str], decision: Decision | None = None
+) -> str:
     """An option a decision chose or offers, as the card shows it.
 
     As `card_decision_text`, except that a text the planner opened with a
     scope option's id ("sector:120+130 health") names only that option, so
-    the whole text reads as the option's label, the words Search gives it.
+    the whole text reads as the option's label, the words Search gives it,
+    unless another of `options`, the texts the decision chose and offers,
+    would then read alike: each such text keeps the planner's words after
+    the id ("<label> health for the numerator", "<label> health for the
+    total").
     """
     named = with_source_names(text, plan).strip()
-    if (labelled := _option_labelled(named, plan, decision)) is not None:
+    if (labelled := _option_labelled(named, plan, decision)) is None:
+        return _unslugged(named)
+    label, rest = labelled
+    held = {with_source_names(option, plan).strip() for option in (*options, text)}
+    alike = [option for option in held if _choice_alone(option, plan, decision) == label]
+    return f"{label}{rest}" if len(alike) > 1 else label
+
+
+def _choice_alone(text: str, plan: Plan, decision: Decision | None) -> str:
+    """`text`, already named, as `card_choice_text` shows it with no other
+    option reading alike: the label of the scope option it opens with, else
+    its words."""
+    if (labelled := _option_labelled(text, plan, decision)) is not None:
         return labelled[0]
-    return _unslugged(named)
+    return _unslugged(text)
 
 
 def card_decision_text(text: str, plan: Plan, *, decision: Decision | None = None) -> str:
@@ -888,9 +906,11 @@ def _concepts(
     "(2)", each set of namesakes in the order the plan states them
     (`_card_order`). A retrieval in `carried` keeps the name, and the axes it
     states, given there. Namesakes are found by these facets, carried or not,
-    so the others are told apart from it as from each other. The names are
-    read off each retrieval's naming facets, `namings` where given, else read
-    by `_namings`, a plan not compiled reading its sources off `sources`
+    each retrieval's name built from them before any number (`unnumbered`),
+    so the others are told apart from a carried one as from each other,
+    whatever option or number its carried name states. The names are read
+    off each retrieval's naming facets, `namings` where given, else read by
+    `_namings`, a plan not compiled reading its sources off `sources`
     (`_source`).
     """
     carried = carried or _CardNames({}, {})
@@ -900,30 +920,30 @@ def _concepts(
     for rid in _alike(stems):
         if who := namings[rid].who:
             stems[rid] = f"{stems[rid]} {who}"
-    names = {dataset.id: carried.names.get(dataset.id) or stems[dataset.id] for dataset in datasets}
-    options = {dataset.id: carried.options.get(dataset.id, frozenset()) for dataset in datasets}
-    fresh = [dataset for dataset in datasets if dataset.id not in carried.names]
+    unnumbered = dict(stems)
+    stated: dict[str, frozenset[str]] = {dataset.id: frozenset() for dataset in datasets}
     for stem in dict.fromkeys(_alike(stems).values()):
         namesakes = [dataset for dataset in datasets if stems[dataset.id] == stem]
         if len({dataset.period for dataset in namesakes}) > 1:
             for dataset in namesakes:
-                if dataset.id not in carried.names:
-                    names[dataset.id] = f"{stem} {_in_period(dataset)}"
+                unnumbered[dataset.id] = f"{stem} {_in_period(dataset)}"
     for index, axis in enumerate(_NAMING_AXES):
-        for name in dict.fromkeys(_alike(names).values()):
-            namesakes = [dataset for dataset in datasets if names[dataset.id] == name]
+        for name in dict.fromkeys(_alike(unnumbered).values()):
+            namesakes = [dataset for dataset in datasets if unnumbered[dataset.id] == name]
             if len({namings[dataset.id].options[index] for dataset in namesakes}) < 2:
                 continue
             for dataset in namesakes:
-                held = namings[dataset.id].options[index]
-                if dataset.id not in carried.names and held is not None:
-                    names[dataset.id] = f"{name}, {held}"
-                    options[dataset.id] |= {axis}
-    for name in dict.fromkeys(_alike(names).values()):
+                if (held := namings[dataset.id].options[index]) is not None:
+                    unnumbered[dataset.id] = f"{name}, {held}"
+                    stated[dataset.id] |= {axis}
+    names = {rid: carried.names.get(rid) or name for rid, name in unnumbered.items()}
+    options = {rid: carried.options.get(rid, axes) for rid, axes in stated.items()}
+    fresh = [dataset for dataset in datasets if dataset.id not in carried.names]
+    for name in dict.fromkeys(_alike(unnumbered).values()):
         taken = set(names.values())
         number = 0
         for dataset in fresh:
-            if names[dataset.id] != name:
+            if unnumbered[dataset.id] != name:
                 continue
             number += 1
             while f"{name} ({number})" in taken:

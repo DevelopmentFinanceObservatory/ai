@@ -3649,7 +3649,29 @@ def test_a_retrievals_description_is_searchs_account_of_its_source() -> None:
     ],
 )
 def test_a_choice_shows_no_planner_slug_or_option_id(text: str, shown: str) -> None:
-    assert card_choice_text(text, _recorded_plan("long")) == shown
+    assert card_choice_text(text, _recorded_plan("long"), options=(text,)) == shown
+
+
+def test_options_one_label_would_read_alike_keep_the_planners_words() -> None:
+    """Two options of one decision opening with the same scope option id would
+    both read as that option's label alone, so each keeps the planner's words
+    after the id, the chosen one included; an option no other reads alike
+    with still reads as the label alone."""
+    plan = _recorded_plan("long")
+    numerator, total = (
+        "sector:120+130 health for the numerator",
+        "sector:120+130 health for the total",
+    )
+    offered = (numerator, total, "sector:130")
+
+    shown = [card_choice_text(text, plan, options=offered) for text in (*offered, numerator)]
+
+    assert shown == [
+        f"{_RECORDED_SECTOR_LABEL} health for the numerator",
+        f"{_RECORDED_SECTOR_LABEL} health for the total",
+        "population policy, programme, and reproductive health, CRS 130 alone",
+        f"{_RECORDED_SECTOR_LABEL} health for the numerator",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -3725,7 +3747,12 @@ def test_an_option_id_two_decisions_label_apart_never_shows_raw(
     assert card_decision_text(text, plan, decision=decision) == (
         f"{label} because the user asked for net flows"
     )
-    assert card_choice_text("measure_basis:net", plan, decision=decision) == label
+    assert (
+        card_choice_text(
+            "measure_basis:net", plan, decision=decision, options=("measure_basis:net",)
+        )
+        == label
+    )
 
 
 @pytest.mark.parametrize(
@@ -4007,6 +4034,72 @@ def test_a_revisions_retrieval_sharing_a_carried_retrievals_concept_keeps_its_pa
         "health aid from United States to Kenya",
         "health aid from France to Kenya",
     )
+
+
+def test_a_revisions_retrieval_changing_its_option_is_told_apart_from_a_numbered_carried_one(
+    decision: DecisionFactory,
+) -> None:
+    """The card numbers two retrievals alike in every naming facet, "(1)" and
+    "(2)"; a revision changes only the second's provider option. The first
+    keeps its card name, and the second, a namesake of it by concept,
+    parties and period whatever number the card's name holds, reads by the
+    option it now holds."""
+    pins = (_SPEC_A, _SPEC_B)
+    held = ("bilateral flows only", "bilateral plus imputed multilateral")
+
+    def scope(pin: str, chosen: str) -> Decision:
+        return Decision(
+            slot=scope_choice_slot(pin, "provider"),
+            description="How provider is counted.",
+            options=held,
+            chosen=chosen,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT,
+            rationale="Search's default for this question.",
+            fixes=DecisionFixes(source_spec_id=pin),
+            scope=DecisionScope(
+                choice_id=f"{pin}:provider",
+                axis="provider",
+                options=(
+                    ScopeOptionState(option_id="provider:first", status="available"),
+                    ScopeOptionState(option_id="provider:second", status="available"),
+                ),
+            ),
+        )
+
+    def plan(second: str) -> Plan:
+        scopes = [scope(pins[0], held[0]), scope(pins[1], second)]
+        return Plan(
+            question="Health aid from the United States to Kenya, twice",
+            decisions=[decision(), *scopes],
+            evidence_requirements=[
+                DatasetRequirement(
+                    id=f"r{index}",
+                    decision_ids=["measure", held_scope.slot],
+                    measure="health",
+                    entities=[
+                        Entity(name="United States", role="donor"),
+                        Entity(name="Kenya", role="recipient"),
+                    ],
+                    period=Period(start=2023, end=2023),
+                    source_spec_id=pin,
+                )
+                for index, (pin, held_scope) in enumerate(zip(pins, scopes, strict=True))
+            ],
+        )
+
+    prior = plan(held[0])
+    assert _concepts(prior).names == {
+        "r0": "health from United States to Kenya (1)",
+        "r1": "health from United States to Kenya (2)",
+    }
+
+    words = plan_words(plan(held[1]), shown_as=prior)
+
+    assert (words.names["r0"], words.names["r1"]) == (
+        "health from United States to Kenya (1)",
+        "health from United States to Kenya, bilateral plus imputed multilateral",
+    )
+    assert words.options == {"r0": frozenset(), "r1": {"provider"}}
 
 
 @pytest.mark.parametrize("helper", ["_concept", "_who"])

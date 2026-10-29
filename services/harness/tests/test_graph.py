@@ -3535,6 +3535,11 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
 
 
 _AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
+# Africa as a set naming a class of party outside `common.place_type.PartyClass`: the
+# set does not read, but what a resubmit posts of it does.
+_AFRICA_UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
+# Africa as a set stating no label, so what a resubmit posts of it does not read.
+_AFRICA_UNLABELLED = {"ref": "africa", "total": "DACAfricaTotal"}
 
 
 @pytest.mark.parametrize(
@@ -3543,7 +3548,10 @@ _AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
         pytest.param(_AFRICA_TOTAL, False, None, id="block-reads-stored-readable"),
         pytest.param(_AFRICA_TOTAL, True, None, id="block-reads-stored-unreadable"),
         pytest.param(
-            {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]},
+            _AFRICA_UNKNOWN_CLASS, True, None, id="block-of-an-unknown-class-stored-unreadable"
+        ),
+        pytest.param(
+            _AFRICA_UNLABELLED,
             False,
             [{"role": "destination", **_AFRICA_TOTAL}],
             id="block-unreadable-stored-readable",
@@ -3561,8 +3569,10 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     compile on another basis does (`compiler.sources.wire_groups`): its label
     and ref, and no total, which Search recomputes. It reads the block again,
     so a reading stored when an earlier release could not read the set switches
-    once this release can, and where the block's set does not read, it posts
-    the readable set the reading was stored with."""
+    once this release can. A set naming a class of party this release does not
+    know is posted by its label and ref, all the resubmit sends of it. Where what
+    the block's set posts does not read, as a set stating no label, it posts the
+    readable set the reading was stored with."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
@@ -3583,17 +3593,16 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
 async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """The part's block names Africa as a set of a class of party this release does
-    not know, so the set cannot be read. Posting the part without it would let
+    """The part's block names a set on its recipients with no label, so what the
+    switch would post of it cannot be read. Posting the part without it would let
     Search count another population, so the switch posts nothing and offers the
     plan unchanged under `switch_failed`, which asking again cannot get past."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    group = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
 
     runner, _, plan, _, events = await _switch_runner(
-        real_schemas, search, entity_groups={"destination": group}
+        real_schemas, search, entity_groups={"destination": _AFRICA_UNLABELLED}
     )
 
     assert search.posted == []
@@ -4161,16 +4170,22 @@ async def test_a_chip_compiles_through_search_fetches_what_it_compiled_and_never
     assert [step["result"]["outcome"] for step in executor.steps] == ["ok"]
 
 
-async def test_a_chip_posts_the_groups_its_reading_was_resolved_with() -> None:
+@pytest.mark.parametrize(
+    "group", [_AFRICA_TOTAL, _AFRICA_UNKNOWN_CLASS], ids=["total", "unknown-class"]
+)
+async def test_a_chip_posts_the_groups_its_reading_was_resolved_with(
+    group: dict[str, Any],
+) -> None:
     """The answer's reading came from a search whose block named Africa as the
     set its recipients were asked for, and no plan kept that block. The chip's
-    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`)."""
+    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`),
+    one naming a class of party this release does not know too, since the reading
+    stored what the resubmit posts of it."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
-    await _chip_turn(search, entity_groups=groups)
+    await _chip_turn(search, entity_groups={"destination": group})
 
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
@@ -4178,17 +4193,17 @@ async def test_a_chip_posts_the_groups_its_reading_was_resolved_with() -> None:
 
 
 async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> None:
-    """The answer's reading came from a block naming Africa as a set of a class
-    of party this release does not know, and no block of it is kept, so nothing
-    names the set. Posting the part without it would let Search count another
-    population, so the chip posts nothing and its step fails as a plan card's
-    switch over such a block does."""
+    """The answer's reading came from a block naming a set on its recipients with no
+    label, and no block of it is kept, so nothing names the set. Posting the part
+    without it would let Search count another population, so the chip posts nothing
+    and its step fails as a plan card's switch over such a block does."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    group = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
 
-    runner, _, executor, _ = await _chip_turn(search, entity_groups={"destination": group})
+    runner, _, executor, _ = await _chip_turn(
+        search, entity_groups={"destination": _AFRICA_UNLABELLED}
+    )
 
     assert search.posted == []
     (step,) = executor.steps
