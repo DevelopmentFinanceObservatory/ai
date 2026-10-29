@@ -1815,3 +1815,98 @@ def test_no_pick_is_built_for_a_scope_choice_admission_writes() -> None:
             )
             is None
         )
+
+
+def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() -> None:
+    """The user answered current prices with no constant series shown, then
+    switched the card's prices row to constant: that replan ends on
+    `prices_unserved`, and the card keeps current prices. A later switch of
+    the years row is held to the card's current prices, so it lands."""
+    measure = Decision(
+        slot="measure",
+        description="What to measure.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    years = Decision(
+        slot="years",
+        description="Which years.",
+        options=["2015-2022", "2019-2022"],
+        chosen="2015-2022",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(period=Period(start=2015, end=2022)),
+    )
+
+    def aid(requirement_id: str, start: int, **update: Any) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=("measure", "years"),
+            measure="French aid to Kenya",
+            entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
+            period=Period(start=start, end=2022),
+            source_spec_id=_GROSS,
+            unit=Unit(currency="USD", prices="current"),
+        ).model_copy(update=update)
+
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA)
+    ctx.session.events = _prices_ask_events(pick="o1")
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([measure, years]),
+        evidence_requirements=[aid("all", 2015)],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    slot = f"user_prices_{_GROSS}"
+    constant = decision_option_id("constant prices")
+    pick = decision_pick(plan, choice_id=f"decision/{slot}", option_id=constant, to_origin={})
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    ctx.session.events = [
+        *ctx.session.events,
+        response_event("propose_plan", card),
+        _switch_event(f"decision/{slot}", constant),
+    ]
+    switched = propose(
+        amends_version=card["version"],
+        evidence_requirements=[aid("all2", 2015, unit=None)],
+        removed_evidence_requirements=["all"],
+        tool_context=ctx,
+    )
+    assert switched["code"] == ProblemCode.PRICES_UNSERVED.value, switched
+    later = decision_option_id("2019-2022")
+    pick = decision_pick(plan, choice_id="decision/years", option_id=later, to_origin={})
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    ctx.session.events = [
+        *ctx.session.events,
+        response_event("propose_plan", switched),
+        _switch_event("decision/years", later),
+    ]
+
+    result = propose(
+        amends_version=card["version"],
+        decisions=drafts(
+            [
+                years.model_copy(
+                    update={
+                        "chosen": "2019-2022",
+                        "fixes": DecisionFixes(period=Period(start=2019, end=2022)),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[aid("recent", 2019)],
+        removed_evidence_requirements=["all"],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result

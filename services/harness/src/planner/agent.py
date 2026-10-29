@@ -88,6 +88,7 @@ from submission.prices_choice import (
     PRICES_SLOT_PREFIX,
     PricesChoice,
     measure_key,
+    prices_slot,
 )
 from submission.service import (
     COMBINATION_OPTIONS,
@@ -804,7 +805,8 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
     part's choice, as they do on the orchestrator's question, and a skip
     keeps it, marking a constant choice `asked`. A switch of the part's
     prices row on the plan card (`_prices_switched`) is a new answer for the
-    part, marked `asked` too. Any other `propose_plan`
+    part, marked `asked` too, while its replan is under way or once the plan
+    on record states it (`_switch_stands`). Any other `propose_plan`
     response, the plan landing included, clears the refusal, so no later ask
     of another kind is read as that one. A message the user typed
     (`_user_message`) releases every choice and clears the refusal, and an
@@ -835,8 +837,9 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
             chosen.clear()
         elif (switched := _prices_switched(step.body)) is not None:
             part, basis = switched
-            _release_measure(chosen, part, measures)
-            chosen[part] = PricesChoice(basis, asked=True)
+            if _switch_stands(tool_context.state, part, basis):
+                _release_measure(chosen, part, measures)
+                chosen[part] = PricesChoice(basis, asked=True)
         elif step.call_id in asked:
             part = asked.pop(step.call_id)
             answer = _answers(step.body.get("result")).get("q1") or {}
@@ -873,6 +876,20 @@ def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
         None,
     )
     return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
+
+
+def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
+    """Whether a switch of `part`'s prices row to `basis` holds: its replan is
+    under way (`planner.plan.decision_pick` names the row), or the plan on
+    record states the switched prices. A switch whose replan was refused or
+    stopped holds neither, so the prices stay as the card shows them."""
+    slot = prices_slot(part)
+    pick = decision_pick(state)
+    if pick is not None and pick.slot == slot:
+        return True
+    plan = load_plan(state)
+    label = PricesChoice(basis).label
+    return plan is not None and any(d.slot == slot and d.chosen == label for d in plan.decisions)
 
 
 def _release_measure(
