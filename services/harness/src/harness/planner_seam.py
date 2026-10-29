@@ -163,7 +163,7 @@ from submission.service import (
     submit,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
-from translator.discovery import CutCalls, current_cut_calls
+from translator.discovery import CutCalls, current_cut_calls, resolving_once
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
 from translator.referral import USER_DECIDES, ReferralKind
 from translator.tool import Translate, build_translate, permitted_repair
@@ -633,89 +633,89 @@ class PlannerSeam:
         # cancelled on the way out (`translator.discovery.CutCalls`).
         cut_calls = CutCalls()
         cut_calls_token = current_cut_calls.set(cut_calls)
-        try:
-            # `fresh` answers "has this session ever been briefed".
-            fresh = not ctx.session.state.get(_BRIEFED_STATE_KEY, False)
-            ctx.session.state[_BRIEFED_STATE_KEY] = True
-            # Every spec_id the planner's message shows it, written on every
-            # entry so `propose_plan` reads it (`PIN_SOURCES_STATE_KEY`). A
-            # pin of a shown one reuses its block, and one of a shown,
-            # settled measure gets the measure decision `propose_plan`
-            # writes. Readings render on a fresh message only, so a later
-            # entry keeps the ones it rendered, less any the executor has
-            # since refused.
-            ledger = _NO_READINGS
-            if fresh:
-                ledger = _readings_ledger(readings)
-                # An earlier turn's spec_id pins from the block its own turn
-                # stored; this turn's search of one replaces it.
-                prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
-                blocks = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
-                searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
-                sources = _reading_pin_sources(
-                    readings,
-                    ledger.spec_ids,
-                    blocks=blocks,
-                    earlier=_named(prior.get("readings", ())) - searched,
-                    warnings={
-                        **prior.get("warnings", {}),
-                        **(ctx.state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}),
-                    },
-                )
-            else:
-                sources = pin_sources(cast(SessionState, ctx.session.state))
-            refused = {spec_id for spec_id, _ in _refused_specs(refusal)}
-            sources = {k: v for k, v in sources.items() if k not in refused}
-            save_pin_sources(cast(SessionState, ctx.session.state), sources)
-            message = self._message(
-                fresh=fresh,
-                question=question,
-                prior_plan=_as_authored(seeded),
-                refusal=refusal,
-                amendment=amendment,
-                canvas_digest=canvas_digest,
-                conversation_digest=conversation_digest,
-                ledger=ledger,
-                asks=load_asks(cast(SessionState, ctx.session.state)),
-                ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
-                asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
-            )
-            submitted, plan, refused = await self._propose(
-                ctx=ctx, message=message, on_progress=on_progress
-            )
-            if refused is not None:
-                return self._refused(refused)
-            assert submitted is not None and plan is not None, (
-                "_propose answers a refusal unless a proposal declared the plan on record "
-                "ready (see planner.agent.declare_ready)"
-            )
-            if plan.status is not PlanStatus.PENDING_APPROVAL:
-                # `declare_ready` enforces this (`planner.agent.
-                # _execution_blocked`); repeated here so a future gap in that
-                # allowlist reaches this seam as a loud `PlannerSeamError`
-                # instead of a plan the graph shows the user as approvable.
-                raise PlannerSeamError(
-                    f"a plan that is {plan.status.value} was declared ready, not "
-                    "pending_approval; refusing to report it ready"
-                )
-            return {"plan": plan.model_dump(mode="json"), "summary": submitted["summary"]}
-        finally:
-            # Every exit of this method runs through here -- a normal
-            # return, a raised `PlannerSeamError`, and a `NodeInterruptedError`
-            # propagating straight out of `_propose`'s own `await
-            # ctx.run_node(...)` (a planner-side `adk_request_input` ask)
-            # alike. `finally` is what makes the last of those work: that
-            # exception is never caught anywhere in this method, so only code
-            # that always runs on the way out, regardless of how the method
-            # is leaving, ever gets a chance to run before the flush this
-            # node's own `NodeRunner` performs on the way to reporting the
-            # pause (see `_persist_durable`'s own docstring).
+        # A `resolve_definition` call this turn already made is served its answer
+        # (`translator.discovery.resolving_once`).
+        with resolving_once(cast(SessionState, ctx.state)):
             try:
-                store_aligned_readings(ctx, cast(SessionState, ctx.session.state))
-                self._persist_durable(ctx)
+                # `fresh` answers "has this session ever been briefed".
+                fresh = not ctx.session.state.get(_BRIEFED_STATE_KEY, False)
+                ctx.session.state[_BRIEFED_STATE_KEY] = True
+                # Every spec_id the planner's message shows it, written on every
+                # entry so `propose_plan` reads it (`PIN_SOURCES_STATE_KEY`). A
+                # pin of a shown one reuses its block, and one of a shown,
+                # settled measure gets the measure decision `propose_plan`
+                # writes. Readings render on a fresh message only, so a later
+                # entry keeps the ones it rendered, less any the executor has
+                # since refused.
+                ledger = _NO_READINGS
+                if fresh:
+                    ledger = _readings_ledger(readings)
+                    # An earlier turn's spec_id pins from the block its own turn
+                    # stored; this turn's search of one replaces it.
+                    prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
+                    blocks = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+                    searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
+                    sources = _reading_pin_sources(
+                        readings,
+                        ledger.spec_ids,
+                        blocks=blocks,
+                        earlier=_named(prior.get("readings", ())) - searched,
+                        warnings={
+                            **prior.get("warnings", {}),
+                            **(ctx.state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}),
+                        },
+                    )
+                else:
+                    sources = pin_sources(cast(SessionState, ctx.session.state))
+                refused = {spec_id for spec_id, _ in _refused_specs(refusal)}
+                sources = {k: v for k, v in sources.items() if k not in refused}
+                save_pin_sources(cast(SessionState, ctx.session.state), sources)
+                message = self._message(
+                    fresh=fresh,
+                    question=question,
+                    prior_plan=_as_authored(seeded),
+                    refusal=refusal,
+                    amendment=amendment,
+                    canvas_digest=canvas_digest,
+                    conversation_digest=conversation_digest,
+                    ledger=ledger,
+                    asks=load_asks(cast(SessionState, ctx.session.state)),
+                    ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
+                    asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
+                )
+                submitted, plan, refused = await self._propose(
+                    ctx=ctx, message=message, on_progress=on_progress
+                )
+                if refused is not None:
+                    return self._refused(refused)
+                assert submitted is not None and plan is not None, (
+                    "_propose answers a refusal unless a proposal declared the plan on record "
+                    "ready (see planner.agent.declare_ready)"
+                )
+                if plan.status is not PlanStatus.PENDING_APPROVAL:
+                    # `declare_ready` enforces this (`planner.agent.
+                    # _execution_blocked`); repeated here so a future gap in that
+                    # allowlist reaches this seam as a loud `PlannerSeamError`
+                    # instead of a plan the graph shows the user as approvable.
+                    raise PlannerSeamError(
+                        f"a plan that is {plan.status.value} was declared ready, not "
+                        "pending_approval; refusing to report it ready"
+                    )
+                return {"plan": plan.model_dump(mode="json"), "summary": submitted["summary"]}
             finally:
-                current_cut_calls.reset(cut_calls_token)
-                await cut_calls.close()
+                # Every exit of this method runs through here: a normal return, a
+                # raised `PlannerSeamError`, and a `NodeInterruptedError` from
+                # `_propose`'s own `await ctx.run_node(...)` (a planner-side
+                # `adk_request_input` ask). Nothing in this method catches that
+                # exception, so only a `finally` runs before the flush this
+                # node's own `NodeRunner` performs on the way to reporting the
+                # pause (see `_persist_durable`'s own docstring).
+                try:
+                    store_aligned_readings(ctx, cast(SessionState, ctx.session.state))
+                    self._persist_durable(ctx)
+                finally:
+                    current_cut_calls.reset(cut_calls_token)
+                    await cut_calls.close()
 
     @staticmethod
     def _persist_durable(ctx: Context) -> None:
@@ -822,7 +822,27 @@ class PlannerSeam:
         proposes again (`_unanswered`), or as `SeamCode.PLAN_NOT_READY` with
         the referral's reason (`_not_ready`), since no model is there to
         settle it.
+
+        A `resolve_definition` call this turn already made is served its
+        answer (`translator.discovery.resolving_once`).
         """
+        with resolving_once(cast(SessionState, ctx.state)):
+            return await self._revised(
+                ctx=ctx,
+                prior_plan=prior_plan,
+                evidence_requirements=evidence_requirements,
+                inherits=inherits,
+            )
+
+    async def _revised(
+        self,
+        *,
+        ctx: Context,
+        prior_plan: dict[str, Any],
+        evidence_requirements: Sequence[Mapping[str, Any]],
+        inherits: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """`revise`'s answer, inside the turn's answers."""
         state = cast(SessionState, ctx.state)
         prior = Plan.model_validate(prior_plan)
         save_plan(state, prior)

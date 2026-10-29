@@ -102,12 +102,14 @@ from translator.referral import (
     save_referral,
 )
 from translator.tool import (
+    ANCHOR_READS_STATE_KEY,
     IssueResolution,
     _compile_failure_action,
     _referral_payload,
     authored_answer,
     build_translate,
     build_translator_core,
+    held_anchor_reads,
     issue_resolution,
     permitted_repair,
 )
@@ -157,7 +159,7 @@ class _UnreadableSurface(FixtureSurface):
 
 
 class _CountingSurface(FixtureSurface):
-    """A `FixtureSurface` that counts each tool it was asked to call.
+    """A `FixtureSurface` that counts each tool it was asked to call, and each list.
 
     Proves `propose_operations`'s `describe` fetch is memoized on a
     same-revision retry, rather than only checking the result.
@@ -166,6 +168,11 @@ class _CountingSurface(FixtureSurface):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.calls: dict[str, int] = {}
+        self.listed = 0
+
+    async def list_tools(self) -> list[ToolSchema]:
+        self.listed += 1
+        return await super().list_tools()
 
     async def call_tool(
         self,
@@ -1275,7 +1282,9 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     entity_groups: dict[str, Any],
     named: bool,
 ) -> None:
-    """The group rewrite and discovery both read the pin's identity on record, off one resolve."""
+    """The group rewrite and discovery both read the pin's identity on record, off one resolve,
+    and so does the next translation of the plan, as a switch or an amendment translates it
+    again. Each translation lists the surface once."""
     pinned = requirement(
         measure="official development assistance",
         entities=[Entity(name="France", role="donor")],
@@ -1303,10 +1312,71 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     )
     surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": resolved})
 
-    answer = await build_translate(surface=surface)(context)
+    translate = build_translate(surface=surface)
+    answer = await translate(context)
 
     assert surface.calls["resolve_definition"] == 1
+    # Only a translation that reaches a compile lists the surface. The set-aside one
+    # goes back before it.
+    assert surface.listed == int(named)
     assert ("named_in_place_of_across" in answer) is named
+
+    translated = context.state[PLAN_STATE_KEY]
+    context.state[PLAN_STATE_KEY] = draft(
+        decisions=[pinning_decision(SPEC_AFRICA)],
+        evidence_requirements=[pinned, derived_requirement()],
+    ).model_dump_json()
+    again = await translate(context)
+
+    assert surface.calls["resolve_definition"] == 1
+    assert surface.listed == 2 * int(named)
+    assert again == answer
+    assert context.state[PLAN_STATE_KEY] == translated
+
+
+async def test_translate_asks_search_once_for_a_pinned_identity_it_cannot_reach(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    """Search cannot be reached for the pin's identity on record. The group rewrite
+    and discovery share the one refusal, and the next translation asks again."""
+    pinned = requirement(
+        measure="official development assistance",
+        entities=[Entity(name="France", role="donor")],
+        across=("recipient",),
+        source_spec_id=SPEC_AFRICA,
+        unit=None,
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_AFRICA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    identity = {"seed": "africa", "requested_window": period_window(pinned.period)}
+    save_windowed_pins(
+        context.state,
+        [WindowedPin(spec_id=SPEC_AFRICA, identity=identity, windowed_from=SPEC_OTHER)],
+    )
+    unavailable = ToolCallResult(
+        is_error=True,
+        structured_content={"code": "upstream_unavailable", "retry_mode": "retry_after_delay"},
+    )
+    surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": unavailable})
+    translate = build_translate(surface=surface)
+
+    answer = await translate(context)
+
+    assert answer["kind"] == ReferralKind.DISCOVERY_UNAVAILABLE.value, answer
+    assert surface.calls["resolve_definition"] == 1
+
+    await translate(context)
+
+    assert surface.calls["resolve_definition"] == 2
 
 
 SPEC_G7 = "spec_9c7a11e2" + "0" * 24
@@ -1803,3 +1873,16 @@ def test_a_referral_joins_what_it_offers_a_copy_and_its_origin(
     assert mapped["stale_pins"] == []
     assert mapped["requirement_id"] == "debt"
     assert {field: mapped[field] for field in joined} == joined
+
+
+def test_an_anchor_reads_value_that_is_no_mapping_holds_no_reads(
+    empty_context: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    empty_context.state[ANCHOR_READS_STATE_KEY] = ["x"]
+
+    with caplog.at_level("WARNING", logger="translator.tool"):
+        held = held_anchor_reads(empty_context.state)
+
+    assert held == ()
+    assert ANCHOR_READS_STATE_KEY in caplog.text
+    assert "list" in caplog.text

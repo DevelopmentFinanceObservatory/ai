@@ -504,11 +504,11 @@ def _outcome(recorded: Mapping[str, Any] | None) -> resolution.ResolutionOutcome
     )
 
 
-async def _no_anchor_read(workflow: Any, plan: Plan, *, surface: Any) -> None:
+async def _no_anchor_read(workflow: Any, plan: Plan, *, surface: Any, held: Any) -> None:
     """The newest-year read a replayed translation makes: none. That read reads the
     data, which no recording holds, so it is skipped, as production skips it when the
     entry has no time left for it."""
-    del workflow, plan, surface
+    del workflow, plan, surface, held
 
 
 class RecordingMismatchError(RuntimeError):

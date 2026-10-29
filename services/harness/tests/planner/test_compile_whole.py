@@ -67,11 +67,12 @@ async def test_a_whole_whose_kept_sets_cannot_be_read_is_refused_unposted(
     block = _with_groups(us_2023_block("health"), {role: group})
     save_pin_sources(state, {block["spec_id"]: PinSource(block=block, settled=True)})
 
-    refused = await planner_agent.compile_whole(
+    read = await planner_agent.compile_whole(
         cast(ToolSurface, surface),
         Realignment(block["spec_id"], (), _WHOLE, _WHOLE, whole_axis=axis),
         state=state,
     )
+    refused = read(state)
 
     if posted is not None:
         (call,) = surface.calls
@@ -108,11 +109,12 @@ async def test_a_basis_compile_whose_sets_cannot_be_read_is_refused_unposted(
     )
     save_pin_sources(state, {TOTAL: PinSource(block=block, settled=True)})
 
-    refused = await planner_agent.compile_on_basis(
+    read = await planner_agent.compile_on_basis(
         cast(ToolSurface, surface),
         Realignment(TOTAL, ("measure_basis:gross",), "total", "share"),
         state=state,
     )
+    refused = read(state)
 
     if posted is not None:
         (call,) = surface.calls

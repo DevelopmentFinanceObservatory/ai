@@ -19,7 +19,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, NamedTuple, cast, override
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -36,6 +36,8 @@ from compiler.surface import (
 )
 from data_mcp.definition_store import InMemoryDefinitionStore
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
+from data_mcp.definition_writes import windowed_identity
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from executor.classify import ToolFailure
 from executor.completion import FramePublished
@@ -130,6 +132,7 @@ from planner.plan import (
     open_window,
     plan_revision,
     repinned,
+    windowed_pins,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -149,7 +152,7 @@ from submission.service import (
     save_aligned_pin,
     scope_choice_decisions,
 )
-from translator.discovery import PartFault, PartNotResolvedError
+from translator.discovery import RESOLVED_STATE_PREFIX, PartFault, PartNotResolvedError
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import (
@@ -3192,6 +3195,10 @@ def _hashed_scope() -> dict[str, Any]:
     return scope
 
 
+# The window the plan of `_scoped_plan` reads its dataset over.
+_PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
+
+
 def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """The spec_id and envelope Search answers for `scope` switched to CRS
     120 and 130: grant equivalents become the basis, since gross is out of
@@ -3740,7 +3747,8 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     leaves the readings as they were and the planner's drafting state as it
     found it. A revision's refusal gives the reason its own
     (`harness.sentences.refusal_reason`); only one Search could not answer
-    in time can succeed later."""
+    in time can succeed later. The part Search answered stays in the turn's
+    resolve store, which holds whatever the switch's outcome."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = (
@@ -3796,6 +3804,10 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     # The fake seam drafted with no pin sources or rounds of its own.
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
+    resolved = [
+        value for key, value in state.items() if key.startswith(RESOLVED_STATE_PREFIX) and value
+    ]
+    assert len(resolved) == (0 if refused_by == "search" else 1)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 
 
@@ -3981,28 +3993,63 @@ _INCLUSIVE_PROVENANCE = {
 }
 
 
+class _RecordedFixtures(FixtureSurface):
+    """A `FixtureSurface` recording each call's tool and arguments in `calls`."""
+
+    def __init__(
+        self, *, schemas: list[ToolSchema], responses: Mapping[str, ToolCallResult]
+    ) -> None:
+        super().__init__(schemas=schemas, responses=responses)
+        self.calls: list[tuple[str, Mapping[str, object]]] = []
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
+    ) -> ToolCallResult:
+        self.calls.append((tool.name, arguments))
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
 class _TranslatingSeam(_Seam):
     """A `PlannerModel` drafting `plans` and revising through the real
     `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
-    translation's discovery and the compile, over `schemas`, with no model."""
+    translation's discovery and the compile, over `schemas`, answering
+    `responses`, with no model."""
 
-    def __init__(self, plans: list[dict[str, Any]], *, schemas: list[ToolSchema]) -> None:
+    def __init__(
+        self,
+        plans: list[dict[str, Any]],
+        *,
+        schemas: list[ToolSchema],
+        responses: Mapping[str, ToolCallResult] | None = None,
+    ) -> None:
         super().__init__(plans)
-        self._seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=schemas))
+        self.surface = _RecordedFixtures(schemas=schemas, responses=responses or {})
+        self._seam = PlannerSeam(settings=Settings(), surface=self.surface)
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         return await self._seam.revise(**kwargs)
 
 
-async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
-    real_schemas: list[ToolSchema],
-) -> None:
+class _SwitchedOff(NamedTuple):
+    """A switch off a stated source (`_switch_off_a_stated_source`): the runner, the
+    switch's events, the seam that revised, the pin Search answered and the copy
+    of it over the plan's years."""
+
+    runner: Any
+    events: list[Any]
+    seam: _TranslatingSeam
+    new_pin: str
+    copy_pin: str
+
+
+async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _SwitchedOff:
     """The deployed failure: the planner stated the CRS as the health
     numerator's source, and the user switched it to bilateral plus imputed
-    multilateral, a dataset Search names otherwise. The switch drops the
-    stated source with the pin it left, so the translation takes the new pin
-    with no search, the plan compiles, and its run accepts what the new
-    dataset returns."""
+    multilateral, a dataset Search names otherwise and holds from 1995. The
+    switch posts the identity over every year its search answered, which the
+    plan pins. Admission copies the pin over the years the plan reads, and the
+    translation resolves the copy, which Search answers over those years."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -4011,7 +4058,7 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
         "coverage": {
             "kind": "exact",
             "has_data": True,
-            "window": {"start_year": 2015, "end_year": 2024},
+            "window": {"start_year": 1995, "end_year": 2024},
         },
         "facets": {"provenance": _INCLUSIVE_PROVENANCE},
         "entities": [{"role": "country", "ref": "country/KEN", "label": "Kenya"}],
@@ -4031,8 +4078,21 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             ],
         }
     )
+    identity = block["definition"]["identity"]
+    copy_pin, copied = windowed_identity(identity, _PLAN_WINDOW)
+    over_window = copy.deepcopy(envelope)
+    copied_block = over_window["parts"][0]["spec"]
+    copied_block["spec_id"] = copied_block["definition"]["spec_id"] = copy_pin
+    copied_block["definition"]["identity"] = copied
+    copied_block["resolved"]["coverage"]["window"]["start_year"] = 2015
     seam = _TranslatingSeam(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}],
+        schemas=real_schemas,
+        responses={
+            "resolve_definition": ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: over_window}
+            )
+        },
     )
     search = SearchStub(answer={scope["id"]: envelope})
     runner, _ = orchestrator_runner(
@@ -4055,14 +4115,29 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             "switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"},
         },
     )
+    return _SwitchedOff(runner, events, seam, new_pin, copy_pin)
 
+
+async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A switch off a stated source (`_switch_off_a_stated_source`) drops the
+    stated source with the pin it left, so the translation takes the new pin
+    with no search, the plan compiles, and its run accepts what the new
+    dataset returns. The translation resolves the copy admission made over the
+    plan's years, and searches nothing."""
+    runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(real_schemas)
+
+    assert [(tool, arguments.get("spec_id")) for tool, arguments in seam.surface.calls] == [
+        ("resolve_definition", copy_pin)
+    ]
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered, offered.get("switch_failed")
     revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
     (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
-    assert (dataset.source_spec_id, dataset.source) == (new_pin, None)
+    assert (dataset.source_spec_id, dataset.source) == (copy_pin, None)
     assert revised.workflow is not None
-    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [new_pin]
+    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [copy_pin]
     approved = PlannerPlan.model_validate(
         revised.model_dump()
         | {
@@ -4071,7 +4146,7 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             "approved_at": datetime.now(UTC),
         }
     )
-    manifest = _get_data_manifest(spec_id=new_pin)
+    manifest = _get_data_manifest(spec_id=copy_pin)
     manifest["citation"]["sources"] = [_INCLUSIVE_PROVENANCE]
     fetched = ToolCallResult(is_error=False, structured_content=manifest, text="fetched")
 
@@ -4082,6 +4157,24 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     )
 
     assert isinstance(outcome, Accepted), outcome
+
+
+async def test_a_later_period_amendment_reads_the_switched_dataset_over_every_year_it_holds(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """After a switch off a stated source (`_switch_off_a_stated_source`), the
+    stored reading is of the switched dataset, the planner's block for it
+    states the years Search holds it for, from 1995, and the plan's copy over
+    its own years is held as a copy of that dataset. A later amendment of the period
+    reads the dataset whole and copies it over the new years."""
+    runner, _, _, new_pin, copy_pin = await _switch_off_a_stated_source(real_schemas)
+
+    state = _session_state(runner)
+    shown = state["planner:pin_sources"][new_pin]["block"]
+    assert shown["resolved"]["coverage"]["window"]["start_year"] == 1995
+    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert stored.spec_id == new_pin
+    assert windowed_pins(cast(SessionState, state))[copy_pin].windowed_from == new_pin
 
 
 @pytest.mark.parametrize(

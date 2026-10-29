@@ -42,6 +42,14 @@ process) takes the table, and `get_data_digest.py`, which renders at most
 have data-mcp's `client_holder` live, since the deployed topology mounts
 data-mcp in-process in both today, per `client_holder.py`'s own docstring,
 so neither parses the Parquet bytes on its own.
+
+The verified table is kept per process under `artifact.artifact_digest`, the
+sha256 of its bytes, with the `expected_series` and `continuing` it was
+checked against (`_TABLES`). A retrieval's `get_data` digest and the harness's
+evidence check on the same mint therefore download and decode the artifact
+once. Concurrent misses on one key through one link share one fetch and its
+outcome, a failure included, and the fetch is bounded as a whole. Only a table that passed every check is kept, so a failure is
+retried by the next call after it.
 """
 
 from __future__ import annotations
@@ -51,7 +59,8 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from typing import Any, NamedTuple
 
 import httpx2
@@ -76,6 +85,7 @@ __all__ = [
     "SERIES_STATISTICS_SCHEMA",
     "ContinuedSeries",
     "SeriesStatisticsSchemaError",
+    "clear_series_statistics_cache",
     "continued_series",
     "continuing_method",
     "fetch_series_statistics",
@@ -130,6 +140,122 @@ _FACET = TypeAdapter(SeriesStatisticsModel.model_fields["facet"].annotation)
 # degrades cleanly on any failure, so a single attempt is enough -- see each
 # caller's own docstring for what "degrade" means there.
 _FETCH_TIMEOUT_S = 30.0
+
+# The bound on one whole fetch, link lookup, GET and read together. The hops'
+# own timeouts bound each read off the wire, which a body trickling in under
+# them never meets, and every caller missing the table waits on the one fetch.
+_FLIGHT_TIMEOUT_S = 60.0
+
+# The Arrow buffer bytes the verified tables `_TABLES` may hold in total. A
+# 25,000-series CRS file is about 7.5 MiB as Arrow, so this keeps several of
+# the largest and every small one a turn reads.
+_TABLES_MAX_BYTES = 64 * 1024 * 1024
+
+
+class _TableKey(NamedTuple):
+    """What a verified table was read and checked under, which is the artifact's
+    own content digest plus the two arguments `_read` checks the file against."""
+
+    artifact_digest: str
+    expected_series: int | None
+    continuing: str | None
+
+
+class _FlightKey(NamedTuple):
+    """What one fetch reads: the table it verifies, and the pair and transport it
+    reads the link and the bytes through."""
+
+    table: _TableKey
+    subject_id: str
+    content_version: str
+    transport: httpx2.AsyncBaseTransport | None
+
+
+class _VerifiedTables:
+    """Verified tables, least recently used first, within `max_bytes` of Arrow buffers.
+
+    A key names immutable bytes and a deterministic read of them, so an entry
+    never goes stale. It is only evicted to stay under `max_bytes`. A table is
+    sized by every buffer it references (`pa.Table.get_total_buffer_size`),
+    so a slice counts the whole buffer it keeps alive. `flight` hands every
+    caller missing one table through one link the one fetch of it, so all of
+    them share its outcome, a failure included.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._tables: OrderedDict[_TableKey, tuple[pa.Table, int]] = OrderedDict()
+        self._held = 0
+        self._flights: dict[_FlightKey, asyncio.Task[pa.Table]] = {}
+
+    def get(self, key: _TableKey) -> pa.Table | None:
+        """The table kept under `key`, marked most recently used, or `None`."""
+        entry = self._tables.get(key)
+        if entry is None:
+            return None
+        self._tables.move_to_end(key)
+        return entry[0]
+
+    def put(self, key: _TableKey, table: pa.Table) -> None:
+        """Keep `table` under `key`, evicting the least recently used past
+        `max_bytes`. A table larger than the whole budget is not kept."""
+        size = table.get_total_buffer_size()
+        if size > self.max_bytes:
+            return
+        if (replaced := self._tables.pop(key, None)) is not None:
+            self._held -= replaced[1]
+        self._tables[key] = (table, size)
+        self._held += size
+        while self._held > self.max_bytes:
+            _, (_, evicted) = self._tables.popitem(last=False)
+            self._held -= evicted
+
+    def flight(
+        self, key: _FlightKey, fetch: Callable[[], Coroutine[Any, Any, pa.Table]]
+    ) -> asyncio.Task[pa.Table]:
+        """The fetch of `key` in flight, started as `fetch()` when none is.
+
+        The fetch raises `TimeoutError` once it runs past `_FLIGHT_TIMEOUT_S`,
+        and is forgotten once it ends, so the next miss after a failure
+        fetches again. A failure is logged as it ends, since every caller
+        may have given up on it by then.
+        """
+        if (task := self._flights.get(key)) is None:
+            task = asyncio.create_task(asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S))
+            self._flights[key] = task
+
+            def forget(done: asyncio.Task[pa.Table]) -> None:
+                # A fetch `clear` cancelled ends after the next one under `key` began.
+                if self._flights.get(key) is done:
+                    del self._flights[key]
+                if not done.cancelled() and (exc := done.exception()) is not None:
+                    logger.warning(
+                        "series statistics: the fetch of %s through %s/%s failed: %r",
+                        key.table.artifact_digest,
+                        key.subject_id,
+                        key.content_version,
+                        exc,
+                    )
+
+            task.add_done_callback(forget)
+        return task
+
+    def clear(self) -> None:
+        """Forget every table, and cancel and forget every fetch in flight."""
+        self._tables.clear()
+        self._held = 0
+        for task in self._flights.values():
+            task.cancel()
+        self._flights.clear()
+
+
+_TABLES = _VerifiedTables(_TABLES_MAX_BYTES)
+
+
+def clear_series_statistics_cache() -> None:
+    """Forget every verified table and cancel every fetch in flight, so the next
+    read of each goes to the network."""
+    _TABLES.clear()
 
 
 class SeriesStatisticsSchemaError(ValueError):
@@ -224,7 +350,8 @@ async def fetch_series_statistics_table(
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
 ) -> pa.Table:
-    """Fetch and read `artifact`'s `series-statistics/1` Parquet bytes.
+    """Fetch and read `artifact`'s `series-statistics/1` Parquet bytes, once per
+    process for each artifact digest, series count and continuing method.
 
     Args:
         subject_id: The `spec_` id `artifact` was minted under.
@@ -243,11 +370,14 @@ async def fetch_series_statistics_table(
             `frame_materialisation.materialise_and_register`'s own `transport`
             -- `None` (the default) means a real network GET.
         deadline: When set, the link lookup and the GET together must finish
-            before it; `None` bounds each by its own timeout alone.
+            before it; `None` waits on the fetch's own bound alone
+            (`_FLIGHT_TIMEOUT_S`).
 
     Returns:
         The file's rows in `SERIES_STATISTICS_ARROW_SCHEMA`, in its own row
-        order -- empty when `artifact` carries zero rows.
+        order -- empty when `artifact` carries zero rows. A table this
+        process already verified under the same key is returned with no
+        link lookup or GET.
 
     Raises:
         fastmcp.exceptions.ResourceError: `artifact_link` could not read the
@@ -262,8 +392,9 @@ async def fetch_series_statistics_table(
             as 410 `artifact_expired`, or its redirect target did.
         httpx2.TransportError: the GET itself failed, or no dfo-apis ID token
             could be minted for it.
-        TimeoutError: `deadline` passed before the link lookup and the GET
-            finished.
+        TimeoutError: `deadline` passed before the fetch started, which it
+            then does not, or before the link lookup and the GET finished, or
+            the fetch ran past `_FLIGHT_TIMEOUT_S`.
     """
     # Imported here, not at module level: `data_mcp.artifact_resource` imports
     # `data_mcp.get_data_tool`, which imports `frame_materialisation`, which
@@ -274,7 +405,11 @@ async def fetch_series_statistics_table(
     # for its own `artifact_link` import.
     from data_mcp.artifact_resource import artifact_link  # noqa: PLC0415
 
-    async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
+    key = _TableKey(artifact.artifact_digest, expected_series, continuing)
+    if (held := _TABLES.get(key)) is not None:
+        return held
+
+    async def fetch() -> pa.Table:
         link = await artifact_link(subject_id, content_version, artifact.artifact_digest)
         # `Accept-Encoding: identity` is what keeps `_read_bounded`'s cap exact.
         async with get_client().stream_link(
@@ -284,13 +419,25 @@ async def fetch_series_statistics_table(
             transport=transport,
         ) as response:
             fetched = await _read_bounded(response, max_bytes=artifact.bytes)
-    computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
-    if computed_digest != artifact.artifact_digest:
-        raise SeriesStatisticsSchemaError(
-            "fetched artifact bytes do not hash to the advertised artifact_digest "
-            f"{artifact.artifact_digest!r}; computed {computed_digest!r}"
-        )
-    return _read(fetched, expected_series=expected_series, continuing=continuing)
+        computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
+        if computed_digest != artifact.artifact_digest:
+            raise SeriesStatisticsSchemaError(
+                "fetched artifact bytes do not hash to the advertised artifact_digest "
+                f"{artifact.artifact_digest!r}; computed {computed_digest!r}"
+            )
+        table = _read(fetched, expected_series=expected_series, continuing=continuing)
+        _TABLES.put(key, table)
+        return table
+
+    # A caller with no time left starts no fetch it could not wait for.
+    if deadline is not None and deadline.remaining() <= 0:
+        raise TimeoutError("the call's deadline passed before the statistics fetch started")
+    # A miss joins the fetch in flight for its table through its own link, which
+    # `_FLIGHT_TIMEOUT_S` bounds, and waits for it until its own deadline. Shielded,
+    # so a caller giving up leaves the fetch to the others.
+    flight = _TABLES.flight(_FlightKey(key, subject_id, content_version, transport), fetch)
+    async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
+        return await asyncio.shield(flight)
 
 
 async def _read_bounded(response: httpx2.Response, *, max_bytes: int) -> bytes:
