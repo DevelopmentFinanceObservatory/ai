@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 import pytest
@@ -28,6 +28,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTIO
 from google.genai import types
 from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
+from harness.decision_pick import DecisionPick, decision_pick
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_option_id
@@ -82,7 +83,7 @@ from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
-from .test_plan_display import _fixing_measure, _recorded_payload, _recorded_plan
+from .test_plan_display import _donor_rank_plan, _fixing_measure, _recorded_payload, _recorded_plan
 from .test_planner_seam import ScriptedPlannerLlm, _seam
 from .test_turn_records import (
     _EXAMPLE_LINE,
@@ -455,6 +456,32 @@ def test_a_planner_decision_option_keeps_its_id_when_a_replan_reorders_the_optio
 
     assert labels_by_id(reordered) == labels_by_id(plan)
     assert len(labels_by_id(plan)) == len(measure.options)
+
+
+def test_a_switch_to_an_option_the_card_words_picks_the_option_as_the_planner_wrote_it(
+    decision: Callable[..., Decision],
+) -> None:
+    """A rank decision the planner wrote as `among`'s values ("population",
+    "named") shows the card's words for each, and a switch to the option
+    the card words "only donors picked by name" picks "named", the option as the
+    plan states it."""
+    plan = _donor_rank_plan(decision)
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+
+    (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    (row,) = [row for row in frame.decisions if row.choice_id is not None]
+    labels = {option.label: option.option_id for option in row.options or ()}
+    assert (row.chosen, list(labels)) == (
+        "all 32 donors in DAC2a",
+        ["all 32 donors in DAC2a", "only donors picked by name"],
+    )
+    assert decision_pick(
+        plan,
+        choice_id=row.choice_id,
+        option_id=labels["only donors picked by name"],
+        to_origin={},
+    ) == DecisionPick.on_card(plan, slot="measure", chosen="named")
 
 
 def test_a_plan_a_switch_offers_says_what_else_moved_and_a_plain_plan_offers_no_switch() -> None:
