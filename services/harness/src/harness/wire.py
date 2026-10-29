@@ -46,6 +46,9 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
     model_validator,
 )
 
@@ -646,47 +649,74 @@ MAX_SEED_GROUP_DCID_CHARS = 1024
 SeedGroupDcid = Annotated[str, Field(max_length=MAX_SEED_GROUP_DCID_CHARS)]
 
 
+def _unposted(default: object) -> WrapValidator:
+    """Read a set's field a resubmit does not post, `default` with a warning where
+    it does not parse, so the field and not the set is lost."""
+
+    def read(value: object, handler: ValidatorFunctionWrapHandler, info: ValidationInfo) -> object:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            logger.warning(
+                "seed set field dropped: field=%s errors=%s",
+                info.field_name,
+                sorted({error["type"] for error in exc.errors()}),
+            )
+            return default
+
+    return WrapValidator(read)
+
+
 class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
     The members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
     The seed's resubmit (`harness.seeds.resolve_seed`) posts each set's `label`
-    and its `ref` or `group_id` on its role (`compiler.sources.wire_groups`).
-    The set the turn reads is the one Search answers with. Each field
-    is held to the bound apis sets on it, so no set Search serves fails here;
-    a residual label in `left_out`, which apis does not bound, is held only by
-    the seed's byte cap (`MAX_SEED_SPEC_BYTES`).
+    and its `ref` or `group_id` on its role (`compiler.sources.wire_groups`), and
+    those are held as `compiler.sources.block_wire_groups` reads them, each to the
+    bound apis sets on it: a set failing one is not one Search would take.
+    Every other field is read to its own type and bound and falls back to its
+    default where it does not parse (`_unposted`), since the set posts the same
+    without it; a residual label in `left_out`, which apis does not bound, is
+    held only by the seed's byte cap (`MAX_SEED_SPEC_BYTES`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
-    ref: SeedGroupDcid | None = None
+    ref: SeedGroupDcid | None = Field(default=None, min_length=1)
     group_id: SeedGroupDcid | None = Field(
         default=None,
+        min_length=1,
         exclude_if=lambda group_id: group_id is None,
     )
-    entity_type: SeedGroupDcid | None = Field(
+    entity_type: Annotated[SeedGroupDcid | None, _unposted(None)] = Field(
         default=None, exclude_if=lambda entity_type: entity_type is None
     )
-    total: SeedGroupDcid | None = Field(default=None, exclude_if=lambda total: total is None)
-    whole_of: tuple[PartyClass, ...] = Field(
+    total: Annotated[SeedGroupDcid | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda total: total is None
+    )
+    whole_of: Annotated[tuple[PartyClass, ...], _unposted(())] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
-    side_classes: tuple[PartyClass, ...] = Field(
+    side_classes: Annotated[tuple[PartyClass, ...], _unposted(())] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
-    members: tuple[SeedGroupDcid, ...] = Field(
+    members: Annotated[tuple[SeedGroupDcid, ...], _unposted(())] = Field(
         default=(), max_length=MAX_SEED_GROUP_MEMBERS, exclude_if=lambda members: not members
     )
-    holds_multilaterals: bool | None = Field(default=None, exclude_if=lambda holds: holds is None)
-    left_out: tuple[str, ...] | None = Field(
+    holds_multilaterals: Annotated[bool | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda holds: holds is None
+    )
+    left_out: Annotated[tuple[str, ...] | None, _unposted(None)] = Field(
         default=None,
         max_length=MAX_SEED_GROUP_LEFT_OUT,
         exclude_if=lambda labels: labels is None,
     )
-    sum_differs: bool = Field(default=False, exclude_if=lambda differs: not differs)
+    sum_differs: Annotated[bool, _unposted(False)] = Field(
+        default=False, exclude_if=lambda differs: not differs
+    )
 
 
 class SeedSpec(BaseModel):
@@ -696,9 +726,9 @@ class SeedSpec(BaseModel):
     The website posts the block as Search served it. `entity_groups` is read
     from its `resolved.entity_groups`, so the seed's resubmit posts the sets
     beside the identity and Search, which keeps only a set the graph
-    confirms, names them again. Only a set on a role the identity binds, with
-    a name Search would take, is kept; any other is dropped and the seed
-    stands without it, as `compiler.sources` drops a nameless one. A set
+    confirms, names them again. Only a set on a role the identity binds, whose
+    posted name and node Search would take, is kept; any other is dropped and
+    the seed stands without it, as `compiler.sources` drops a nameless one. A set
     carrying a key `SeedEntityGroup` does not know refuses the seed. Every other member, the rest of `resolved`
     among them, is dropped as the block is read, so nothing
     in the harness reads it from the browser: `harness.graph`'s `seed` node
@@ -743,8 +773,9 @@ class SeedSpec(BaseModel):
                     raise ValueError(
                         f"resolved.entity_groups.{role} carries unknown keys {unknown}"
                     ) from exc
-                # Every bound matches apis' `EntityGroup`, so a set failing here is
-                # one Search would not take on a resubmit; the seed stands without it.
+                # Only the fields a resubmit posts can fail a set (`SeedEntityGroup`),
+                # each to apis' bound, so a set failing here is one Search would not
+                # take on a resubmit; the seed stands without it.
                 label = group.get("label") if isinstance(group, dict) else None
                 logger.warning(
                     "seed set dropped: role=%s label=%r errors=%s",

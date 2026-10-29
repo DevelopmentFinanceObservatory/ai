@@ -620,10 +620,9 @@ def _source_parties(source: SelectedSource, sides: dict[str | None, list[str]]) 
     """Name each side of the flow `sides` leaves empty from `source`: the named
     set it binds there (`SelectedSource.groups`), else how many members it
     holds on its open axis there, when two or more."""
-    for group in source.groups:
-        side = flow_side(group.role)
-        if side is not None and not sides[side]:
-            sides[side].append(group.label)
+    for side, label in _side_groups(source):
+        if not sides[side]:
+            sides[side].append(label)
     for axis in source.open_entity_axes or ():
         side = flow_side(axis.column)
         if side is None or sides[side] or axis.member_count is None or axis.member_count < 2:
@@ -2020,11 +2019,11 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     return f"Fetch {measure} for {_parties(requirement, plan)}"
 
 
-def _side_groups(requirement: DatasetRequirement, plan: Plan) -> list[tuple[str, str]]:
-    """Each named set `requirement`'s selected source binds on a side of the
-    flow (`SelectedSource.groups`), as that side and the set's label, in the
-    source's order; empty before compile. `_parties` names a side by it."""
-    source = _selected_source(requirement.id, plan)
+def _side_groups(source: SelectedSource | None) -> list[tuple[str, str]]:
+    """Each named set `source` binds on a side of the flow (`SelectedSource.groups`),
+    as that side and the set's label, in the source's order; empty without a
+    source. The plan card names a side its parties leave empty by it (`_who`,
+    `_parties`)."""
     return [
         (side, group.label)
         for group in (source.groups if source is not None else ())
@@ -2045,7 +2044,8 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     requirement leaves it. Before compile the requirement's own words.
     """
     sides = {across_party(word) for word in requirement.across}
-    groups = [(side, label) for side, label in _side_groups(requirement, plan) if side in sides]
+    source = _selected_source(requirement.id, plan)
+    groups = [(side, label) for side, label in _side_groups(source) if side in sides]
     entities = [*requirement.entities, *(Entity(name=label) for _, label in groups)]
     grouped = {side for side, _ in groups}
     across = tuple(word for word in requirement.across if across_party(word) not in grouped)

@@ -516,18 +516,34 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
             },
         ),
         ({}, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
+        (
+            {"whole_of": ["sovereign"], "side_classes": ["official", "residual"]},
+            {
+                "role": "observationAbout",
+                "label": "Africa",
+                "ref": "africa",
+                "side_classes": ["official", "residual"],
+            },
+        ),
+        (
+            {"left_out": [f"residual {n}" for n in range(65)]},
+            {"role": "observationAbout", "label": "Africa", "ref": "africa"},
+        ),
     ],
     ids=[
         "with-the-marker",
         "with-the-sides-classes",
         "without-the-field",
+        "an-unknown-class",
+        "past-64-residuals",
     ],
 )
 async def test_a_seed_resolves_its_set_with_the_classes_its_whole_total_holds(
     monkeypatch: pytest.MonkeyPatch, marked: dict[str, Any], hashed: dict[str, Any]
 ) -> None:
     # A seed without the field resolves to the group it always did, so a plan hash over
-    # the source does not move.
+    # the source does not move. One whose field does not parse resolves its set without
+    # that field.
     fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
     block = json.loads(fixture.read_text())["spec"]
     block["resolved"]["entity_groups"]["observationAbout"] |= marked

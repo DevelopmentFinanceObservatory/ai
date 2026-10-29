@@ -1184,19 +1184,49 @@ def test_a_seed_takes_every_key_search_serves_on_a_set(case: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "whole_of",
-    ["official", [""], list(range(2)), ["party"]],
-    ids=["a-string", "blank-class", "not-text", "a-party-kind"],
+    "unread",
+    [
+        {"whole_of": "official"},
+        {"whole_of": [""]},
+        {"whole_of": list(range(2))},
+        {"whole_of": ["party"]},
+        {"side_classes": ["sovereign"]},
+        {"total": 7},
+        {"members": "country/KEN"},
+        {"left_out": [f"residual {n}" for n in range(65)]},
+        {"sum_differs": "often"},
+        {"holds_multilaterals": [True]},
+    ],
+    ids=[
+        "whole-of-a-string",
+        "whole-of-blank-class",
+        "whole-of-not-text",
+        "whole-of-a-party-kind",
+        "side-classes-unknown-class",
+        "total-not-text",
+        "members-not-a-list",
+        "left-out-past-64",
+        "sum-differs-not-a-flag",
+        "holds-multilaterals-not-a-flag",
+    ],
 )
-def test_a_set_whose_whole_of_is_not_a_list_of_classes_is_dropped(whole_of: object) -> None:
+def test_a_set_keeps_its_posted_identity_past_a_field_it_does_not_post(
+    unread: dict[str, object],
+) -> None:
+    """A resubmit posts a set's label and node alone (`compiler.sources.wire_groups`),
+    so a field it does not post that does not parse is dropped and the set stands."""
     block = _region_members_block()
     block["resolved"]["entity_groups"] = {
-        "observationAbout": {"label": "Africa", "whole_of": whole_of}
+        "observationAbout": {"label": "Africa", "ref": "africa", **unread}
     }
 
     seed = Seed.model_validate({"spec": block, "operations": []})
 
-    assert seed.spec.entity_groups is None
+    assert seed.spec.entity_groups is not None
+    assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == {
+        "label": "Africa",
+        "ref": "africa",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1224,9 +1254,18 @@ def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: obje
         {"label": ""},
         {"label": None, "ref": "africa"},
         {"label": "A" * 121, "ref": "africa"},
+        {"label": "Africa", "ref": ""},
+        {"label": "Africa", "group_id": 7},
         "Africa",
     ],
-    ids=["empty-label", "null-label", "label-too-long", "not-an-object"],
+    ids=[
+        "empty-label",
+        "null-label",
+        "label-too-long",
+        "empty-ref",
+        "group-id-not-text",
+        "not-an-object",
+    ],
 )
 def test_a_set_search_would_not_take_is_dropped_and_the_seed_stands(
     group: object, caplog: pytest.LogCaptureFixture

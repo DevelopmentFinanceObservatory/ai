@@ -99,6 +99,7 @@ from typing import Any, cast
 
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
+from compiler.sources import readable_source
 from compiler.surface import ToolSurface
 from executor.classify import ExecutorCode
 from google.adk import Context, Event
@@ -1803,8 +1804,8 @@ def _whole_reading_name(
     pin: AlignedPin, block: Mapping[str, Any] | None, *, sources: SourceReadings
 ) -> str:
     """The name a declared whole's reading is stored under, read off its own
-    `block` and its part's (`pin.origin` in `sources`) alone, each read as a
-    source once however many wholes read it, so it holds
+    `block` and its part's (`pin.origin` in `sources`, read as a source once
+    however many wholes read it) alone, so it holds
     whatever plan the turn ends on. Over every donor or recipient, as the
     plan card names it (`harness.plan_display.source_whole_name`), on the
     sector option the whole's scope holds, else the part's. Over every
@@ -1816,8 +1817,7 @@ def _whole_reading_name(
     by_axis = plan_display.whole_name(pin.whole_axis, measure=measure)
     if pin.whole_axis == "sector" or block is None:
         return by_axis
-    # `sources` holds `block` under the whole's own spec_id (`_spec_blocks`).
-    source = sources.get(pin.spec_id)
+    source = readable_source(block)
     if source is None:
         return by_axis
     part = sources.get(pin.origin)
