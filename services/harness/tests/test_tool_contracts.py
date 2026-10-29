@@ -641,8 +641,16 @@ def test_a_part_summary_offers_a_count_only_when_search_lists_a_basis_sibling(
             False,
             id="unknown-class",
         ),
-        # No label: what a resubmit posts of the set is not readable either.
-        pytest.param({"ref": None, "total": "DAC"}, [], True, id="no-label"),
+        # The same class beside a registry id that is not text: what a resubmit
+        # posts of the set is not readable either.
+        pytest.param(
+            {"label": "DAC", "total": "DAC", "whole_of": ["party"], "group_id": 7},
+            [],
+            True,
+            id="group-id-not-text",
+        ),
+        # No label: the set names nothing, so the reading stores none and reads.
+        pytest.param({"ref": None, "total": "DAC"}, [], False, id="no-label"),
     ],
 )
 def test_a_part_summary_with_an_unreadable_set_says_no_reading(

@@ -592,6 +592,15 @@ def is_country(ref: str) -> bool:
     return ref.startswith(_COUNTRY_PREFIX)
 
 
+def party_class(ref: str) -> PartyClass | None:
+    """The class of party (`PartyClass`) the resolved party `ref` is of, where its ref
+    shows it: `official` for a country (`is_country`), since Search's code index
+    classes a private provider by its OECD private donor code, none of which names a
+    country, and every other party it does not total or count as a residual as
+    official. `None` for any other party, whose class only Search's index states."""
+    return "official" if is_country(ref) else None
+
+
 def countries_apart(left: Collection[str], right: Collection[str]) -> bool:
     """Whether two sets of entity refs bound on one role name rows that never meet:
     both name countries alone (`is_country`), at least one each, and none in
@@ -1076,13 +1085,15 @@ def block_wire_groups(
     what a resubmit posts of it (`wire_groups`): its role, `label`, `ref` and
     `group_id`, skipping the set on the role column `leaving_out`. Every other field
     keeps its default and is not read, so a set naming a class of party outside
-    `PartyClass` still reads here. What this returns is for `wire_groups` alone.
+    `PartyClass` still reads here. A set stating no label is skipped, as
+    `block_groups` skips it: it names nothing a resubmit can post. What this
+    returns is for `wire_groups` alone.
 
     Raises:
-        ValueError: When a set's posted identity is not readable: `entity_groups`
-            is not an object, or a set is not one, states no label, or states a
-            `ref` or `group_id` that is not text. A resubmit posted without that
-            set can bind another population.
+        ValueError: When a labelled set's posted identity is not readable:
+            `entity_groups` is not an object, or a set is not one, or states a `ref`
+            or `group_id` that is not text. A resubmit posted without that set can
+            bind another population.
     """
     raw = _mapping(block.get("resolved")).get("entity_groups")
     if raw is None:
@@ -1096,9 +1107,8 @@ def block_wire_groups(
         if not isinstance(held, Mapping):
             raise ValueError(f"the set on {role!r} is not an object: {held!r}")
         group = cast(Mapping[str, object], held)
-        label = _text(group.get("label"))
-        if label is None:
-            raise ValueError(f"the set on {role!r} states no label: {dict(group)!r}")
+        if (label := _text(group.get("label"))) is None:
+            continue
         found.append(
             ResolvedGroup(
                 role=role,
@@ -1108,6 +1118,20 @@ def block_wire_groups(
             )
         )
     return tuple(found)
+
+
+def readable_wire_groups(
+    block: Mapping[str, object], *, leaving_out: str | None = None
+) -> tuple[ResolvedGroup, ...] | None:
+    """What a resubmit posts of each named set `block` states (`block_wire_groups`),
+    skipping the set on the role column `leaving_out`, `None` with a warning logged
+    where that is not readable. A caller refuses the resubmit on `None`, since a
+    definition posted without its sets can bind another population."""
+    try:
+        return block_wire_groups(block, leaving_out=leaving_out)
+    except ValueError as exc:
+        logger.warning("posted named sets of %s are not readable: %s", block.get("spec_id"), exc)
+        return None
 
 
 def _optional_text(group: Mapping[str, object], key: str, *, role: str) -> str | None:
@@ -1128,7 +1152,7 @@ def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | 
     """The named sets `block` states (`block_groups`), `None` with a warning logged
     where they are not readable, as a set naming a class of party outside
     `PartyClass`, for a caller that reads them and goes on without. A resubmit
-    posts only each set's identity (`block_wire_groups`) and refuses where that is
+    posts only each set's identity (`readable_wire_groups`) and refuses where that is
     not readable, since a definition posted without its sets can bind another
     population."""
     try:

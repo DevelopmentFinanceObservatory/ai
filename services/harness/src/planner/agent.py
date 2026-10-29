@@ -50,7 +50,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
-from compiler.sources import block_group, block_wire_groups
+from compiler.sources import block_group, party_class, readable_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -1485,12 +1485,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             )
         )
     entries = [entry.model_dump(mode="json", exclude_none=True) for entry in switched]
-    try:
-        groups = block_wire_groups(block)
-    except ValueError as exc:
-        logger.warning(
-            "basis compile of %s refused: named sets not readable: %s", realignment.spec_id, exc
-        )
+    groups = readable_wire_groups(block)
+    if groups is None:
         return unservable(
             f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
         )
@@ -1605,10 +1601,8 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     if source is None or block is None or scope is None or not whole_axis_held(scope, axis):
         return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
     column = WHOLE_COLUMNS.get(axis)
-    try:
-        groups = block_wire_groups(block, leaving_out=column)
-    except ValueError as exc:
-        logger.warning("whole of %s refused: named sets not readable: %s", part_pin, exc)
+    groups = readable_wire_groups(block, leaving_out=column)
+    if groups is None:
         return underivable(
             f"Search's named sets for {part_pin} are not readable", "groups_unreadable"
         )
@@ -1758,11 +1752,13 @@ def _parties_outside(
     One binding parties there holds those it binds, and of a total it binds,
     the members Search lists for the group naming it on `column`
     (`ResolvedGroup.members`, DAC countries' total). A total holding a whole
-    population (`ResolvedGroup.whole_of`) holds every party of its classes,
-    so it holds the part's party where those are every class the side
-    publishes (`ResolvedGroup.side_classes`), residuals aside; where the side
-    publishes another class, or Search states no classes for the side but
-    residuals, nothing here says which class the party is, so it is unshown.
+    population (`ResolvedGroup.whole_of`) holds every party of its classes:
+    the part's party where its ref shows it is of one
+    (`compiler.sources.party_class`, a country official), or where they are
+    every class the side publishes (`ResolvedGroup.side_classes`), residuals
+    aside; where the side publishes another class, or Search states no classes
+    for the side but residuals, nothing here says which class any other party
+    is, so it is unshown.
     Any other party is outside where Search binds parties or lists a total's
     members there, and unshown where the total it binds states neither its
     members nor a whole class. Where Search's group on `column` is not
@@ -1795,6 +1791,8 @@ def _parties_outside(
         if party in bound or party in members:
             return True
         if group is not None and group.whole_of:
+            if party_class(party) in group.whole_of:
+                return True
             classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
             return True if classes and classes <= set(group.whole_of) else None
         if members or group is None or group.total not in bound:

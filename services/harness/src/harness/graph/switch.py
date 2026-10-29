@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import block_wire_groups
+from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from planner.plan import (
@@ -518,7 +518,7 @@ async def _resubmit(
     `translator.discovery.resolve_definition`: the part's entity groups
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
     so Search names them again. They are `block`'s groups, read for what the
-    resubmit posts alone (`compiler.sources.block_wire_groups`), where `block`
+    resubmit posts alone (`compiler.sources.readable_wire_groups`), where `block`
     is at hand and they read, else the groups `reading` was resolved with
     (`SearchReading.entity_groups`).
 
@@ -533,12 +533,7 @@ async def _resubmit(
     unreadable = SwitchFailedError(
         "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
     )
-    groups = None
-    if block is not None:
-        try:
-            groups = block_wire_groups(block)
-        except ValueError as exc:
-            logger.warning("plan switch: pin=%s block's named sets not readable: %s", pin, exc)
+    groups = readable_wire_groups(block) if block is not None else None
     if groups is None:
         # A block whose sets do not read falls back only to stored sets that do.
         # An empty stored tuple beside such a block would post the part without them.

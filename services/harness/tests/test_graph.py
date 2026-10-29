@@ -3538,8 +3538,9 @@ _AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
 # Africa as a set naming a class of party outside `common.place_type.PartyClass`: the
 # set does not read, but what a resubmit posts of it does.
 _AFRICA_UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
-# Africa as a set stating no label, so what a resubmit posts of it does not read.
-_AFRICA_UNLABELLED = {"ref": "africa", "total": "DACAfricaTotal"}
+# Africa as a set stating a registry id that is not text, so what a resubmit posts of
+# it does not read.
+_AFRICA_UNPOSTABLE = {"label": "Africa", "ref": "africa", "group_id": 7}
 
 
 @pytest.mark.parametrize(
@@ -3551,7 +3552,7 @@ _AFRICA_UNLABELLED = {"ref": "africa", "total": "DACAfricaTotal"}
             _AFRICA_UNKNOWN_CLASS, True, None, id="block-of-an-unknown-class-stored-unreadable"
         ),
         pytest.param(
-            _AFRICA_UNLABELLED,
+            _AFRICA_UNPOSTABLE,
             False,
             [{"role": "destination", **_AFRICA_TOTAL}],
             id="block-unreadable-stored-readable",
@@ -3571,7 +3572,8 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     so a reading stored when an earlier release could not read the set switches
     once this release can. A set naming a class of party this release does not
     know is posted by its label and ref, all the resubmit sends of it. Where what
-    the block's set posts does not read, as a set stating no label, it posts the
+    the block's set posts does not read, as a set stating a registry id that is
+    not text, it posts the
     readable set the reading was stored with."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
@@ -3593,8 +3595,8 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
 async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """The part's block names a set on its recipients with no label, so what the
-    switch would post of it cannot be read. Posting the part without it would let
+    """The part's block names a set on its recipients with a registry id that is not
+    text, so what the switch would post of it cannot be read. Posting the part without it would let
     Search count another population, so the switch posts nothing and offers the
     plan unchanged under `switch_failed`, which asking again cannot get past."""
     scope = _hashed_scope()
@@ -3602,7 +3604,7 @@ async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchange
     search = SearchStub(answer={scope["id"]: envelope})
 
     runner, _, plan, _, events = await _switch_runner(
-        real_schemas, search, entity_groups={"destination": _AFRICA_UNLABELLED}
+        real_schemas, search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
     )
 
     assert search.posted == []
@@ -4193,8 +4195,8 @@ async def test_a_chip_posts_the_groups_its_reading_was_resolved_with(
 
 
 async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> None:
-    """The answer's reading came from a block naming a set on its recipients with no
-    label, and no block of it is kept, so nothing names the set. Posting the part
+    """The answer's reading came from a block naming a set on its recipients with a
+    registry id that is not text, and no block of it is kept, so nothing names the set. Posting the part
     without it would let Search count another population, so the chip posts nothing
     and its step fails as a plan card's switch over such a block does."""
     scope = _hashed_scope()
@@ -4202,7 +4204,7 @@ async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> N
     search = SearchStub(answer={scope["id"]: envelope})
 
     runner, _, executor, _ = await _chip_turn(
-        search, entity_groups={"destination": _AFRICA_UNLABELLED}
+        search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
     )
 
     assert search.posted == []

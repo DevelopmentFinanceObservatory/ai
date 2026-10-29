@@ -19,8 +19,11 @@ from ..basis_alignment import TOTAL, BasisCompiles, WholeCompiles, basis_block, 
 
 _WHOLE = "whole"
 
-# A named set stating no label, so what a resubmit posts of it does not read.
-_UNREADABLE = {"ref": "africa", "total": "DACAfricaTotal"}
+# A named set stating a registry id that is not text, so what a resubmit posts of it
+# does not read.
+_UNREADABLE = {"label": "Africa", "ref": "africa", "group_id": 7}
+# A named set stating no label, which names nothing a resubmit can post.
+_UNLABELLED = {"ref": "africa", "total": "DACAfricaTotal"}
 # A named set stating a class of party outside `common.place_type.PartyClass`: the
 # set does not read, but what a resubmit posts of it does.
 _UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
@@ -41,6 +44,8 @@ def _with_groups(block: dict[str, Any], groups: dict[str, Any]) -> dict[str, Any
         pytest.param("sector", "destination", _UNREADABLE, None, id="kept-role"),
         # The set sits on the role the whole opens, which posts no set there.
         pytest.param("donor", "origin", _UNREADABLE, {}, id="opened-role"),
+        # The set states no label, so the whole is posted without it.
+        pytest.param("sector", "destination", _UNLABELLED, {}, id="no-label"),
         # The set's class is unknown, but the whole posts all it needs of it.
         pytest.param(
             "sector", "destination", _UNKNOWN_CLASS, {"destination": _POSTED}, id="unknown-class"
@@ -53,7 +58,8 @@ async def test_a_whole_whose_kept_sets_cannot_be_read_is_refused_unposted(
     """US health aid whose block names a set whose posted identity this release cannot
     read. A whole keeping the set's role is refused under `groups_unreadable` with no
     call to Search, since posting the identity without the set lets Search count
-    another population. A whole opening that role posts no set there, so it compiles.
+    another population. A whole opening that role posts no set there, so it compiles,
+    as does one keeping a set stating no label, which names nothing to post.
     A set naming a class of party this release does not know is posted by its label
     and ref, which is all the resubmit sends."""
     surface = WholeCompiles()
@@ -80,7 +86,8 @@ async def test_a_whole_whose_kept_sets_cannot_be_read_is_refused_unposted(
 @pytest.mark.parametrize(
     ("group", "posted"),
     [
-        pytest.param(_UNREADABLE, None, id="no-label"),
+        pytest.param(_UNREADABLE, None, id="group-id-not-text"),
+        pytest.param(_UNLABELLED, {}, id="no-label"),
         pytest.param(_UNKNOWN_CLASS, {"origin": _POSTED}, id="unknown-class"),
     ],
 )
@@ -91,7 +98,8 @@ async def test_a_basis_compile_whose_sets_cannot_be_read_is_refused_unposted(
     and its block names a set whose posted identity this release cannot read. The
     compile is refused as an unsupported ask with no call to Search, since posting
     the identity without the set lets Search count another population. A set naming
-    a class of party this release does not know is posted by its label and ref."""
+    a class of party this release does not know is posted by its label and ref, and
+    one stating no label, which names nothing to post, is left out of the post."""
     surface = BasisCompiles()
     state = cast(SessionState, {})
     block = _with_groups(
@@ -108,7 +116,7 @@ async def test_a_basis_compile_whose_sets_cannot_be_read_is_refused_unposted(
 
     if posted is not None:
         (call,) = surface.calls
-        assert call["entity_groups"] == posted
+        assert call.get("entity_groups", {}) == posted
         return
     assert surface.calls == []
     assert refused is not None

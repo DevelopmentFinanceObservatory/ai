@@ -14,15 +14,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
-    block_wire_groups,
     bound_refs,
     open_entity_axes_of,
     readable_groups,
+    readable_wire_groups,
     resolved_source_mentions,
     total_reading,
 )
@@ -31,9 +31,6 @@ from pydantic import ValidationError
 
 from harness.scope_choices import PartScope, planner_axes
 from harness.wire import RetryMode
-
-if TYPE_CHECKING:
-    from planner.workflow import ResolvedGroup
 
 logger = logging.getLogger(__name__)
 
@@ -557,7 +554,7 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `_scope` reads it, and `planner_axes` the axes the planner's own words
     settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `entity_groups`
     are the named sets the part's places were asked for as, each holding only
-    what a resubmit posts of it (`compiler.sources.block_wire_groups`), which a
+    what a resubmit posts of it (`compiler.sources.readable_wire_groups`), which a
     later resubmit of the reading, such as a chip's, posts again. Where what one
     posts is not readable they are none, with a warning logged, and
     `entity_groups_unreadable` is true, so that resubmit refuses rather than post
@@ -572,7 +569,7 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     resolved = spec.get("resolved") or {}
     requested = _identity(spec).get("requested_window")
     facts = _wide_facts(spec)
-    groups = _wire_groups_of(spec)
+    groups = readable_wire_groups(spec)
     return {
         "coverage_kind": (resolved.get("coverage") or {}).get("kind"),
         "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
@@ -583,17 +580,6 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "entity_groups": [group.model_dump(mode="json") for group in groups or ()],
         "entity_groups_unreadable": groups is None,
     }
-
-
-def _wire_groups_of(spec: Mapping[str, Any]) -> tuple[ResolvedGroup, ...] | None:
-    """What a resubmit posts of each named set `spec` states
-    (`compiler.sources.block_wire_groups`), `None` with a warning logged where
-    that is not readable (`reading_facts`)."""
-    try:
-        return block_wire_groups(spec)
-    except ValueError as exc:
-        logger.warning("named sets of %s are not readable: %s", spec.get("spec_id"), exc)
-        return None
 
 
 def _scope(spec_id: object, scope: object) -> dict[str, Any] | None:

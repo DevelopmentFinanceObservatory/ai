@@ -19,6 +19,7 @@ from compiler.sources import (
     outcome_from_envelope,
     pinned_stat_var,
     readable_source,
+    readable_wire_groups,
     source_from_spec_block,
     stat_var_count,
     total_reading,
@@ -1015,8 +1016,7 @@ def test_a_resubmit_reads_each_sets_posted_identity_whatever_else_it_states() ->
 @pytest.mark.parametrize(
     "africa",
     [
-        pytest.param({"ref": "africa", "total": "DACAfrica"}, id="no-label"),
-        pytest.param({"label": "", "ref": "africa"}, id="empty-label"),
+        pytest.param({"label": "Africa", "ref": 5}, id="ref-not-text"),
         pytest.param({"label": "Africa", "group_id": 7}, id="group-id-not-text"),
         pytest.param("Africa", id="not-an-object"),
     ],
@@ -1026,9 +1026,26 @@ def test_a_resubmit_refuses_a_set_whose_posted_identity_does_not_read(africa: ob
 
     with pytest.raises(ValueError, match="destination"):
         block_wire_groups(block)
+    assert readable_wire_groups(block) is None
     assert wire_groups(block_wire_groups(block, leaving_out="destination")) == {
         "origin": {"label": "G7"}
     }
+
+
+@pytest.mark.parametrize(
+    "africa",
+    [
+        pytest.param({"ref": "africa", "total": "DACAfrica"}, id="no-label"),
+        pytest.param({"label": "", "ref": "africa"}, id="empty-label"),
+    ],
+)
+def test_a_resubmit_posts_without_a_set_stating_no_label(africa: object) -> None:
+    # A set stating no label names nothing a resubmit can post, and the source
+    # reading the block skips it too.
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+
+    assert [group.role for group in source_from_spec_block(block).groups] == ["origin"]
+    assert wire_groups(readable_wire_groups(block) or ()) == {"origin": {"label": "G7"}}
 
 
 # "ODA to Ethiopia from all donors" binds the OECD's official-donors total; the

@@ -4888,7 +4888,8 @@ def _show_blocks(ctx: _FakeToolContext, *blocks: dict[str, Any]) -> None:
     "named_set",
     [
         pytest.param(None, id="no-set"),
-        pytest.param({"whole_of": ["official"]}, id="set-unreadable"),
+        pytest.param({"label": "DAC countries", "group_id": 7}, id="set-unreadable"),
+        pytest.param({"whole_of": ["official"]}, id="set-unlabelled"),
         pytest.param(
             {"label": "DAC countries", "whole_of": ["sovereign_fund"]}, id="set-of-an-unknown-class"
         ),
@@ -4903,9 +4904,11 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
     inputs were put on one basis. The compiled total drops the source the planner
     wrote, which discovery would otherwise search back to the grant-equivalent
     total. A named set on the total's block whose posted identity is not readable,
-    as one stating no label, refuses the compile and posts nothing, since a resubmit
-    without it can bind another population. One naming a class of party this
-    release does not know is posted by its label, all the resubmit sends of it."""
+    as one stating a registry id that is not text, refuses the compile and posts
+    nothing, since a resubmit without it can bind another population. One stating
+    no label names nothing a resubmit can post, so the total is posted without it.
+    One naming a class of party this release does not know is posted by its label,
+    all the resubmit sends of it."""
     surface = BasisCompiles()
     ctx = _FakeToolContext()
     total_block = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
@@ -4917,11 +4920,11 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
         _tools_reading(surface)["propose_plan"].func, ctx, decision(), source="OECD DAC1"
     )
 
-    if named_set is not None and "label" not in named_set:
+    if named_set is not None and "group_id" in named_set:
         assert result.get("code") == ProblemCode.OPERATION_UNSUPPORTED.value, result
         assert surface.calls == []
         return
-    if named_set is not None:
+    if named_set is not None and "label" in named_set:
         (call,) = surface.calls
         assert call["entity_groups"] == {"origin": {"label": "DAC countries"}}
         return
@@ -9044,36 +9047,8 @@ _DAC_COUNTRIES = _DAC_DONOR_WHOLES["dac1"]["whole"]["resolved"]["entity_groups"]
             id="total-listing-no-members",
         ),
         # Official donors, a whole population of its class, where the dataset also
-        # publishes private donors: nothing says which class the US is.
-        pytest.param(
-            ["DACOfficialDonors"],
-            _OFFICIAL_DONORS,
-            "whole_members_unstated",
-            id="whole-class-beside-another",
-        ),
-        # The same total stating no classes for its side, so nothing says the side
-        # holds official donors alone.
-        pytest.param(
-            ["DACOfficialDonors"],
-            {k: v for k, v in _OFFICIAL_DONORS.items() if k != "side_classes"},
-            "whole_members_unstated",
-            id="whole-class-side-unstated",
-        ),
-        # The same total stating residuals alone for its side, which is no class of party.
-        pytest.param(
-            ["DACOfficialDonors"],
-            {**_OFFICIAL_DONORS, "side_classes": ["residual"]},
-            "whole_members_unstated",
-            id="whole-class-side-residuals-only",
-        ),
-        # The same total where the side publishes no class besides official donors and
-        # residuals: every party there is of its class.
-        pytest.param(
-            ["DACOfficialDonors"],
-            {**_OFFICIAL_DONORS, "side_classes": ["official", "residual"]},
-            None,
-            id="whole-class-of-the-side",
-        ),
+        # publishes private donors: the US is a country, so an official donor.
+        pytest.param(["DACOfficialDonors"], _OFFICIAL_DONORS, None, id="whole-class-of-the-party"),
         # A class of party this release does not know, on the side or the whole: the
         # group is unreadable, so nothing shows the total holds the US.
         pytest.param(
@@ -9096,7 +9071,7 @@ async def test_a_donor_whole_is_served_only_where_search_shows_it_holds_the_part
     """US health aid to Africa over every donor's, where Search's answer binds donors
     on the opened role: the share is served where those hold the US, as parties,
     as the members Search lists for the total it binds, or as a whole-population
-    total of every class the side publishes. It is refused as a whole that does
+    total of the US's class. It is refused as a whole that does
     not contain its part where Search shows the US is outside
     (`part_outside_whole`), and as one nothing shows holds it where the bound
     total lists no members and no class of party holding it
@@ -9130,10 +9105,9 @@ _G7 = [
 ]
 
 
-def _g7_health_to_africa(members: list[str] | None) -> dict[str, Any]:
-    """`_us_health_to_africa` read from the G7's published total in place of the US:
-    `GroupOfSeven` bound on `origin`, under Search's named set for it listing
-    `members` (none where `None`)."""
+def _donor_health_to_africa(ref: str, label: str) -> dict[str, Any]:
+    """`_us_health_to_africa` read from the donor `ref`, Search's `label` for it, in
+    place of the US: `ref` bound on `origin`."""
     block = _us_health_to_africa()
     scope = block["resolved"]["scope_choices"]
     for identity in (
@@ -9141,10 +9115,69 @@ def _g7_health_to_africa(members: list[str] | None) -> dict[str, Any]:
         scope["compiled"]["identity"],
         block["definition"]["identity"],
     ):
-        identity["entities"]["origin"] = ["GroupOfSeven"]
+        identity["entities"]["origin"] = [ref]
     block["resolved"]["entities"] = [
-        {"ref": "GroupOfSeven", "label": "G7", "entity_type": "Place", "role": "origin"}
+        {"ref": ref, "label": label, "entity_type": "Place", "role": "origin"}
     ]
+    return block
+
+
+@pytest.mark.parametrize(
+    ("group", "cause"),
+    [
+        # The dataset also publishes private donors, the foundation's class.
+        pytest.param(_OFFICIAL_DONORS, "whole_members_unstated", id="beside-another-class"),
+        # Search states no classes for the side, so nothing says it holds official
+        # donors alone.
+        pytest.param(
+            {k: v for k, v in _OFFICIAL_DONORS.items() if k != "side_classes"},
+            "whole_members_unstated",
+            id="side-unstated",
+        ),
+        # Residuals alone for the side, which is no class of party.
+        pytest.param(
+            {**_OFFICIAL_DONORS, "side_classes": ["residual"]},
+            "whole_members_unstated",
+            id="side-residuals-only",
+        ),
+        # The side publishes no class besides official donors and residuals: every
+        # party there is of the total's class.
+        pytest.param(
+            {**_OFFICIAL_DONORS, "side_classes": ["official", "residual"]},
+            None,
+            id="whole-class-of-the-side",
+        ),
+    ],
+)
+async def test_a_whole_population_holds_a_donor_no_ref_classes_only_where_it_holds_the_side(
+    decision: DecisionFactory, group: dict[str, Any], cause: str | None
+) -> None:
+    """Gates Foundation health aid to Africa over official donors' total, a
+    whole-population total of official donors: the foundation is no country, so its
+    ref states no class (`compiler.sources.party_class`). The whole holds it where
+    the total's class is every class the side publishes, residuals aside, and
+    nothing shows it does (`whole_members_unstated`) where the side publishes
+    another class or Search states none but residuals."""
+    block = _donor_health_to_africa("GatesFoundation", "Gates Foundation")
+    surface = _OpenedWholeCompiles(block, bound=["DACOfficialDonors"], groups={"origin": group})
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision)
+
+    if cause is None:
+        assert result["outcome"] == Outcome.OK.value, result
+        assert dict(_pins(ctx))[_WHOLE] == _OPENED_WHOLE["donor"]
+        return
+    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"]["cause"] == cause
+    assert load_plan(ctx.state) is None
+
+
+def _g7_health_to_africa(members: list[str] | None) -> dict[str, Any]:
+    """`_us_health_to_africa` read from the G7's published total in place of the US:
+    `GroupOfSeven` bound on `origin`, under Search's named set for it listing
+    `members` (none where `None`)."""
+    block = _donor_health_to_africa("GroupOfSeven", "G7")
     group: dict[str, Any] = {"label": "G7", "total": "GroupOfSeven"}
     if members is not None:
         group["members"] = members
