@@ -53,10 +53,12 @@ from google.genai import types
 from harness import plan_display, planner_seam
 from harness.graph import switch
 from harness.graph.state import (
+    ORCHESTRATOR_COMPILED_SPECS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    compiled_block,
 )
 from harness.orchestrator_tools import _search_context
 from harness.planner_seam import (
@@ -73,6 +75,7 @@ from harness.planner_seam import (
     _plan_context,
     _RunTracker,
 )
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, planner_axes
 from harness.scripted import use_compiled_proposals
 from harness.sentences import (
     SeamCode,
@@ -84,11 +87,12 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
-from harness.turn_records import SearchReading, part_name
+from harness.turn_records import CompiledFrom, SearchReading, part_name
 from harness.wiring import handing_back_planner_failures
 from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
+    ALIGNED_PINS_STATE_KEY,
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -96,11 +100,13 @@ from planner.plan import (
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
+    PLAN_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AlignedPin,
+    AlignmentKey,
     AnswerMode,
     AskBreakdown,
     DatasetRequirement,
@@ -108,6 +114,7 @@ from planner.plan import (
     Entity,
     FullHistory,
     GrowthRequirement,
+    HeldSources,
     JoinRequirement,
     Period,
     PinSource,
@@ -121,9 +128,12 @@ from planner.plan import (
     Unit,
     WholeOf,
     amendment_entry,
+    clear_entry_compiles,
     current_discovery_time_left,
     current_earlier_block,
+    current_earlier_compile,
     discovery_time_left,
+    earlier_block,
     full_histories,
     load_plan,
     pin_sources,
@@ -1536,8 +1546,8 @@ async def test_an_orchestrator_turn_with_no_search_says_so(
 def _prior_ledger(*turns: tuple[list[SearchReading], Mapping[str, Any]]) -> dict[str, Any]:
     """The prior ledger a conversation whose turns read `turns`, each its
     readings and the spec blocks its record stored, seeds the next turn with.
-    The conversation's `earlier_block` becomes the current one, as
-    `harness.studio` sets it for a segment."""
+    The conversation's `earlier_block` and `earlier_compile` become the current
+    ones, as `harness.studio` sets them for a segment."""
     conversation = ConversationState(conversation_id="conv_prior")
     conversation.turns = [
         {
@@ -1551,6 +1561,7 @@ def _prior_ledger(*turns: tuple[list[SearchReading], Mapping[str, Any]]) -> dict
     prior = conversation.prior_ledger_state()
     assert prior is not None
     current_earlier_block.set(conversation.earlier_block)
+    current_earlier_compile.set(conversation.earlier_compile)
     return prior
 
 
@@ -1610,6 +1621,180 @@ async def test_a_later_turn_renders_and_pins_an_earlier_turns_reading(
         SPEC: PinSource(warnings=("role_scope_defaulted",), settled=True, earlier_turn=True)
     }
     assert pin_sources(state)[SPEC].spec_block(SPEC) == block
+
+
+def _turn_compiling_the_total() -> dict[str, Any]:
+    """The session state of a turn that compiled the US total on gross disbursements
+    for a share and stored the compile as a reading of the total's words
+    (`store_aligned_readings`), the compile's block marking its basis as the
+    planner's. The planner's state and the turn's are one session's, as in the
+    graph."""
+    origin = SearchReading.model_validate(
+        {"text": "US total ODA", "status": "definite", "spec_id": TOTAL, "asked_roles": ["donor"]}
+    )
+    gross = basis_block(TOTAL_GROSS, narrow=False, active="measure_basis:gross")
+    state: dict[str, Any] = {
+        ORCHESTRATOR_SEARCHES_KEY: [origin.model_dump(mode="json")],
+        ORCHESTRATOR_SPECS_KEY: {
+            TOTAL: basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
+        },
+    }
+    save_aligned_pin(
+        cast(SessionState, state),
+        AlignedPin(
+            origin=TOTAL,
+            option_ids=("measure_basis:gross",),
+            spec_id=TOTAL_GROSS,
+            digest={
+                "part_digests": [
+                    {
+                        "variable": TOTAL_GROSS,
+                        "status": "definite",
+                        "spec_id": TOTAL_GROSS,
+                        "spec_block": {**gross, PLANNER_AXES_BLOCK_KEY: ["measure_basis"]},
+                    }
+                ]
+            },
+            records_origin=True,
+        ),
+    )
+    planner_seam.store_aligned_readings(
+        cast(Any, SimpleNamespace(state=state)), cast(SessionState, state)
+    )
+    return state
+
+
+def _direct_and_aligned(requirement: Any) -> dict[str, DatasetRequirement]:
+    """A pin of the compiled total as the planner's own, and the input aligned onto it."""
+    direct = requirement(id="direct", source_spec_id=TOTAL_GROSS)
+    aligned = requirement(
+        id="aligned",
+        source_spec_id=TOTAL_GROSS,
+        aligned_from=TOTAL,
+        aligned_options=("measure_basis:gross",),
+    )
+    return {item.id: item for item in (direct, aligned)}
+
+
+def test_a_compile_in_this_turn_is_read_by_its_requirement_alone(requirement: Any) -> None:
+    """After the turn stores its compile as a reading, the compile's block is kept by
+    the compile alone: no spec_id-keyed block or warning holds it, so in a later
+    entry of the turn a pin of its spec_id as the planner's own reads no block and
+    no planner marks, while the requirement aligned onto it, and a switch of the
+    compile's reading, read the compile's block. (Within the entry that compiled
+    it, an unshown pin reads that entry's one compile, `planner.plan.HeldSources.entry_compile`.)"""
+    state = _turn_compiling_the_total()
+    clear_entry_compiles(cast(SessionState, state))
+    by_id = _direct_and_aligned(requirement)
+    plan = Plan.model_construct(evidence_requirements=tuple(by_id.values()))
+    held = HeldSources.of(cast(SessionState, state))
+    sources = planner_seam._sources_by_requirement(cast(SessionState, state), plan)
+
+    assert TOTAL_GROSS not in state[ORCHESTRATOR_SPECS_KEY]
+    assert TOTAL_GROSS not in state[ORCHESTRATOR_SPEC_WARNINGS_KEY]
+    assert TOTAL_GROSS not in planner_seam._spec_blocks(cast(SessionState, state))
+    assert held.source_of(by_id["direct"], by_id) is None
+    assert "direct" not in sources
+    compiled = held.source_of(by_id["aligned"], by_id)
+    assert compiled is not None
+    assert planner_axes(compiled.spec_block(TOTAL_GROSS)) == {"measure_basis"}
+    assert planner_axes(
+        compiled_block(
+            cast(SessionState, state),
+            AlignmentKey(TOTAL, ("measure_basis:gross",)),
+            TOTAL_GROSS,
+        )
+    ) == {"measure_basis"}
+
+
+async def test_a_compile_from_an_earlier_turn_is_read_by_its_requirement_alone(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """Turn 1 compiled the total and kept the compile's block with its record. In
+    turn 2 the planner is shown no source for the compile's spec_id and no earlier
+    block answers it, so a pin of it as the planner's own reads no block and no
+    planner marks and is resolved afresh. The requirement aligned onto it reads
+    the compile's block, its basis the planner's."""
+    turn_one = _turn_compiling_the_total()
+    conversation = ConversationState(conversation_id="conv_prior")
+    conversation.turns = [
+        {
+            "user": "asked",
+            "assistant": "answered",
+            "readings": turn_one[ORCHESTRATOR_SEARCHES_KEY],
+            "specs": turn_one[ORCHESTRATOR_SPECS_KEY],
+            "compiled_specs": turn_one[ORCHESTRATOR_COMPILED_SPECS_KEY],
+        }
+    ]
+    prior = conversation.prior_ledger_state()
+    assert prior is not None
+    current_earlier_block.set(conversation.earlier_block)
+    current_earlier_compile.set(conversation.earlier_compile)
+
+    _, state = await _first_request_with_readings(
+        prior["readings"],
+        plan=_translated_plan(decision, requirement, derived_requirement),
+        stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior},
+    )
+    by_id = _direct_and_aligned(requirement)
+    held = HeldSources.of(state)
+
+    assert [
+        (reading["spec_id"], reading.get("compiled_from")) for reading in prior["readings"]
+    ] == [
+        (TOTAL, None),
+        (
+            TOTAL_GROSS,
+            CompiledFrom(origin=TOTAL, option_ids=("measure_basis:gross",)).model_dump(mode="json"),
+        ),
+    ]
+    assert list(pin_sources(state)) == [TOTAL]
+    assert earlier_block(TOTAL_GROSS) is None
+    assert held.source_of(by_id["direct"], by_id) is None
+    compiled = held.source_of(by_id["aligned"], by_id)
+    assert compiled is not None
+    assert planner_axes(compiled.spec_block(TOTAL_GROSS)) == {"measure_basis"}
+
+
+async def test_an_entry_seeded_with_a_stored_plan_recording_no_origin_migrates_it() -> None:
+    """`fixtures/aligned_total_plan_stored.json`: a comparison stored with its total
+    moved onto the multilateral row and no origin recorded, the compile held as a pin
+    of the stored form. An entry the graph seeds with that plan writes the total's
+    origin onto the plan it drafts from and marks the pin
+    (`planner.plan.migrate_stored_origins`)."""
+    recorded = json.loads(
+        (Path(__file__).parent / "fixtures" / "aligned_total_plan_stored.json").read_text()
+    )
+    stored = recorded["state"]
+    # The fixture's pin keeps no answer; the entry stores a held pin's answer as a
+    # reading, so it carries one naming the compile.
+    (held,) = stored[ALIGNED_PINS_STATE_KEY]
+    pin = {
+        **held,
+        "digest": {"part_digests": [{"status": "definite", "spec_id": held["spec_id"]}]},
+    }
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=[])
+    harness = _SeamHarness({ALIGNED_PINS_STATE_KEY: [pin]})
+
+    await harness.run(
+        seam,
+        question=stored[PLAN_STATE_KEY]["question"],
+        prior_plan=stored[PLAN_STATE_KEY],
+        readings=[],
+    )
+    state = await harness.state()
+    plan = load_plan(state)
+
+    assert plan is not None
+    second = plan.requirement("second")
+    assert isinstance(second, DatasetRequirement)
+    assert (second.source_spec_id, second.aligned_from, second.aligned_options) == (
+        pin["spec_id"],
+        pin["origin"],
+        tuple(pin["option_ids"]),
+    )
+    assert [marked["records_origin"] for marked in state[ALIGNED_PINS_STATE_KEY]] == [True]
 
 
 async def test_the_newest_reading_of_a_spec_id_wins_across_turns(

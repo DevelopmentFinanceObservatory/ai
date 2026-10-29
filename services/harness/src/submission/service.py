@@ -41,7 +41,6 @@ import functools
 import hashlib
 import logging
 import unicodedata
-from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -144,7 +143,6 @@ from planner.plan import (
     UnsupportedPlanError,
     WholeIsItsMemberError,
     WindowedPin,
-    aligned_pins,
     amendment_entry,
     authored,
     bound_fixes,
@@ -485,8 +483,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 "evidence_requirements": tuple(unwindowed_requirements),
             }
         )
-    if previous is not None:
-        previous = _with_inferred_origins(previous, aligned_pins(view.state))
     evidence_requirements = _with_aligned_origins(evidence_requirements, previous)
     held = HeldSources.of(view.state)
     pins = held.shown
@@ -4681,57 +4677,6 @@ def _moved_to(requirement: DatasetRequirement, move: _Moved) -> DatasetRequireme
 def _exact_codes_of(source: PinSource | None, pin: str) -> frozenset[str]:
     """The codes `source`'s block for `pin` states exactly (`exact_codes`); none without a block."""
     return exact_codes(source.spec_block(pin) if source is not None else None)
-
-
-def _with_inferred_origins(previous: Plan, aligned: Sequence[AlignedPin]) -> Plan:
-    """`previous` with each aligned input held beside a pin that does not record its
-    origin (`AlignedPin.records_origin` unset) given the origin it was moved from and
-    the options it was moved to (`DatasetRequirement.aligned_from`,
-    `DatasetRequirement.aligned_options`).
-
-    Such a pin is stored beside a plan that holds an aligned input on its compiled pin
-    alone and records no origin on any requirement. An input pinning the spec_id of
-    exactly one such compile (not a declared whole's) records its origin and options,
-    where no other requirement of `previous` pins that spec_id, since one that does
-    may hold it as its own, and none pins the origin, which an input pinned to the
-    compile directly beside its origin's own requirement would. A pin that records
-    its origin is never read here, so an input restated with another meaning, which
-    records none, keeps none. The stored plan keeps its form and revision; only the
-    plan this call admits records the origin.
-    """
-    origins: dict[str, set[tuple[str, tuple[str, ...]]]] = {}
-    for pin in aligned:
-        if pin.whole_axis is None and not pin.records_origin:
-            origins.setdefault(pin.spec_id, set()).add((pin.origin, pin.option_ids))
-    datasets = [r for r in previous.evidence_requirements if isinstance(r, DatasetRequirement)]
-    if not origins or any(dataset.aligned_from is not None for dataset in datasets):
-        return previous
-    pinning = Counter(dataset.source_spec_id for dataset in datasets)
-    inferred = {
-        dataset.id: moved
-        for dataset in datasets
-        if dataset.source_spec_id is not None
-        and pinning[dataset.source_spec_id] == 1
-        and len(held := origins.get(dataset.source_spec_id, set())) == 1
-        and (moved := next(iter(held)))[0] not in pinning
-    }
-    if not inferred:
-        return previous
-    return previous.model_copy(
-        update={
-            "evidence_requirements": tuple(
-                requirement.model_copy(
-                    update={
-                        "aligned_from": inferred[requirement.id][0],
-                        "aligned_options": inferred[requirement.id][1],
-                    }
-                )
-                if requirement.id in inferred
-                else requirement
-                for requirement in previous.evidence_requirements
-            )
-        }
-    )
 
 
 def _with_aligned_origins(

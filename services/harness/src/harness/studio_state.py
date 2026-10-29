@@ -45,7 +45,7 @@ from collections.abc import Callable, Coroutine, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from common.telemetry import end_turn_span, start_turn_span, use_turn_span
 from compiler.sources import alternative_definitions, source_from_spec_block
@@ -57,14 +57,15 @@ from google.adk.errors import StaleSessionError
 from google.adk.events import Event, EventActions
 from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig
-from planner.plan import PlanStatus, cut_user_text
+from planner.plan import AlignmentKey, PlanStatus, cut_user_text
 from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
 from harness.conversation import current_conversation_key
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.graph.state import ORCHESTRATOR_COMPILED_SPECS_KEY, ORCHESTRATOR_SPECS_KEY
 from harness.reply_figures import drawn_series
 from harness.turn_records import (
+    CompiledBlock,
     PlanRecord,
     PlanSource,
     RecordedIdentity,
@@ -466,6 +467,18 @@ def _deserialize_segment(value: Any) -> Segment | None:
     )
 
 
+class _EarlierLedger(NamedTuple):
+    """What every earlier turn of a conversation read (`ConversationState._earlier_ledger`):
+    its readings oldest first, the block and warnings the newest reading naming each
+    spec_id decides, and the block the newest turn stored for each compile, by what
+    it was compiled for and its spec_id."""
+
+    readings: list[SearchReading]
+    blocks: dict[str, Any]
+    warnings: dict[str, list[dict[str, Any]]]
+    compiles: dict[tuple[AlignmentKey, str], Any]
+
+
 @dataclass
 class ConversationState:
     """Wire bookkeeping for one (principal, conversation_id) pair."""
@@ -517,14 +530,15 @@ class ConversationState:
     # with the rest of this state on restart (`ApprovalRecord`'s docstring).
     approvals: list[ApprovalRecord] = field(default_factory=list)
     # One record per completed turn: {user, assistant, cards, error, plans,
-    # readings, specs, identities}, where `plans` are the `PlanRecord`s of
-    # the plans the turn ran, `readings` the `SearchReading`s it read, as
-    # JSON, `specs` the spec block `search` returned for each source those
-    # plans used, and `identities` the `RecordedIdentity` of every source the
-    # turn's searches returned or its plans used, as JSON, by spec_id
-    # (`recorded_identity`). Every key but `user` and `assistant` is
-    # optional, and a record without `plans`, `readings`, `specs` or
-    # `identities` holds none. Feeds the conversation digest (newest
+    # readings, specs, compiled_specs, identities}, where `plans` are the
+    # `PlanRecord`s of the plans the turn ran, `readings` the `SearchReading`s
+    # it read, as JSON, `specs` the spec block `search` returned for each
+    # source those plans used, `compiled_specs` the `CompiledBlock` of each
+    # compile alignment made among them, and `identities` the
+    # `RecordedIdentity` of every source the turn's searches returned or its
+    # plans used, as JSON, by spec_id (`recorded_identity`). Every key but
+    # `user` and `assistant` is optional, and a record without `plans`,
+    # `readings`, `specs`, `compiled_specs` or `identities` holds none. Feeds the conversation digest (newest
     # window), the recall seam (everything older) and the planner's ledger
     # (`prior_ledger_state`). None of them reads `identities`.
     turns: list[dict[str, Any]] = field(default_factory=list)
@@ -550,13 +564,15 @@ class ConversationState:
     # blocks its searches returned by spec_id, each the whole value the
     # graph last wrote (`harness.graph.state.ORCHESTRATOR_PLAN_RECORDS_KEY`,
     # `ORCHESTRATOR_SEARCHES_KEY`, `ORCHESTRATOR_SPECS_KEY`), set by
-    # `harness.studio` as events stream. `turn_specs` is process-local: the
-    # turn's own ADK session holds the blocks, and `StudioStore.load` reads
-    # them back from it, so the ledger stores only the blocks `close_turn`
-    # keeps.
+    # `harness.studio` as events stream, and the blocks of the compiles
+    # alignment made, as `CompiledBlock` JSON (`ORCHESTRATOR_COMPILED_SPECS_KEY`).
+    # `turn_specs` and `turn_compiled_specs` are process-local: the turn's own
+    # ADK session holds the blocks, and `StudioStore.load` reads them back from
+    # it, so the ledger stores only the blocks `close_turn` keeps.
     turn_plans: list[dict[str, Any]] = field(default_factory=list)
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
+    turn_compiled_specs: list[dict[str, Any]] = field(default_factory=list)
     # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
     # by `harness.studio`; once the graph's `seed` node applied it, as that
     # node wrote it, with `from_option_id` and `spec_id`
@@ -918,9 +934,10 @@ class ConversationState:
             record["readings"] = readings
         # Keep the blocks of the sources the turn's plans used and of the source
         # each windowed copy among them copies: a later turn can pin or fetch
-        # that source through `earlier_block`. A block can run to about 120 KB
-        # and the record is kept for the whole conversation, so no other is kept.
-        identities = _turn_identities(self.turn_specs, plans)
+        # that source through `earlier_block`, or read a compile's through
+        # `earlier_compile`. A block can run to about 120 KB and the record is
+        # kept for the whole conversation, so no other is kept.
+        identities = _turn_identities(self.turn_blocks(), plans)
         copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
             {**self._earlier_identities(), **identities},
@@ -929,6 +946,9 @@ class ConversationState:
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
             record["specs"] = specs
+        compiled = [entry for entry in self.turn_compiled_specs if entry.get("spec_id") in used]
+        if compiled:
+            record["compiled_specs"] = compiled
         if identities:
             record["identities"] = {
                 spec_id: recorded.model_dump(mode="json")
@@ -947,7 +967,7 @@ class ConversationState:
         change it.
         """
         plans = _validated(PlanRecord, self.turn_plans, reader="identity", what="plan record")
-        recorded = _turn_identities(self.turn_specs, plans).get(spec_id)
+        recorded = _turn_identities(self.turn_blocks(), plans).get(spec_id)
         if recorded is not None:
             return recorded
         for turn in reversed(self.turns):
@@ -955,6 +975,15 @@ class ConversationState:
             if stored is not None:
                 return RecordedIdentity.model_validate(stored)
         return None
+
+    def turn_blocks(self) -> dict[str, Any]:
+        """Every block this turn holds by spec_id, a compile's (`turn_compiled_specs`)
+        where no search returned its spec_id, read for identities and names alone:
+        a spec_id hashes its identity, so every block holding it states the same."""
+        return {
+            **{entry["spec_id"]: entry["block"] for entry in self.turn_compiled_specs},
+            **self.turn_specs,
+        }
 
     def _earlier_identities(self) -> dict[str, RecordedIdentity]:
         """The identities earlier turns stored (`close_turn`), by spec_id."""
@@ -977,7 +1006,7 @@ class ConversationState:
         `earlier_block` resolves. No block is included. A pin or a fetch
         reads one through `earlier_block`.
         """
-        readings, blocks, warnings = self._earlier_ledger()
+        readings, blocks, warnings, _ = self._earlier_ledger()
         if not readings:
             return None
         return {
@@ -995,33 +1024,49 @@ class ConversationState:
         since the latest year may have moved and a pin of it is confirmed by
         a fresh search. A reading with no stored block, such as a source
         only the translator found or a spec_id no plan of its turn used,
-        contributes none either.
+        contributes none either, and neither does a compile stored as a
+        reading (`SearchReading.compiled_from`), whose block is read for that
+        compile alone (`earlier_compile`).
         """
-        return self._earlier_ledger()[1].get(spec_id)
+        return self._earlier_ledger().blocks.get(spec_id)
 
-    def _earlier_ledger(
-        self,
-    ) -> tuple[list[SearchReading], dict[str, Any], dict[str, list[dict[str, Any]]]]:
-        """Every earlier turn's readings oldest first, and the block and
-        warnings the newest reading naming each spec_id decides
-        (`prior_ledger_state`, `earlier_block`)."""
-        readings: list[SearchReading] = []
-        blocks: dict[str, Any] = {}
-        warnings: dict[str, list[dict[str, Any]]] = {}
+    def earlier_compile(self, key: AlignmentKey, spec_id: str) -> dict[str, Any] | None:
+        """The spec block the newest earlier turn that kept one stored for the compile
+        made for `key` that Search answered as `spec_id` (`CompiledBlock`); None when
+        none did."""
+        return self._earlier_ledger().compiles.get((key, spec_id))
+
+    def _earlier_ledger(self) -> _EarlierLedger:
+        """Every earlier turn's readings oldest first, the block and warnings the
+        newest reading naming each spec_id decides, a compile's reading none, and
+        the block the newest turn keeping one stored for each compile
+        (`prior_ledger_state`, `earlier_block`, `earlier_compile`)."""
+        ledger = _EarlierLedger([], {}, {}, {})
         for turn in self.turns:
+            for entry in _validated(
+                CompiledBlock,
+                turn.get("compiled_specs") or (),
+                reader="ledger",
+                what="compiled block",
+            ):
+                ledger.compiles[(entry.compiled_from.key, entry.spec_id)] = entry.block
             stored = turn.get("specs") or {}
             for reading in _validated(
                 SearchReading, turn.get("readings") or (), reader="ledger", what="search reading"
             ):
-                readings.append(reading)
+                ledger.readings.append(reading)
                 for spec_id in named_spec_ids(reading):
-                    block = stored.get(spec_id)
-                    if block is None or reading.requested_window_kind == "latest":
-                        blocks.pop(spec_id, None)
+                    block = (
+                        None if reading.requested_window_kind == "latest" else stored.get(spec_id)
+                    )
+                    if reading.compiled_from is not None:
+                        continue
+                    if block is None:
+                        ledger.blocks.pop(spec_id, None)
                     else:
-                        blocks[spec_id] = block
-                    warnings[spec_id] = [w.model_dump(mode="json") for w in reading.warnings]
-        return readings, blocks, warnings
+                        ledger.blocks[spec_id] = block
+                    ledger.warnings[spec_id] = [w.model_dump(mode="json") for w in reading.warnings]
+        return ledger
 
     @property
     def awaiting_answer(self) -> bool:
@@ -1082,6 +1127,7 @@ class ConversationState:
         self.turn_plans = []
         self.turn_readings = []
         self.turn_specs = {}
+        self.turn_compiled_specs = []
         self.turn_applied_choice = None
         self.turn_choice_baseline = {}
         self.turn_recorded = False
@@ -1218,7 +1264,7 @@ _RUN_ITEM_PREFIXES = (
 _RUN_ITEMS_RETRY_ATTEMPTS = 3
 
 # Identity, the six process-local runtime objects, and the turn's spec
-# blocks (`turn_specs`, read back from the turn's own ADK session by
+# blocks (`turn_specs`, `turn_compiled_specs`, read back from the turn's own ADK session by
 # `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
     {
@@ -1231,6 +1277,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "_composition_ops",
         "_removal_unreported",
         "turn_specs",
+        "turn_compiled_specs",
     }
 )
 
@@ -1621,13 +1668,18 @@ class StudioStore:
                     setattr(entry.state, f.name, getattr(durable, f.name))
         entry.baseline = _serialize_durable(entry.state)
         if entry.state.turn_index and not entry.state.turn_recorded:
-            entry.state.turn_specs = await self._turn_specs(principal, entry.state.session_id)
+            entry.state.turn_specs, entry.state.turn_compiled_specs = await self._turn_specs(
+                principal, entry.state.session_id
+            )
         return entry.state
 
-    async def _turn_specs(self, principal: str, session_id: str) -> dict[str, Any]:
+    async def _turn_specs(
+        self, principal: str, session_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """The spec blocks the open turn's own ADK session holds
-        (`ORCHESTRATOR_SPECS_KEY`), for `ConversationState.close_turn` to keep
-        those of the sources its plans used. Empty when the session holds
+        (`ORCHESTRATOR_SPECS_KEY`) and its compiles' blocks
+        (`ORCHESTRATOR_COMPILED_SPECS_KEY`), for `ConversationState.close_turn` to
+        keep those of the sources its plans used. Empty when the session holds
         none or does not exist yet."""
         session = await self._session_service.get_session(
             app_name=self._turn_app_name,
@@ -1635,7 +1687,12 @@ class StudioStore:
             session_id=session_id,
             config=GetSessionConfig(num_recent_events=0),
         )
-        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
+        if session is None:
+            return {}, []
+        return (
+            dict(session.state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+            list(session.state.get(ORCHESTRATOR_COMPILED_SPECS_KEY) or []),
+        )
 
     def claim_segment(self, principal: str, conversation_id: str) -> str:
         """Claim a fresh segment on the LIVE state already loaded on this

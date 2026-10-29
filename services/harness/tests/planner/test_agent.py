@@ -127,6 +127,7 @@ from planner.plan import (
     aligned_pins,
     clear_entry_compiles,
     clear_unsupported,
+    compile_key,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
@@ -135,6 +136,7 @@ from planner.plan import (
     is_search_pin,
     load_plan,
     load_plan_rounds,
+    migrate_stored_origins,
     open_window,
     pin_slot_moves,
     pin_source_of,
@@ -150,6 +152,7 @@ from planner.plan import (
     scope_choice_slot,
     search_pin_slot,
     split_of,
+    stored_origins,
     stored_plan,
     windowed_pins,
 )
@@ -7310,7 +7313,7 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
             origin=us_2023_block("health")["spec_id"],
             option_ids=("provider:inclusive",),
             spec_id=inclusive["spec_id"],
-            digest={},
+            digest={"part_digests": [{"spec_block": inclusive}]},
         ),
     )
 
@@ -8704,12 +8707,15 @@ def test_a_stored_plan_recording_no_origin_and_its_aligned_pin_load_translate_an
     above leaves in the stored form whose requirements record no origin
     (`DatasetRequirement.aligned_from`): the plan, its total moved onto the
     multilateral row, and that compile held as an `AlignedPin` stating no
-    `records_origin`, which loads as unset. Both load, the
-    plan keeps the revision it was stored under, and it translates with each
-    requirement on its stored pin. Amended into the share of US ODA going to
+    `records_origin`, which loads as unset. Both load, the plan keeps the revision
+    it was stored under, and it translates with each requirement on its stored pin.
+
+    The entry that loads it writes the total's origin onto the plan once
+    (`migrate_stored_origins`), which gives it a new revision, and marks the pin; a
+    second load changes nothing. Amended into the share of US ODA going to
     multilaterals, US multilateral ODA pinned to that row directly, the total reads
-    the compile's origin as its own and goes back to its own pin, so the share does
-    not divide one series by itself."""
+    its recorded origin and goes back to its own pin, so the share does not divide
+    one series by itself."""
     recorded = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "aligned_total_plan_stored.json").read_text()
     )
@@ -8744,6 +8750,22 @@ def test_a_stored_plan_recording_no_origin_and_its_aligned_pin_load_translate_an
 
     ctx = _FakeToolContext()
     ctx.state.update(state)
+    migrate_stored_origins(ctx.state)
+    migrated = load_plan(ctx.state)
+
+    assert migrated is not None
+    second = migrated.requirement("second")
+    assert isinstance(second, DatasetRequirement)
+    assert (second.source_spec_id, second.aligned_from, second.aligned_options) == (
+        _US_MULTILATERAL["spec_id"],
+        _US_TOTAL["spec_id"],
+        ("provider:multilateral",),
+    )
+    assert plan_revision(migrated) != recorded["revision"]
+    assert [pin.records_origin for pin in aligned_pins(ctx.state)] == [True]
+    migrate_stored_origins(ctx.state)
+    assert load_plan(ctx.state) == migrated
+
     _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL, _another_part(_US_MULTILATERAL))
     result = _tools_by_name()["propose_plan"].func(
         question="What share of US ODA goes to multilaterals?",
@@ -8764,6 +8786,92 @@ def test_a_stored_plan_recording_no_origin_and_its_aligned_pin_load_translate_an
         ("second", _US_TOTAL["spec_id"]),
         ("first", _US_MULTILATERAL["spec_id"]),
     ]
+
+
+def test_an_origin_dropped_after_a_stored_plan_migrates_is_not_inferred_again(
+    decision: DecisionFactory,
+) -> None:
+    """The stored comparison above, loaded once so its total records its origin. The
+    planner then restates the total on the multilateral row as US multilateral ODA, a
+    measure of its own, dropping the origin. A later entry loads that plan: the pin
+    it came from is marked, so nothing gives the total its origin back."""
+    recorded = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "aligned_total_plan_stored.json").read_text()
+    )
+    ctx = _FakeToolContext()
+    ctx.state.update(
+        {**recorded["state"], PLAN_STATE_KEY: json.dumps(recorded["state"][PLAN_STATE_KEY])}
+    )
+    migrate_stored_origins(ctx.state)
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL, _another_part(_US_MULTILATERAL))
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="How does US multilateral ODA compare with France's?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("second", _US_MULTILATERAL).model_copy(
+                update={"measure": "US multilateral ODA"}
+            )
+        ],
+        amends_version=1,
+        tool_context=ctx,
+    )
+    assert result["outcome"] == Outcome.OK.value, result
+    restated = load_plan(ctx.state)
+    migrate_stored_origins(ctx.state)
+
+    assert restated is not None
+    assert load_plan(ctx.state) == restated
+    second = restated.requirement("second")
+    assert isinstance(second, DatasetRequirement)
+    assert (second.source_spec_id, second.aligned_from) == (_US_MULTILATERAL["spec_id"], None)
+
+
+def test_a_stored_wholes_pin_names_the_compile_its_migrated_part_records() -> None:
+    """A stored plan whose part was moved onto the inclusive compile and whose whole was
+    compiled over that pin, each held as a pin of the stored form. Loading it gives
+    the part its origin, and the whole's pin names the part's compile, so the whole
+    reads its own compile (`planner.plan.compile_key`). A whole of a part pinning its
+    own dataset is left as it is."""
+    health = us_2023_block("health")["spec_id"]
+    inclusive = us_2023_block("health_inclusive")["spec_id"]
+    whole = us_2023_block("whole_inclusive")["spec_id"]
+    plain = us_2023_block("dac1_total_gross")["spec_id"]
+    part = DatasetRequirement(
+        id=_PART,
+        decision_ids=["measure"],
+        measure="US health aid",
+        entities=[Entity(name="United States", role="donor")],
+        period=Period(start=2023, end=2023),
+        source_spec_id=inclusive,
+    )
+    total = part.model_copy(
+        update={
+            "id": _WHOLE,
+            "source_spec_id": whole,
+            "whole_of": WholeOf(part=_PART, axis="sector"),
+        }
+    )
+    plan = Plan.model_construct(evidence_requirements=(part, total))
+    held = (
+        AlignedPin(origin=health, option_ids=("provider:inclusive",), spec_id=inclusive, digest={}),
+        AlignedPin(origin=inclusive, option_ids=(), spec_id=whole, digest={}, whole_axis="sector"),
+        AlignedPin(origin=plain, option_ids=(), spec_id=whole, digest={}, whole_axis="donor"),
+    )
+
+    migrated, marked = stored_origins(plan, held, to_origin={})
+
+    assert migrated is not None
+    by_id = {requirement.id: requirement for requirement in migrated.evidence_requirements}
+    assert [(pin.part_origin, pin.part_option_ids, pin.records_origin) for pin in marked] == [
+        (None, (), True),
+        (health, ("provider:inclusive",), True),
+        (None, (), True),
+    ]
+    restated = by_id[_WHOLE]
+    assert isinstance(restated, DatasetRequirement)
+    assert compile_key(restated, by_id) == marked[1].key
 
 
 async def test_a_comparison_with_a_total_stating_no_provider_scope_keeps_both_datasets(

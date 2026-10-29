@@ -23,14 +23,20 @@ from data_mcp.search_tool import MAX_PARTS
 from google.adk import Context, Event
 from google.adk.events import RequestInput
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
-from planner.plan import AskBreakdown, SessionState, stored_plan
+from planner.plan import AlignmentKey, AskBreakdown, SessionState, earlier_compile, stored_plan
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
 
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn_records import Origin, SearchReading, open_prices
+from harness.turn_records import (
+    CompiledBlock,
+    CompiledFrom,
+    Origin,
+    SearchReading,
+    open_prices,
+)
 
 # The ADK app name every stored conversation's sessions are keyed under.
 AGENT_NAME = "dfo_analyst_graph"
@@ -68,6 +74,12 @@ ORCHESTRATOR_SEARCHES_KEY = "orchestrator:searches"
 # Every plan this turn ran, oldest first, as `PlanRecord` JSON, written by
 # `plan_done`; `harness.studio` keeps it with the turn's record.
 ORCHESTRATOR_PLAN_RECORDS_KEY = "orchestrator:plan_records"
+# The block of each compile alignment made for a calculation's input this turn, as
+# `harness.turn_records.CompiledBlock` JSON, newest last (`save_compiled_block`).
+# Kept apart from `ORCHESTRATOR_SPECS_KEY`, so a pin of a compile's spec_id as the
+# planner's own never reads its block or planner marks; `harness.studio` keeps
+# those a plan used with the turn's record.
+ORCHESTRATOR_COMPILED_SPECS_KEY = "orchestrator:compiled_specs"
 # spec_id -> the warnings of the search part that returned it, as `search`
 # stores its block under `ORCHESTRATOR_SPECS_KEY`.
 ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
@@ -377,6 +389,7 @@ def store_search(
     held_open: Sequence[Sequence[str]] = (),
     share_sides: Sequence[Sequence[str]] = (),
     origin: Origin = "search",
+    compiled_from: CompiledFrom | None = None,
 ) -> list[dict[str, Any]]:
     """Store what a `resolver_digest` read in the orchestrator's session state,
     and return its parts as the model reads them, without their blocks.
@@ -391,6 +404,11 @@ def store_search(
     known. A `definite` part whose prices are open over several years reads
     with `open_prices`, the options of its prices question
     (`harness.turn_records.open_prices`).
+
+    A digest of a compile alignment made (`compiled_from`) stores each part's
+    own block and its warnings by the compile alone (`save_compiled_block`),
+    never by its spec_id, and each part's reading records the compile
+    (`SearchReading.compiled_from`).
     """
     specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
@@ -420,6 +438,10 @@ def store_search(
                 spec_id: {**block, "_resolved_sources": mentions}
                 for spec_id, block in blocks.items()
             }
+        if compiled_from is not None:
+            facts["compiled_from"] = compiled_from.model_dump(mode="json")
+            if (own := blocks.pop(part.get("spec_id") or "", None)) is not None:
+                save_compiled_block(state, compiled_from, part["spec_id"], own)
         specs.update(blocks)
         spec_warnings.update(dict.fromkeys(blocks, reading.get("warnings") or []))
         if asked:
@@ -437,6 +459,48 @@ def store_search(
     state[ORCHESTRATOR_SPEC_WARNINGS_KEY] = spec_warnings
     state[ORCHESTRATOR_SEARCHES_KEY] = searches
     return readings
+
+
+def save_compiled_block(
+    state: SessionState, compiled_from: CompiledFrom, spec_id: str, block: Mapping[str, Any]
+) -> None:
+    """Keep `block` as this turn's block of the compile made for `compiled_from` that
+    Search answered as `spec_id` (`ORCHESTRATOR_COMPILED_SPECS_KEY`), in place of one
+    kept for the same."""
+    entry = CompiledBlock(compiled_from=compiled_from, spec_id=spec_id, block=dict(block))
+    kept = [
+        raw
+        for raw in state.get(ORCHESTRATOR_COMPILED_SPECS_KEY) or ()
+        if (raw.get("spec_id"), raw.get("compiled_from"))
+        != (spec_id, compiled_from.model_dump(mode="json"))
+    ]
+    state[ORCHESTRATOR_COMPILED_SPECS_KEY] = [*kept, entry.model_dump(mode="json")]
+
+
+def compiled_block(
+    state: SessionState, key: AlignmentKey, spec_id: str
+) -> Mapping[str, Any] | None:
+    """The block of the compile made for `key` that Search answered as `spec_id`: the
+    one this turn kept (`save_compiled_block`), else the one an earlier turn stored
+    (`planner.plan.earlier_compile`); `None` where neither did."""
+    for raw in reversed(state.get(ORCHESTRATOR_COMPILED_SPECS_KEY) or ()):
+        entry = CompiledBlock.model_validate(raw)
+        if entry.spec_id == spec_id and entry.compiled_from.key == key:
+            return entry.block
+    return earlier_compile(key, spec_id)
+
+
+def compiled_spec_ids(state: SessionState) -> set[str]:
+    """The spec_id of each compile this turn kept a block of, or the conversation's
+    readings record (`SearchReading.compiled_from`)."""
+    return {
+        *(raw["spec_id"] for raw in state.get(ORCHESTRATOR_COMPILED_SPECS_KEY) or ()),
+        *(
+            raw["spec_id"]
+            for raw in conversation_readings(state)
+            if raw.get("compiled_from") and raw.get("spec_id")
+        ),
+    }
 
 
 def conversation_readings(state: SessionState) -> list[dict[str, Any]]:

@@ -54,7 +54,12 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import types
-from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorded_identity
+from planner.plan import (
+    SEEDS_STATE_KEY,
+    current_earlier_block,
+    current_earlier_compile,
+    current_recorded_identity,
+)
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -68,6 +73,7 @@ from harness.graph.state import (
     AGENT_NAME,
     APPLY_CHOICE_STATE_KEY,
     ORCHESTRATOR_APPLIED_KEY,
+    ORCHESTRATOR_COMPILED_SPECS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -724,11 +730,11 @@ async def _sse_stream(
 
 
 def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
-    """Keep the plan records, search readings, spec blocks and applied chip
-    `event` writes to the turn's session state, for `ConversationState.close_turn` to store
-    with the turn. Each key holds the turn's whole value, so the latest
-    write replaces. The blocks stay in process (`turn_specs`) until the turn
-    closes."""
+    """Keep the plan records, search readings, spec blocks, compiles' blocks and
+    applied chip `event` writes to the turn's session state, for
+    `ConversationState.close_turn` to store with the turn. Each key holds the
+    turn's whole value, so the latest write replaces. The blocks stay in process
+    (`turn_specs`, `turn_compiled_specs`) until the turn closes."""
     delta = event.actions.state_delta
     if ORCHESTRATOR_PLAN_RECORDS_KEY in delta:
         conversation.turn_plans = list(delta[ORCHESTRATOR_PLAN_RECORDS_KEY])
@@ -736,6 +742,8 @@ def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
         conversation.turn_readings = list(delta[ORCHESTRATOR_SEARCHES_KEY])
     if ORCHESTRATOR_SPECS_KEY in delta:
         conversation.turn_specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
+    if ORCHESTRATOR_COMPILED_SPECS_KEY in delta:
+        conversation.turn_compiled_specs = list(delta[ORCHESTRATOR_COMPILED_SPECS_KEY])
     if ORCHESTRATOR_APPLIED_KEY in delta:
         conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
 
@@ -1312,6 +1320,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             current_conversation_key.set((principal, body.conversation_id))
             current_user_message.set(conversation.turn_user_words)
             current_earlier_block.set(conversation.earlier_block)
+            current_earlier_compile.set(conversation.earlier_compile)
             current_recorded_identity.set(conversation.recorded_identity)
             # This request's model-call bounds, read by every model call the
             # streamed run makes (`harness.turn_budget`).
@@ -1752,6 +1761,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # refined ask and no switch's label.
         current_user_message.set(conversation.turn_user_words)
         current_earlier_block.set(conversation.earlier_block)
+        current_earlier_compile.set(conversation.earlier_compile)
         current_recorded_identity.set(conversation.recorded_identity)
         start_turn_budget(settings)
         try:

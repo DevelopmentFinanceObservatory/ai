@@ -34,6 +34,7 @@ from data_mcp.scope import ScopeAxis
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles
 from planner.plan import (
+    AlignmentKey,
     DatasetRequirement,
     Decline,
     Plan,
@@ -639,6 +640,48 @@ class FetchReading(StrictModel):
     args: tuple[dict[str, Any], ...] = Field(default=(), exclude_if=lambda args: not args)
 
 
+class CompiledFrom(StrictModel):
+    """What a compile stored as a reading was compiled for (`planner.plan.AlignmentKey`):
+    the pin `origin` on the options `option_ids`, or with its choice on `whole_axis`
+    left open, and for a whole the compile of its part (`part_origin`,
+    `part_option_ids`)."""
+
+    origin: str
+    option_ids: tuple[str, ...] = ()
+    whole_axis: str | None = None
+    part_origin: str | None = None
+    part_option_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, key: AlignmentKey) -> CompiledFrom:
+        """The record of `key`."""
+        return cls(
+            origin=key.origin,
+            option_ids=key.option_ids,
+            whole_axis=key.whole_axis,
+            part_origin=key.part_origin,
+            part_option_ids=key.part_option_ids,
+        )
+
+    @property
+    def key(self) -> AlignmentKey:
+        """The compile this records (`planner.plan.AlignedPin.key`)."""
+        return AlignmentKey(
+            self.origin, self.option_ids, self.whole_axis, self.part_origin, self.part_option_ids
+        )
+
+
+class CompiledBlock(StrictModel):
+    """The spec block of one compile alignment made for a calculation's input, which
+    Search answered as `spec_id`, kept apart from the blocks of the datasets
+    searches returned (`harness.graph.state.ORCHESTRATOR_COMPILED_SPECS_KEY`), so
+    no pin of `spec_id` as the planner's own reads it."""
+
+    compiled_from: CompiledFrom
+    spec_id: str
+    block: dict[str, Any]
+
+
 # The reading statuses whose own spec_id a search settled on: a `definite`
 # part, and a candidate or nearest series the orchestrator fetched (`chosen`).
 SETTLED_STATUSES = frozenset({"definite", "chosen"})
@@ -688,6 +731,12 @@ class SearchReading(StrictModel):
     posted identity this release could not read (`compiler.sources.block_wire_groups`), so
     `entity_groups` is empty without the part having none, and that resubmit
     refuses. It is stored and not rendered, as is `observed_at`.
+    `compiled_from` is set on a compile alignment made for a calculation's input
+    and stored as a reading (`harness.planner_seam.store_aligned_readings`): what
+    it was compiled for. Such a reading is admission's answer for that
+    requirement and no dataset the planner was shown, so a later turn reads its
+    block for that compile alone (`harness.studio_state.ConversationState.earlier_compile`) and a pin
+    of its spec_id as the planner's own does not read it.
     """
 
     text: str | None
@@ -737,6 +786,7 @@ class SearchReading(StrictModel):
     )
     origin: Origin = "search"
     observed_at: datetime | None = None
+    compiled_from: CompiledFrom | None = Field(default=None, exclude_if=lambda key: key is None)
 
     @model_validator(mode="before")
     @classmethod
@@ -775,8 +825,8 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them, `planner_axes`, `entity_groups` and
-        `entity_groups_unreadable` too. A `no_data` part's `reason` is the
+        among them, `planner_axes`, `entity_groups`,
+        `entity_groups_unreadable` and `compiled_from` too. A `no_data` part's `reason` is the
         reading's `refusal_code`, and `counted_as`, `alternatives` and
         `other_prices` are `harness.tool_contracts.measure_choice`'s.
         """
@@ -845,6 +895,7 @@ class SearchReading(StrictModel):
             planner_axes=tuple(part.get("planner_axes") or ()),
             entity_groups=tuple(part.get("entity_groups") or ()),
             entity_groups_unreadable=part.get("entity_groups_unreadable") is True,
+            compiled_from=part.get("compiled_from"),
             origin=origin,
             observed_at=observed_at,
         )

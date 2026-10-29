@@ -45,6 +45,7 @@ from harness.graph.state import (
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
+    compiled_spec_ids,
     frame_id_for,
     readable_plan,
     register_frames,
@@ -630,10 +631,12 @@ def record_plan(
     plan_record = PlanRecord.from_plan(
         plan,
         # A source an earlier turn's search returned is a searched one too,
-        # and keeps its block in that turn's record.
+        # and keeps its block in that turn's record, as does a compile alignment
+        # made, whose reading is in the ledger already.
         searched={
             *(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
             *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("spec_ids", []),
+            *compiled_spec_ids(state),
         },
         failed_steps=frozenset(stopped.values()),
         run_id=run_id,

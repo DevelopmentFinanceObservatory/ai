@@ -79,9 +79,11 @@ from translator.discovery import DefinitionNotResolvedError, resolve_definition
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
+    ORCHESTRATOR_COMPILED_SPECS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    compiled_block,
     conversation_readings,
     readable_plan,
     store_search,
@@ -123,14 +125,16 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # The other state a revision writes, which a switch that fails or is stopped
 # puts back too: the plan, and the readings `store_search` stores for the
 # switched sources and for the pins the revision compiles
-# (`harness.planner_seam.store_aligned_readings`), with their blocks. Each
-# maps to the value it is put back as when unset, since the studio reads the
-# readings and blocks as a list and a mapping (`harness.studio`).
+# (`harness.planner_seam.store_aligned_readings`), with their blocks and the
+# compiles' blocks. Each maps to the value it is put back as when unset, since the
+# studio reads the readings, the blocks and the compiles' blocks as a list, a
+# mapping and a list (`harness.studio`).
 _RESTORED_KEYS: Mapping[str, Any] = {
     "plan": None,
     ORCHESTRATOR_SEARCHES_KEY: [],
     ORCHESTRATOR_SPECS_KEY: {},
     ORCHESTRATOR_SPEC_WARNINGS_KEY: {},
+    ORCHESTRATOR_COMPILED_SPECS_KEY: [],
 }
 
 
@@ -336,7 +340,9 @@ async def _switched_plan(
                     entry.model_dump(mode="json", exclude_none=True)
                     for entry in switch_entries(scope, choice=choice, option_id=option_id)
                 ],
-                block=specs.get(pin) or _source_block(sources.get(pin), pin),
+                block=specs.get(pin)
+                or _source_block(sources.get(pin), pin)
+                or _compiled_block(state, reading, pin),
                 label=label,
             )
             for pin, reading, scope, choice in targets
@@ -499,6 +505,16 @@ def _target(
 def _source_block(source: PinSource | None, pin: str) -> Mapping[str, Any] | None:
     """The block the planner was shown for `pin`, when it was shown one."""
     return source.spec_block(pin) if source is not None else None
+
+
+def _compiled_block(
+    state: SessionState, reading: SearchReading, pin: str
+) -> Mapping[str, Any] | None:
+    """The block kept for `reading`'s compile (`SearchReading.compiled_from`), whose pin
+    is `pin`, this turn or an earlier one (`compiled_block`); `None` for a reading that
+    is no compile or where none was kept."""
+    compiled = reading.compiled_from
+    return compiled_block(state, compiled.key, pin) if compiled is not None else None
 
 
 async def _resubmit(
@@ -717,7 +733,9 @@ async def apply_stored_choice(
                 entry.model_dump(mode="json", exclude_none=True)
                 for entry in switch_entries(reading.scope, choice=choice, option_id=option_id)
             ],
-            block=(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
+            block=(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin)
+            or _compiled_block(cast(SessionState, ctx.state), reading, pin)
+            or earlier_block(pin),
             label=label,
         )
     except SwitchFailedError as exc:

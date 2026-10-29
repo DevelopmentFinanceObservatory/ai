@@ -145,6 +145,7 @@ from planner.plan import (
     load_asks_across_years,
     load_plan,
     load_plan_rounds,
+    migrate_stored_origins,
     pin_sources,
     record_optional_decline,
     record_unsupported,
@@ -180,6 +181,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    save_compiled_block,
     store_search,
 )
 from harness.prefix_cache import PrefixCache
@@ -196,6 +198,7 @@ from harness.turn_budget import CLOSED_BY_KEY, current_turn_budget
 from harness.turn_records import (
     SETTLED_STATUSES,
     CandidateReading,
+    CompiledFrom,
     RenderedReadings,
     SearchReading,
     measure_choice_text,
@@ -569,6 +572,11 @@ class PlannerSeam:
         seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
         if seeded is not None:
             save_plan(cast(SessionState, ctx.session.state), seeded)
+        # A plan stored before its requirements recorded their origins takes them
+        # from the pins held beside it, once (`migrate_stored_origins`). The
+        # message renders no origin (`_plan_context`), so `seeded` serves it as
+        # the graph passed it.
+        migrate_stored_origins(cast(SessionState, ctx.session.state))
         if not ctx.resume_inputs:
             # One `__call__` is one entry into the planner, EXCEPT when it
             # re-enters through a `RequestInput` this seam itself raised
@@ -834,6 +842,7 @@ class PlannerSeam:
         state = cast(SessionState, ctx.state)
         prior = Plan.model_validate(prior_plan)
         save_plan(state, prior)
+        migrate_stored_origins(state)
         save_plan_rounds(state, 0)
         view = _RevisionSession(tool_context=ctx, inherits=dict(inherits))
         proposal = Proposal(
@@ -1903,7 +1912,14 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     so the reading reads it in `SearchReading.planner_axes` and
     `harness.scope_choices.carried_entries` leaves that entry out.
     Later turns then find it among the readings, and a switch on its
-    plan-card row finds its scope (`harness.graph.switch`).
+    plan-card row finds its scope (`harness.graph.switch`). Each such reading
+    records what its pin was compiled for (`SearchReading.compiled_from`), and
+    the compile's block is kept by that compile alone
+    (`harness.graph.state.save_compiled_block`), never under its spec_id, so a
+    pin of that spec_id as the planner's own, this turn or a later one, reads
+    no compile's block or planner marks, and a later turn shows the planner no
+    source for it (`_reading_pin_sources`). A pin whose spec_id a reading of the
+    conversation already names joins no reading; its block is kept all the same.
 
     Each dataset Search settled on for a calculation's input the planner
     pinned none for (`submission.service.searched_pins`) joins them the same
@@ -1925,7 +1941,12 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     ]
     stored = {reading.spec_id for reading in readings}
     for pin in held:
+        compiled_from = CompiledFrom.of(pin.key)
         if pin.spec_id in stored:
+            if (block := pin.block) is not None:
+                save_compiled_block(
+                    cast(SessionState, ctx.state), compiled_from, pin.spec_id, block
+                )
             continue
         origin = next(
             (reading for reading in reversed(readings) if reading.spec_id == pin.origin), None
@@ -1951,6 +1972,7 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
             asked=[origin.asked_roles] if origin is not None else (),
             held_open=[origin.open_roles] if origin is not None else (),
             share_sides=[origin.share_over] if origin is not None else (),
+            compiled_from=compiled_from,
         )
         stored.add(pin.spec_id)
     for found in searched:
@@ -2024,13 +2046,20 @@ def _reading_pin_sources(
     keeps the parties its settling reading asked for. A fetched price sibling
     (`SearchReading.sibling_of` on axis `unit`) settles as its own source,
     since its block elects the count search elected for the source that
-    offered it.
+    offered it. A compile stored as a reading (`SearchReading.compiled_from`)
+    is admission's answer for the requirement it was compiled for and shows
+    the planner nothing: a spec_id only such readings name gets no source, so
+    a pin of it reads no compile's block or planner marks.
     """
-    settled = [
-        parsed
-        for parsed in (SearchReading.model_validate(reading) for reading in readings)
-        if parsed.status in SETTLED_STATUSES
-    ]
+    parsed = [SearchReading.model_validate(reading) for reading in readings]
+    plain = [reading for reading in parsed if reading.compiled_from is None]
+    compiled_only = {
+        spec_id
+        for reading in parsed
+        if reading.compiled_from is not None
+        for spec_id in named_spec_ids(reading)
+    }.difference(*(named_spec_ids(reading) for reading in plain))
+    settled = [reading for reading in plain if reading.status in SETTLED_STATUSES]
     elected = {reading.spec_id for reading in settled if reading.other_count_of is None}
     counts_of = {
         reading.spec_id: reading.other_count_of
@@ -2039,6 +2068,8 @@ def _reading_pin_sources(
     }
     sources: dict[str, PinSource] = {}
     for spec_id in shown:
+        if spec_id in compiled_only:
+            continue
         from_earlier = spec_id in earlier
         reading = next((r for r in reversed(settled) if r.spec_id == spec_id), None)
         sources[spec_id] = PinSource(

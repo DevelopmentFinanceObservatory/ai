@@ -2385,7 +2385,7 @@ class _Translator:
                 " ".join(
                     loose_match_notes(
                         self._conversation.turn_readings,
-                        specs=self._conversation.turn_specs,
+                        specs=self._conversation.turn_blocks(),
                         plans=self._conversation.turn_plans,
                     )
                 )
@@ -2393,7 +2393,7 @@ class _Translator:
             )
             basis = basis_line(
                 self._conversation.turn_readings,
-                specs=self._conversation.turn_specs,
+                specs=self._conversation.turn_blocks(),
                 plans=self._conversation.turn_plans,
             )
             closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
@@ -2419,7 +2419,7 @@ class _Translator:
             [
                 ApplyChoiceSuggestion(kind="apply_choice", turn=turn, **chip._asdict())
                 for chip in scope_chips(
-                    self._conversation.turn_readings, specs=self._conversation.turn_specs
+                    self._conversation.turn_readings, specs=self._conversation.turn_blocks()
                 )
             ]
             if self._final_text
