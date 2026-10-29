@@ -10338,11 +10338,35 @@ def test_a_sum_of_provider_rows_searched_in_words_keeps_each_row(
 
 def _another_part(block: dict[str, Any]) -> dict[str, Any]:
     """A copy of `block` as a part of its own (`PartScope.base`), under a spec_id of its
-    own, as another donor's DAC1 row reads."""
+    own, binding the same donor and compiling to the same identity."""
     part = block["resolved"]["scope_choices"]["base"]["spec_id"]
     text = json.dumps(block)
     for held, other in ((part, f"spec_{'6' * 32}"), (block["spec_id"], f"spec_{'5' * 32}")):
         text = text.replace(held, other)
+    return json.loads(text)
+
+
+def _french_dac1(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block`, one of `_SUM_BLOCKS`' DAC countries' DAC1 rows, as France's
+    row reads: France bound as its donor, as `us_health_to_kenya` binds the United
+    States, so no donor set, under the spec_ids its identities hash to."""
+    text = json.dumps(block)
+    for held, french in (("DACCountriesTotal", "country/FRA"), ("DAC countries, total", "France")):
+        text = text.replace(held, french)
+    copied = json.loads(text)
+    resolved = copied["resolved"]
+    del resolved["entity_groups"]["origin"]
+    for entity in resolved["entities"]:
+        if entity["role"] == "origin":
+            entity["entity_type"] = "Country"
+    scope = resolved["scope_choices"]
+    renamed = {
+        scope["base"]["spec_id"]: spec_id_for(canonicalize(scope["base"]["identity"])),
+        copied["spec_id"]: spec_id_for(canonicalize(scope["compiled"]["identity"])),
+    }
+    text = json.dumps(copied)
+    for held, french in renamed.items():
+        text = text.replace(held, french)
     return json.loads(text)
 
 
@@ -10364,7 +10388,7 @@ def test_provider_rows_of_two_parts_read_in_words_keep_their_own(
     contributions counting no money twice."""
     blocks = {
         _TOTAL: _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"], stated=stated),
-        _PART: _another_part(
+        _PART: _french_dac1(
             _searched_in_words(_SUM_BLOCKS["dac_countries_multilateral"], stated=stated)
         ),
     }
@@ -10505,7 +10529,7 @@ _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
             {
                 "first": _US_MULTILATERAL,
                 "second": _US_TOTAL,
-                "other": _another_part(_US_MULTILATERAL),
+                "other": _french_dac1(_US_MULTILATERAL),
             },
             [_share("first", "second"), _difference("second", "other")],
             None,
@@ -10521,7 +10545,7 @@ _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
                 {
                     "first": _US_MULTILATERAL,
                     "second": _US_TOTAL,
-                    "other": _another_part(
+                    "other": _french_dac1(
                         _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"])
                     ),
                 },
@@ -10544,7 +10568,7 @@ _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
                 "second": _searched_in_words(
                     _SUM_BLOCKS["dac_countries_multilateral"], stated=False
                 ),
-                "other": _another_part(_US_MULTILATERAL),
+                "other": _french_dac1(_US_MULTILATERAL),
             },
             [_added("first", "second"), _share(_SUM, "other")],
             None,
@@ -10619,6 +10643,70 @@ def test_two_sides_never_read_one_series(
     assert [
         step_id for step_id in caveated if differ & set(plan.requirement(step_id).decision_ids)
     ] == caveated
+
+
+def _own_part_with_source(block: dict[str, Any]) -> dict[str, Any]:
+    """`block`, a part compiled onto one provider row, as Search answers that row read
+    in words with its source named ("multilateral ODA from OECD DAC1"): a part of its
+    own, whose base identity binds the row's code and DAC1's provenance facet, under
+    the spec_id that identity hashes to. The compile of total ODA onto the row
+    leaves the facet to the read, which picks DAC1, so the two read one series."""
+    scope = block["resolved"]["scope_choices"]
+    identity = {
+        **scope["compiled"]["identity"],
+        "facets": {"provenance": {"state": "value", "ref": "provenance/OECDDAC1"}},
+    }
+    spec_id = spec_id_for(canonicalize(identity))
+    text = json.dumps(block)
+    for held in (scope["base"]["spec_id"], block["spec_id"]):
+        text = text.replace(held, spec_id)
+    own = json.loads(text)
+    own["definition"]["identity"] = identity
+    own_scope = own["resolved"]["scope_choices"]
+    own_scope["base"]["identity"] = own_scope["compiled"]["identity"] = identity
+    return own
+
+
+def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
+    decision: DecisionFactory,
+) -> None:
+    """ "What share of US ODA went to multilateral organisations?": Search answers
+    multilateral ODA as a part of its own, and the total counted on its multilateral
+    row compiles to that part's series under another spec_id. The compile is held,
+    so the share would divide one series by itself and answer 100%. The total keeps
+    its own row, and the share states that its inputs count different spending."""
+    numerator = _searched_in_words(_own_part_with_source(_SUM_BLOCKS["dac_countries_multilateral"]))
+    compile_block = _SUM_BLOCKS["dac_countries_multilateral"]
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, numerator, _US_TOTAL)
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin=_US_TOTAL["spec_id"],
+            option_ids=("provider:multilateral",),
+            spec_id=compile_block["spec_id"],
+            digest={"spec_block": compile_block},
+        ),
+    )
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of US ODA went to multilateral organisations?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("first", numerator),
+            _dac_countries("second", _US_TOTAL),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [("first", numerator["spec_id"]), ("second", _US_TOTAL["spec_id"])]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    differ = {d.slot for d in plan.decisions if d.caveat == "providers_differ"}
+    assert differ & set(plan.requirement(_SHARE).decision_ids)
 
 
 # The US donor total under a second spec_id, on `TOTAL`'s part, counted net by default.
@@ -10865,6 +10953,7 @@ def test_two_unpinned_leaves_read_one_series_only_when_they_are_one_leaf(
         "measure_basis",
         {},
         {"second": {"measure_basis:gross"}},
+        compiles={},
     )
 
     assert moved == ({("second", "measure_basis:gross")} if kept_apart else set())

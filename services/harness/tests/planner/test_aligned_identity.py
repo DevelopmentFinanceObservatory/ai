@@ -63,11 +63,11 @@ from .test_agent import (
     IDS,
     DecisionFactory,
     RequirementFactory,
-    _another_part,
     _combination_asked,
     _dac_countries,
     _difference,
     _FakeToolContext,
+    _french_dac1,
     _pins,
     _reduced,
     _referred_event,
@@ -330,7 +330,7 @@ async def test_a_direct_pin_sharing_an_aligned_compiles_spec_id_keeps_its_own_ro
     total and the share divide one series by itself. Each side keeps its own row:
     the total goes back to its own pin."""
     ctx = _FakeToolContext()
-    france = _another_part(_US_MULTILATERAL)
+    france = _french_dac1(_US_MULTILATERAL)
     _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL, france)
     propose = _proposing()
     compared = await propose(
@@ -377,7 +377,7 @@ async def test_a_compile_leaves_the_shown_pins_as_the_planner_was_shown_them(
     shown, so the shown pins keep their keys: a later direct pin of that spec_id
     finds no shown source to read the compile's provenance from."""
     ctx = _FakeToolContext()
-    france = _another_part(_US_MULTILATERAL)
+    france = _french_dac1(_US_MULTILATERAL)
     _show_blocks(ctx, _US_TOTAL, france)
     shown = set(pin_sources(ctx.state))
 
