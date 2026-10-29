@@ -19,7 +19,7 @@ from compiler.compile import CompileIssueCode
 from compiler.sources import DiscoveryStatus
 from compiler.surface import ToolCallResult, ToolSchema
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
-from executor.outcomes import Accepted
+from executor.outcomes import Accepted, RefusalKind
 from executor.run import execute_approved_plan
 from harness.plan_display import step_rows
 from planner.plan import (
@@ -220,8 +220,8 @@ async def test_a_translation_states_its_rolling_years_from_the_newest_year_the_d
     card = {row["id"]: row["description"] for row in step_rows(stored)}
     assert f"from {window[0]} to {window[1]}, following the newest year" in str(card["growth"])
     assert [name for name, _ in surface.calls] == ["get_data", "resolve_anchor"]
-    # The read stands on the list the compile read.
-    assert surface.listed == 1
+    # The compile and the read each list the surface.
+    assert surface.listed == 2
 
     _script_analysis(surface, stored)
     _, outcome = await execute_approved_plan(stored.approve(at=datetime.now(UTC)), surface=surface)
@@ -229,7 +229,7 @@ async def test_a_translation_states_its_rolling_years_from_the_newest_year_the_d
     assert isinstance(outcome, Accepted), outcome
     assert [anchor.period for anchor in outcome.anchors] == [newest]
     # The run lists the surface and reads the newest year again for itself.
-    assert surface.listed == 2
+    assert surface.listed == 3
     assert [name for name, _ in surface.calls].count("resolve_anchor") == 2
     ((_, sent),) = [call for call in surface.calls if call[0] == "growth"]
     assert (sent["window_start"], sent["window_end"]) == tuple(str(year) for year in window)
@@ -324,6 +324,43 @@ async def test_a_restatement_a_plan_rule_refuses_goes_back_as_a_compile_issue_na
     assert "2023" in issue["reason"]
     assert answer["action"]["arguments"]["kind"] == ReferralKind.REQUIREMENT_NEEDS_REPAIR.value
     assert answer["action"]["arguments"]["constraint"] == CompileIssueCode.ROLLING_ANCHOR_BEHIND
+    assert context.plan() == draft
+
+
+class _ChangingSurface(ScriptedSurface):
+    """A `ScriptedSurface` whose `get_data` takes other arguments from its second listing on."""
+
+    async def list_tools(self) -> list[ToolSchema]:
+        listed = await super().list_tools()
+        if self.listed == 1:
+            return listed
+        return [
+            schema.model_copy(update={"parameters": {"type": "object", "properties": {}}})
+            if schema.name == "get_data"
+            else schema
+            for schema in listed
+        ]
+
+
+async def test_a_tool_changed_after_the_compile_stops_the_newest_year_read(
+    rolling_draft: Callable[..., Plan],
+    source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The newest-year read lists the surface itself, so a tool that changed since
+    the compile listed it stops the read before any retrieval, as it stops the run."""
+    draft = rolling_draft()
+    context = _Context(draft, source())
+    surface = _ChangingSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok({})], "resolve_anchor": [_anchor("2024")]},
+    )
+
+    answer = await _propose(context, surface)
+
+    assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
+    assert answer["action"]["arguments"]["stop_code"] == RefusalKind.SURFACE_CHANGED.value
+    assert surface.calls == []
     assert context.plan() == draft
 
 

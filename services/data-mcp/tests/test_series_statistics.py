@@ -988,6 +988,46 @@ async def test_concurrent_reads_of_one_artifact_fetch_it_once() -> None:
     assert all(table is tables[0] for table in tables)
 
 
+async def test_concurrent_reads_of_one_artifact_share_a_failed_fetch() -> None:
+    """Three reads of one artifact that all miss the cache at once share the one
+    fetch's failure. None of them fetches again on its own."""
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    requests: list[str] = []
+    statuses = iter((503, 200, 200))
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("link")
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    async def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("get")
+        # Yield, so the other reads miss the cache while this GET is in flight.
+        await asyncio.sleep(0.01)
+        return httpx2.Response(next(statuses), content=data)
+
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        results = await asyncio.gather(
+            *(
+                fetch_series_statistics_table(
+                    subject_id=_SPEC_ID,
+                    content_version=_CONTENT_VERSION,
+                    artifact=artifact,
+                    expected_series=1,
+                    continuing=None,
+                    transport=httpx2.MockTransport(get_handler),
+                )
+                for _ in range(3)
+            ),
+            return_exceptions=True,
+        )
+
+    assert requests == ["link", "get"]
+    assert all(isinstance(result, httpx2.HTTPStatusError) for result in results), results
+
+
 def test_a_slice_counts_every_buffer_it_keeps_alive() -> None:
     """A one-row slice of a large table holds the large table's buffers, so it is
     sized by them and a budget below them does not keep it."""

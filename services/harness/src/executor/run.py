@@ -1303,7 +1303,6 @@ async def read_anchors(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
-    schemas: Mapping[str, ToolSchema] | None = None,
     held: Iterable[HeldAnchor] = (),
 ) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded:
     """Resolve the newest period of each group of `workflow`'s rolling steps, as its run would.
@@ -1313,12 +1312,10 @@ async def read_anchors(
     evidence, and `resolve_anchor` for each group, over the same
     populations and frames. Nothing is admitted to a ledger and nothing is
     recorded, and no derived step runs. `revision` names the work in a stop's
-    outcome. The other arguments but the last two are
+    outcome. The other arguments but the last are
     `execute_approved_plan`'s. No answer is written from the read, so it asks
     no names for its series (`no_label_refs`).
 
-    `schemas` are the tools `workflow` was just compiled against, by name;
-    the surface check then reads them in place of listing the surface again.
     A group whose key (`HeldAnchor.key`) one of `held` carries reads as that
     one, and its retrievals run only when another group rests on them too.
 
@@ -1346,7 +1343,7 @@ async def read_anchors(
     )
     run = _Run(submission, run_id=None, ledger=None, runtime=runtime)
     try:
-        return await run.read_anchors(schemas=schemas, held={anchor.key: anchor for anchor in held})
+        return await run.read_anchors(held={anchor.key: anchor for anchor in held})
     except _Stopped as stopped:
         return _stop_outcome(stopped)
 
@@ -1466,9 +1463,7 @@ class _Run:
             anchors=self._anchors_so_far(),
         )
 
-    async def read_anchors(
-        self, *, schemas: Mapping[str, ToolSchema] | None, held: Mapping[str, HeldAnchor]
-    ) -> tuple[AnchorRead, ...]:
+    async def read_anchors(self, *, held: Mapping[str, HeldAnchor]) -> tuple[AnchorRead, ...]:
         """Run the retrievals the anchor groups rest on, seal them, and resolve each group.
 
         The run's own steps for the part of it a group's newest period rests
@@ -1485,10 +1480,9 @@ class _Run:
         A group `held` names by its key (`_group_key`) reads as the held
         result instead, renamed to the group's steps, and the entities its
         retrievals left out are taken from it; a retrieval runs only for a
-        group `held` does not name. `schemas`, when given, stand in for the
-        surface's own list (`_surface_as_compiled`).
+        group `held` does not name.
         """
-        schemas = await self._surface_as_compiled(schemas)
+        schemas = await self._surface_as_compiled()
         keys = {group.steps: self._group_key(group) for group in self.anchor_groups}
         standing = {
             group.steps: held[keys[group.steps]]
@@ -1791,26 +1785,18 @@ class _Run:
 
     # -- before the first call ------------------------------------------------------
 
-    async def _surface_as_compiled(
-        self, listed: Mapping[str, ToolSchema] | None = None
-    ) -> dict[str, ToolSchema]:
+    async def _surface_as_compiled(self) -> dict[str, ToolSchema]:
         """Re-read the surface and refuse to run against tools that have changed.
 
         Each step's tool is compared with what the step was compiled against.
         A workflow with a rolling step also calls `resolve_anchor`, which no
         step names, so that tool is compared with its row of the capability
-        table, under the first rolling step's id. `listed`, the surface a
-        caller has just listed, by name, is compared in place of listing it
-        again; a run lists it itself, since the surface may have moved since
-        the plan was approved.
+        table, under the first rolling step's id.
         """
-        if listed is not None:
-            schemas = dict(listed)
-        else:
-            try:
-                schemas = {schema.name: schema for schema in await self.surface.list_tools()}
-            except ToolSurfaceUnavailableError as exc:
-                raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc)) from exc
+        try:
+            schemas = {schema.name: schema for schema in await self.surface.list_tools()}
+        except ToolSurfaceUnavailableError as exc:
+            raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc)) from exc
         for step in self.workflow.steps:
             self._check_as_compiled(
                 schemas.get(step.tool.name),

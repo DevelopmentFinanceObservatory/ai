@@ -2151,8 +2151,9 @@ def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
 # (`harness.studio`), so the parts last the turn: every invocation of it (the
 # first message, each plan card switch, the approval) is served what an
 # earlier one was answered, on any instance, and the next turn starts empty.
-# A part is written once, when it is resolved. A restore after a failed or
-# stopped switch (`harness.graph.switch._restore`) writes the saved keys again.
+# A part is written once, when it is resolved. A switch that fails or is
+# stopped keeps them: `harness.graph.switch._restore` puts back the drafting
+# state without them, so the parts Search answered meanwhile stay.
 RESOLVED_STATE_PREFIX = "translator:resolved:"
 
 
@@ -2231,44 +2232,9 @@ def resolving_once(
         _current_resolving.reset(token)
 
 
-def _resolve_arguments(
-    *,
-    spec_id: str,
-    identity: Mapping[str, Any],
-    groups: Sequence[ResolvedGroup] = (),
-    scope_entries: Sequence[Mapping[str, Any]] = (),
-) -> dict[str, object]:
-    """The arguments of data-mcp's `resolve_definition` for `identity` under `spec_id`
-    (`resolve_definition`, `hold_resolved`)."""
-    arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
-    if groups:
-        arguments["entity_groups"] = wire_groups(groups)
-    if scope_entries:
-        arguments["scope_entries"] = [dict(entry) for entry in scope_entries]
-    return arguments
-
-
 def _resolved_key(arguments: Mapping[str, object]) -> str:
     """The session state key the part a `resolve_definition` call with `arguments` answered is stored under."""
     return RESOLVED_STATE_PREFIX + hashlib.sha256(rfc8785.dumps(dict(arguments))).hexdigest()
-
-
-def hold_resolved(
-    state: SessionState,
-    *,
-    spec_id: str,
-    identity: Mapping[str, Any],
-    groups: Sequence[ResolvedGroup] = (),
-    part: Mapping[str, Any],
-) -> None:
-    """Hold `part` as Search's answer to resolving `identity` under `spec_id`, for the rest of the turn.
-
-    A later `resolve_definition` of the same identity and `groups` inside
-    `resolving_once` over `state` is served `part` and posts nothing. `part`
-    is a `definite` part data-mcp has stored the definition of.
-    """
-    arguments = _resolve_arguments(spec_id=spec_id, identity=identity, groups=groups)
-    state[_resolved_key(arguments)] = part
 
 
 async def answered_once(
@@ -2357,9 +2323,11 @@ async def resolve_definition(
         DefinitionNotResolvedError: If the call did not complete, data-mcp
             refused it, or the envelope holds no part.
     """
-    arguments = _resolve_arguments(
-        spec_id=spec_id, identity=identity, groups=groups, scope_entries=scope_entries
-    )
+    arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
+    if groups:
+        arguments["entity_groups"] = wire_groups(groups)
+    if scope_entries:
+        arguments["scope_entries"] = [dict(entry) for entry in scope_entries]
 
     def call() -> Awaitable[ToolCallResult]:
         return call_within_entry(

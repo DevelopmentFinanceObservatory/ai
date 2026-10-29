@@ -3058,20 +3058,6 @@ def _first_year_refusal(
     )
 
 
-def requirement_window(
-    requirement: DatasetRequirement, *, whole_history: Mapping[str, int]
-) -> dict[str, object]:
-    """The `requested_window` a pinned `requirement` is retrieved over (`_window_pins`).
-
-    Its period, or for one stating `period_end_open` a range with no end
-    year (`_open_window`). `whole_history` is the plan's
-    `planner.plan.HistorySplit.whole_history`.
-    """
-    if requirement.period_end_open:
-        return _open_window(requirement, whole_history=whole_history)
-    return period_window(requirement.period)
-
-
 def _open_window(
     requirement: DatasetRequirement, *, whole_history: Mapping[str, int]
 ) -> dict[str, object]:
@@ -3193,7 +3179,10 @@ def _window_pins(
         if pin is None or recorded is None:
             continue
         pinning[requirement.id] = pin
-        window = requirement_window(requirement, whole_history=whole_history)
+        if requirement.period_end_open:
+            window = _open_window(requirement, whole_history=whole_history)
+        else:
+            window = period_window(requirement.period)
         if recorded.identity.get("requested_window") == window:
             copies[requirement.id] = None
         else:

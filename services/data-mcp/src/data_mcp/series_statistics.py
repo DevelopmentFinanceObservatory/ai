@@ -47,21 +47,20 @@ The verified table is kept per process under `artifact.artifact_digest`, the
 sha256 of its bytes, with the `expected_series` and `continuing` it was
 checked against (`_TABLES`). A retrieval's `get_data` digest and the harness's
 evidence check on the same mint therefore download and decode the artifact
-once, and concurrent misses on one key wait on the first. Only a table that
-passed every check is kept, so a failure is retried by the next call.
+once. Concurrent misses on one key share one fetch and its outcome, a failure
+included. Only a table that passed every check is kept, so a failure is
+retried by the next call after it.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import io
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from typing import Any, NamedTuple
 
 import httpx2
@@ -157,30 +156,22 @@ class _TableKey(NamedTuple):
     continuing: str | None
 
 
-@dataclass
-class _Flight:
-    """The lock the callers missing one key share, and how many of them hold or await it."""
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    users: int = 0
-
-
 class _VerifiedTables:
     """Verified tables, least recently used first, within `max_bytes` of Arrow buffers.
 
     A key names immutable bytes and a deterministic read of them, so an entry
     never goes stale. It is only evicted to stay under `max_bytes`. A table is
     sized by every buffer it references (`pa.Table.get_total_buffer_size`),
-    so a slice counts the whole buffer it keeps alive. `flight` hands the
-    callers missing one key a single lock, so the first fetches and the rest
-    find its table.
+    so a slice counts the whole buffer it keeps alive. `flight` hands every
+    caller missing one key the one fetch of it, so all of them share its
+    outcome, a failure included.
     """
 
     def __init__(self, max_bytes: int) -> None:
         self.max_bytes = max_bytes
         self._tables: OrderedDict[_TableKey, tuple[pa.Table, int]] = OrderedDict()
         self._held = 0
-        self._flights: dict[_TableKey, _Flight] = {}
+        self._flights: dict[_TableKey, asyncio.Task[pa.Table]] = {}
 
     def get(self, key: _TableKey) -> pa.Table | None:
         """The table kept under `key`, marked most recently used, or `None`."""
@@ -204,22 +195,19 @@ class _VerifiedTables:
             _, (_, evicted) = self._tables.popitem(last=False)
             self._held -= evicted
 
-    @contextlib.asynccontextmanager
-    async def flight(self, key: _TableKey, *, deadline: CallDeadline | None) -> AsyncIterator[None]:
-        """Hold `key`'s lock, waiting for it until `deadline` at the latest."""
-        flight = self._flights.setdefault(key, _Flight())
-        flight.users += 1
-        try:
-            async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
-                await flight.lock.acquire()
-            try:
-                yield
-            finally:
-                flight.lock.release()
-        finally:
-            flight.users -= 1
-            if not flight.users:
-                del self._flights[key]
+    def flight(
+        self, key: _TableKey, fetch: Callable[[], Coroutine[Any, Any, pa.Table]]
+    ) -> asyncio.Task[pa.Table]:
+        """The fetch of `key` in flight, started as `fetch()` when none is.
+
+        The fetch is forgotten once it ends, so the next miss after a failure
+        fetches again.
+        """
+        if (task := self._flights.get(key)) is None:
+            task = asyncio.create_task(fetch())
+            self._flights[key] = task
+            task.add_done_callback(lambda _: self._flights.pop(key, None))
+        return task
 
     def clear(self) -> None:
         """Forget every table."""
@@ -383,19 +371,17 @@ async def fetch_series_statistics_table(
     key = _TableKey(artifact.artifact_digest, expected_series, continuing)
     if (held := _TABLES.get(key)) is not None:
         return held
-    async with _TABLES.flight(key, deadline=deadline):
-        if (held := _TABLES.get(key)) is not None:
-            return held
-        async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
-            link = await artifact_link(subject_id, content_version, artifact.artifact_digest)
-            # `Accept-Encoding: identity` is what keeps `_read_bounded`'s cap exact.
-            async with get_client().stream_link(
-                link,
-                timeout_s=_FETCH_TIMEOUT_S,
-                headers={"Accept-Encoding": "identity"},
-                transport=transport,
-            ) as response:
-                fetched = await _read_bounded(response, max_bytes=artifact.bytes)
+
+    async def fetch() -> pa.Table:
+        link = await artifact_link(subject_id, content_version, artifact.artifact_digest)
+        # `Accept-Encoding: identity` is what keeps `_read_bounded`'s cap exact.
+        async with get_client().stream_link(
+            link,
+            timeout_s=_FETCH_TIMEOUT_S,
+            headers={"Accept-Encoding": "identity"},
+            transport=transport,
+        ) as response:
+            fetched = await _read_bounded(response, max_bytes=artifact.bytes)
         computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
         if computed_digest != artifact.artifact_digest:
             raise SeriesStatisticsSchemaError(
@@ -405,6 +391,13 @@ async def fetch_series_statistics_table(
         table = _read(fetched, expected_series=expected_series, continuing=continuing)
         _TABLES.put(key, table)
         return table
+
+    # A miss joins the fetch in flight for `key`, which each hop bounds by its own
+    # timeout, and waits for it until its own deadline. Shielded, so a caller
+    # giving up leaves the fetch to the others.
+    flight = _TABLES.flight(key, fetch)
+    async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
+        return await asyncio.shield(flight)
 
 
 async def _read_bounded(response: httpx2.Response, *, max_bytes: int) -> bytes:

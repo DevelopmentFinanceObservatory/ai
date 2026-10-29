@@ -830,13 +830,11 @@ async def read_within_entry(
     plan: Plan,
     *,
     surface: ToolSurface,
-    schemas: Mapping[str, ToolSchema] | None = None,
     held: Sequence[HeldAnchor] = (),
 ) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None:
     """`executor.run.read_anchors` over `workflow`, or `None` when the planner entry has no time for it.
 
-    `schemas` are the tools `workflow` was compiled against and `held` the
-    groups an earlier read resolved, both as `read_anchors` takes them.
+    `held` are the groups an earlier read resolved, as `read_anchors` takes them.
     Inside a planner entry the read may take the time the entry has left
     (`planner.plan.discovery_time_left`). A read that time cuts short, or
     one there is no time to start, is logged and recorded on the trace as
@@ -855,7 +853,6 @@ async def read_within_entry(
                         r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
                     ],
                     surface=surface,
-                    schemas=schemas,
                     held=held,
                 )
         except TimeoutError:
@@ -929,7 +926,6 @@ def build_translator_core(
         result: CompileResult,
         *,
         compiled: Callable[[Plan, Translation], CompileResult],
-        schemas: Mapping[str, ToolSchema],
         tool_context: ToolContext,
     ) -> tuple[Plan, Translation, CompileResult] | dict[str, object]:
         """`plan`, `translation` and `result`, its compiled workflow, with each group's rolling years stated from the newest year the data holds.
@@ -948,8 +944,9 @@ def build_translator_core(
         restatement a plan rule refuses, or one that does not compile,
         answers `_not_compiled` with `ROLLING_ANCHOR_BEHIND` issues.
 
-        The read takes `schemas`, the surface `result` was compiled against,
-        rather than listing it again. A group whose retrievals and
+        The read lists the surface itself and refuses tools changed since
+        `result` was compiled (`executor.run._Run._surface_as_compiled`). A
+        group whose retrievals and
         requirements are those of a group the session's previous read
         resolved stands on that read (`held_anchor_reads`), so a revision
         that leaves a rolling root as it was reads it once. The run reads it
@@ -963,7 +960,6 @@ def build_translator_core(
             workflow,
             plan,
             surface=surface,
-            schemas=schemas,
             held=held_anchor_reads(tool_context.state),
         )
         if isinstance(answered, tuple):
@@ -1092,7 +1088,6 @@ def build_translator_core(
             translation,
             result,
             compiled=compiled,
-            schemas=by_name,
             tool_context=tool_context,
         )
         if isinstance(stated, dict):

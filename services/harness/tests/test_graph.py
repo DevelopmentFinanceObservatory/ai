@@ -37,6 +37,7 @@ from compiler.surface import (
 from data_mcp.definition_store import InMemoryDefinitionStore
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from executor.classify import ToolFailure
 from executor.completion import FramePublished
@@ -3198,21 +3199,6 @@ def _hashed_scope() -> dict[str, Any]:
 _PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
 
 
-def _posted(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The spec_id and identity a plan card switch of `scope` posts beside the
-    part, which are its base identity over the window the plan reads
-    (`_PLAN_WINDOW`) in place of the whole span its search answered."""
-    spec_id, identity = windowed_identity(scope["base"]["identity"], _PLAN_WINDOW)
-    return spec_id, dict(identity)
-
-
-def _switch_posts(search: SearchStub, scope: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    """The entries a plan card switch of `scope` posted: the part's, over the years
-    its search answered, then the same scope over the years the plan reads (`_posted`)."""
-    entries = [entry for body in search.posted for entry in body["input"]["entries"]]
-    return tuple(sorted(entries, key=lambda entry: entry["variable_text"] != scope["id"]))
-
-
 def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """The spec_id and envelope Search answers for `scope` switched to CRS
     120 and 130: grant equivalents become the basis, since gross is out of
@@ -3473,12 +3459,9 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
     )
 
     assert len(seam.calls) == 1  # the first draft; the switch drafts nothing
-    # The part over the years its search answered, and beside it the same scope
-    # over the years the plan reads.
-    entry, over_window = _switch_posts(search, scope)
+    (posted,) = search.posted
+    (entry,) = posted["input"]["entries"]
     assert (entry["variable_text"], entry["identity"]) == (scope["id"], scope["base"]["identity"])
-    assert (over_window["variable_text"], over_window["identity"]) == _posted(scope)
-    assert over_window["scope_entries"] == entry["scope_entries"]
     assert entry["scope_entries"] == [
         scope["entries"][1],
         {
@@ -3582,7 +3565,7 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
         earlier_whole=whole,
     )
 
-    assert len(search.posted) == 2  # the part, and the part over the plan's years
+    assert len(search.posted) == 1
     assert len(seam.revisions) == 1
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered
@@ -3660,10 +3643,9 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
         stored_groups=stored_groups,
     )
 
-    # The part, and the same scope over the plan's years, post the same sets.
-    entries = _switch_posts(search, scope)
-    assert len(entries) == 2
-    assert [entry.get("entity_groups") for entry in entries] == [posted, posted]
+    (sent,) = search.posted
+    (entry,) = sent["input"]["entries"]
+    assert entry.get("entity_groups") == posted
 
 
 async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(
@@ -4014,8 +3996,10 @@ _INCLUSIVE_PROVENANCE = {
 class _RecordedFixtures(FixtureSurface):
     """A `FixtureSurface` recording each call's tool and arguments in `calls`."""
 
-    def __init__(self, *, schemas: list[ToolSchema]) -> None:
-        super().__init__(schemas=schemas)
+    def __init__(
+        self, *, schemas: list[ToolSchema], responses: Mapping[str, ToolCallResult]
+    ) -> None:
+        super().__init__(schemas=schemas, responses=responses)
         self.calls: list[tuple[str, Mapping[str, object]]] = []
 
     @override
@@ -4029,11 +4013,18 @@ class _RecordedFixtures(FixtureSurface):
 class _TranslatingSeam(_Seam):
     """A `PlannerModel` drafting `plans` and revising through the real
     `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
-    translation's discovery and the compile, over `schemas`, with no model."""
+    translation's discovery and the compile, over `schemas`, answering
+    `responses`, with no model."""
 
-    def __init__(self, plans: list[dict[str, Any]], *, schemas: list[ToolSchema]) -> None:
+    def __init__(
+        self,
+        plans: list[dict[str, Any]],
+        *,
+        schemas: list[ToolSchema],
+        responses: Mapping[str, ToolCallResult] | None = None,
+    ) -> None:
         super().__init__(plans)
-        self.surface = _RecordedFixtures(schemas=schemas)
+        self.surface = _RecordedFixtures(schemas=schemas, responses=responses or {})
         self._seam = PlannerSeam(settings=Settings(), surface=self.surface)
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
@@ -4057,8 +4048,8 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
     numerator's source, and the user switched it to bilateral plus imputed
     multilateral, a dataset Search names otherwise and holds from 1995. The
     switch posts the identity over every year its search answered, which the
-    plan pins, and beside it the same scope over the years the plan reads,
-    Search's answer for the copy admission makes of the pin."""
+    plan pins. Admission copies the pin over the years the plan reads, and the
+    translation resolves the copy, which Search answers over those years."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -4087,9 +4078,6 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
             ],
         }
     )
-    seam = _TranslatingSeam(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
-    )
     identity = block["definition"]["identity"]
     copy_pin, copied = windowed_identity(identity, _PLAN_WINDOW)
     over_window = copy.deepcopy(envelope)
@@ -4097,7 +4085,16 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
     copied_block["spec_id"] = copied_block["definition"]["spec_id"] = copy_pin
     copied_block["definition"]["identity"] = copied
     copied_block["resolved"]["coverage"]["window"]["start_year"] = 2015
-    search = SearchStub(answer={scope["id"]: envelope, _posted(scope)[0]: over_window})
+    seam = _TranslatingSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}],
+        schemas=real_schemas,
+        responses={
+            "resolve_definition": ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: over_window}
+            )
+        },
+    )
+    search = SearchStub(answer={scope["id"]: envelope})
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
         planner=seam,
@@ -4127,13 +4124,13 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     """A switch off a stated source (`_switch_off_a_stated_source`) drops the
     stated source with the pin it left, so the translation takes the new pin
     with no search, the plan compiles, and its run accepts what the new
-    dataset returns. The translation is served Search's answer for the copy
-    over the plan's years, which the switch posted, and asks Search nothing."""
+    dataset returns. The translation resolves the copy admission made over the
+    plan's years, and searches nothing."""
     runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(real_schemas)
 
-    # The switch's post over the plan's years answered the copy admission made,
-    # so the translation takes it as the source and asks Search nothing.
-    assert seam.surface.calls == []
+    assert [(tool, arguments.get("spec_id")) for tool, arguments in seam.surface.calls] == [
+        ("resolve_definition", copy_pin)
+    ]
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered, offered.get("switch_failed")
     revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
