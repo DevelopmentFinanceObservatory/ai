@@ -1431,9 +1431,11 @@ def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) 
 def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
     """Every spec block `state` holds a pin's source in, by spec_id: those of
     the datasets the planner was shown (`pin_sources`), then this turn's
-    searches (`ORCHESTRATOR_SPECS_KEY`), then the pins compiled for a
-    calculation's inputs (`aligned_pins`), each later one in place of an
-    earlier one for its spec_id."""
+    searches (`ORCHESTRATOR_SPECS_KEY`), each in place of an earlier one for its
+    spec_id, then the pins compiled for a calculation's inputs (`aligned_pins`)
+    under a spec_id neither holds. A compile Search answered with a spec_id the
+    planner was shown, as a pin the plan holds for its own reasons, leaves that
+    pin's block as shown."""
     blocks: dict[str, Mapping[str, Any]] = {
         spec_id: block
         for spec_id, shown in pin_sources(state).items()
@@ -1443,7 +1445,7 @@ def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
     for pin in aligned_pins(state):
         (part,) = pin.digest["part_digests"]
         if (block := part.get("spec_block")) is not None:
-            blocks[pin.spec_id] = block
+            blocks.setdefault(pin.spec_id, block)
     return blocks
 
 
@@ -2159,8 +2161,10 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
 
 
 def _field_line(requirement: dict[str, Any]) -> str:
-    """Every field of one requirement but `id`, `kind` and its citation list."""
-    skip = {"id", "kind", "decision_ids"}
+    """Every field of one requirement but `id`, `kind`, its citation list and the
+    pin alignment moved it from, which `propose_plan` writes and carries itself
+    (`DatasetRequirement.aligned_from`)."""
+    skip = {"id", "kind", "decision_ids", "aligned_from"}
     return " ".join(
         f"{key}={_scalar(value)}" for key, value in requirement.items() if key not in skip
     )

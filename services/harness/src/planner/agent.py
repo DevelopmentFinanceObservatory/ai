@@ -1427,7 +1427,9 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     resubmit carries every option, so an input moving on the measure basis
     and the provider scope is compiled once. The answer is shown to the
     planner as a source of its own (`planner.plan.save_pin_sources`),
-    settled as the pin it was compiled from, and held as a
+    settled as the pin it was compiled from, unless the planner was shown
+    its spec_id already, as a pin the plan may hold for its own reasons,
+    whose source stands as shown. It is held as a
     `submission.service.AlignedPin` with the answer's digest
     (`harness.tool_contracts.resolver_digest`), its block marking those
     axes as the planner's, beside any axis the origin's block marks
@@ -1516,7 +1518,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))
     compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    save_pin_sources(state, {**sources, spec_id: compiled})
+    save_pin_sources(state, {spec_id: compiled, **sources})
     save_aligned_pin(
         state,
         AlignedPin(
@@ -1656,7 +1658,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
     whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    save_pin_sources(state, {**sources, spec_id: whole_source})
+    save_pin_sources(state, {spec_id: whole_source, **sources})
     save_aligned_pin(
         state,
         AlignedPin(origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis),

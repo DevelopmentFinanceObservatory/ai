@@ -188,6 +188,7 @@ from submission.service import (
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
+    aligned_pins,
     first_year_reads,
     identity_on_record,
     save_aligned_pin,
@@ -8182,6 +8183,139 @@ def test_a_share_over_the_dac1_total_moves_it_to_bilateral_oda(decision: Decisio
     assert [
         (r["spec_id"], r["option_ids"], r["requirement_id"]) for r in refused["detail"]["realign"]
     ] == [(us_2023_block("dac1_total_gross")["spec_id"], ["provider:bilateral"], _WHOLE)]
+
+
+def test_a_direct_pin_sharing_an_aligned_compiles_spec_id_keeps_its_own_row(
+    decision: DecisionFactory,
+) -> None:
+    """An earlier plan compared the US total with France's multilateral ODA, which moved
+    the total onto DAC1's multilateral row, and Search answered that compile with the
+    spec_id it gives US multilateral ODA, since spec_ids are canonical over the
+    identity. The amended plan reads US multilateral ODA, pinned to that row directly,
+    as a share of the total, restated on the compile it was moved to. Read as the
+    total's compile, the direct pin would be counted as the total and the share
+    divide one series by itself. Each side keeps its own row: the total goes back
+    to its own pin."""
+    ctx = _FakeToolContext()
+    france = _another_part(_US_MULTILATERAL)
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL, france)
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin=_US_TOTAL["spec_id"],
+            option_ids=("provider:multilateral",),
+            spec_id=_US_MULTILATERAL["spec_id"],
+            digest={},
+        ),
+    )
+    propose = _tools_by_name()["propose_plan"].func
+    compared = propose(
+        question="How does US ODA compare with France's multilateral ODA?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("second", _US_TOTAL),
+            _dac_countries("other", france),
+            _difference("second", "other"),
+        ],
+        tool_context=ctx,
+    )
+    assert compared["outcome"] == Outcome.OK.value, compared
+    assert dict(_pins(ctx))["second"] == _US_MULTILATERAL["spec_id"]
+
+    result = propose(
+        question="What share of US ODA goes to multilaterals?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("first", _US_MULTILATERAL),
+            _dac_countries("second", _US_MULTILATERAL),
+            _share("first", "second"),
+        ],
+        removed_evidence_requirements=["other", _COMPARE],
+        amends_version=1,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [
+        ("second", _US_TOTAL["spec_id"]),
+        ("first", _US_MULTILATERAL["spec_id"]),
+    ]
+
+
+def test_an_aligned_from_the_planner_sends_is_dropped(decision: DecisionFactory) -> None:
+    """The planner's schema leaves `aligned_from` out, but a model can send it. US
+    multilateral ODA, sent as aligned from the US total, as a share of that total:
+    the value is dropped, so the numerator keeps its own row and records no origin."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    claimed = _dac_countries("first", _US_MULTILATERAL).model_copy(
+        update={"aligned_from": _US_TOTAL["spec_id"]}
+    )
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of US ODA goes to multilaterals?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            claimed,
+            _dac_countries("second", _US_TOTAL),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [
+        (requirement.id, requirement.source_spec_id, requirement.aligned_from)
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+    ] == [
+        ("first", _US_MULTILATERAL["spec_id"], None),
+        ("second", _US_TOTAL["spec_id"], None),
+    ]
+
+
+def test_a_plan_and_aligned_pin_stored_before_the_origin_record_load_and_translate() -> None:
+    """`fixtures/aligned_total_plan_stored.json` holds the session state the comparison
+    above leaves, as the code stored it before a requirement recorded the pin alignment
+    moved it from (`DatasetRequirement.aligned_from`): the plan, its total moved onto
+    the multilateral row, and that compile held as an `AlignedPin`. Both load, the
+    plan keeps the revision it was stored under, and it translates with each
+    requirement on its stored pin."""
+    recorded = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "aligned_total_plan_stored.json").read_text()
+    )
+    state = {
+        **recorded["state"],
+        PLAN_STATE_KEY: json.dumps(recorded["state"][PLAN_STATE_KEY]),
+    }
+
+    plan = load_plan(state)
+    held = aligned_pins(state)
+
+    assert plan is not None
+    assert plan_revision(plan) == recorded["revision"]
+    assert [(pin.origin, pin.spec_id) for pin in held] == [
+        (_US_TOTAL["spec_id"], _US_MULTILATERAL["spec_id"])
+    ]
+    pins = {
+        requirement.id: requirement.source_spec_id
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+    }
+    translation = build_translation(plan, pins)
+    assert {
+        op.requirement_id: op.spec_id
+        for op in translation.operations
+        if isinstance(op, RetrieveOperation)
+    } == {
+        "second": _US_MULTILATERAL["spec_id"],
+        "other": _another_part(_US_MULTILATERAL)["spec_id"],
+    }
 
 
 async def test_a_comparison_with_a_total_stating_no_provider_scope_keeps_both_datasets(

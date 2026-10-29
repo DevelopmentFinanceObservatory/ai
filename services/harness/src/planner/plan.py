@@ -58,6 +58,7 @@ from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from planner.operations import Translation
 from planner.parties import (
@@ -975,6 +976,15 @@ class DatasetRequirement(TaggedModel):
             "for US aid to Kenya. Counted from the part's own dataset, with no search. Read "
             "only as that denominator."
         ),
+    )
+
+    # The pin `propose_plan`'s alignment moved this requirement from
+    # (`submission.service._aligned_bases`), read as its origin wherever
+    # `source_spec_id` is another pin's compile (`submission.service.AlignedPin`).
+    # Admission writes it and carries it while the pin stands; the planner's
+    # schema leaves it out, and a value the planner sends is dropped.
+    aligned_from: Annotated[SkipJsonSchema[SpecId | None], HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda aligned_from: aligned_from is None
     )
 
     @field_validator("source_code", mode="before")
@@ -3295,9 +3305,17 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
 
 
 def repinned(
-    requirement: DatasetRequirement, spec_id: str, exact_codes: frozenset[str]
+    requirement: DatasetRequirement,
+    spec_id: str,
+    exact_codes: frozenset[str],
+    *,
+    aligned_from: str | None = None,
 ) -> DatasetRequirement:
     """`requirement` pinned to `spec_id`, a dataset code chose in place of the one it named.
+
+    `aligned_from` is the pin alignment compiled `spec_id` from
+    (`DatasetRequirement.aligned_from`), `None` for a pin that is its own, as a
+    scope switch's is.
 
     The source it stated goes with the pin it left: `source`, `source_ref`
     and `source_exclude`, and `source_code` unless `exact_codes`, the codes
@@ -3312,6 +3330,7 @@ def repinned(
         "source": None,
         "source_ref": None,
         "source_exclude": False,
+        "aligned_from": aligned_from,
     }
     if requirement.source_code not in exact_codes:
         update["source_code"] = None

@@ -2411,8 +2411,11 @@ def _resolve_pin_block(
     The pin is the planner's assertion that the dataset answers the
     requirement, so a dataset it was shown this entry
     (`planner.plan.pin_sources`) is reused when `requirement` is the only
-    dataset requirement in `plan` pinning it. With several, nothing tells
-    which one the search that returned it was about. `None` too when the
+    dataset requirement in `plan` pinning it as its own. With several, nothing
+    tells which one the search that returned it was about. A requirement
+    `propose_plan`'s alignment moved onto the pin (`DatasetRequirement.aligned_from`)
+    reads the pin compiled for it, so it reuses the block and leaves the one
+    pinning it as its own to reuse it too. `None` too when the
     search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
     since one means the search dropped part of the ask and answered a
     narrower one, and when no block was carried forward for it. An earlier
@@ -2428,9 +2431,11 @@ def _resolve_pin_block(
     pinning = [
         item
         for item in plan.evidence_requirements
-        if isinstance(item, DatasetRequirement) and item.source_spec_id == pin
+        if isinstance(item, DatasetRequirement)
+        and item.source_spec_id == pin
+        and item.aligned_from is None
     ]
-    if len(pinning) != 1:
+    if requirement.aligned_from is None and len(pinning) != 1:
         return None
     return source.spec_block(pin)
 

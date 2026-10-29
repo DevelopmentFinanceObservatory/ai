@@ -479,6 +479,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 "evidence_requirements": tuple(unwindowed_requirements),
             }
         )
+    evidence_requirements = _with_aligned_origins(evidence_requirements, previous)
     pins = pin_sources(view.state)
     sources = SourceReadings.of_shown(pins)
     measures = measure_choices(
@@ -4072,21 +4073,19 @@ class _Input(NamedTuple):
 
 
 def _read_inputs(
-    requirements: Sequence[EvidenceRequirement],
-    *,
-    sources: SourceReadings,
-    origins: Mapping[str, str],
+    requirements: Sequence[EvidenceRequirement], *, sources: SourceReadings
 ) -> dict[str, _Input]:
     """Each pinned dataset requirement among `requirements`, its pin's origin
-    (`origins`) as `_input_bases` reads it on every axis, by requirement id. Each
-    origin is parsed once, its block and source read off `sources`."""
+    (`DatasetRequirement.aligned_from`, else the pin) as `_input_bases` reads it on
+    every axis, by requirement id. Each origin is parsed once, its block and source
+    read off `sources`."""
     held: dict[str, _Origin | None] = {}
     inputs: dict[str, _Input] = {}
     for requirement in requirements:
         if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
             continue
         pin = requirement.source_spec_id
-        origin = origins.get(pin, pin)
+        origin = requirement.aligned_from or pin
         if origin not in held:
             block = sources.block(origin)
             scope = part_scope(origin, block)
@@ -4320,8 +4319,11 @@ def _aligned_bases(
 
     An input already on its options keeps its origin pin. Another is pinned
     to the pin compiled from its origin on the options it moves to, one per
-    axis (`aligned`), and the requirement is restated under it, appended
-    when only the plan this call amends states it. An input with no such
+    axis (`aligned`), and the requirement is restated under it, recording
+    that origin (`DatasetRequirement.aligned_from`), appended when only the
+    plan this call amends states it. An input's origin is the one its
+    requirement records, else its own pin, so a pin the plan holds for its
+    own reasons reads as itself though a compile answered with its spec_id. An input with no such
     pin yet answers `BASES_UNALIGNED`, naming each to compile with every
     option it moves to (`Realignment`). `planner.agent.with_source_reads`
     compiles them and proposes again. An input whose choice does not offer
@@ -4374,7 +4376,6 @@ def _aligned_bases(
         declared = _whole_parts(requirements, unsearched=unsearched)
     except _Unservable as exc:
         return exc.problem
-    origins = {pin.spec_id: pin.origin for pin in aligned if pin.whole_axis is None}
     compiled = {
         (pin.origin, pin.option_ids): pin.spec_id for pin in aligned if pin.whole_axis is None
     }
@@ -4382,10 +4383,10 @@ def _aligned_bases(
     # final pin below.
     whole_ids = {whole.id for whole, _, _ in declared}
     aligning = [requirement for requirement in requirements if requirement.id not in whole_ids]
-    inputs = _read_inputs(aligning, sources=sources, origins=origins)
+    inputs = _read_inputs(aligning, sources=sources)
     by_axis = {axis: _input_bases(inputs, axis=axis) for axis in _ALIGNED_AXES}
     steps = [step for step in requirements if len(inputs_of(step)) >= 2]
-    groups = _input_groups(requirements, source_of=lambda pin: sources.get(origins.get(pin, pin)))
+    groups = _input_groups(requirements, source_of=sources.get)
     unpinned: dict[str, Unpinned] = {}
     for step in steps:
         under = set().union(*(group.members for group in groups[step.id]))
@@ -4431,12 +4432,58 @@ def _aligned_bases(
         return exc.problem
     moved = {**wholes, **realigned}
     return [
-        repinned(requirement, pin, exact_codes(_pin_block(pin, shown)))
+        repinned(
+            requirement,
+            pin,
+            exact_codes(_pin_block(pin, shown)),
+            aligned_from=_aligned_from(inputs.get(requirement.id), pin),
+        )
         if isinstance(requirement, DatasetRequirement)
         and (pin := moved.get(requirement.id)) is not None
         else requirement
         for requirement in _with_found(evidence_requirements, requirements, {**found, **moved})
     ]
+
+
+def _aligned_from(read: _Input | None, pin: str) -> str | None:
+    """The origin a requirement read as `read` and moved to `pin` records
+    (`DatasetRequirement.aligned_from`): `read`'s origin where `pin` was compiled
+    from it, `None` for a declared whole (no `read`) or a move back onto the origin."""
+    return read.origin if read is not None and read.origin != pin else None
+
+
+def _with_aligned_origins(
+    evidence_requirements: Sequence[EvidenceRequirement], previous: Plan | None
+) -> list[EvidenceRequirement]:
+    """This call's requirements, each dataset requirement's `aligned_from` the one the
+    plan `previous` records for it while its pin stands, else unset.
+
+    Alignment alone writes `aligned_from` (`_aligned_bases`). The planner's schema
+    leaves it out, so a value the planner sends is dropped, and a requirement it
+    restates on the pin alignment moved it to keeps the origin recorded for it.
+    """
+    held = {
+        requirement.id: requirement
+        for requirement in (previous.evidence_requirements if previous is not None else ())
+        if isinstance(requirement, DatasetRequirement)
+    }
+    restated: list[EvidenceRequirement] = []
+    for requirement in evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement):
+            restated.append(requirement)
+            continue
+        before = held.get(requirement.id)
+        origin = (
+            before.aligned_from
+            if before is not None and before.source_spec_id == requirement.source_spec_id
+            else None
+        )
+        restated.append(
+            requirement
+            if origin == requirement.aligned_from
+            else requirement.model_copy(update={"aligned_from": origin})
+        )
+    return restated
 
 
 class _InputGroup(NamedTuple):
@@ -4586,8 +4633,10 @@ def _passed_through(
 def _source_of_pin(
     dataset: DatasetRequirement, source_of: Callable[[str], SelectedSource | None]
 ) -> SelectedSource | None:
-    """The source `dataset` pins (`source_of`), `None` where it pins none."""
-    return None if dataset.source_spec_id is None else source_of(dataset.source_spec_id)
+    """The source of the pin `dataset` was compiled from, else of its own pin
+    (`source_of`, `DatasetRequirement.aligned_from`), `None` where it pins none."""
+    origin = dataset.aligned_from or dataset.source_spec_id
+    return None if origin is None else source_of(origin)
 
 
 def _keeps_every_row(requirement: FilterRequirement, dataset: DatasetRequirement) -> bool:
