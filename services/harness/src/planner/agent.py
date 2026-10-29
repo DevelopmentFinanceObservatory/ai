@@ -1434,8 +1434,7 @@ class ToolContextSession:
         state = self.tool_context.state
         if admission.windowed_pins is not None:
             save_windowed_pins(state, admission.windowed_pins)
-        if admission.alignments is not None:
-            save_alignments(state, admission.alignments)
+        save_alignments(state, admission.alignments)
         save_plan(state, admission.plan)
         save_plan_rounds(state, admission.rounds)
         # A new proposal supersedes whatever the translator referred back.
