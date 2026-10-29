@@ -531,29 +531,29 @@ class _AcceptingPlanner:
         return {"plan": kwargs["prior_plan"], "summary": "revised"}
 
 
-@pytest.mark.parametrize("origin_read", [True, False], ids=["origin-read", "origin-unread"])
-async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_compile(
-    decision: DecisionFactory, origin_read: bool
-) -> None:
-    """An amendment adds health's share of the gross bilateral total, pinning the compile
-    alignment made for the share's total, which the planner was never shown. The card
-    lists that requirement's provider row, read from the compile's block, with
-    health's. A switch of the row posts the compile's scope, whether or not the total
-    it was compiled from has a stored reading, re-pins each requirement onto its own
-    resubmit, and holds the switched compile under the words and parties of the
-    requirement pinning it, with none of the total's provenance."""
-    ctx = _FakeToolContext()
+async def _pinning_the_compile(
+    ctx: _FakeToolContext, decision: DecisionFactory, *measures: str
+) -> Plan:
+    """`_bilateral_share` amended with health's share of each of `measures`, a
+    requirement `bilateral<i>` pinning `TOTAL_GROSS_BILATERAL`, the compile
+    alignment made for the share's total, which the planner was never shown.
+    Returns the plan on record."""
     plan = await _bilateral_share(ctx, decision)
+    ids = [f"bilateral{index}" if index else "bilateral" for index in range(len(measures))]
     amended = await _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"].func(
-        answered=[AskAnswer(ask=0, outputs=("share", "of_bilateral"))],
+        answered=[AskAnswer(ask=0, outputs=("share", *(f"of_{rid}" for rid in ids)))],
         evidence_requirements=[
-            _us_dataset("bilateral", "US bilateral ODA", TOTAL_GROSS_BILATERAL),
-            ShareOfRequirement(
-                id="of_bilateral",
-                decision_ids=["measure"],
-                numerator=RequirementSide(input_id="health"),
-                denominator=RequirementSide(input_id="bilateral"),
-            ),
+            requirement
+            for rid, measure in zip(ids, measures, strict=True)
+            for requirement in (
+                _us_dataset(rid, measure, TOTAL_GROSS_BILATERAL),
+                ShareOfRequirement(
+                    id=f"of_{rid}",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="health"),
+                    denominator=RequirementSide(input_id=rid),
+                ),
+            )
         ],
         amends_version=plan.version,
         tool_context=ctx,
@@ -561,13 +561,72 @@ async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_com
     assert amended["outcome"] == Outcome.OK.value, amended
     plan = load_plan(ctx.state)
     assert plan is not None
+    return plan
+
+
+@pytest.mark.parametrize(
+    ("measures", "stored"),
+    [
+        (("US bilateral ODA", "US bilateral ODA"), "US bilateral ODA"),
+        (("US bilateral ODA", "US gross bilateral aid"), None),
+    ],
+    ids=["same-words", "different-words"],
+)
+async def test_a_compile_two_requirements_pin_switches_only_under_words_they_share(
+    decision: DecisionFactory, measures: tuple[str, str], stored: str | None
+) -> None:
+    """Two requirements pin the compile directly, and the switch re-pins both and
+    stores one reading of the switched dataset. Worded alike, it is stored under
+    their words. Worded apart, the switch is refused before any resubmit: one
+    reading would name one of them wrongly."""
+    ctx = _FakeToolContext()
+    plan = await _pinning_the_compile(ctx, decision, *measures)
+    surface = _ProviderResubmits()
+    planner = _AcceptingPlanner()
+    switching = switch_module._switched_plan(
+        cast(Any, ctx),
+        plan,
+        choice_id=choice_id(plan, _provider_row(plan, "bilateral")),
+        option_id="provider:inclusive",
+        planner=cast(Any, planner),
+        surface=cast(ToolSurface, surface),
+    )
+
+    if stored is None:
+        with pytest.raises(SwitchFailedError) as refused:
+            await switching
+        assert refused.value.code == switch_module.SCOPE_CHOICE_NOT_APPLIED
+        assert (surface.posted, planner.revisions) == ([], [])
+        return
+    await switching
+    texts = [
+        r["text"]
+        for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY]
+        if r["spec_id"] == _TOTAL_GROSS_INCLUSIVE
+    ]
+    assert texts == [stored]
+
+
+@pytest.mark.parametrize("unread", [(), (TOTAL,), (TOTAL, HEALTH)], ids=["read", "total", "both"])
+async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_compile(
+    decision: DecisionFactory, unread: tuple[str, ...]
+) -> None:
+    """An amendment adds health's share of the gross bilateral total, pinning the compile
+    alignment made for the share's total, which the planner was never shown. The card
+    lists that requirement's provider row, read from the compile's block, with
+    health's. A switch of the row posts the compile's scope, whether or not the total
+    it was compiled from has a stored reading, and health's from the block it was
+    shown with when it has none, re-pins each requirement onto its own
+    resubmit, and holds the switched compile under the words and parties of the
+    requirement pinning it, with none of the total's provenance."""
+    ctx = _FakeToolContext()
+    plan = await _pinning_the_compile(ctx, decision, "US bilateral ODA")
     shown = pin_sources(ctx.state)
     shown[TOTAL] = shown[TOTAL].model_copy(update={"provenance_ref": "oecd-dac1"})
     save_pin_sources(ctx.state, shown)
-    if not origin_read:
-        ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
-            r for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY] if r["spec_id"] != TOTAL
-        ]
+    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
+        r for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY] if r["spec_id"] not in unread
+    ]
     surface = _ProviderResubmits()
     planner = _AcceptingPlanner()
 
