@@ -960,6 +960,320 @@ def test_a_pick_replacing_a_shares_input_keeps_the_share_whatever_admission_deri
     assert result["outcome"] == Outcome.OK.value, result
 
 
+def test_the_picked_share_proposed_with_no_pick_held_is_refused() -> None:
+    """The plan the pick above records, US total ODA as a share of itself, proposed
+    by the planner with no pick held: nothing the user chose put the sides on one
+    series, so the share is refused for the planner to redraft."""
+    part = Decision(
+        slot="part",
+        description="Which figure leads the share.",
+        options=["US multilateral ODA", "another figure"],
+        chosen="another figure",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(measure="another figure"),
+    )
+    measure = part.model_copy(
+        update={"slot": "measure", "options": ["a", "b"], "chosen": "a", "fixes": None}
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_TOTAL)
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, part]),
+        evidence_requirements=[
+            _dac_countries("first", _US_TOTAL).model_copy(
+                update={"measure": "another figure", "decision_ids": ("measure", "part")}
+            ),
+            _dac_countries("second", _US_TOTAL),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
+    assert load_plan(ctx.state) is None
+
+
+def test_a_pick_both_sides_cite_leaves_no_share_of_itself_admitted() -> None:
+    """The card shares US multilateral ODA over the US total in 2019, both inputs
+    citing the year. The user picks 2018, and the replan rewrites both inputs, pinning
+    each on the US total. The pick moved only the year; the planner put the two sides
+    on one series, so the share is refused."""
+    measure = Decision(
+        slot="measure",
+        description="What the share measures.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    year = Decision(
+        slot="year",
+        description="Which year the share reads.",
+        options=["2019", "2018"],
+        chosen="2019",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(period=Period(start=2019, end=2019)),
+    )
+    cited = {"decision_ids": ("measure", "year")}
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, year]),
+        evidence_requirements=[
+            _dac_countries("first", _US_MULTILATERAL).model_copy(update=cited),
+            _dac_countries("second", _US_TOTAL).model_copy(update=cited),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    shown = load_plan(ctx.state)
+    assert shown is not None
+    pick = decision_pick(
+        shown,
+        choice_id="decision/year",
+        option_id=decision_option_id("2018"),
+        to_origin={},
+        alignments={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    in_2018 = {**cited, "period": Period(start=2018, end=2018)}
+
+    result = propose(
+        amends_version=card["version"],
+        decisions=drafts(
+            [
+                year.model_copy(
+                    update={
+                        "chosen": "2018",
+                        "fixes": DecisionFixes(period=Period(start=2018, end=2018)),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[
+            _dac_countries("first", _US_TOTAL).model_copy(update={**in_2018, "measure": "a"}),
+            _dac_countries("second", _US_TOTAL).model_copy(update={**in_2018, "measure": "b"}),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
+
+
+def test_a_pick_on_another_decision_keeps_a_share_an_earlier_pick_made() -> None:
+    """The user's pick put the first share's numerator on the US total, a share of
+    itself admitted as theirs. A second pick, of the year a second share's inputs
+    cite, keeps the first share as the card holds it, which the planner may not
+    change, so the replan is admitted."""
+    measure = Decision(
+        slot="measure",
+        description="What the share measures.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    first = _dac_countries("first", _US_MULTILATERAL)
+    part = Decision(
+        slot="part",
+        description="Which figure leads the share.",
+        options=[first.measure, "another figure"],
+        chosen=first.measure,
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(measure=first.measure),
+    )
+    year = Decision(
+        slot="year",
+        description="Which year the second share reads.",
+        options=["2019", "2018"],
+        chosen="2019",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(period=Period(start=2019, end=2019)),
+    )
+    cites_year = {"decision_ids": ("measure", "year")}
+    third = _dac_countries("third", _US_MULTILATERAL).model_copy(update=cites_year)
+    fourth = _dac_countries("fourth", _US_TOTAL).model_copy(update=cites_year)
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, part, year]),
+        evidence_requirements=[
+            first.model_copy(update={"decision_ids": ("measure", "part")}),
+            _dac_countries("second", _US_TOTAL),
+            third,
+            fourth,
+            _share("first", "second"),
+            _share("third", "fourth").model_copy(update={"id": "share_two"}),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    picks = [("part", "another figure"), ("year", "2018")]
+    replans = [
+        (
+            part.model_copy(
+                update={
+                    "chosen": "another figure",
+                    "fixes": DecisionFixes(measure="another figure"),
+                }
+            ),
+            [
+                _dac_countries("first", _US_TOTAL).model_copy(
+                    update={"measure": "another figure", "decision_ids": ("measure", "part")}
+                )
+            ],
+        ),
+        (
+            year.model_copy(
+                update={
+                    "chosen": "2018",
+                    "fixes": DecisionFixes(period=Period(start=2018, end=2018)),
+                }
+            ),
+            [
+                held.model_copy(update={"period": Period(start=2018, end=2018)})
+                for held in (third, fourth)
+            ],
+        ),
+    ]
+
+    version = card["version"]
+    for (slot, chosen), (picked, requirements) in zip(picks, replans, strict=True):
+        shown = load_plan(ctx.state)
+        assert shown is not None
+        pick = decision_pick(
+            shown,
+            choice_id=f"decision/{slot}",
+            option_id=decision_option_id(chosen),
+            to_origin={},
+            alignments={},
+        )
+        assert pick is not None
+        save_decision_pick(ctx.state, pick)
+        result = propose(
+            amends_version=version,
+            decisions=drafts([picked]),
+            evidence_requirements=requirements,
+            tool_context=ctx,
+        )
+        assert result["outcome"] == Outcome.OK.value, (slot, result)
+        version = result["version"]
+
+
+@pytest.mark.parametrize(
+    ("reads", "refused"),
+    [
+        # The replan points the numerator's mean at the denominator's input: the share
+        # step and its denominator are kept, but a step between them was rewritten
+        # onto the denominator's series.
+        pytest.param("second", True, id="rewired-onto-the-denominator"),
+        pytest.param("first", False, id="kept-on-its-input"),
+    ],
+)
+def test_a_pick_rewriting_a_step_beneath_a_share_onto_its_denominator_is_refused(
+    reads: str, refused: bool
+) -> None:
+    """The card divides US multilateral ODA summed over its years by the US total's
+    mean. The user picks the mean for the numerator too, and the replan rewrites the
+    numerator's step. Read from the total, both sides are the total's mean, a share of
+    itself the pick did not make, and it is refused; read from its own input, the
+    share is admitted."""
+    measure = Decision(
+        slot="measure",
+        description="What the share measures.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    how = Decision(
+        slot="how",
+        description="How the numerator folds its years.",
+        options=["sum", "mean"],
+        chosen="sum",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(reduction=Reduction.SUM),
+    )
+    numerator = AggregateRequirement(
+        id="num",
+        decision_ids=("measure", "how"),
+        input_id="first",
+        reduction=Reduction.SUM,
+        group_by=(),
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, how]),
+        evidence_requirements=[
+            _dac_countries("first", _US_MULTILATERAL),
+            _dac_countries("second", _US_TOTAL),
+            numerator,
+            AggregateRequirement(
+                id="den",
+                decision_ids=("measure",),
+                input_id="second",
+                reduction=Reduction.MEAN,
+                group_by=(),
+            ),
+            _share("first", "second").model_copy(update={"id": "share_two"}),
+            _share("num", "den").model_copy(update={"accept_provider_difference": True}),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    shown = load_plan(ctx.state)
+    assert shown is not None
+    pick = decision_pick(
+        shown,
+        choice_id="decision/how",
+        option_id=decision_option_id("mean"),
+        to_origin={},
+        alignments={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+
+    result = propose(
+        amends_version=card["version"],
+        decisions=drafts(
+            [
+                how.model_copy(
+                    update={"chosen": "mean", "fixes": DecisionFixes(reduction=Reduction.MEAN)}
+                )
+            ]
+        ),
+        evidence_requirements=[
+            numerator.model_copy(update={"input_id": reads, "reduction": Reduction.MEAN})
+        ],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
+
+
 # A ranking decision whose options differ only in how many donors it keeps.
 RANKING = Decision(
     slot="donor_scope",
