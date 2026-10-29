@@ -26,6 +26,7 @@ from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
+from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -42,6 +43,7 @@ from data_mcp.definition_store import (
     set_store,
 )
 from data_mcp.describe_tool import describe
+from data_mcp.export_data_tool import export_data
 from data_mcp.get_data_tool import TYPE_COLUMNS, aclose_background_mints, get_data
 from data_mcp.get_skill_file_tool import get_skill_file
 from data_mcp.get_skill_tool import get_skill
@@ -130,9 +132,21 @@ async def healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-def _add_declared(fn: Callable[..., object], *, title: str) -> None:
-    """Register `fn` as a catalogue tool whose listed schema is `declared_tool`'s."""
-    tool = Tool.from_function(fn, version="1", title=title, annotations=READ_ONLY_CATALOGUE)
+# `export_data` writes: it renders a file and pins it, spending the caller's
+# allowance for a new file. A repeat call returns the same file and spends nothing.
+_EXPORT = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+
+
+def _add_declared(
+    fn: Callable[..., object], *, title: str, annotations: ToolAnnotations = READ_ONLY_CATALOGUE
+) -> None:
+    """Register `fn` as a tool whose listed schema is `declared_tool`'s."""
+    tool = Tool.from_function(fn, version="1", title=title, annotations=annotations)
     mcp.add_tool(declared_tool(tool))
 
 
@@ -150,6 +164,7 @@ _add_declared(describe, title="Explain a data identifier")
 _add_declared(get_skill, title="Load a skill")
 _add_declared(get_skill_file, title="Read a skill file")
 _add_declared(sources, title="List data sources")
+_add_declared(export_data, title="Export data as a file", annotations=_EXPORT)
 mcp.tool(resolve_definition, version="1")
 mcp.tool(catalogue_counts, version="1")
 

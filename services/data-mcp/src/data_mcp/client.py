@@ -21,6 +21,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
+from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
 from opentelemetry import trace
 
 from data_mcp.deadline import CallDeadline
@@ -160,6 +161,15 @@ def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
     return parsed
 
 
+def _retry_after_s(response: httpx2.Response) -> float | None:
+    """The response's `Retry-After` as seconds, or `None` when it names none.
+
+    apis writes delay-seconds; an HTTP-date form reads as `None`.
+    """
+    value = response.headers.get("Retry-After", "").strip()
+    return float(value) if value.isdigit() else None
+
+
 def is_retryable(error: UpstreamError) -> bool:
     """Whether repeating the request that failed with `error` could succeed.
 
@@ -215,6 +225,11 @@ class UpstreamClient:
         self._auth = auth
         self._sleep = sleep
         self._public_origin = settings.dfo_site_origin
+        self._caller_principal = (
+            None
+            if settings.dfo_caller_principal is None
+            else settings.dfo_caller_principal.get_secret_value()
+        )
         self._client = httpx2.AsyncClient(
             base_url=settings.dfo_apis_url,
             timeout=httpx2.Timeout(
@@ -247,6 +262,21 @@ class UpstreamClient:
         """
         base = self._client.base_url if self._public_origin is None else self._public_origin
         return str(httpx2.URL(base).join(link))
+
+    def caller_headers(self) -> dict[str, str]:
+        """The headers that name the current request's caller to dfo-apis.
+
+        The caller principal and the caller, when this process holds the principal
+        (`Settings.dfo_caller_principal`) and the website named the caller by address
+        (`x-dfo-caller: ip:<digest>`), so dfo-apis counts that client's allowance.
+        Empty otherwise, and dfo-apis counts the call against this service.
+        """
+        caller = current_caller()
+        if self._caller_principal is None or caller is None:
+            return {}
+        if not ADDRESS_CALLER.fullmatch(caller):
+            return {}
+        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: caller}
 
     @asynccontextmanager
     async def stream_link(
@@ -441,8 +471,7 @@ class UpstreamClient:
             call_span.set_attribute("http.request.resend_count", attempt - 1)
             if result.status is not None:
                 call_span.set_attribute("http.response.status_code", result.status)
-            # #26 derives `retry_after_delay`'s interval from these, since no
-            # upstream response carries one.
+            # #26 derives `retry_after_delay`'s interval from these.
             result.attempts = attempt
             result.elapsed_s = time.monotonic() - start
             raise await self._translate_gated_surface_404(
@@ -529,6 +558,7 @@ class UpstreamClient:
             capability_version=problem.get("capability_version"),
             body=body,
             extensions=extensions,
+            retry_after_s=_retry_after_s(response),
         )
 
     def _should_retry(self, error: UpstreamError, *, retry: bool) -> bool:

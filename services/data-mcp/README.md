@@ -156,6 +156,26 @@ Returns a `ToolResult` with the following items.
 
 A ref the deployment does not hold refuses `node_not_held`; a ref that names a node that is not a source refuses `request_invalid` with the door's own detail; a malformed ref is refused before any read. A deployment that does not mount the Graph API's source doors refuses `capability_unavailable`.
 
+### export_data
+
+The `export_data` tool turns a frame into a file the user keeps and returns a public link to it. It asks dfo-apis to prepare the export (`POST /api/datasets/exports`), which renders the exact frame version, copies the file to the pinned tier and answers the file's facts with the link's path. The tool puts that path on `DFO_SITE_ORIGIN`, so the link reads `https://developmentfinance.org/api/datasets/exports/exp_<32 hex>`. A GET on the link answers 302 to a storage URL signed for five minutes; the tool never calls it, so no signed URL reaches its result. A new file spends one unit of the caller's daily pin allowance, and a repeat call for the same frame and options returns the same file and spends nothing. When `DFO_CALLER_PRINCIPAL` is set and the website named the caller by address (`x-dfo-caller: ip:<digest>`), the prepare carries both headers, so dfo-apis spends that client's allowance.
+
+#### Parameters
+
+- `frame_ref`: `{spec_id, content_version}` from a `get_data` or verb result, fetched (`spec_`) or derived (`ops_`). A `spec_id` with no `content_version` refuses `frame_ref_incomplete` and sends nothing.
+- `format`: `csv` (default), `xlsx` or `parquet`.
+- `bundle`: Optional, default `false`. `true` wraps the file in a zip with `README.md`, `datapackage.json` and `CITATION.cff`.
+
+#### Return format
+
+Returns a `ToolResult` with the following items.
+
+- Text content with the file name, format, rows and columns of the data table, size, link, citation, one line per source with its licence (or "licence not stated") and terms URL, how long the file is kept (permanently, since it is pinned), and which columns it holds: a fetched frame's long layout with a `_label` column beside each code, or a derived frame's own columns, which carry no labels.
+- A `resource_link` block to the link, with the file's media type and size.
+- Structured content `{url, file_name, media_type, bytes, rows, columns, sha256, frame_ref, citation, licences, pinned}`, each licence `{source, label, licence, url}`.
+
+Refusals use the shared envelope. A CSV or xlsx request over 250,000 rows refuses `over_ceiling` with `correct_and_retry` and `fix` `{"format": "parquet"}`. A spent allowance refuses `allowance_exhausted` with `do_not_retry` and `retry_after_s` to the next UTC midnight, from dfo-apis' `Retry-After`. Backpressure or a spent daily pin budget refuses `service_unavailable` with `retry_after_delay` and dfo-apis' `Retry-After` as `retry_after_s`. A derived frame stored without a recipe refuses `provenance_unavailable`, and a source on dfo-apis' licence deny-list `licence_not_redistributable`, both `do_not_retry`. Every other code maps as it does for `get_data`: `snapshot_not_found` and `artifact_expired` become `upstream_error` with `do_not_retry` and the code in `upstream_code`.
+
 ### resolve_definition
 
 The `resolve_definition` tool resolves one identity again through the upstream Search API's `dataset_resubmit` door, so the caller reads Search's own answer for it. A caller passing the Spec's `entity_groups` has them posted beside the identity, so Search names a set a role's places were asked for as again. The harness calls it, on the data-mcp at `DATA_MCP_URL`, for each Search result a Studio turn starts from and for a seed's identity over the years a plan retrieves (`windowed_identity`), and takes every label, sentence and population fact the turn uses from the answer. The combined server outside clients reach leaves it out (`harness.combined_mcp.HARNESS_ONLY_TOOLS`).
@@ -271,6 +291,8 @@ Settings load from environment variables using `data_mcp.settings.Settings`.
 | `GET_DATA_DEADLINE_S`                | `165.0`                 | Wall-clock deadline for a `get_data` call under `DIRECT_CALL_BUDGET`          |
 | `OPERATION_POLL_INTERVAL_S`          | `2.0`                   | Fallback wait between operation poll attempts                                 |
 | `EXTERNAL_MINT_CONCURRENCY`          | `1`                     | Mint slots one process holds for outside callers under `EXTERNAL_CALL_BUDGET` |
+| `DFO_SITE_ORIGIN`                    | `None`                  | Public site origin for artifact and export links; required on Cloud Run       |
+| `DFO_CALLER_PRINCIPAL`               | `None`                  | Secret sent beside a website-named caller on `export_data` prepares           |
 | `PORT`                               | `8080`                  | Port for the streamable HTTP transport                                        |
 
 ## Running tests

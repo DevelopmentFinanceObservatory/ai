@@ -856,6 +856,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "authorisation_mismatch",
             "manifest_outside_authorisation",
             HarnessCode.PROVENANCE_UNAVAILABLE,
+            "licence_not_redistributable",
         }
     ),
     FailureClass.CARD_REFUSED: frozenset(

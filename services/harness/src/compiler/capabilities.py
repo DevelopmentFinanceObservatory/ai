@@ -328,6 +328,13 @@ EXCLUDED_TOOLS: tuple[ExcludedTool, ...] = (
         ),
     ),
     ExcludedTool(
+        tool=_data("export_data"),
+        reason=(
+            "Turns a frame into a file and a public link for an outside model's user; "
+            "no workflow step reads it."
+        ),
+    ),
+    ExcludedTool(
         tool=_data("catalogue_counts"),
         reason=(
             "Serves the counts of what DFO holds to the orchestrator's explain_dfo; "

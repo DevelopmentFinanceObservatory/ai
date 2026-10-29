@@ -36,6 +36,7 @@ class UpstreamError(Exception):
         capability_version: str | None = None,
         body: bytes = b"",
         extensions: Mapping[str, Any] | None = None,
+        retry_after_s: float | None = None,
     ) -> None:
         self.status = status
         self.code = code
@@ -46,8 +47,11 @@ class UpstreamError(Exception):
         self.capability_version = capability_version
         self.body = body
         self.extensions: dict[str, Any] = dict(extensions or {})
+        # The response's `Retry-After` in seconds, when it named one. `export_data`
+        # reads it; every other tool derives its wait from the two fields below.
+        self.retry_after_s = retry_after_s
         # Filled in by the retry loop. #26's `retry_after_delay` derives its
-        # interval from them, since no upstream response carries one.
+        # interval from them.
         self.attempts = 1
         self.elapsed_s = 0.0
         super().__init__(f"upstream call failed: status={status} code={code} title={title}")

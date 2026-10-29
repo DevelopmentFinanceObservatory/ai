@@ -201,6 +201,11 @@ STOP_CODES = frozenset(
         # (`compiler.capabilities.EXCLUDED_TOOLS`).
         "skill_not_found",
         "skill_resource_not_found",
+        # `export_data`'s own refusals. No workflow step calls it
+        # (`compiler.capabilities.EXCLUDED_TOOLS`).
+        "allowance_exhausted",
+        "provenance_unavailable",
+        "licence_not_redistributable",
         # analysis-mcp
         "stat_var_unresolved",
         "frame_too_large",

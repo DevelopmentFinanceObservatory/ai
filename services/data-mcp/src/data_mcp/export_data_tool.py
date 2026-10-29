@@ -1,0 +1,227 @@
+"""The `export_data` tool: a frame as a file the user keeps, behind a public link.
+
+The tool asks dfo-apis to prepare the export (`POST /api/datasets/exports`): dfo-apis
+renders the exact frame version as CSV, xlsx or Parquet, alone or in a zip bundle,
+copies the file to its pinned tier and answers the file's facts with the link's path,
+`/api/datasets/exports/{export_id}`. The tool puts that path on the public site
+(`UpstreamClient.public_url`), where a GET answers 302 to a URL signed for five
+minutes. The tool never calls the link, so no signed URL reaches its result.
+
+The prepare spends one unit of the caller's daily pin allowance for a new file, and
+nothing for a repeat. The caller the website named rides on the call
+(`UpstreamClient.caller_headers`).
+
+A fetched frame (`spec_`) exports its long layout, with a `_label` column beside each
+code. A derived frame (`ops_`) exports its own columns, which carry no labels.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal, NotRequired, TypedDict
+
+from fastmcp.tools import ToolResult
+from mcp.types import ResourceLink, TextContent
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
+
+from data_mcp.client import DATASETS_PREFIX
+from data_mcp.client_holder import get_client
+from data_mcp.deadline import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S, CallDeadline
+from data_mcp.errors import UpstreamError
+from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
+
+_PREPARE_ROUTE = f"{DATASETS_PREFIX}/exports"
+
+# The prepare must answer before the combined server cancels an outside call
+# (`EXTERNAL_CALL_LIMIT_S`). dfo-apis finishes a prepare the tool stopped waiting
+# for, so a repeat call then finds the file and renders nothing.
+_PREPARE_DEADLINE_S = EXTERNAL_CALL_LIMIT_S - EXTERNAL_CALL_MARGIN_S
+
+_FORMAT_NAMES = {"csv": "CSV", "xlsx": "Excel (xlsx)", "parquet": "Parquet"}
+
+_DERIVED_PREFIX = "ops_"
+
+
+@with_config(ConfigDict(extra="forbid"))
+class ExportFrameRef(TypedDict):
+    """The frame to export: `spec_id`, and its `content_version`."""
+
+    spec_id: str
+    content_version: NotRequired[str]
+
+
+class ExportLicence(BaseModel):
+    """One source of the exported frame and its licence, as dfo-apis names them."""
+
+    source: str
+    label: str
+    licence: str | None
+    url: str | None
+
+
+class ExportFacts(BaseModel):
+    """The facts dfo-apis answers for a prepared export. A repeat answers the same."""
+
+    url_path: str
+    file_name: str
+    media_type: str
+    format: Literal["csv", "xlsx", "parquet"]
+    bundle: bool
+    bytes: int
+    rows: int
+    columns: int
+    sha256: str
+    frame: dict[str, str]
+    citation: str
+    licences: list[ExportLicence]
+    pinned: bool
+
+
+def _size(n: int) -> str:
+    """A byte count as a reader scans it: `812 B`, `5.5 KB`, `3.2 MB`."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _licence_line(licence: ExportLicence) -> str:
+    terms = licence.licence or "licence not stated"
+    return f"- {licence.label}: {terms}{f' ({licence.url})' if licence.url else ''}"
+
+
+def _render_digest(facts: ExportFacts, *, url: str) -> str:
+    """The digest: file, format, shape, size, link, citation, licences, how long the file
+    is kept, and which columns the file holds."""
+    file_format = _FORMAT_NAMES[facts.format]
+    if facts.bundle:
+        file_format += " in a zip with README.md, datapackage.json and CITATION.cff"
+    lines = [
+        f"File: {facts.file_name}",
+        f"Format: {file_format}",
+        f"Rows and columns: {facts.rows:,} rows, {facts.columns:,} columns",
+        f"Size: {_size(facts.bytes)}",
+        f"Link: {url}",
+        f"Citation: {facts.citation}",
+        "Licences:",
+        *(_licence_line(licence) for licence in facts.licences),
+        "Kept: permanently. The link needs no key and does not expire.",
+    ]
+    if facts.frame["spec_id"].startswith(_DERIVED_PREFIX):
+        lines.append("Columns: the derived frame's own. Code labels come with fetched frames only.")
+    else:
+        lines.append("Columns: the long layout, with a _label column beside each code.")
+    return "\n".join(lines)
+
+
+def _refusal(exc: UpstreamError, *, frame: ExportFrameRef, export_format: str) -> ToolRefusal:
+    """The refusal for a prepare dfo-apis refused. Codes the exports door owns map here;
+    every other code maps as it does for `get_data`."""
+    match exc.code:
+        case "over_ceiling":
+            count = exc.extensions.get("count")
+            cap = exc.extensions.get("cap")
+            return ToolRefusal.export_over_ceiling(
+                export_format=export_format,
+                count=count if isinstance(count, int) else None,
+                cap=cap if isinstance(cap, int) else None,
+            )
+        case "allowance_exhausted":
+            return ToolRefusal.allowance_exhausted(
+                retry_after_s=exc.retry_after_s, detail=exc.detail
+            )
+        case "provenance_unavailable":
+            return ToolRefusal.provenance_unavailable(spec_id=frame["spec_id"])
+        case "licence_not_redistributable":
+            return ToolRefusal.licence_not_redistributable(detail=exc.detail)
+        case "service_unavailable" if exc.retry_after_s is not None:
+            return ToolRefusal.service_unavailable(
+                service="dfo-apis exports",
+                retry_after_s=exc.retry_after_s,
+                detail=exc.detail,
+                trace_id=exc.trace_id,
+                capability_version=exc.capability_version,
+            )
+    return from_upstream_error(exc)
+
+
+async def export_data(
+    frame_ref: Annotated[
+        ExportFrameRef,
+        Field(description="The frame to export, as a get_data or verb result names it."),
+    ],
+    format: Annotated[
+        Literal["csv", "xlsx", "parquet"], Field(description="The file format.")
+    ] = "csv",
+    bundle: Annotated[
+        bool,
+        Field(
+            description="Wrap the file in a zip with README.md, datapackage.json and CITATION.cff."
+        ),
+    ] = False,
+) -> ToolResult:
+    """Export a frame, fetched or derived, as a file and return a public link to it.
+
+    The link needs no key and does not expire. CSV and xlsx hold up to 250,000 rows;
+    Parquet has no limit.
+    """
+    content_version = frame_ref.get("content_version")
+    if not content_version:
+        return to_tool_result(
+            ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=frame_ref["spec_id"])
+        )
+    client = get_client()
+    body = {
+        "frame": {"spec_id": frame_ref["spec_id"], "content_version": content_version},
+        "format": format,
+        "bundle": bundle,
+    }
+    try:
+        response = await client.request(
+            "POST",
+            _PREPARE_ROUTE,
+            route=_PREPARE_ROUTE,
+            json=body,
+            headers=client.caller_headers(),
+            deadline=CallDeadline.after(_PREPARE_DEADLINE_S),
+        )
+    except UpstreamError as exc:
+        return to_tool_result(_refusal(exc, frame=frame_ref, export_format=format))
+    try:
+        facts = ExportFacts.model_validate_json(response.content)
+    except ValidationError as exc:
+        return to_tool_result(
+            ToolRefusal.upstream_response_unusable(
+                detail=f"the export response did not match the shape this service expects: {exc}"
+            )
+        )
+    url = client.public_url(facts.url_path)
+    structured = {
+        "url": url,
+        **facts.model_dump(
+            include={
+                "file_name",
+                "media_type",
+                "bytes",
+                "rows",
+                "columns",
+                "sha256",
+                "citation",
+                "licences",
+                "pinned",
+            }
+        ),
+        "frame_ref": facts.frame,
+    }
+    link = ResourceLink(
+        type="resource_link",
+        uri=url,
+        name=facts.file_name,
+        mimeType=facts.media_type,
+        size=facts.bytes,
+    )
+    return ToolResult(
+        content=[TextContent(type="text", text=_render_digest(facts, url=url)), link],
+        structured_content=structured,
+        is_error=False,
+    )
