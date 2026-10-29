@@ -2126,6 +2126,7 @@ _PICKED = DecisionPick(
     chosen="the top 10 donors",
     origin_fixes=DecisionFixes(entities=(Entity(name="DAC countries", role="donor"),)),
     replaced_readings=("0" * 64,),
+    replaced_kinds=("dataset",),
     cited_by_every=("donor_scope",),
     cited_by_any=(),
     kept_requirements={},

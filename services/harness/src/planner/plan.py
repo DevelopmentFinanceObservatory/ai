@@ -6307,7 +6307,9 @@ class DecisionPick(StrictModel):
     `origin_fixes` is what that decision fixed on the card, which the picked
     option must change. Call C the card's requirements citing `slot`. The
     replan replaces them: `replaced_readings` holds what each root of C
-    read (`requirement_roots`, `requirement_readings`), `cited_by_every`
+    read (`requirement_roots`, `requirement_readings`), `replaced_kinds`
+    the kinds of those roots, which tell a change of shape apart,
+    `cited_by_every`
     the decisions every replacing requirement cites, `slot` and each
     decision of the user's every member of C cited, and `cited_by_any` each
     other decision of the user's some member of C cited, which some
@@ -6326,6 +6328,7 @@ class DecisionPick(StrictModel):
     chosen: str
     origin_fixes: DecisionFixes
     replaced_readings: tuple[str, ...]
+    replaced_kinds: tuple[str, ...]
     cited_by_every: tuple[str, ...]
     cited_by_any: tuple[str, ...]
     kept_requirements: dict[str, str]
@@ -6360,6 +6363,7 @@ class DecisionPick(StrictModel):
             chosen=chosen,
             origin_fixes=origin.fixes,
             replaced_readings=tuple(sorted({readings[r.id] for r in requirement_roots(replaced)})),
+            replaced_kinds=tuple(sorted({r.kind for r in requirement_roots(replaced)})),
             cited_by_every=tuple(sorted({slot} | every)),
             cited_by_any=tuple(sorted((users & some) - every)),
             kept_requirements={

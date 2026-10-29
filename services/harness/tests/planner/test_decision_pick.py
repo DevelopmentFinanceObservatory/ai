@@ -1448,3 +1448,96 @@ def test_a_pick_this_release_cannot_read_is_refused_and_nothing_is_recorded(
     assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value
     recorded = load_plan(ctx.state)
     assert recorded is not None and recorded.version == first["version"]
+
+
+@pytest.mark.parametrize(
+    ("card_fixes", "picked_fixes"),
+    [
+        pytest.param(DONOR_SCOPE.fixes, DecisionFixes(measure="net ODA"), id="entities"),
+        pytest.param(
+            DecisionFixes(entities=DONOR_SCOPE.fixes.entities, unit=USD),
+            DecisionFixes(measure="net ODA", unit=USD),
+            id="entities-and-the-unit",
+        ),
+        pytest.param(
+            DONOR_SCOPE.fixes,
+            DecisionFixes(entities=DONOR_SCOPE.fixes.entities, measure="net ODA"),
+            id="the-share-listing-entities",
+        ),
+    ],
+)
+def test_a_landed_shape_pick_can_be_picked_back(
+    decision: Callable[..., Decision], card_fixes: DecisionFixes, picked_fixes: DecisionFixes
+) -> None:
+    """The share of all aid to Kenya lands for the DAC total, and the user
+    picks the DAC total back. The replan drops the share and its denominator
+    and keeps the DAC total, which reads the measure and unit the share's
+    decision settled: a change of shape, admitted though those fields keep
+    their values."""
+    shown_as = DONOR_SCOPE.model_copy(
+        update={"options": ["the DAC total", "as a share of all aid to Kenya"], "fixes": card_fixes}
+    )
+    ctx = _context()
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), shown_as, USER_YEAR]),
+        evidence_requirements=[_dac_total()],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+
+    def pick(label: str) -> None:
+        card = load_plan(ctx.state)
+        assert card is not None
+        picked = decision_pick(
+            card,
+            choice_id="decision/donor_scope",
+            option_id=decision_option_id(label),
+            to_origin={},
+        )
+        assert picked is not None
+        save_decision_pick(ctx.state, picked)
+
+    pick("as a share of all aid to Kenya")
+    shared = _propose_plan(
+        ctx,
+        decisions=drafts(
+            [
+                shown_as.model_copy(
+                    update={"chosen": "as a share of all aid to Kenya", "fixes": picked_fixes}
+                )
+            ]
+        ),
+        evidence_requirements=[
+            _dac_total().model_copy(
+                update={
+                    "id": "all",
+                    "entities": (Entity(name="Kenya", role="recipient"),),
+                    "source_spec_id": EVERY_DONOR,
+                }
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=("measure", "donor_scope", "year"),
+                numerator=RequirementSide(input_id="dac"),
+                denominator=RequirementSide(input_id="all"),
+            ),
+        ],
+        amends_version=first["version"],
+    )
+    assert shared["outcome"] == Outcome.OK.value, shared
+    pick("the DAC total")
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([shown_as]),
+        evidence_requirements=[],
+        removed_evidence_requirements=["all", "share"],
+        amends_version=shared["version"],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [r.id for r in plan.evidence_requirements] == ["dac"]

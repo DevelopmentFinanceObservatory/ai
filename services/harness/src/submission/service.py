@@ -7028,7 +7028,8 @@ def _picked_decision(
 
     The plan holds it when it states a decision under the pick's slot whose
     `chosen` is the picked label and whose `fixes`, read off the
-    requirements citing it (`settle_decisions`), are set, and whose citing
+    requirements citing it (`settle_decisions`), are set, and, where the
+    replan keeps the plan's shape (`_same_shape`), whose citing
     `requirements` no longer read what the card's decision fixed
     (`_fixes_kept`). That decision is
     recorded `resolved_by=user`. Any other plan is refused (`_pick_not_held`).
@@ -7041,11 +7042,23 @@ def _picked_decision(
         states = f"states {stated.chosen!r} for it"
     elif stated.fixes is None:
         states = "states it, but the requirements citing it fix none of what it names"
-    elif _fixes_kept(pick, requirements):
+    elif _same_shape(pick, requirements) and _fixes_kept(pick, requirements):
         states = "states it, but the requirements citing it fix what the card's option fixed"
     else:
         return stated.model_copy(update={"resolved_by": ResolvedBy.USER})
     return _pick_not_held(pick, states, None, proposer, stated=stated)
+
+
+def _same_shape(pick: DecisionPick, requirements: Sequence[EvidenceRequirement]) -> bool:
+    """Whether the requirements replacing the card's that cited the pick end in
+    figures of the kinds C's did (`pick.replaced_kinds`, `requirement_roots`).
+
+    A pick that changes the shape, a share for a total or a total back for a
+    share, is judged by `_outside_pick` alone: the fields the card's option
+    fixed can keep their values across such a change.
+    """
+    replacing = [r for r in requirements if r.id not in pick.kept_requirements]
+    return {r.kind for r in requirement_roots(replacing)} == set(pick.replaced_kinds)
 
 
 def _fixes_kept(pick: DecisionPick, requirements: Sequence[EvidenceRequirement]) -> bool:
