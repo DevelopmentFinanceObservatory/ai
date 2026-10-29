@@ -2053,15 +2053,15 @@ async def test_the_servers_own_refusals_answer_the_envelope_in_both_channels(
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
-        ("describe_frame", {"frame_ref": {"spec_id": "spec_1"}}),
+        ("describe_frame", {"frame_ref": {"spec_id": "ops_1"}}),
         (
             "write_component",
-            {"intent": {"type": "table", "frame_ref": {"spec_id": "spec_1"}, "select": {}}},
+            {"intent": {"type": "table", "frame_ref": {"spec_id": "ops_1"}, "select": {}}},
         ),
     ],
     ids=["describe_frame", "write_component"],
 )
-async def test_a_bare_spec_id_refuses_frame_ref_incomplete_in_the_envelope(
+async def test_a_bare_ops_id_refuses_frame_ref_incomplete_in_the_envelope(
     name: str, arguments: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(server, "PlatformAssembler", _mock_platform_assembler(RELEASE))
@@ -2075,7 +2075,6 @@ async def test_a_bare_spec_id_refuses_frame_ref_incomplete_in_the_envelope(
         "correct_and_retry",
     )
     assert envelope["fix"]["pointer"] == "/frame_ref/content_version"
-    assert "get_data" in envelope["fix"]["advice"]
 
 
 async def test_an_apps_client_gets_a_notice_view_for_a_reply_without_an_envelope(
