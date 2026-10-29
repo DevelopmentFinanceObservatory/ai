@@ -9,9 +9,12 @@ same year, which `executor.run._Run._check_anchor_held` lets through.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -655,6 +658,33 @@ async def test_a_read_past_the_entrys_time_records_the_plan_as_written(
     assert (growth.window_start, growth.window_end) == (2019, 2024)
     assert [name for name, _ in surface.calls] == calls
     assert events == ["translation.anchor_read_skipped"]
+
+
+async def test_the_planner_entry_evals_stand_in_read_records_the_plan_as_written(
+    rolling_draft: Callable[..., Plan],
+    source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`evals/planner_entry` replays a translation with `entry._no_anchor_read` as its
+    newest-year read, called as `propose_operations` calls the served one."""
+    path = Path(__file__).resolve().parents[4] / "evals" / "planner_entry" / "entry.py"
+    spec = importlib.util.spec_from_file_location("planner_entry_eval_entry", path)
+    assert spec is not None and spec.loader is not None
+    entry = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, entry)
+    spec.loader.exec_module(entry)
+    context = _Context(rolling_draft(), source())
+    surface = ScriptedSurface(schemas=real_schemas, responses={})
+    core = build_translator_core(surface=surface, anchor_read=entry._no_anchor_read)
+
+    answer = await core.propose_operations(
+        translation=build_translation(context.plan(), context.specs), tool_context=context
+    )
+
+    assert answer["outcome"] == "ok", answer
+    assert "restated" not in answer
+    assert surface.calls == []
 
 
 async def test_a_restatement_refused_names_the_requirement_whose_move_the_rule_refuses(

@@ -576,16 +576,9 @@ def _groups(
 
 def _posted_scope(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> PartScope:
     """The scope a switch of `choice` to `option_id` asks Search for: `scope`
-    with the switch's entries (`switch_entries`) and `option_id` active on the
-    choice's axis."""
+    with the switch's entries (`switch_entries`)."""
     return scope.model_copy(
-        update={
-            "entries": tuple(switch_entries(scope, choice=choice, option_id=option_id)),
-            "choices": tuple(
-                held.model_copy(update={"active": option_id}) if held.axis == choice.axis else held
-                for held in scope.choices
-            ),
-        }
+        update={"entries": tuple(switch_entries(scope, choice=choice, option_id=option_id))}
     )
 
 

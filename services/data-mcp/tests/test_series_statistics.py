@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from common.apis_auth import TOKEN_HEADER
-from data_mcp import client_holder
+from data_mcp import client_holder, series_statistics
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import Manifest, strip_manifest
 from data_mcp.series_statistics import (
@@ -26,12 +26,14 @@ from data_mcp.series_statistics import (
     _read_bounded,
     _TableKey,
     _VerifiedTables,
+    clear_series_statistics_cache,
     continuing_method,
     fetch_series_statistics,
     fetch_series_statistics_table,
     find_statistics_artifact,
     series_statistics_table,
 )
+from fastmcp.exceptions import ResourceError
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .test_client import ID_TOKEN, _client, _settings, id_token_auth
@@ -968,6 +970,7 @@ async def test_concurrent_reads_of_one_artifact_fetch_it_once() -> None:
         await asyncio.sleep(0.01)
         return httpx2.Response(200, content=data)
 
+    transport = httpx2.MockTransport(get_handler)
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         tables = await asyncio.gather(
@@ -978,7 +981,7 @@ async def test_concurrent_reads_of_one_artifact_fetch_it_once() -> None:
                     artifact=artifact,
                     expected_series=1,
                     continuing=None,
-                    transport=httpx2.MockTransport(get_handler),
+                    transport=transport,
                 )
                 for _ in range(3)
             )
@@ -1007,6 +1010,7 @@ async def test_concurrent_reads_of_one_artifact_share_a_failed_fetch() -> None:
         await asyncio.sleep(0.01)
         return httpx2.Response(next(statuses), content=data)
 
+    transport = httpx2.MockTransport(get_handler)
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         results = await asyncio.gather(
@@ -1017,7 +1021,7 @@ async def test_concurrent_reads_of_one_artifact_share_a_failed_fetch() -> None:
                     artifact=artifact,
                     expected_series=1,
                     continuing=None,
-                    transport=httpx2.MockTransport(get_handler),
+                    transport=transport,
                 )
                 for _ in range(3)
             ),
@@ -1026,6 +1030,113 @@ async def test_concurrent_reads_of_one_artifact_share_a_failed_fetch() -> None:
 
     assert requests == ["link", "get"]
     assert all(isinstance(result, httpx2.HTTPStatusError) for result in results), results
+
+
+async def test_concurrent_reads_of_one_artifact_through_other_links_fetch_on_their_own() -> None:
+    """Two reads of one artifact under different content versions miss the cache at
+    once. The one whose link lookup fails does not fail the other."""
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    expired = "cv_" + "5" * 32
+
+    def snapshot_handler(request: httpx2.Request) -> httpx2.Response:
+        if expired in request.url.path:
+            return httpx2.Response(410, json={"code": "artifact_expired"})
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    transport = httpx2.MockTransport(lambda _request: httpx2.Response(200, content=data))
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        failed, read = await asyncio.gather(
+            *(
+                fetch_series_statistics_table(
+                    subject_id=_SPEC_ID,
+                    content_version=content_version,
+                    artifact=artifact,
+                    expected_series=1,
+                    continuing=None,
+                    transport=transport,
+                )
+                for content_version in (expired, _CONTENT_VERSION)
+            ),
+            return_exceptions=True,
+        )
+
+    assert isinstance(failed, ResourceError), failed
+    assert isinstance(read, pa.Table), read
+    assert read["stat_var"].to_pylist() == ["dcid:VarA"]
+
+
+async def test_a_fetch_that_runs_past_its_own_bound_fails_a_read_with_no_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GET that never finishes ends the shared fetch at `_FLIGHT_TIMEOUT_S`, so a
+    caller with no deadline of its own is not left waiting on it."""
+    monkeypatch.setattr(series_statistics, "_FLIGHT_TIMEOUT_S", 0.05)
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    async def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(1.0)
+        return httpx2.Response(200, content=data)
+
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        with pytest.raises(TimeoutError):
+            await fetch_series_statistics_table(
+                subject_id=_SPEC_ID,
+                content_version=_CONTENT_VERSION,
+                artifact=artifact,
+                expected_series=1,
+                continuing=None,
+                transport=httpx2.MockTransport(get_handler),
+            )
+
+
+async def test_clearing_the_cache_cancels_the_fetch_in_flight() -> None:
+    """A read after `clear_series_statistics_cache` fetches again rather than join the
+    fetch that was in flight when the cache was cleared, which ends cancelled."""
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    requests: list[str] = []
+    stalls = iter((True, False))
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("link")
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    async def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("get")
+        if next(stalls):
+            await asyncio.sleep(1.0)
+        return httpx2.Response(200, content=data)
+
+    arguments: dict[str, Any] = {
+        "subject_id": _SPEC_ID,
+        "content_version": _CONTENT_VERSION,
+        "artifact": artifact,
+        "expected_series": 1,
+        "continuing": None,
+        "transport": httpx2.MockTransport(get_handler),
+    }
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        stalled = asyncio.create_task(fetch_series_statistics_table(**arguments))
+        while requests != ["link", "get"]:
+            await asyncio.sleep(0)
+        clear_series_statistics_cache()
+        table = await fetch_series_statistics_table(**arguments)
+        with pytest.raises(asyncio.CancelledError):
+            await stalled
+
+    assert requests == ["link", "get", "link", "get"]
+    assert table["stat_var"].to_pylist() == ["dcid:VarA"]
 
 
 def test_a_slice_counts_every_buffer_it_keeps_alive() -> None:

@@ -47,8 +47,8 @@ The verified table is kept per process under `artifact.artifact_digest`, the
 sha256 of its bytes, with the `expected_series` and `continuing` it was
 checked against (`_TABLES`). A retrieval's `get_data` digest and the harness's
 evidence check on the same mint therefore download and decode the artifact
-once. Concurrent misses on one key share one fetch and its outcome, a failure
-included. Only a table that passed every check is kept, so a failure is
+once. Concurrent misses on one key through one link share one fetch and its
+outcome, a failure included, and the fetch is bounded as a whole. Only a table that passed every check is kept, so a failure is
 retried by the next call after it.
 """
 
@@ -141,6 +141,11 @@ _FACET = TypeAdapter(SeriesStatisticsModel.model_fields["facet"].annotation)
 # caller's own docstring for what "degrade" means there.
 _FETCH_TIMEOUT_S = 30.0
 
+# The bound on one whole fetch, link lookup, GET and read together. The hops'
+# own timeouts bound each read off the wire, which a body trickling in under
+# them never meets, and every caller missing the table waits on the one fetch.
+_FLIGHT_TIMEOUT_S = 60.0
+
 # The Arrow buffer bytes the verified tables `_TABLES` may hold in total. A
 # 25,000-series CRS file is about 7.5 MiB as Arrow, so this keeps several of
 # the largest and every small one a turn reads.
@@ -156,6 +161,16 @@ class _TableKey(NamedTuple):
     continuing: str | None
 
 
+class _FlightKey(NamedTuple):
+    """What one fetch reads: the table it verifies, and the pair and transport it
+    reads the link and the bytes through."""
+
+    table: _TableKey
+    subject_id: str
+    content_version: str
+    transport: httpx2.AsyncBaseTransport | None
+
+
 class _VerifiedTables:
     """Verified tables, least recently used first, within `max_bytes` of Arrow buffers.
 
@@ -163,15 +178,15 @@ class _VerifiedTables:
     never goes stale. It is only evicted to stay under `max_bytes`. A table is
     sized by every buffer it references (`pa.Table.get_total_buffer_size`),
     so a slice counts the whole buffer it keeps alive. `flight` hands every
-    caller missing one key the one fetch of it, so all of them share its
-    outcome, a failure included.
+    caller missing one table through one link the one fetch of it, so all of
+    them share its outcome, a failure included.
     """
 
     def __init__(self, max_bytes: int) -> None:
         self.max_bytes = max_bytes
         self._tables: OrderedDict[_TableKey, tuple[pa.Table, int]] = OrderedDict()
         self._held = 0
-        self._flights: dict[_TableKey, asyncio.Task[pa.Table]] = {}
+        self._flights: dict[_FlightKey, asyncio.Task[pa.Table]] = {}
 
     def get(self, key: _TableKey) -> pa.Table | None:
         """The table kept under `key`, marked most recently used, or `None`."""
@@ -196,30 +211,41 @@ class _VerifiedTables:
             self._held -= evicted
 
     def flight(
-        self, key: _TableKey, fetch: Callable[[], Coroutine[Any, Any, pa.Table]]
+        self, key: _FlightKey, fetch: Callable[[], Coroutine[Any, Any, pa.Table]]
     ) -> asyncio.Task[pa.Table]:
         """The fetch of `key` in flight, started as `fetch()` when none is.
 
-        The fetch is forgotten once it ends, so the next miss after a failure
+        The fetch raises `TimeoutError` once it runs past `_FLIGHT_TIMEOUT_S`,
+        and is forgotten once it ends, so the next miss after a failure
         fetches again.
         """
         if (task := self._flights.get(key)) is None:
-            task = asyncio.create_task(fetch())
+            task = asyncio.create_task(asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S))
             self._flights[key] = task
-            task.add_done_callback(lambda _: self._flights.pop(key, None))
+
+            def forget(done: asyncio.Task[pa.Table]) -> None:
+                # A fetch `clear` cancelled ends after the next one under `key` began.
+                if self._flights.get(key) is done:
+                    del self._flights[key]
+
+            task.add_done_callback(forget)
         return task
 
     def clear(self) -> None:
-        """Forget every table."""
+        """Forget every table, and cancel and forget every fetch in flight."""
         self._tables.clear()
         self._held = 0
+        for task in self._flights.values():
+            task.cancel()
+        self._flights.clear()
 
 
 _TABLES = _VerifiedTables(_TABLES_MAX_BYTES)
 
 
 def clear_series_statistics_cache() -> None:
-    """Forget every verified table, so the next fetch of each goes to the network."""
+    """Forget every verified table and cancel every fetch in flight, so the next
+    read of each goes to the network."""
     _TABLES.clear()
 
 
@@ -335,7 +361,8 @@ async def fetch_series_statistics_table(
             `frame_materialisation.materialise_and_register`'s own `transport`
             -- `None` (the default) means a real network GET.
         deadline: When set, the link lookup and the GET together must finish
-            before it; `None` bounds each by its own timeout alone.
+            before it; `None` waits on the fetch's own bound alone
+            (`_FLIGHT_TIMEOUT_S`).
 
     Returns:
         The file's rows in `SERIES_STATISTICS_ARROW_SCHEMA`, in its own row
@@ -357,7 +384,7 @@ async def fetch_series_statistics_table(
         httpx2.TransportError: the GET itself failed, or no dfo-apis ID token
             could be minted for it.
         TimeoutError: `deadline` passed before the link lookup and the GET
-            finished.
+            finished, or the fetch ran past `_FLIGHT_TIMEOUT_S`.
     """
     # Imported here, not at module level: `data_mcp.artifact_resource` imports
     # `data_mcp.get_data_tool`, which imports `frame_materialisation`, which
@@ -392,10 +419,10 @@ async def fetch_series_statistics_table(
         _TABLES.put(key, table)
         return table
 
-    # A miss joins the fetch in flight for `key`, which each hop bounds by its own
-    # timeout, and waits for it until its own deadline. Shielded, so a caller
-    # giving up leaves the fetch to the others.
-    flight = _TABLES.flight(key, fetch)
+    # A miss joins the fetch in flight for its table through its own link, which
+    # `_FLIGHT_TIMEOUT_S` bounds, and waits for it until its own deadline. Shielded,
+    # so a caller giving up leaves the fetch to the others.
+    flight = _TABLES.flight(_FlightKey(key, subject_id, content_version, transport), fetch)
     async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
         return await asyncio.shield(flight)
 
