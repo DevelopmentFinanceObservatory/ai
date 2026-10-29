@@ -62,7 +62,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import block_groups
+from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from data_mcp.definition_writes import windowed_identity
 from google.adk import Context, Event
@@ -362,7 +362,7 @@ async def _switched_plan(
             reading,
             scope,
             _posted_scope(scope, choice=choice, option_id=option_id),
-            _groups(reading, specs.get(pin) or _source_block(sources.get(pin), pin)),
+            _groups(reading, specs.get(pin) or _source_block(sources.get(pin), pin), pin=pin),
         )
         for pin, reading, scope, choice in targets
     ]
@@ -563,10 +563,43 @@ def _source_block(source: PinSource | None, pin: str) -> Mapping[str, Any] | Non
     return source.spec_block(pin) if source is not None else None
 
 
-def _groups(reading: SearchReading, block: Mapping[str, Any] | None) -> tuple[ResolvedGroup, ...]:
-    """The entity groups a switch of `reading` posts: those it was resolved with
-    (`SearchReading.entity_groups`), or `block`'s for a reading stored without them."""
-    return tuple(reading.entity_groups or (block_groups(block) if block is not None else ()))
+def _groups(
+    reading: SearchReading, block: Mapping[str, Any] | None, *, pin: str
+) -> tuple[ResolvedGroup, ...]:
+    """The entity groups a switch of `reading`, pinned as `pin`, posts beside the part,
+    as every resubmit posts them (`compiler.sources.wire_groups`), so Search names
+    them again.
+
+    They are `block`'s groups, read for what the resubmit posts alone
+    (`compiler.sources.readable_wire_groups`), where `block` is at hand and names
+    sets that read, else the groups `reading` was resolved with
+    (`SearchReading.entity_groups`) where those read, else none where `block`
+    reads and names none. Both the switch's post (`_resubmit`) and its post over
+    the plan's window (`_windowed_post`) take them, so neither posts sets the
+    other would refuse.
+
+    Raises:
+        SwitchFailedError: If neither reads: what `block`'s groups post is not
+            readable or there is no `block`, and `reading`'s were not readable when
+            it was stored (`SearchReading.entity_groups_unreadable`) or, beside a
+            block naming sets, it holds none, since the switch would post the part
+            without them.
+    """
+    groups = readable_wire_groups(block) if block is not None else None
+    # A block naming no sets says nothing of the reading's, so readable stored sets
+    # stand. A block whose sets do not read falls back only to stored sets that
+    # do: an empty stored tuple beside it would post the part without them.
+    stored_stands = not reading.entity_groups_unreadable and (
+        groups is not None or block is None or bool(reading.entity_groups)
+    )
+    if not groups and stored_stands:
+        groups = reading.entity_groups
+    if groups is None:
+        logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
+        raise SwitchFailedError(
+            "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
+    return tuple(groups)
 
 
 def _posted_scope(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> PartScope:
@@ -877,6 +910,7 @@ async def apply_stored_choice(
             groups=_groups(
                 reading,
                 (ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
+                pin=pin,
             ),
             label=label,
         )

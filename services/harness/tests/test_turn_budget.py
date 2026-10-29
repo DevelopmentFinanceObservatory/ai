@@ -268,6 +268,39 @@ async def test_the_span_records_the_first_chunk_and_the_gaps_after_it() -> None:
     assert len(span.attributes["dfo.model.chunk_gaps_s"]) == 2
 
 
+async def test_the_span_records_thought_tokens_and_when_thought_and_text_first_arrived() -> None:
+    """A call that thinks before it answers stamps when its first thought and
+    its first text arrived, counted as the first chunk is, on the stream's
+    waits alone, so the 10 s the caller spends on each chunk is left out, and
+    the thought tokens its usage reports."""
+    clock = _Clock()
+    budget = _budget(clock=clock, model_time_s=60.0)
+
+    async def thinks_then_answers() -> AsyncGenerator[LlmResponse]:
+        clock.now += 1.0
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[types.Part(text="hm", thought=True)]),
+            partial=True,
+        )
+        clock.now += 3.0
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[types.Part(text="answer")]), partial=True
+        )
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[types.Part(text="answer")]),
+            usage_metadata=types.GenerateContentResponseUsageMetadata(thoughts_token_count=321),
+        )
+
+    with _current(budget), _generate_content_span() as span:
+        async for _ in bounded(thinks_then_answers, stream=True):
+            clock.now += 10.0
+
+    assert span.attributes is not None
+    assert span.attributes["dfo.model.first_thought_s"] == 1.0
+    assert span.attributes["dfo.model.first_text_s"] == 4.0
+    assert span.attributes["dfo.model.thoughts_token_count"] == 321
+
+
 class _StallingModels:
     """genai's `aio.models`: the first stream stalls before its first chunk."""
 

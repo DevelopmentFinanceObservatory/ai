@@ -80,15 +80,23 @@ _OFFERED_STATUSES = frozenset({"available", "partial"})
 
 # The words for each cause Search gives a dropped scope entry
 # (`PartScope.dropped_entries[].cause`): what kept the entry out of the
-# compile, or a reason code of the option it asked for (`REASON_COPY`).
-# Causes with a parameter (`both_on_<axis>`, `blocks_every_<axis>_option:<conflict>`)
-# and a declared conflict's own cause are worded in `_dropped_cause_words`.
+# compile, a reason code of the option it asked for (`REASON_COPY`), or the
+# cause of a conflict between two options Search declares (`search.scope.rules`
+# and `search.scope.provider` in dfo-apis). Causes with a parameter
+# (`both_on_<axis>`, `blocks_every_<axis>_option:<conflict>`) and a declared
+# conflict's cause with no words here are worded in `_dropped_cause_words`.
 _DROPPED_CAUSE_WORDS: dict[str, str] = {
     "entry_on_axis": "another choice settles that axis",
     "not_served": "the answer serves another option",
     "option_unavailable": "that option is not available here",
     "option_partial": "that option covers only some years",
     "conflicts_with_entry": "it conflicts with another choice",
+    "imputed_gross_disbursements_only": (
+        "imputed multilateral aid is not published on that measure basis"
+    ),
+    "both_composite_sources": (
+        "imputed multilateral aid cannot be added to the OECD headline series"
+    ),
     **REASON_COPY,
 }
 
@@ -834,11 +842,11 @@ def _dropped_cause_words(cause: str, *, axis: str, availability: Mapping[str, An
     """`cause`, a dropped scope entry's cause code, in words.
 
     A partial requested option adds the years it covers, as "(2011 to
-    2024)". A declared conflict's own cause, the one the requested option's
-    `conflicts_with` availability names, reads as a conflict. Any other
-    cause with no words of its own, such as one this release does not
-    know, says only that Search could not apply the entry. Both keep the
-    code in brackets.
+    2024)". A declared conflict's cause with no words of its own, one the
+    requested option's `conflicts_with` availability names, reads as a
+    conflict. Any other cause with no words of its own, such as one this
+    release does not know, says only that Search could not apply the entry.
+    Both keep the code in brackets.
     """
     if cause == "axis_absent":
         words = f"this answer has no {axis} choice"

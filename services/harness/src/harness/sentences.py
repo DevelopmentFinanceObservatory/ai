@@ -459,11 +459,14 @@ def referral_sentence(
 class PlanWords:
     """How the requirements of the plan a refusal is about read
     (`harness.plan_display.plan_words`): `names`, each one's name on the plan
-    card, and `inputs`, the ids each one reads, by requirement id. A
-    requirement with no name is left unnamed, and its id reaches no reader."""
+    card, `inputs`, the ids each one reads, and `options`, the scope axes
+    ("provider", "measure_basis") whose option a retrieval's name states, by
+    requirement id. A requirement with no name is left unnamed, and its id
+    reaches no reader."""
 
     names: Mapping[str, str] = field(default_factory=dict)
     inputs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    options: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 _NO_WORDS = PlanWords()
@@ -724,6 +727,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "default_facet_undefined",
             "coverage_insufficient",
             "coverage_gaps",
+            "entity_no_series",
             "window_short",
             "scope_window_short",
             "scope_entities_unbound",

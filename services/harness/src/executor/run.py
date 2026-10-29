@@ -2115,7 +2115,7 @@ class _Run:
         on. It stops as
         `REQUIREMENT_UNMET` naming the first such step in plan order, its
         requirement the left-out entity's, carrying each left-out entity's
-        `ENTITY_MISSING` finding as an error. A narrowing is read off the
+        `ENTITY_NO_SERIES` finding as an error. A narrowing is read off the
         step's compiled arguments (`compiler.frame_columns.entity_narrowings`),
         whose columns are the approved source's, as the left-out entities'
         are.

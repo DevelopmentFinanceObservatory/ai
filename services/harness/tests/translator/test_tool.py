@@ -47,6 +47,7 @@ from planner.plan import (
     AskAnswer,
     Coverage,
     DatasetRequirement,
+    DecisionFixes,
     Entity,
     FirstYear,
     GrowthRequirement,
@@ -54,6 +55,7 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    RankRequirement,
     RequirementSide,
     ShareOfRequirement,
     Unit,
@@ -74,6 +76,8 @@ from planner.records import (
     EntityCandidate,
     EntityKey,
     GroupBy,
+    RankAmong,
+    RankDirection,
     RelativePeriod,
     RollingWindow,
     SourceNameCandidate,
@@ -1181,6 +1185,88 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
     assert [source.spec_id for source in stored.workflow.sources] == [SPEC_AFRICA]
 
 
+# DAC1 grant equivalents over 2015-2024 with all 50 providers left open on `origin`
+# and no entity resolved.
+SPEC_OPEN_DONORS = "spec_944230c2" + "0" * 24
+_OPEN_DONORS_BLOCK = _spec(
+    SPEC_OPEN_DONORS,
+    "Grant equivalents from 50 providers for official development assistance",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[],
+    role_axis_facts=[{"role": "origin", "member_count": 50}],
+)
+
+
+class _SearchRecordingSurface(_CountingSurface):
+    """A `_CountingSurface` that keeps the parts of every `search` it was asked to make."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.searched: list[object] = []
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: dict[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name == "search":
+            self.searched.append(arguments.get("parts"))
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+@pytest.mark.parametrize(
+    ("entities", "across", "searched"),
+    [
+        ([Entity(name="Japan", role="donor"), Entity(name="Italy", role="donor")], (), True),
+        ([], ("donor",), False),
+    ],
+    ids=["donors-named", "donors-across"],
+)
+async def test_a_pin_leaving_open_the_side_its_names_sit_on_is_searched_with_them(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    entities: list[Entity],
+    across: tuple[str, ...],
+    searched: bool,
+) -> None:
+    """Ten donors named on a pin holding every donor open would fail at run time, one
+    `entity_missing` each. The pin is searched again with the donors as donors, so the
+    source approved binds them. A pin read across every donor is honoured as it is."""
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_OPEN_DONORS)],
+            evidence_requirements=[
+                requirement(
+                    measure="official development assistance",
+                    entities=entities,
+                    across=across,
+                    source_spec_id=SPEC_OPEN_DONORS,
+                    unit=None,
+                ),
+                derived_requirement(),
+            ],
+        )
+    )
+    save_pin_sources(
+        context.state, {SPEC_OPEN_DONORS: PinSource(block=_OPEN_DONORS_BLOCK, settled=True)}
+    )
+    surface = _SearchRecordingSurface(schemas=real_schemas)
+
+    await build_translate(surface=surface)(context)
+
+    if not searched:
+        assert surface.searched == []
+        return
+    ((part,),) = surface.searched
+    assert part["entities"] == [{"text": entity.name, "role": "donor"} for entity in entities]
+
+
 @pytest.mark.parametrize(
     ("entity_groups", "named"), [(_GROUP_CLOSED, True), ({}, False)], ids=["named", "set-aside"]
 )
@@ -1373,6 +1459,98 @@ async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
     assert isinstance(total, DatasetRequirement)
     assert (total.entities, total.across) == (
         ((kenya, g7), ()) if named else ((kenya,), ("donor",))
+    )
+
+
+# DAC1 grant equivalents with the donor side bound to the members of "DAC members",
+# read as members.
+SPEC_DAC_MEMBERS = "spec_2a9984cd" + "0" * 24
+_DAC_MEMBERS_BLOCK = _spec(
+    SPEC_DAC_MEMBERS,
+    "Grant equivalents from 32 DAC members for official development assistance",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[
+        {"role": "origin", "label": "United States", "ref": "country/USA"},
+        {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        {"role": "origin", "label": "Japan", "ref": "country/JPN"},
+    ],
+    entity_groups={"origin": {"label": "DAC members", "ref": "DACMembers"}},
+)
+
+
+@pytest.mark.parametrize(
+    ("entity_groups", "named"),
+    [
+        ({"origin": {"label": "DAC members", "ref": "DACMembers"}}, True),
+        ({"origin": {"label": "DAC members", "total": "DACCountriesTotal"}}, False),
+        ({}, False),
+    ],
+    ids=["group-of-members", "group-total", "members-alone"],
+)
+@pytest.mark.parametrize("axis", ["donor", None], ids=["axis-stated", "axis-the-sole-role"])
+async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
+    real_schemas: list[ToolSchema],
+    decision: Callable[..., Any],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+    entity_groups: dict[str, Any],
+    named: bool,
+    axis: str | None,
+) -> None:
+    """For "largest DAC donors", a rank over every donor pinned to the DAC members, the
+    pin giving way would rank 50 providers, Turkey among the top ten. The group is named
+    for its members in place of `across`, so the rank keeps to them, whether it states
+    its axis or ranks over its input's one role. A group the pin binds as its published
+    total, or a side held to named members alone, is left as it is."""
+    context = context_holding(
+        draft(
+            decisions=[
+                pinning_decision(SPEC_DAC_MEMBERS),
+                decision(
+                    slot="donor_population_scope",
+                    options=["all reporting DAC members", "only DAC countries"],
+                    chosen="all reporting DAC members",
+                    fixes=DecisionFixes(among=RankAmong.POPULATION),
+                ),
+            ],
+            evidence_requirements=[
+                requirement(
+                    id="req_oda",
+                    measure="official development assistance",
+                    entities=[],
+                    across=("donor",),
+                    source_spec_id=SPEC_DAC_MEMBERS,
+                    unit=None,
+                ),
+                RankRequirement(
+                    id="req_rank",
+                    decision_ids=["donor_population_scope"],
+                    input_id="req_oda",
+                    direction=RankDirection.HIGHEST_FIRST,
+                    among=RankAmong.POPULATION,
+                    axis=axis,
+                    limit=10,
+                    window_start=2024,
+                    window_end=2024,
+                ),
+            ],
+        )
+    )
+    block = _DAC_MEMBERS_BLOCK | {
+        "resolved": _DAC_MEMBERS_BLOCK["resolved"] | {"entity_groups": entity_groups}
+    }
+    save_pin_sources(context.state, {SPEC_DAC_MEMBERS: PinSource(block=block, settled=True)})
+
+    found = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+
+    members = Entity(name="DAC members", role="donor", members=True)
+    assert found == ((NamedGroup("req_oda", members, "donor"),) if named else ())
+    ranked = _stored(context).requirement("req_oda")
+    assert isinstance(ranked, DatasetRequirement)
+    assert (ranked.entities, ranked.across, ranked.source_spec_id) == (
+        ((members,), (), SPEC_DAC_MEMBERS) if named else ((), ("donor",), SPEC_DAC_MEMBERS)
     )
 
 

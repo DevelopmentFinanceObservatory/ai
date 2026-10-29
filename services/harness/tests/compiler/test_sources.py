@@ -11,19 +11,22 @@ import pytest
 from compiler.sources import (
     DiscoveryStatus,
     MembersAnswer,
+    block_wire_groups,
     bound_refs,
     is_family,
     measure_named_by_query,
     members_reading,
     outcome_from_envelope,
     pinned_stat_var,
+    readable_source,
+    readable_wire_groups,
     source_from_spec_block,
     stat_var_count,
     total_reading,
     wire_groups,
 )
 from planner.records import EntityCandidate, EntityKey, Period
-from planner.workflow import BoundEntity, OpenEntityAxis
+from planner.workflow import BoundEntity, OpenEntityAxis, SelectedSource
 
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
@@ -253,6 +256,39 @@ def test_a_shape_without_a_digest_reads_as_none(shape: dict[str, Any] | None) ->
 
     assert source.shape_member_digest is None
     assert source.shape_member_count == (shape or {}).get("member_count")
+
+
+@pytest.mark.parametrize(
+    ("labels", "read"),
+    [
+        (
+            {
+                "concept_label": "health",
+                "published_tables": "OECD Creditor Reporting System (CRS) and ONE Imputed "
+                "Multilateral Sectors",
+            },
+            (
+                "health",
+                "OECD Creditor Reporting System (CRS) and ONE Imputed Multilateral Sectors",
+            ),
+        ),
+        ({"concept_label": None, "published_tables": None}, (None, None)),
+        ({}, (None, None)),
+    ],
+    ids=["stated", "null", "before-the-fields"],
+)
+def test_the_concept_and_tables_search_states_are_read_as_stated(
+    labels: dict[str, Any], read: tuple[str | None, str | None]
+) -> None:
+    source = source_from_spec_block(_spec(**labels))
+
+    assert (source.concept_label, source.published_tables) == read
+    # A source stating neither keeps the serialised form of one saved before them.
+    dumped = source.model_dump()
+    assert ("concept_label" in dumped, "published_tables" in dumped) == (
+        read[0] is not None,
+        read[1] is not None,
+    )
 
 
 def test_a_source_without_a_provenance_facet_has_no_provenance() -> None:
@@ -647,6 +683,18 @@ def test_an_entity_without_its_role_is_refused() -> None:
         source_from_spec_block(_spec(entities=[{"label": "Kenya", "ref": "country/KEN"}]))
 
 
+def test_a_readable_source_is_none_with_a_warning_for_an_unusable_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A caller naming by the source reads an unusable block as none, logged once,
+    and a usable one as `source_from_spec_block` reads it."""
+    block = _spec()
+    assert readable_source(block) == source_from_spec_block(block)
+    with caplog.at_level("WARNING", logger="compiler.sources"):
+        assert readable_source(_spec("spec-abc")) is None
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+
+
 # --- Whether a source mints as one StatVar ------------------------------------------
 
 _GENDER_BLOCK_SLOT = {
@@ -937,6 +985,79 @@ def test_a_resubmit_posts_each_set_without_its_total() -> None:
     }
 
 
+def test_a_resubmit_posts_the_registry_id_of_a_set_the_graph_holds_no_node_for() -> None:
+    # Search keeps a set with no node of its own, read as its members, only through
+    # its registry id, which restores the total its dataset publishes for it.
+    asia = {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "total": None}
+    source = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups={"destination": asia}))
+
+    assert wire_groups(source.groups) == {
+        "destination": {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia"}
+    }
+
+
+def test_a_resubmit_reads_each_sets_posted_identity_whatever_else_it_states() -> None:
+    # Africa names a class of party this release does not know, so the full set is
+    # not readable; a resubmit posts only its label, ref and registry id.
+    africa = {**_GROUPS["destination"], "whole_of": ["sovereign_fund"], "group_id": None}
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+    with pytest.raises(ValueError, match="sovereign_fund"):
+        source_from_spec_block(block)
+
+    assert wire_groups(block_wire_groups(block)) == {
+        "destination": {"label": "Africa", "ref": "africa"},
+        "origin": {"label": "G7"},
+    }
+    assert wire_groups(block_wire_groups(block, leaving_out="destination")) == {
+        "origin": {"label": "G7"}
+    }
+
+
+@pytest.mark.parametrize(
+    "africa",
+    [
+        pytest.param({"label": "Africa", "ref": 5}, id="ref-not-text"),
+        pytest.param({"label": "Africa", "group_id": 7}, id="group-id-not-text"),
+        pytest.param("Africa", id="not-an-object"),
+    ],
+)
+def test_a_resubmit_refuses_a_set_whose_posted_identity_does_not_read(africa: object) -> None:
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+
+    with pytest.raises(ValueError, match="destination"):
+        block_wire_groups(block)
+    assert readable_wire_groups(block) is None
+    assert wire_groups(block_wire_groups(block, leaving_out="destination")) == {
+        "origin": {"label": "G7"}
+    }
+
+
+@pytest.mark.parametrize(
+    "africa",
+    [
+        pytest.param({"ref": "africa", "total": "DACAfrica"}, id="no-label"),
+        pytest.param({"label": "", "ref": "africa"}, id="empty-label"),
+    ],
+)
+def test_a_resubmit_posts_without_a_set_stating_no_label(africa: object) -> None:
+    # A set stating no label names nothing a resubmit can post, and the source
+    # reading the block skips it too.
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+
+    assert [group.role for group in source_from_spec_block(block).groups] == ["origin"]
+    assert wire_groups(readable_wire_groups(block) or ()) == {"origin": {"label": "G7"}}
+
+
+@pytest.mark.parametrize("key", ["ref", "group_id"])
+def test_a_resubmit_posts_a_set_without_an_empty_ref_or_group_id(key: str) -> None:
+    # The source reading the block reads an empty ref or group_id as absent, so the
+    # resubmit posts the set with its label alone.
+    block = _spec(entities=_ENTITIES, entity_groups={"destination": {"label": "Africa", key: ""}})
+
+    assert source_from_spec_block(block).groups[0].label == "Africa"
+    assert wire_groups(readable_wire_groups(block) or ()) == {"destination": {"label": "Africa"}}
+
+
 # "ODA to Ethiopia from all donors" binds the OECD's official-donors total; the
 # union "all donors including private" binds that total and the private one.
 _WHOLE_ENTITIES = [
@@ -1027,6 +1148,137 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
     ).groups
 
     assert members_reading(union, answer=MembersAnswer.SUMMED) is None
+
+
+# Sets summed as their members, as Search states them: `left_out` names the
+# residuals the set's published total counts beside the members, absent where
+# the members leave none out and for a set with no published total, such as
+# the G7 read as its members. `sum_differs` says the source publishes its own
+# figure for the set, which can differ from the members' sum, in a sentence of
+# its own, so the residuals' list ends before it.
+_AFRICA_LEFT_OUT = (
+    " and leaves out what the data allocates to no single country: "
+    "Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC)."
+)
+_PUBLISHED = (
+    " The source publishes its own figure for {label}, "
+    "which can differ from one built from its members."
+)
+
+
+@pytest.mark.parametrize(
+    ("group", "tail"),
+    [
+        (
+            {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
+            ".",
+        ),
+        (
+            {"destination": {"ref": "africa", "label": "Africa", "total": None}},
+            ".",
+        ),
+        (
+            {"origin": {"ref": None, "label": "G7", "total": None}},
+            ".",
+        ),
+        (
+            {
+                "destination": {
+                    "ref": "africa",
+                    "label": "Africa",
+                    "total": None,
+                    "left_out": [
+                        "Africa, unallocated by country (DAC)",
+                        "North of Sahara, unallocated by country (DAC)",
+                    ],
+                }
+            },
+            _AFRICA_LEFT_OUT,
+        ),
+        (
+            {"origin": {"ref": None, "label": "G7", "total": None, "sum_differs": True}},
+            "." + _PUBLISHED.format(label="G7"),
+        ),
+        (
+            {
+                "destination": {
+                    "ref": "africa",
+                    "label": "Africa",
+                    "total": None,
+                    "left_out": [
+                        "Africa, unallocated by country (DAC)",
+                        "North of Sahara, unallocated by country (DAC)",
+                    ],
+                    "sum_differs": True,
+                }
+            },
+            _AFRICA_LEFT_OUT + _PUBLISHED.format(label="Africa"),
+        ),
+        (
+            {
+                "origin": {
+                    "ref": "DAC",
+                    "label": "DAC members",
+                    "total": None,
+                    "left_out": ["DAC donors, unspecified"],
+                }
+            },
+            " and leaves out what the source's total for DAC members counts beside them: "
+            "DAC donors, unspecified.",
+        ),
+    ],
+    ids=[
+        "donor-members-leave-nothing-out",
+        "recipient-members-leave-nothing-out",
+        "donor-set-with-no-published-total",
+        "recipient-members-leave-out-residuals",
+        "donor-total-differs-from-its-members-sum",
+        "residuals-end-before-the-published-figure",
+        "donor-members-leave-out-residuals",
+    ],
+)
+def test_summed_members_state_only_the_residuals_search_names(
+    group: dict[str, dict[str, object]], tail: str
+) -> None:
+    (read,) = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=group)).groups
+
+    assert members_reading(read, answer=MembersAnswer.SUMMED) == (
+        f"The figure for {read.label} adds up its members' figures{tail}"
+    )
+
+
+def test_an_unknown_answer_still_states_that_the_published_figure_can_differ() -> None:
+    group = {"origin": {"ref": "DAC", "label": "DAC members", "total": None, "sum_differs": True}}
+    (read,) = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=group)).groups
+
+    assert members_reading(read, answer=None) == (
+        f"The figures for {read.label} come from its members' figures."
+        + _PUBLISHED.format(label=read.label)
+    )
+
+
+def test_a_stored_set_reads_the_residuals_it_was_stored_with() -> None:
+    stated = {"ref": "africa", "label": "Africa", "total": None}
+    blocks = [
+        {"destination": stated},
+        {"destination": {**stated, "left_out": ["Africa, unallocated by country (DAC)"]}},
+    ]
+    stored = [
+        SelectedSource.model_validate(
+            source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=block)).model_dump(
+                mode="json"
+            )
+        )
+        for block in blocks
+    ]
+
+    assert [
+        members_reading(source.groups[0], answer=MembersAnswer.SUMMED) for source in stored
+    ] == [
+        "The figure for Africa adds up its members' figures.",
+        "The figure for Africa adds up its members' figures and leaves out what the data "
+        "allocates to no single country: Africa, unallocated by country (DAC).",
+    ]
 
 
 def test_a_resubmit_posts_a_whole_total_without_its_marker() -> None:

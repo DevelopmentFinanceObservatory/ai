@@ -61,7 +61,7 @@ _HAND_BACK_CAP = 800
 # Characters of a step summary that hands back a limited ranking whole
 # (`_lists_kept_rows`): the digest's header, up to `_LIST_CAP` rank lines of
 # at most about 120 characters each (a key of two role columns, a value and
-# the `[n=, coverage=]` tail), and its unit and coverage lines. A summary
+# the `[N rows, coverage=]` tail), and its unit and coverage lines. A summary
 # that still passes it is trimmed to the first and last row instead of cut
 # mid-list.
 _WHOLE_RANKING_CHARS = 3_000
@@ -833,6 +833,10 @@ def plan_done_node(
                 )
                 if _give_plan_back(ctx):
                     lead += " A brief that avoids the failure may be planned once more."
+            if "remedy" in result["failed_step"]:
+                lead += (
+                    " Tell the user what they can do about it, as the failed step's remedy says it."
+                )
         elif hand_back.nothing_chartable:
             lead = (
                 "The approved plan ran, but its result cannot be drawn: tell the user what "

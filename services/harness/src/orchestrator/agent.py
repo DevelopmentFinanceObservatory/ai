@@ -95,7 +95,9 @@ plainly right, fetch it. When it does not, ask the user, with the
 candidates' labels as the options.
 
 Send each place to search as the user wrote it. When search cannot place it,
-search once more with the place as you read it, before any other retry.
+search once more with the place as you read it, before any other retry. A
+part refused as role_not_resolved goes again first with `role` set on every
+name, from the side the user or an earlier turn gave it.
 
 When search finds nothing for a part, refuses it, or leaves out something
 the user asked for in it, search once more for that part alone: `as_text`
