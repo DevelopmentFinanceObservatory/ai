@@ -150,8 +150,18 @@ ANCHOR_READS_STATE_KEY = "translator:anchor_reads"
 
 
 def held_anchor_reads(state: SessionState) -> tuple[HeldAnchor, ...]:
-    """The groups `save_anchor_reads` kept, less any stored in a shape this release rejects."""
+    """The groups `save_anchor_reads` kept, less any stored in a shape this release rejects.
+
+    A value that is no mapping of groups holds none, and the omission is logged.
+    """
     stored = state.get(ANCHOR_READS_STATE_KEY) or {}
+    if not isinstance(stored, Mapping):
+        logger.warning(
+            "%s: left out a stored value that is no mapping, a %s",
+            ANCHOR_READS_STATE_KEY,
+            type(stored).__name__,
+        )
+        return ()
     held: list[HeldAnchor] = []
     errors: list[ValidationError] = []
     for value in stored.values():
@@ -1404,9 +1414,11 @@ def build_translate(
         (`translator.discovery.name_pinned_groups`). Each identity is
         resolved at most once in the turn
         (`translator.discovery.resolving_once`), so a switch or an amendment
-        that leaves a pin as it was asks Search nothing for it. A Search
-        outage one identity meets is kept for the rest of the translation, so
-        the group rewrite and discovery ask for it once.
+        that leaves a pin as it was asks Search nothing for it. A retryable
+        refusal Search answers one identity with is kept for the rest of the
+        translation, so the group rewrite and discovery ask for it once. A
+        raised failure (a timeout, a transport error,
+        `ToolSurfaceUnavailableError`) is kept for nothing and is asked again.
 
         Returns:
             `{"outcome": "ok"}` once the plan compiled, with `restated` when

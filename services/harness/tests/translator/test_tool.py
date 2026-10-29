@@ -102,12 +102,14 @@ from translator.referral import (
     save_referral,
 )
 from translator.tool import (
+    ANCHOR_READS_STATE_KEY,
     IssueResolution,
     _compile_failure_action,
     _referral_payload,
     authored_answer,
     build_translate,
     build_translator_core,
+    held_anchor_reads,
     issue_resolution,
     permitted_repair,
 )
@@ -1871,3 +1873,16 @@ def test_a_referral_joins_what_it_offers_a_copy_and_its_origin(
     assert mapped["stale_pins"] == []
     assert mapped["requirement_id"] == "debt"
     assert {field: mapped[field] for field in joined} == joined
+
+
+def test_an_anchor_reads_value_that_is_no_mapping_holds_no_reads(
+    empty_context: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    empty_context.state[ANCHOR_READS_STATE_KEY] = ["x"]
+
+    with caplog.at_level("WARNING", logger="translator.tool"):
+        held = held_anchor_reads(empty_context.state)
+
+    assert held == ()
+    assert ANCHOR_READS_STATE_KEY in caplog.text
+    assert "list" in caplog.text

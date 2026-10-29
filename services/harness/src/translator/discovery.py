@@ -2203,7 +2203,10 @@ _current_resolving: ContextVar[_Resolving | None] = ContextVar("resolving", defa
 def resolving_once(
     state: SessionState | None = None, *, keep_retryable: bool = False
 ) -> Iterator[None]:
-    """Ask Search each `resolve_definition` and `search` call once a turn, inside the block.
+    """Ask Search each `resolve_definition` and `search` call once an invocation, inside the block.
+
+    Search answers and refusals are kept for the invocation alone; only a
+    `definite` `resolve_definition` part is kept in session state, for the turn.
 
     The outermost block opens the invocation's answers (`_Invocation`), and
     a block inside it shares them, so concurrent identical calls anywhere in
