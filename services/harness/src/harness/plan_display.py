@@ -650,39 +650,6 @@ def _sides_phrase(sides: Mapping[str | None, Sequence[str]]) -> str:
     )
 
 
-def source_whole_name(
-    axis: str,
-    *,
-    source: SelectedSource,
-    part: SelectedSource | None,
-    sector: str | None,
-    measure: str | None,
-) -> str | None:
-    """What a declared whole leaving the donor or recipient `axis` open
-    fetches, named off the source Search answered for it alone, with no plan.
-
-    The concept as the plan card names it (`_entity_whole_concept`). Then the
-    parties `source` binds, each side by the named set bound there, else its
-    entities, else the members its open axis holds, and the opened side,
-    still unnamed, as every party there: "official development assistance
-    from DAC countries", "gross disbursements (official development
-    assistance) from official donors (DAC) to Kenya". `None` where `axis` is
-    on no side of a flow or nothing names the concept."""
-    side = flow_side(axis)
-    concept = _entity_whole_concept(source=source, part=part, sector=sector, measure=measure or "")
-    if side is None or not concept:
-        return None
-    sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
-    bound = {flow_side(group.role) for group in source.groups}
-    for entity in source.entities:
-        if (entity_side := flow_side(entity.role)) is not None and entity_side not in bound:
-            sides[entity_side].append(entity.label)
-    _source_parties(source, sides)
-    if not sides[side]:
-        sides[side].append(whole_name(axis))
-    return f"{concept} {_sides_phrase(sides)}"
-
-
 def _entity_whole_concept(
     *,
     source: SelectedSource | None,
@@ -691,8 +658,7 @@ def _entity_whole_concept(
     measure: str,
 ) -> str:
     """What a declared whole leaving a donor or recipient axis open fetches,
-    the one rule the plan card (`_concept`) and its stored reading
-    (`source_whole_name`) share, by `concept_name`'s order: the concept
+    as the plan card names it (`_concept`), by `concept_name`'s order: the concept
     Search states for the whole's `source`, else for its part's `part`, else
     the `sector` option the whole was counted on, else the label Search
     composed for `source`'s measure, which differs from the part's where
@@ -1541,18 +1507,13 @@ def card_questions(plan: Plan) -> dict[str, str]:
 
 
 def _governed_concepts(plan: Plan, decision: Decision, concepts: Mapping[str, str]) -> list[str]:
-    """The names `concepts` gives the retrievals pinning a source the row of scope
-    decision `decision` stands for (`listed_together`), in the order the plan states them."""
-    pinned = {
-        member.fixes.source_spec_id
-        for member in listed_together(plan, decision.slot)
-        if member.fixes is not None and member.fixes.source_spec_id is not None
-    }
+    """The names `concepts` gives the retrievals citing a decision the row of scope
+    decision `decision` stands for (`_row_slots`), in the order the plan states them."""
+    row = _row_slots(plan, decision)
     return [
         name
         for requirement_id, name in concepts.items()
-        if typing.cast(DatasetRequirement, plan.requirement(requirement_id)).source_spec_id
-        in pinned
+        if not row.isdisjoint(plan.requirement(requirement_id).decision_ids)
     ]
 
 
@@ -1570,19 +1531,36 @@ def listed_together(plan: Plan, slot: str) -> tuple[Decision, ...]:
 def choice_id(plan: Plan, decision: Decision) -> str:
     """The id the plan card gives scope decision `decision`'s row: `"<requirement id>:<axis>"`.
 
-    The requirement is the first of `plan` pinning a source the row stands
-    for (`listed_together`). A switch re-pins requirements and keeps their
-    ids, so the row keeps its id through every switch of the conversation,
-    whichever decision of the row is listed. A row whose sources no
-    requirement pins keeps Search's own id for the choice.
+    The requirement is the first of `plan` citing a decision the row stands
+    for (`_row_slots`). Admission derives each requirement's scope decisions
+    on the pin the planner states for it (`submission.service.statement`):
+    its pin's own rows, and for an input alignment moved onto another
+    pin's compile a row of its own on each axis moved
+    (`scope_<axis>_of_<requirement id>`). So the id reads the plan as the
+    planner states it, and a row standing for an aligned input's moved
+    axis takes that input's id, whichever requirement pins the compile. A
+    switch re-pins requirements and keeps their ids, so the row keeps its
+    id through every switch of the conversation, whichever decision of the
+    row is listed. A row no requirement cites keeps Search's own id for the
+    choice.
     """
     assert decision.scope is not None, "only a scope decision has a choice id"
-    pinned = {
-        member.fixes.source_spec_id
-        for member in listed_together(plan, decision.slot) or (decision,)
-        if member.fixes is not None and member.fixes.source_spec_id is not None
-    }
-    return pinned_choice_id(plan, pinned, decision.scope.axis) or decision.scope.choice_id
+    row = _row_slots(plan, decision)
+    first = next(
+        (
+            requirement
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+            and not row.isdisjoint(requirement.decision_ids)
+        ),
+        None,
+    )
+    return f"{first.id}:{decision.scope.axis}" if first is not None else decision.scope.choice_id
+
+
+def _row_slots(plan: Plan, decision: Decision) -> frozenset[str]:
+    """The slots of the decisions the card's row for `decision` stands for (`listed_together`)."""
+    return frozenset(member.slot for member in listed_together(plan, decision.slot) or (decision,))
 
 
 # The prefix of the id a planner decision's row takes (`decision_choice_id`).
@@ -1631,7 +1609,11 @@ def decision_option_id(label: str) -> str:
 def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | None:
     """`"<requirement id>:<axis>"` for the first requirement of `plan` pinning one
     of `pinned`, the id `choice_id` gives a row standing for those sources;
-    `None` when no requirement pins any."""
+    `None` when no requirement pins any.
+
+    `plan` is the plan as the planner states it (`submission.service.statement`),
+    where each requirement pins the source its scope decisions are derived on,
+    so an input alignment moved onto a compile reads as the pin it states."""
     first = next(
         (
             requirement

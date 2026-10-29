@@ -123,10 +123,12 @@ from planner.plan import (
     UnsupportedOperation,
     WholeOf,
     WindowedPin,
+    aligned_pins,
     clear_unsupported,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
+    held_sources,
     is_dataset,
     is_scope_choice,
     is_search_pin,
@@ -4960,20 +4962,22 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
         if isinstance(r, DatasetRequirement)
     ] == [("health", HEALTH), ("total", TOTAL_GROSS)]
     bases = {
-        d.fixes.source_spec_id: d
+        d.slot: d
         for d in plan.decisions
         if d.scope is not None and d.scope.axis == "measure_basis" and d.fixes is not None
     }
-    assert {pin: d.active_option_id for pin, d in bases.items()} == {
-        HEALTH: "measure_basis:gross",
-        TOTAL_GROSS: "measure_basis:gross",
+    moved_row = "scope_measure_basis_of_total"
+    assert {slot: d.active_option_id for slot, d in bases.items()} == {
+        scope_choice_slot(HEALTH, "measure_basis"): "measure_basis:gross",
+        moved_row: "measure_basis:gross",
     }
-    aligned = bases[TOTAL_GROSS]
+    aligned = bases[moved_row]
     assert aligned.resolved_by is ResolvedBy.PLANNER_DEFAULT
     assert "one basis" in aligned.rationale
     assert aligned.slot in plan.requirement("total").decision_ids
     assert plan.requirement("total").source is None  # type: ignore[union-attr]
-    assert not any(d.fixes is not None and d.fixes.source_spec_id == TOTAL for d in plan.decisions)
+    # The total's grant-equivalent basis row went with the move.
+    assert scope_choice_slot(TOTAL, "measure_basis") not in {d.slot for d in plan.decisions}
 
     # A restatement pinning the total as it was shown takes the compiled pin again.
     again = await _share_of_health(
@@ -6003,16 +6007,10 @@ async def test_a_total_compiled_on_the_bilateral_scope_is_pinned_with_the_planne
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.requirement("total").source_spec_id == TOTAL_BILATERAL  # type: ignore[union-attr]
-    (aligned,) = [
-        d
-        for d in plan.decisions
-        if d.scope is not None
-        and d.scope.axis == "provider"
-        and d.fixes is not None
-        and d.fixes.source_spec_id == TOTAL_BILATERAL
-    ]
+    (aligned,) = [d for d in plan.decisions if d.slot == "scope_provider_of_total"]
     assert aligned.resolved_by is ResolvedBy.PLANNER_DEFAULT
     assert aligned.active_option_id == "provider:bilateral"
+    assert aligned.slot in plan.requirement("total").decision_ids
 
 
 async def test_a_basis_search_read_in_the_planners_words_is_never_the_users(
@@ -6056,7 +6054,8 @@ async def test_no_pin_check_runs_on_a_pin_a_pending_read_will_move(
 ) -> None:
     """US health aid counted gross as a share of a US total the planner pinned no
     dataset for. Search pins the total, then the total is compiled gross. The checks
-    reading the pins run once, on the compiled total."""
+    reading the pins run once, on the total as Search pinned it, before the
+    compile moves it."""
     checked: list[str | None] = []
     check = submission_service._measure_fixed_by_pin
 
@@ -6079,7 +6078,7 @@ async def test_no_pin_check_runs_on_a_pin_a_pending_read_will_move(
 
     assert result["outcome"] == Outcome.OK.value, result
     assert surface.tools == ["search", "resolve_definition"]
-    assert checked == [TOTAL_GROSS]
+    assert checked == [TOTAL]
 
 
 async def test_an_unanswered_referral_is_refused_before_a_search_for_an_unpinned_input(
@@ -6919,15 +6918,11 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     provenance and the planner's axes are the part's, so a later search carries
     from the whole what it carries from the part. The whole states no scope row of
     its own, since each would restate the part's; a decision of the planner's
-    states it, cited by the whole. The whole's source keeps the provenance its
-    part's source records."""
+    states it, cited by the whole. The whole is held as a compile from its part."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block(part), *([_us_block(whole)] if whole else []))
-    shown = pin_sources(ctx.state)
     part_pin = us_2023_block(part)["spec_id"]
-    provenance = {"provenance_ref": "provenance/OECD_CRS", "provenance_account": "OECD CRS"}
-    save_pin_sources(ctx.state, {**shown, part_pin: shown[part_pin].model_copy(update=provenance)})
 
     result = await _us_2023(
         _tools_reading(surface)["propose_plan"].func,
@@ -6962,12 +6957,12 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
         (_WHOLE, us_2023_block(compiled)["spec_id"]),
     ]
     assert searched_pins(ctx.state) == ()
-    held_source = pin_sources(ctx.state)[us_2023_block(compiled)["spec_id"]]
-    assert (held_source.provenance_ref, held_source.provenance_account) == (
-        provenance["provenance_ref"],
-        provenance["provenance_account"],
+    (whole_compile,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None]
+    assert (whole_compile.spec_id, whole_compile.origin) == (
+        us_2023_block(compiled)["spec_id"],
+        part_pin,
     )
-    held = held_source.block
+    held = whole_compile.block
     assert held is not None
     assert PLANNER_AXES_BLOCK_KEY not in held
     assert {
@@ -9356,7 +9351,7 @@ async def test_a_donor_whole_of_an_inclusive_part_is_counted_on_the_scope_search
     assert (provider["option_id"], provider["provenance"]) == ("provider:inclusive", "carried")
     whole_pin = _OPENED_WHOLE["donor"]
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
-    whole_block = pin_sources(ctx.state)[whole_pin].spec_block(whole_pin)
+    whole_block = held_sources(ctx.state)[whole_pin].spec_block(whole_pin)
     assert whole_block is not None
     choices = whole_block["resolved"]["scope_choices"]["choices"]
     assert {c["axis"]: (c["active"], c["provenance"]) for c in choices}["provider"] == (
@@ -9711,7 +9706,7 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert result["outcome"] == Outcome.OK.value, result
     whole_pin = surface.recorded["whole"]["spec_id"]
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
-    whole_block = pin_sources(ctx.state)[whole_pin].spec_block(whole_pin)
+    whole_block = held_sources(ctx.state)[whole_pin].spec_block(whole_pin)
     assert whole_block is not None
     held = reading_facts(whole_block)["scope"]["dropped_entries"]
     assert [d["entry"]["option_id"] for d in held] == dropped
@@ -9836,7 +9831,7 @@ async def test_a_dac_donor_whole_searchs_answer_compiles(
     plan = load_plan(ctx.state)
     assert plan is not None
     pins = dict(_pins(ctx))
-    shown = pin_sources(ctx.state)
+    shown = held_sources(ctx.state)
     discovered = {
         rid: source_from_spec_block(cast(Any, shown[spec_id].spec_block(spec_id)))
         for rid, spec_id in pins.items()
@@ -10847,7 +10842,6 @@ def test_two_unpinned_leaves_read_one_series_only_when_they_are_one_leaf(
         return submission_service._InputBasis(
             requirement_id=requirement_id,
             pin=block["spec_id"],
-            origin=block["spec_id"],
             choice=choice,
             stated=False,
             held=submission_service._Origin(block=block, scope=scope),
@@ -12358,28 +12352,28 @@ async def test_a_part_alignment_moves_is_held_to_the_user_s_prices(
     assert result["detail"]["part"] == health["spec_id"]
 
 
-def test_a_whole_compiled_from_an_aligned_part_pin_is_held_to_the_user_s_prices(
+def test_a_whole_declared_from_a_priced_part_is_held_to_the_user_s_prices(
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
-    """Alignment compiled the part on another basis, and a declared whole was
-    compiled from that aligned pin. The whole's pin follows the chain back to
-    the part, so stating no unit on it drops the user's constant prices."""
+    """A declared whole is compiled from its part's dataset, whatever pin it
+    carries, so it reads the part the user priced: stating no unit on it drops
+    the user's constant prices."""
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
     sources = _shown_readings(ctx)
-    aligned, whole = "spec_" + "1" * 32, "spec_" + "2" * 32
-    parts = Parts(
-        sources.get,
-        sources.block,
-        shown=pin_sources(ctx.state).keys(),
-        aligned={aligned: _GROSS, whole: aligned},
+    parts = Parts(sources.get, sources.block, shown=pin_sources(ctx.state).keys())
+    part = requirement(id="part", source_spec_id=_GROSS)
+    total = requirement(
+        id="total",
+        source_spec_id="spec_" + "2" * 32,
+        unit=None,
+        whole_of=WholeOf(part="part", axis="sector"),
     )
-    total = requirement(id="total", source_spec_id=whole, unit=None)
 
     refused = prices_decisions(
         {_GROSS: PricesChoice("constant")},
         [total],
-        [total],
+        [total, part],
         parts=parts,
         propose="propose_plan",
     )
@@ -12387,6 +12381,44 @@ def test_a_whole_compiled_from_an_aligned_part_pin_is_held_to_the_user_s_prices(
     assert isinstance(refused, dict), refused
     assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value
     assert refused["detail"]["part"] == _GROSS
+    assert refused["detail"]["requirement_id"] == "total"
+
+
+def test_a_direct_pin_of_an_unshown_compile_is_held_to_the_user_s_prices(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user picked constant prices for gross French aid to Kenya. A pin compiled
+    for another input over the years 2020 to 2024 of that series is held as a
+    compile only, never shown to the planner. A plan pinning it directly, with no
+    unit, reads what the priced part measures, so it is refused as dropping the
+    user's choice."""
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    compiled = copy.deepcopy(_FRANCE_KENYA)
+    compiled["spec_id"] = "spec_" + "3" * 32
+    compiled["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin="spec_" + "4" * 32,
+            option_ids=("measure_basis:gross",),
+            spec_id=compiled["spec_id"],
+            digest={"spec_block": compiled},
+        ),
+    )
+    ctx.session.events = _prices_ask_events()
+    dataset, derived = requirements
+    direct = dataset.model_copy(update={"source_spec_id": compiled["spec_id"], "unit": None})
+
+    refused = _propose_one(_tools_by_name(), ctx, decision(), [direct, derived])
+
+    assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
+    assert refused["detail"]["part"] == _GROSS
+    assert refused["detail"]["requirement_id"] == dataset.id
 
 
 def test_an_answer_to_another_question_leaves_the_prices_choice_standing(

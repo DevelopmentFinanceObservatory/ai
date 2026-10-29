@@ -10,8 +10,9 @@ reads the user's picks off the answered interrupt, one per part
 `prices_decisions` writes each pick as a `resolved_by=user` decision fixing
 the price basis alone (`DecisionFixes.prices`), cited by every dataset
 requirement the planner pinned to one of the part's series (`Parts.series`),
-so each keeps its own currency and base year. A pin alignment moved is read
-as the planner wrote it (`Parts.origin_of`). It refuses a plan in which
+so each keeps its own currency and base year. A requirement alignment moves
+is read on the pin it states (`submission.service.admit` derives every
+decision before it pins the compile). It refuses a plan in which
 one of those leaves its unit out, states other prices or pins a series in
 other prices, naming the unit to state: the base year comes from the
 requirement's own pin, or from the series it is told to move to. With no
@@ -117,8 +118,7 @@ class Parts:
     `searched` those a search settled on as readings of their own, not
     fetched as another count of one (`of_shown`); `None` reads every shown
     series so. `priced` are the parts the user chose prices for
-    (`priced_by`). `aligned` maps each pin alignment compiled to the pin it was
-    compiled from (`submission.service.AlignedPin`).
+    (`priced_by`).
 
     A part's series are the part, each series its block offers in its place,
     another count or other prices, and each shown series measuring what one
@@ -130,7 +130,6 @@ class Parts:
     source_of: Callable[[str], SelectedSource | None]
     block_of: Callable[[str], Mapping[str, Any] | None]
     shown: Collection[str] = ()
-    aligned: Mapping[str, str] | None = None
     searched: Collection[str] | None = None
     priced: Collection[str] = ()
 
@@ -141,38 +140,39 @@ class Parts:
         source_of: Callable[[str], SelectedSource | None],
         block_of: Callable[[str], Mapping[str, Any] | None],
         *,
-        aligned: Mapping[str, str] | None = None,
+        pinned: Collection[str] = (),
     ) -> Parts:
         """The parts of the datasets `shown` to the planner, read through
         `source_of` and `block_of`: each settled one is a reading of its own
-        unless it was fetched as another count of one (`PinSource.other_count_of`)."""
+        unless it was fetched as another count of one (`PinSource.other_count_of`).
+
+        A dataset a requirement pins (`pinned`) that the planner was not shown,
+        a pin compiled for another input that the planner pins directly
+        (`planner.plan.held_sources`), is a reading of its own too, its
+        measure read off the block `block_of` holds for it. So the user's
+        prices choice on that measure holds it."""
+        compiled = [
+            spec_id
+            for spec_id in dict.fromkeys(pinned)
+            if spec_id not in shown and block_of(spec_id) is not None
+        ]
         return cls(
             source_of,
             block_of,
-            shown=shown.keys(),
-            aligned=aligned,
+            shown=[*shown.keys(), *compiled],
             searched=[
-                spec_id
-                for spec_id, source in shown.items()
-                if source.settled and source.other_count_of is None
+                *(
+                    spec_id
+                    for spec_id, source in shown.items()
+                    if source.settled and source.other_count_of is None
+                ),
+                *compiled,
             ],
         )
 
     def priced_by(self, choices: Mapping[str, PricesChoice]) -> Parts:
         """These parts, with the parts `choices` prices marked."""
         return replace(self, priced=frozenset(choices))
-
-    def origin_of(self, pin: str | None) -> str | None:
-        """The pin as the planner wrote it, before alignment moved it: each
-        compiled pin is followed to the one it was compiled from until a pin
-        alignment did not compile, so a whole compiled from an aligned part's
-        pin reads as the part."""
-        aligned = self.aligned or {}
-        seen: set[str] = set()
-        while pin is not None and pin in aligned and pin not in seen:
-            seen.add(pin)
-            pin = aligned[pin]
-        return pin
 
     def unit_of(self, spec_id: str) -> UnitReading:
         """What the unit of the series `spec_id` states (`source_unit`), nothing when no source is held."""
@@ -525,8 +525,9 @@ def prices_decisions(
 
     `requirements` is every requirement of the patched plan, `patch` this
     call's own. A dataset requirement reads a part when the pin the planner
-    wrote (`Parts.origin_of`) is the part's series or one the part offers in
-    its place (`Parts.series`). Each part that some requirement reads states
+    states, or a declared whole's part's (`DatasetRequirement.whole_of`),
+    whose dataset admission compiles the whole from, is the part's series
+    or one the part offers in its place (`Parts.series`). Each part that some requirement reads states
     one decision fixing `prices`, which each of those cites. A requirement
     citing one that `patch` does not state is appended, so `Plan.amend`
     replaces it. A part no requirement reads states nothing.
@@ -537,6 +538,16 @@ def prices_decisions(
     is the tool a refusal naming a unit calls.
     """
     parts = parts.priced_by(choices)
+    by_id = {requirement.id: requirement for requirement in requirements}
+
+    def read_pin(requirement: DatasetRequirement) -> str | None:
+        part = by_id.get(requirement.whole_of.part) if requirement.whole_of is not None else None
+        return (
+            part.source_spec_id
+            if isinstance(part, DatasetRequirement)
+            else requirement.source_spec_id
+        )
+
     decisions: list[Decision] = []
     slots: dict[str, list[str]] = {}
     for part, choice in choices.items():
@@ -544,13 +555,12 @@ def prices_decisions(
         reading = [
             requirement
             for requirement in requirements
-            if isinstance(requirement, DatasetRequirement)
-            and parts.origin_of(requirement.source_spec_id) in series
+            if isinstance(requirement, DatasetRequirement) and read_pin(requirement) in series
         ]
         for requirement in reading:
             unit = requirement.unit
             wanted = _wanted(
-                parts.origin_of(requirement.source_spec_id),
+                read_pin(requirement),
                 unit.currency if unit is not None else None,
                 part,
                 choice,
@@ -571,7 +581,7 @@ def prices_decisions(
                 f"The user chose {choice.label} for part {part} answering an ask, and "
                 f"{requirement.id!r} {opening}.",
                 part=part,
-                reading=parts.origin_of(requirement.source_spec_id),
+                reading=read_pin(requirement),
                 choice=choice,
                 requirement_id=requirement.id,
                 wanted=wanted,
