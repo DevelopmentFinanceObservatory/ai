@@ -20,7 +20,7 @@
   ],
   "choices": [
     {
-      "choice_id": "req_1:basis",
+      "choice_id": "req1:measure_basis",
       "question": "Basis",
       "chosen": "Gross disbursements"
     },

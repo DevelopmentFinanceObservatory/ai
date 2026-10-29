@@ -5180,15 +5180,29 @@ async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its
     assert _frame(frames, "error")["error"]["error"] == "cancelled"
 
 
-async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_switch() -> None:
+_SECTOR_LABELS = ("health (CRS 120)", "health and population", "population (CRS 130)")
+
+
+@pytest.mark.parametrize(
+    ("choice_id", "option_ids"),
+    [
+        pytest.param(_CHOICE_ID, ["sector:120", "sector:120+130", "sector:130"], id="scope-choice"),
+        pytest.param(
+            "decision/sector",
+            [decision_option_id(label) for label in _SECTOR_LABELS],
+            id="planner-decision",
+        ),
+    ],
+)
+async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_switch(
+    choice_id: str, option_ids: list[str]
+) -> None:
     """Health counted as CRS 120, switched to CRS 120 and 130, then to CRS
-    130, then approved: `plan.approved` names CRS 120, the label on the card
-    the first switch was made from, as what the choice changed from."""
-    labels = {
-        "sector:120": "health (CRS 120)",
-        "sector:120+130": "health and population",
-        "sector:130": "population (CRS 130)",
-    }
+    130, then approved: `plan.approved` names the choice by its id, as the
+    card did (`decision/<slot>` for a planner decision), and CRS 120, the
+    label on the card the first switch was made from, as what it changed
+    from."""
+    labels = dict(zip(option_ids, _SECTOR_LABELS, strict=True))
 
     async def _shows(app: FastAPI, interrupt_id: str, active: str) -> None:
         # The card the pause holds shows the sector choice holding `active`.
@@ -5200,7 +5214,7 @@ async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_
             chosen=labels[active],
             reason="",
             resolved_by="user",
-            choice_id=_CHOICE_ID,
+            choice_id=choice_id,
             active_option_id=active,
             options=[
                 PlanDecisionOption(option_id=option, label=label, status="available")
@@ -5210,7 +5224,7 @@ async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_
         assert pending.card is not None
         pending.card = pending.card.model_copy(update={"decisions": [decision]})
         pending.choices = {
-            _CHOICE_ID: _PendingChoice(
+            choice_id: _PendingChoice(
                 active=active,
                 options={
                     o: _PendingOption(label=lb, status="available") for o, lb in labels.items()
@@ -5222,15 +5236,15 @@ async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     async with _client(app) as client:
         card = _frame(await _stream(client, "/api/studio/turn", _turn_body()), "plan.proposed")
-        await _shows(app, card["interrupt_id"], "sector:120")
-        for option, active in [("sector:120+130", "sector:120+130"), ("sector:130", "sector:130")]:
+        await _shows(app, card["interrupt_id"], option_ids[0])
+        for option in option_ids[1:]:
             frames = await _stream(
                 client,
                 "/api/studio/interrupt",
-                _switch_body(card, option_id=option),
+                _switch_body(card, choice_id=choice_id, option_id=option),
             )
             card = _frame(frames, "plan.proposed")
-            await _shows(app, card["interrupt_id"], active)
+            await _shows(app, card["interrupt_id"], option)
         approved = await _stream(
             client,
             "/api/studio/interrupt",
@@ -5242,7 +5256,7 @@ async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_
 
     assert _frame(approved, "plan.approved")["choices"] == [
         {
-            "choice_id": _CHOICE_ID,
+            "choice_id": choice_id,
             "question": "Sector",
             "chosen": "population (CRS 130)",
             "changed_from": "health (CRS 120)",

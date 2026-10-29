@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–21; 16 is folded
+v1 records its design decisions as numbered deltas (1–24; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -507,11 +507,9 @@ ignores it and an older harness omits it.
   `choice_id` and `option_id` name the option the user picked, `code` is
   the refusal's code, and `reason` says in a reader's words why it failed.
 - `plan.approved`: `{plan_version_id, version, revision?, title, summary?, steps[], choices[]}`. Each step is `{label, gives_answer?}`;
-  each choice is `{choice_id, question, chosen, changed_from?}`, where
-  `choice_id` is the id the plan card's choice carries (`"decision/<slot>"`
-  for a planner decision), `question` is the choice's short name (for
-  example "Basis"), `chosen` the option label and `changed_from` the label
-  it held before the user switched it. The
+  each choice is `{question, chosen, changed_from?}`, where `question` is
+  the choice's short name (for example "Basis"), `chosen` the option label
+  and `changed_from` the label it held before the user switched it. The
   harness sends it once, on the `approve` answer to
   `/api/studio/interrupt`, before the first frame of the resumed run. The
   client attaches it to the message that stream produces and keeps it in
@@ -553,6 +551,18 @@ ignores it and an older harness omits it.
   the card the turn's first switch of it was made from, set when the
   choice holds another label, whether the user switched it or a
   switch moved it, across several switches.
+
+`schema_version` stays 1.
+
+## Approved choices carry their id (delta 24, v1.9)
+
+- `plan.approved.choices[].choice_id` is the id the plan card's
+  `PlanDecision.choice_id` carries for the same row:
+  `"<requirement id>:<axis>"` for a scope choice and `"decision/<slot>"`
+  for a planner decision. A client tells the two apart by the
+  `decision/` prefix. The field is present from v1.9. A `plan.approved`
+  a client stored earlier, such as one in a chat snapshot, has no
+  `choice_id` on its choices, and the client reads it without one.
 
 `schema_version` stays 1.
 
@@ -658,4 +668,5 @@ Fixture values that are samples:
    names the label before the turn's first switch.
 1. `plan.approved.choices[]` gains `choice_id`, the id the plan card's
    choice carries, so a client tells a planner decision
-   (`"decision/<slot>"`) from a scope choice.
+   (`"decision/<slot>"`) from a scope choice; present from v1.9, absent
+   from a `plan.approved` stored earlier.

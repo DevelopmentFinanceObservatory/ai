@@ -1393,6 +1393,7 @@ class PlanApprovedChoice(_WireModel):
     (`chosen`) and, when a switch of the turn changed it, the label it held
     on the card the user first switched from (`changed_from`)."""
 
+    # Delta 24 (v1.9): a `plan.approved` stored before it has no `choice_id`.
     choice_id: str
     question: str
     chosen: str
