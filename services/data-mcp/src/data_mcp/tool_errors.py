@@ -21,9 +21,10 @@ this code has no
 `_UPSTREAM_CODE_MAP` entry -- it is unreachable there. `operation_still_processing`
 is never reached through `from_upstream_error` either: its one source is
 `data_mcp.operations.resolve_operation_response`, when the call deadline ends its
-wait on a 202 operation without a manifest. `service_unavailable` has five
+wait on a 202 operation without a manifest. `service_unavailable` has six
 sources: `from_upstream_error` (apis' own `service_unavailable` code, or a
-transport error), `mint_unanswered` (a mint POST that got no response), an
+transport error), `mint_unanswered` (a mint POST that got no response) and
+`mint_joined_unanswered` (a joined mint POST that got none), an
 unreachable definition store (`search` and `get_data`), `get_data`'s refusals
 for work the call deadline left no time for, or for a mint the mint ledger
 (`data_mcp.mint_ledger`) has no slot for (`mint_still_running`, `mint_slots_full`),
@@ -916,6 +917,38 @@ class ToolRefusal:
             code=ToolErrorCode.SERVICE_UNAVAILABLE,
             message=message,
             fix={"service": "dfo-apis", "spec_id": spec_id, "elapsed_s": round(elapsed_s, 1)},
+            retry_after_s=retry_after_s,
+            trace_id=trace_id,
+            capability_version=capability_version,
+        )
+
+    @classmethod
+    def mint_joined_unanswered(
+        cls,
+        *,
+        spec_id: str,
+        waited_s: float,
+        retry_after_s: float,
+        trace_id: str | None = None,
+        capability_version: str | None = None,
+    ) -> Self:
+        # Raised by `get_data._joined_outcome` for a foreground call that joined an open
+        # POST of the same request, when the call's own deadline ended before that POST
+        # answered or when that POST was cancelled after it was sent. The POST is another
+        # call's, and apis may still be running its mint. This server instance does not
+        # refuse a repeat call: it joins the POST if it is still open, and otherwise
+        # finds the frame the mint built or sends the request again.
+        # `waited_s` is how long this call waited on the POST.
+        return cls(
+            code=ToolErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                f"A mint for {spec_id!r} with this scope, sent by an earlier call, may still "
+                f"be running: this call waited {waited_s:.0f}s for its answer. Calling "
+                "get_data again with the same spec_id and scope after the wait joins that "
+                "mint if it is still open; otherwise it finds the frame the mint built, or "
+                f"sends the request again. Retry after {retry_after_s:.1f}s."
+            ),
+            fix={"service": "dfo-apis", "spec_id": spec_id, "waited_s": round(waited_s, 1)},
             retry_after_s=retry_after_s,
             trace_id=trace_id,
             capability_version=capability_version,

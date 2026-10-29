@@ -24,6 +24,7 @@ from typing import Any, ClassVar, NamedTuple, cast, override
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
+from compiler.caller_clients import MAX_CALLERS
 from compiler.evidence import check_evidence, evidence_from_source
 from compiler.surface import (
     FixtureSurface,
@@ -67,6 +68,8 @@ from harness.chart_binding import (
     over_cap_dimension,
     select_binding_ok,
 )
+from harness.conversation import current_conversation_id
+from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
 from harness.graph import switch as switch_module
 from harness.graph.execute import (
@@ -4433,3 +4436,270 @@ async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_no
     }
     assert not any(c["tool"] == "get_data" for c in executor.calls)
     assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
+
+
+# --- early mints at the card offer ---------------------------------------------
+
+
+class _EarlySends:
+    """`EarlyMints`' send: records each call's arguments, then answers
+    `outcome`, raises it, or waits on `hold` first when one is set."""
+
+    def __init__(self, outcome: str | Exception = "ok", *, hold: asyncio.Event | None = None):
+        self.outcome = outcome
+        self.hold = hold
+        self.sent: list[dict[str, Any]] = []
+        self.cancelled = 0
+
+    async def __call__(self, args: dict[str, Any]) -> str:
+        self.sent.append(args)
+        if self.hold is not None:
+            try:
+                await self.hold.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_execution_sends(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The first card starts its retrieval, an amendment's card starts its own,
+    a re-offer of that card starts nothing, and the run the approval starts
+    asks `get_data` with exactly the arguments the early call sent."""
+    plan_v1 = _seam_plan(question="kenya debt", schemas=real_schemas, stat_vars="sum")
+    plan_v2 = _seam_plan(question="kenya debt, revised", schemas=real_schemas, stat_vars="sum")
+    seam = _Seam(
+        [
+            {"plan": plan_v1.model_dump(mode="json"), "summary": {}},
+            {"plan": plan_v2.model_dump(mode="json"), "summary": {}},
+        ]
+    )
+    sends = _EarlySends()
+    surface = _CallRecordingSurface(_fixture_surface(real_schemas))
+    runner, _ = orchestrator_runner(
+        plan_call(_BRIEF),
+        planner=seam,
+        tool_surface=surface,
+        executor=ScriptedExecutor(),
+        early_mints=EarlyMints(send=sends, max_concurrent=4, settle_s=3.0),
+    )
+
+    await _start(runner)
+    await asyncio.sleep(0)
+    assert sends.sent == [{"spec_id": SPEC_A, "stat_vars": "sum"}]
+
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
+    await asyncio.sleep(0)
+    revision_2 = _output_of(events, "planner")["revision"]
+    assert len(sends.sent) == 2
+
+    # An answer naming the superseded card offers the same card again.
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan_v1)))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 2
+
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_2))
+    assert [args for tool, args in surface.calls if tool == "get_data"] == sends.sent[1:]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "logged"),
+    [
+        ("declined", "outcome=declined"),
+        (RuntimeError("apis unreachable"), "outcome=error:RuntimeError"),
+    ],
+    ids=["declined", "raised"],
+)
+async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_alone(
+    real_schemas: list[ToolSchema],
+    caplog: pytest.LogCaptureFixture,
+    outcome: str | Exception,
+    logged: str,
+) -> None:
+    plan = _seam_plan(schemas=real_schemas)
+
+    async def card(early_mints: EarlyMints | None) -> tuple[Any, Any, str | None]:
+        seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+        runner, _ = orchestrator_runner(
+            plan_call(_BRIEF), planner=seam, executor=ScriptedExecutor(), early_mints=early_mints
+        )
+        events = await _start(runner)
+        await asyncio.sleep(0)
+        return (
+            _output_of(events, "planner"),
+            _session_state(runner)["plan"],
+            _pending_interrupt(events),
+        )
+
+    sends = _EarlySends(outcome)
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        offered = await card(EarlyMints(send=sends, max_concurrent=4, settle_s=3.0))
+
+    assert offered == await card(None)
+    assert offered[2] == APPROVE_INTERRUPT
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert f"spec_id={SPEC_A}" in line
+    assert f"plan_revision={plan_revision(plan)}" in line
+    assert logged in line
+    assert "elapsed_s=" in line
+
+
+async def test_a_call_unsent_at_one_stream_end_logs_one_line_with_its_own_elapsed_time(
+    real_schemas: list[ToolSchema], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A call still pending when the stream ends is logged unsent then, with
+    the seconds since its card was offered, and logs nothing when it ends."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    now = [100.0]
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.01, clock=lambda: now[0])
+    early.offer(_seam_plan(schemas=real_schemas))
+
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        now[0] = 102.5
+        await early.settle()
+        await early.settle()
+        now[0] = 109.0
+        hold.set()
+        await asyncio.gather(*early._tasks)
+
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert "outcome=unsent_at_stream_end" in line
+    assert "elapsed_s=2.50" in line
+
+
+async def test_a_cards_early_calls_go_out_no_more_than_the_cap_at_once(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A card with more retrievals than the cap sends the cap's worth, and the
+    rest as those end."""
+    wide = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=2, settle_s=3.0)
+
+    early.offer(wide)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(sends.sent) == 2
+
+    hold.set()
+    await asyncio.gather(*early._tasks)
+    assert len(sends.sent) == 3
+
+
+def _with_retrievals(plan: Any, count: int) -> Any:
+    """`plan` with its one retrieval step `count` times over, unvalidated: only
+    `EarlyMints` reads it."""
+    assert plan.workflow is not None
+    (retrieval,) = [step for step in plan.workflow.steps if step.tool == _GET_DATA]
+    return plan.model_copy(
+        update={"workflow": plan.workflow.model_copy(update={"steps": (retrieval,) * count})}
+    )
+
+
+async def test_offering_a_newer_card_withdraws_the_older_cards_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The older card's call already out runs on; its calls still queued are
+    withdrawn unsent and logged, and the newer card's call goes out."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+        await asyncio.sleep(0)
+        assert len(sends.sent) == 1
+        early.offer(_seam_plan(question="kenya debt, revised", schemas=real_schemas))
+        hold.set()
+        await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 2
+    assert sends.cancelled == 0
+    lines = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert sum("outcome=withdrawn" in line for line in lines) == 2
+
+
+async def test_withdrawing_cancels_the_latest_cards_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema],
+) -> None:
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+    early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+
+    early.withdraw()
+    hold.set()
+    await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 1
+    assert sends.cancelled == 0
+
+
+async def test_evicting_a_conversation_withdraws_its_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The oldest conversation's record is dropped once `MAX_CALLERS` newer
+    conversations have offered. Its call already out runs on; its queued
+    calls never start."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+    oldest = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
+    other = _seam_plan(schemas=real_schemas)
+
+    current_conversation_id.set("conversation-0")
+    early.offer(oldest)
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+    for n in range(1, MAX_CALLERS + 1):
+        current_conversation_id.set(f"conversation-{n}")
+        early.offer(other)
+    hold.set()
+    await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 1 + MAX_CALLERS
+    assert sends.cancelled == 0
+
+
+async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_not(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _seam_plan(schemas=real_schemas)
+    early = EarlyMints(send=_EarlySends(), max_concurrent=4, settle_s=3.0)
+    withdrawn: list[str] = []
+    monkeypatch.setattr(early, "withdraw", lambda: withdrawn.append("withdraw"))
+    runner, _ = orchestrator_runner(
+        plan_call(_BRIEF),
+        planner=_Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
+        tool_surface=_fixture_surface(real_schemas),
+        executor=ScriptedExecutor(),
+        early_mints=early,
+    )
+
+    await _start(runner)
+    assert withdrawn == []
+
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    assert withdrawn == ["withdraw"]
+
+
+async def test_closing_early_mints_cancels_the_calls_still_running(
+    real_schemas: list[ToolSchema],
+) -> None:
+    sends = _EarlySends(hold=asyncio.Event())
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=3.0)
+    early.offer(_seam_plan(schemas=real_schemas))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+
+    await early.aclose()
+
+    assert sends.cancelled == 1

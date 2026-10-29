@@ -1624,6 +1624,19 @@ def test_mint_unanswered_under_a_short_mint_cap_promises_nothing_of_a_retry() ->
     assert refusal.message.endswith("Retry after 85.1s.")
 
 
+def test_mint_joined_unanswered_is_retryable_and_names_the_wait() -> None:
+    """The mint belongs to another call and this instance does not refuse a repeat, so
+    the refusal carries the joiner's own wait, not a ledger hold."""
+    refusal = ToolRefusal.mint_joined_unanswered(
+        spec_id="spec_" + "a" * 32, waited_s=31.96, retry_after_s=5.0
+    )
+
+    assert refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE
+    assert refusal.retry_mode is RetryMode.RETRY_AFTER_DELAY
+    assert refusal.retry_after_s == 5.0
+    assert refusal.fix == {"service": "dfo-apis", "spec_id": "spec_" + "a" * 32, "waited_s": 32.0}
+
+
 def test_mint_still_running_names_the_mint_and_the_wait() -> None:
     refusal = ToolRefusal.mint_still_running(
         spec_id="spec_" + "a" * 32, started_s_ago=40.04, retry_after_s=80.0

@@ -1308,9 +1308,10 @@ class PlanSwitchFailed(_WireModel):
 
 class PlanProposed(_WireModel):
     """The plan awaiting approval. The run is genuinely paused: nothing is
-    retrieved or computed until an interrupt.response arrives, and this
-    frame is terminal for its SSE response (delta 1 -- resume arrives as a
-    new stream from POST /api/studio/interrupt)."""
+    computed until an interrupt.response arrives (the plan's data may
+    already be loading), and this frame is terminal for its SSE response
+    (delta 1 -- resume arrives as a new stream from POST
+    /api/studio/interrupt)."""
 
     event: Literal["plan.proposed"]
     seq: int = Field(ge=0)
