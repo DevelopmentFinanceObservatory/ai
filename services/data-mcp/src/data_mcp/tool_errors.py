@@ -1078,12 +1078,12 @@ class ToolRefusal:
 
     @classmethod
     def skill_file_changed(
-        cls, *, skill_id: str, path: str, digest: str, current_digest: str
+        cls, *, skill_id: str, path: str, digest: str, current_digest: str, tool: str
     ) -> Self:
         # A paging continuation whose `digest` is not the file's current one:
         # a replica rebuilt between pages, so the pages read so far belong to
-        # another version and the file restarts at offset 0.
-        restart = f'get_skill_file(skill_id="{skill_id}", path="{path}", offset=0)'
+        # another version and the file restarts at offset 0 through `tool`.
+        restart = f'{tool}(skill_id="{skill_id}", path="{path}", offset=0)'
         return cls(
             code=ToolErrorCode.UPSTREAM_VERSION_CHANGED,
             message=(

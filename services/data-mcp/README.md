@@ -90,23 +90,27 @@ Returns a `ToolResult` with the following items.
 
 ### get_skill
 
-The `get_skill` tool loads one skill a `search` result named, by id. It reads apis' Skills API (`GET /api/skills/{skill_id}`) through `data_mcp.skills_client`, as `get_skill_file` does.
+The `get_skill` tool loads one skill a `search` result named, by id, or with `path` one of its files. It reads apis' Skills API (`GET /api/skills/{skill_id}`) through `data_mcp.skills_client`. With `path` it answers as `get_skill_file` does, through the same `get_skill_file_tool.read_skill_file`, and every call its text names is a `get_skill` call.
 
 #### Parameters
 
 - `skill_id`: String of lower-case letters and digits in hyphen-separated words, at most 64 characters, as named in a search result's skills list.
+- `path`: Optional. A file's bundle-relative path exactly as listed, such as `references/core-oda.md`, or `SKILL.md`. Left out, the tool loads the skill.
+- `offset`: Where a page of the file at `path` starts, in characters. Defaults to 0. Past 0 without a `path` refuses `request_invalid` at `/path`.
+- `digest`: The file digest a previous page's closing line names. Required when `offset` is past 0.
 
 #### Return format
 
 Returns a `ToolResult` with the following items.
 
-- Text content with the first page of the skill's `SKILL.md` verbatim, front matter included, then its other files with their sizes and the `get_skill_file` call that reads one. A `SKILL.md` past 32,000 characters stops at a line break, with a closing line naming the `get_skill_file` call that reads the rest.
+- Without `path`, text content with the first page of the skill's `SKILL.md` verbatim, front matter included, then its other files with their sizes and the `get_skill` call that reads one. A `SKILL.md` past 32,000 characters stops at a line break, with a closing line naming the `get_skill` call, with `path` `SKILL.md`, that reads the rest.
 - One `resource_link` block per file after `SKILL.md`, at `skill://{skill_id}/{path}`.
 - Structured content holding the skill's SEP-2640 entry: `uri` (`skill://{skill_id}/SKILL.md`), `frontmatter`, and `resources` as the full manifest of `uri`, `digest` and `size`.
+- With `path`, the `get_skill_file` result below.
 
 ### get_skill_file
 
-The `get_skill_file` tool reads one file of a skill verbatim, from `GET /api/skills/{skill_id}/resources/{path}`.
+The `get_skill_file` tool reads one file of a skill verbatim, from `GET /api/skills/{skill_id}/resources/{path}`. `get_skill` with `path` reads the same way.
 
 #### Parameters
 

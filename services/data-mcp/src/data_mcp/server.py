@@ -12,10 +12,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from common.auth import BearerTokenVerifier, apply_gate
+from common.declaration import declared_tool
 from common.logging import configure_logging
 from common.materialisation import aclose_store as aclose_frame_store
 from common.materialisation import install_store_if_unset
@@ -23,6 +24,7 @@ from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddle
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
+from fastmcp.tools import Tool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -127,6 +129,12 @@ async def healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+def _add_declared(fn: Callable[..., object], *, title: str) -> None:
+    """Register `fn` as a catalogue tool whose listed schema is `declared_tool`'s."""
+    tool = Tool.from_function(fn, version="1", title=title, annotations=READ_ONLY_CATALOGUE)
+    mcp.add_tool(declared_tool(tool))
+
+
 # Each tool's declared implementation version, read by
 # `compiler.surface._declared_version` and pinned per row in
 # `compiler.capabilities`, which lists `get_skill` and `get_skill_file`
@@ -135,27 +143,12 @@ async def healthz(_request: Request) -> JSONResponse:
 # schema on every call is a risk left untaken here. `resolve_definition` and
 # `catalogue_counts` are the harness's: the combined server outside clients
 # reach leaves them out (`harness.combined_mcp`).
-mcp.tool(search_tool.search, version="1", title="Search DFO data", annotations=READ_ONLY_CATALOGUE)
-mcp.tool(get_data, version="1", title="Get data", annotations=READ_ONLY_CATALOGUE)
-mcp.tool(
-    describe,
-    version="1",
-    title="Explain a data identifier",
-    annotations=READ_ONLY_CATALOGUE,
-)
-mcp.tool(get_skill, version="1", title="Load a skill", annotations=READ_ONLY_CATALOGUE)
-mcp.tool(
-    get_skill_file,
-    version="1",
-    title="Read a skill file",
-    annotations=READ_ONLY_CATALOGUE,
-)
-mcp.tool(
-    sources,
-    version="1",
-    title="List data sources",
-    annotations=READ_ONLY_CATALOGUE,
-)
+_add_declared(search_tool.search, title="Search DFO data")
+_add_declared(get_data, title="Get data")
+_add_declared(describe, title="Explain a data identifier")
+_add_declared(get_skill, title="Load a skill")
+_add_declared(get_skill_file, title="Read a skill file")
+_add_declared(sources, title="List data sources")
 mcp.tool(resolve_definition, version="1")
 mcp.tool(catalogue_counts, version="1")
 

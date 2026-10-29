@@ -305,11 +305,13 @@ def offset_refusal(offset: int, *, path: str, length: int) -> ToolRefusal | None
     )
 
 
-def continuation_line(*, skill_id: str, path: str, page: Page, length: int, digest: str) -> str:
-    """The closing line of a page that stops short of the end: the exact next call."""
+def continuation_line(
+    *, skill_id: str, path: str, page: Page, length: int, digest: str, tool: str = "get_skill"
+) -> str:
+    """The closing line of a page that stops short of the end: the exact `tool` call next."""
     return (
         f"This page ends at character {page.next_offset:,} of {length:,}. Read the rest with "
-        f'get_skill_file(skill_id="{skill_id}", path="{path}", offset={page.next_offset}, '
+        f'{tool}(skill_id="{skill_id}", path="{path}", offset={page.next_offset}, '
         f'digest="{digest}").'
     )
 

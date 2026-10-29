@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
+from collections import Counter
+from typing import Any
 
 import httpx2
 import pytest
@@ -62,6 +65,48 @@ async def test_every_tool_declares_a_version() -> None:
         "catalogue_counts": "1",
     }
     assert all(tool.output_schema is None for tool in tools)
+
+
+# The tools outside clients reach through the combined server.
+_CATALOGUE_TOOLS = ("search", "get_data", "describe", "get_skill", "get_skill_file", "sources")
+
+
+def _nodes(schema: Any) -> list[dict[str, Any]]:
+    """Every object in `schema`, at any depth."""
+    if isinstance(schema, list):
+        return [node for item in schema for node in _nodes(item)]
+    if not isinstance(schema, dict):
+        return []
+    return [schema, *(node for value in schema.values() for node in _nodes(value))]
+
+
+def _long_sentences(text: str) -> list[str]:
+    """`text`'s sentences of seven words or more, whitespace normalised."""
+    sentences = re.split(r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<=[.!?])\s+", " ".join(text.split()))
+    return [sentence for sentence in sentences if len(sentence.split()) >= 7]
+
+
+@pytest.mark.parametrize("run_middleware", [True, False], ids=["client", "registered"])
+@pytest.mark.parametrize("name", _CATALOGUE_TOOLS)
+async def test_a_catalogue_tool_declares_a_plain_inline_schema(
+    name: str, run_middleware: bool
+) -> None:
+    """No `$comment`, `$ref`, `$defs`, empty `required` or nullable `anyOf`, and no long
+    sentence said twice across the description and the schema, in what a client lists
+    and in what the harness reads off the registered tool."""
+    (tool,) = [t for t in await mcp.list_tools(run_middleware=run_middleware) if t.name == name]
+    nodes = _nodes(tool.parameters)
+
+    assert [node for node in nodes if {"$comment", "$ref", "$defs"} & node.keys()] == []
+    assert [node for node in nodes if node.get("required") == []] == []
+    assert [node for node in nodes if {"type": "null"} in node.get("anyOf", [])] == []
+    sentences = _long_sentences(tool.description or "") + [
+        sentence
+        for node in nodes
+        if isinstance(node.get("description"), str)
+        for sentence in _long_sentences(node["description"])
+    ]
+    assert [s for s, count in Counter(sentences).items() if count > 1] == []
 
 
 async def test_server_registers_the_artifact_and_skill_file_templates() -> None:

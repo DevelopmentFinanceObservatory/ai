@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from typing import Any
 
 import httpx2
 import pytest
@@ -46,7 +47,7 @@ async def test_skill_md_renders_verbatim_then_the_file_list() -> None:
     assert text_of(result) == (
         SKILL_MD
         + "\n"
-        + 'Files in this skill; read one with get_skill_file(skill_id="oda-concepts", path=…):\n'
+        + 'Files in this skill; read one with get_skill(skill_id="oda-concepts", path=…):\n'
         + "- references/core-oda.md (5.5 KB)\n"
         + "- references/donor-groupings.md (32 B)"
     )
@@ -96,7 +97,7 @@ async def test_a_skill_with_no_other_files_renders_skill_md_alone() -> None:
     assert len(result.content) == 1
 
 
-async def test_a_long_skill_md_returns_its_first_page_pointing_at_get_skill_file() -> None:
+async def test_a_long_skill_md_returns_its_first_page_pointing_at_get_skill_with_its_path() -> None:
     line = "x" * 99 + "\n"
     content_text = line * (PAGE_CHARS // len(line) + 50)
 
@@ -106,7 +107,7 @@ async def test_a_long_skill_md_returns_its_first_page_pointing_at_get_skill_file
     assert text_of(result) == (
         content_text[:page_end]
         + f"\nThis page ends at character {page_end:,} of {len(content_text):,}. Read the rest "
-        + f'with get_skill_file(skill_id="oda-concepts", path="SKILL.md", offset={page_end}, '
+        + f'with get_skill(skill_id="oda-concepts", path="SKILL.md", offset={page_end}, '
         + f'digest="{digest_of(content_text)}").'
     )
 
@@ -117,6 +118,74 @@ async def test_the_description_carries_the_two_skill_loading_sentences() -> None
     description = " ".join((tools["get_skill"].description or "").split())
     assert "loading one does not answer it" in description
     assert "A file refused as not found is not retried under a guessed path" in description
+
+
+# A file, by path
+
+_CORE = "references/core-oda.md"
+_LONG = ("y" * 99 + "\n") * (2 * PAGE_CHARS // 100 + 7)
+
+
+@pytest.mark.parametrize(
+    ("references", "arguments"),
+    [
+        pytest.param(None, {"path": _CORE}, id="served"),
+        pytest.param(None, {"path": "SKILL.md"}, id="skill-md"),
+        pytest.param({_CORE: _LONG}, {"path": _CORE}, id="first-page"),
+        pytest.param(
+            {_CORE: _LONG},
+            {"path": _CORE, "offset": PAGE_CHARS, "digest": digest_of(_LONG)},
+            id="middle-page",
+        ),
+        pytest.param(None, {"path": "references/guessed.md"}, id="not-found"),
+        pytest.param(None, {"path": "../SKILL.md"}, id="malformed-path"),
+        pytest.param({_CORE: _LONG}, {"path": _CORE, "offset": PAGE_CHARS}, id="no-digest"),
+        pytest.param(
+            {_CORE: _LONG},
+            {"path": _CORE, "offset": PAGE_CHARS, "digest": "sha256:" + "0" * 64},
+            id="changed-file",
+        ),
+    ],
+)
+async def test_a_path_answers_as_get_skill_file_does_naming_get_skill(
+    references: dict[str, str] | None, arguments: dict[str, Any]
+) -> None:
+    """Every call either tool prints names itself; the rest of the answer is the same."""
+    handler = serving_skill(references=references)
+    arguments = {"skill_id": SKILL_ID, **arguments}
+
+    by_path = await call_tool(handler, "get_skill", arguments)
+    by_file = await call_tool(handler, "get_skill_file", arguments)
+
+    assert by_path.is_error == by_file.is_error
+    assert text_of(by_path) == _renamed(text_of(by_file))
+    assert by_path.structured_content == _renamed(by_file.structured_content)
+
+
+def _renamed(value: Any) -> Any:
+    """`value` with every printed `get_skill_file(` call read as `get_skill(`."""
+    if isinstance(value, str):
+        return value.replace("get_skill_file(", "get_skill(")
+    if isinstance(value, dict):
+        return {key: _renamed(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_renamed(item) for item in value]
+    return value
+
+
+async def test_an_offset_without_a_path_refuses_request_invalid_without_a_call() -> None:
+    requests: list[httpx2.Request] = []
+
+    result = await call_tool(
+        serving_skill(requests=requests),
+        "get_skill",
+        {"skill_id": SKILL_ID, "offset": PAGE_CHARS, "digest": digest_of(SKILL_MD)},
+    )
+
+    refusal = refusal_of(result)
+    assert refusal["code"] == "request_invalid"
+    assert refusal["fix"]["pointer"] == "/path"
+    assert requests == []
 
 
 # Refusals
