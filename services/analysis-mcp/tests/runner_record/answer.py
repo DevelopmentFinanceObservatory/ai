@@ -152,6 +152,7 @@ def _read(entry: dict[str, Any], *, stores: Stores) -> dict[str, Any]:
     path = entry["path"]
     reads = DerivedReads(
         snapshot_reader=stores.snapshot_reader,
+        version_writer=stores.version_writer,
         artifact_store=stores.artifact_store,
         recipe_reader=stores.recipe_store,
         enrichment=ENRICHMENT,

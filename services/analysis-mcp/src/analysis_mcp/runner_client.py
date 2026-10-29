@@ -54,14 +54,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
-from common.caller import CALLER_HEADER, current_caller
+from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
 from common.holder import Holder
 from common.materialisation import FrameRef, LeftOutSeries
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -78,10 +77,6 @@ DERIVED_PATH = "/api/datasets/derived/{spec_id}/{content_version}"
 DERIVED_FILE_PATH = f"{DERIVED_PATH}/file"
 # The derived file query that answers the frame's rows as one Parquet file.
 DERIVED_FILE_QUERY: Mapping[str, str] = {"format": "parquet", "bundle": "false"}
-CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
-
-# The caller the website names, which dfo-apis believes beside the principal.
-_ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
 
 # The wait a retryable refusal or a failed transport names when dfo-apis sent none.
 DEFAULT_RETRY_AFTER_S = 5.0
@@ -156,7 +151,7 @@ class RunnerClient:
         caller = current_caller()
         if self._caller_principal is None or caller is None:
             return {}
-        if not _ADDRESS_CALLER.fullmatch(caller):
+        if not ADDRESS_CALLER.fullmatch(caller):
             return {}
         return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: caller}
 

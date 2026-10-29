@@ -128,10 +128,11 @@ The service stores an execution trace with lineage and replay metadata.
 
 The service reads configuration through `Settings`.
 
-| Variable              | Type    | Default  | Description                                                                        |
-| --------------------- | ------- | -------- | ---------------------------------------------------------------------------------- |
-| `SEED_FIXTURE_FRAMES` | Boolean | `false`  | Seeds the materialisation store with development finance fixture frames on startup |
-| `MAX_FRAME_ROWS`      | Integer | `250000` | Maximum row count permitted for an input frame                                     |
+| Variable                 | Type    | Default  | Description                                                                               |
+| ------------------------ | ------- | -------- | ----------------------------------------------------------------------------------------- |
+| `SEED_FIXTURE_FRAMES`    | Boolean | `false`  | Seeds the materialisation store with development finance fixture frames on startup        |
+| `MAX_FRAME_ROWS`         | Integer | `250000` | Maximum row count permitted for an input frame                                            |
+| `DERIVED_READ_TIMEOUT_S` | Float   | `15.0`   | Seconds one read of a frame the runner stored (manifest or file) may take before it fails |
 
 ## Testing and baseline updates
 

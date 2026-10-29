@@ -31,7 +31,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
-from common.caller import CALLER_HEADER, current_caller
+from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
 from common.materialisation import FrameRef, get_store
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
@@ -105,16 +105,6 @@ _RECIPE_CONFLICT_CONSTRAINTS = frozenset(
 # so Studio's conversations, which share the harness's one address, spend
 # none. No other route reads it, so no other call carries it.
 PRINCIPAL_HEADER = "x-dfo-principal"
-
-# Sent beside `CALLER_HEADER` on an external caller's create and revise, when
-# the website named that caller by address: the secret dfo-apis shares with
-# the website, which vouches for the caller it names
-# (`dfo_platform.caller.resolve_caller`).
-CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
-
-# The form of a caller the website named by its client's address. dfo-apis
-# accepts no other form beside `CALLER_PRINCIPAL_HEADER`.
-_ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
 
 # Sent only on a revise: the component's write token, which apis checks
 # before it merges a patch.
@@ -557,7 +547,7 @@ class PlatformAssembler:
             principal = self._publish_principal
             return {} if principal is None else {PRINCIPAL_HEADER: principal}
         named = current_caller()
-        if self._caller_principal is None or named is None or not _ADDRESS_CALLER.fullmatch(named):
+        if self._caller_principal is None or named is None or not ADDRESS_CALLER.fullmatch(named):
             return {}
         return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: named}
 

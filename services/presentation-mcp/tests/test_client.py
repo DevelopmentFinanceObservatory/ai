@@ -24,7 +24,7 @@ import httpx2
 import pytest
 import rfc8785
 from common.apis_auth import ApisAuthError
-from common.caller import CALLER_HEADER, supplied_caller
+from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, supplied_caller
 from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
@@ -44,7 +44,6 @@ from dfo_frame_grammar import Frame
 from presentation_mcp import client as client_module
 from presentation_mcp import frame_publish
 from presentation_mcp.client import (
-    CALLER_PRINCIPAL_HEADER,
     PRINCIPAL_HEADER,
     WRITE_TOKEN_HEADER,
     PlatformAssembler,

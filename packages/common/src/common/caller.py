@@ -20,11 +20,22 @@ header in tests that drive a server that way.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 CALLER_HEADER = "x-dfo-caller"
+
+# Sent beside `CALLER_HEADER` to dfo-apis on an external caller's calls, when the
+# website named that caller by address: the secret dfo-apis shares with the
+# website, which vouches for the caller it names
+# (`dfo_platform.caller.resolve_caller`).
+CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
+
+# The form of a caller the website named by its client's address. dfo-apis
+# accepts no other form beside `CALLER_PRINCIPAL_HEADER`.
+ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
 
 # The longest caller `current_caller` accepts. The frame store writes the
 # caller into GCS object metadata, which holds 8 KiB in all.
