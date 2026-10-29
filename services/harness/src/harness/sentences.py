@@ -273,8 +273,8 @@ _DECISION_KEPT = (
 # is about by its id ("the plan" when it names none), `at` is " for <about>"
 # or nothing,
 # `why` the reason clause of the referral it ended on, `asks` the declined asks,
-# `unsupported` why a calculation cannot be made, `part` the reading whose
-# prices the user chose, by its spec_id, `chosen` those prices, and `rounds`,
+# `unsupported` why a calculation cannot be made, `reading` the series a
+# requirement pins, by its spec_id, `chosen` the prices the user chose, and `rounds`,
 # `tool` and `reference` come straight from the refusal's detail.
 SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
     SeamCode.TURN_MODEL_TIME_SPENT: (
@@ -320,8 +320,9 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
         "This cannot be calculated by this system, so nothing was planned: {asks}."
     ),
     ProblemCode.PRICES_UNSERVED: (
-        "The user chose {chosen} for {part}, and no series this turn's searches found is in "
-        "them, so nothing was recorded. Search once for {part} in {chosen}, then plan again."
+        "The plan reads {reading}, and no series this turn's searches found measures it in "
+        "{chosen}, which the user chose, so nothing was recorded. Search once for {reading} in "
+        "{chosen}."
     ),
     ProblemCode.OPERATION_UNSUPPORTED: (
         "This cannot be calculated as planned{at}, because {unsupported}, so nothing was recorded."
@@ -546,7 +547,9 @@ def _fields(detail: Mapping[Any, object], words: PlanWords | None) -> dict[str, 
         "rounds": detail.get("rounds", MAX_PLAN_ROUNDS),
         "tool": detail.get("tool"),
         "reference": detail.get("reference"),
-        "part": f"the reading {part}" if isinstance(part := detail.get("part"), str) else "it",
+        "reading": f"the reading {reading}"
+        if isinstance(reading := detail.get("reading") or detail.get("part"), str)
+        else "one reading",
         "chosen": detail.get("chosen") or "other prices",
     }
 
@@ -1058,6 +1061,10 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
         "This request used all the plan drafts it allows", "so ask again for a fresh start"
     ),
     ProblemCode.NOTHING_TO_PLAN: FailureText("The system has no calculation for what was asked"),
+    # The orchestrator searches for the prices next, and plans again when it may.
+    ProblemCode.PRICES_UNSERVED: FailureText(
+        "The data found so far is not in the prices you chose", "so a search for them runs next"
+    ),
 }
 
 _NARROW_SCOPE = FailureText(

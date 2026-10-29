@@ -450,6 +450,15 @@ def test_a_plan_the_planner_refused_shows_its_code_s_sentence_and_none_of_its_de
     assert is_user_sentence(failed.detail)
 
 
+def test_a_hand_back_for_constant_prices_reads_as_a_search_for_them():
+    """`prices_unserved` hands the turn back for a search, which may still
+    answer, so its step does not read as data that does not cover the question."""
+    failed = _plan_failed_step({"code": "prices_unserved"})
+
+    assert failed.detail == failure_sentence("prices_unserved")
+    assert failed.detail != failure_sentence("coverage_gaps")
+
+
 @pytest.mark.parametrize(
     ("failure", "code"),
     [

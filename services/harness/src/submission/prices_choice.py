@@ -111,8 +111,9 @@ class Parts:
     from (`submission.service.AlignedPin`).
 
     A part's series are the part, each series its block offers in its place,
-    and each shown series measuring what it measures in its currency, in any
-    prices (`same_measure`), such as one a later search found.
+    another count or other prices, and each shown series measuring what one
+    of those measures in the part's currency, in any prices (`same_measure`),
+    such as one a later search found.
     """
 
     source_of: Callable[[str], SelectedSource | None]
@@ -143,16 +144,61 @@ class Parts:
         offered = resolved.get("alternative_measures") or ()
         return [alt for alt in offered if isinstance(alt, Mapping)]
 
+    def offered(self, part: str, *, counts_only: bool = False) -> list[str]:
+        """`part` and the spec_id of each series its block offers in its place,
+        leaving out those in other prices (axis `unit`) when `counts_only`."""
+        return [
+            part,
+            *(
+                spec_id
+                for alt in self.alternatives(part)
+                if isinstance(spec_id := (alt.get("definition") or {}).get("spec_id"), str)
+                and not (counts_only and alt.get("axis") == "unit")
+            ),
+        ]
+
     def series(self, part: str) -> frozenset[str]:
-        """`part`, the spec_id of every series its block offers in its place, and
-        every shown series measuring what it measures in its own currency (`same_measure`)."""
-        offered = ((alt.get("definition") or {}).get("spec_id") for alt in self.alternatives(part))
+        """Every series `part` offers (`offered`), and every shown series measuring
+        what one of those measures in the part's own currency (`same_measure`)."""
+        currency = self.unit_of(part).currency
+        offered = self.offered(part)
         return frozenset(
-            {
-                part,
-                *(spec_id for spec_id in offered if isinstance(spec_id, str)),
-                *self.same_measure(part, self.unit_of(part).currency),
-            }
+            {*offered, *(found for one in offered for found in self.same_measure(one, currency))}
+        )
+
+    def current_of(self, part: str, pin: str) -> str | None:
+        """The series of `part` measuring what `pin` measures in current prices:
+        the part when its block offers `pin` as its count in other prices, else
+        the part or the count it offers whose identity, prices left out
+        (`_priceless`), equals the pin's; `None` when none does."""
+        if self.unit_offered(part, pin):
+            return part
+        wanted = _priceless(self.definition_of(pin))
+        if wanted is None:
+            return None
+        return next(
+            (
+                one
+                for one in self.offered(part, counts_only=True)
+                if one != pin and _priceless(self.definition_of(one)) == wanted
+            ),
+            None,
+        )
+
+    def definition_of(self, spec_id: str) -> Mapping[str, Any] | None:
+        """What states `spec_id`'s definition: its own block, or else the entry a
+        shown block offers it under (`alternatives`); `None` when neither holds it."""
+        block = self.block_of(spec_id)
+        if block is not None:
+            return block
+        return next(
+            (
+                alt
+                for shown in self.shown
+                for alt in self.alternatives(shown)
+                if (alt.get("definition") or {}).get("spec_id") == spec_id
+            ),
+            None,
         )
 
     def unit_offered(self, part: str, spec_id: str) -> bool:
@@ -162,27 +208,27 @@ class Parts:
             for alt in self.alternatives(part)
         )
 
-    def same_measure(self, part: str, currency: str | None) -> list[str]:
-        """Each shown series but `part` measuring what `part` measures, in
-        `currency` and any prices: its identity equals the part's with the
-        prices left out (`_priceless`), so provenance and measurement method
-        match, and its unit states `currency`."""
-        wanted = _priceless(self.block_of(part))
+    def same_measure(self, series: str, currency: str | None) -> list[str]:
+        """Each shown series but `series` measuring what `series` measures, in
+        `currency` and any prices: its identity equals the one of `series`
+        (`definition_of`) with the prices left out (`_priceless`), so
+        provenance and measurement method match, and its unit states `currency`."""
+        wanted = _priceless(self.definition_of(series))
         if wanted is None:
             return []
         return [
             spec_id
             for spec_id in self.shown
-            if spec_id != part
+            if spec_id != series
             and _priceless(self.block_of(spec_id)) == wanted
             and self.unit_of(spec_id).currency == currency
         ]
 
-    def constant_found(self, part: str, currency: str | None) -> tuple[str, UnitReading] | None:
-        """A shown series measuring what `part` measures in `currency` at constant
+    def constant_found(self, series: str, currency: str | None) -> tuple[str, UnitReading] | None:
+        """A shown series measuring what `series` measures in `currency` at constant
         prices of a stated base year (`same_measure`), such as one a later search
         found, with its unit; `None` when none is shown."""
-        for spec_id in self.same_measure(part, currency):
+        for spec_id in self.same_measure(series, currency):
             reading = self.unit_of(spec_id)
             if reading.prices == "constant" and reading.base_year is not None:
                 return spec_id, reading
@@ -239,45 +285,47 @@ def _wanted(
     """The unit, and the series, a requirement pinning `pin` states in `choice`'s prices.
 
     The pin's own unit gives the currency, when the requirement states none,
-    and the base year of constant prices. A requirement pinned to the part's
-    own series moves, for constant prices, to the series the user picked, or
-    else to a series a search found in those prices and that currency
-    (`Parts.constant_found`), with that series' base year. One pinned to the
-    part's count in constant prices, offered or found, moves back to the part
-    for current prices.
+    else the part's, and the base year of constant prices. A requirement
+    pinned to a series of the part not in constant prices moves, for constant
+    prices, to the series the user picked when it pins the part itself, or
+    else to a series a search found measuring what the pin measures in those
+    prices and that currency (`Parts.constant_found`), with that series' base
+    year. One pinned to a series in constant prices moves for current prices
+    to the series of the part measuring the same (`Parts.current_of`).
     """
     own = parts.unit_of(pin) if pin is not None else UnitReading()
-    currency = currency or own.currency
+    currency = currency or own.currency or parts.unit_of(part).currency
     if currency is None:
         return _Wanted(None)
     if choice.prices == "current":
         if own.prices != "constant":
             return _Wanted(Unit(currency=currency, prices="current"))
-        moved = pin is not None and (
-            parts.unit_offered(part, pin) or pin in parts.same_measure(part, currency)
-        )
-        return _Wanted(Unit(currency=currency, prices="current"), part) if moved else _Wanted(None)
+        moved = parts.current_of(part, pin) if pin is not None else None
+        return _Wanted(Unit(currency=currency, prices="current"), moved) if moved else _Wanted(None)
     if own.prices == "constant" and own.base_year is not None:
         return _Wanted(Unit(currency=currency, prices="constant", base_year=own.base_year))
-    found = _constant_series(part, choice, parts, currency) if pin == part else None
+    found = _constant_series(pin, part, choice, parts, currency) if pin is not None else None
     if found is None:
         return _Wanted(None)
     return _Wanted(Unit(currency=currency, prices="constant", base_year=found[1]), found[0])
 
 
 def _constant_series(
-    part: str, choice: PricesChoice, parts: Parts, currency: str
+    pin: str, part: str, choice: PricesChoice, parts: Parts, currency: str
 ) -> tuple[str, int] | None:
-    """The series of `part` in constant prices to move to, with its base year:
-    the one the user picked, else one a search found in `currency` (`Parts.constant_found`)."""
+    """The series in constant prices a requirement pinning `pin` moves to, with
+    its base year: the one the user picked, when `pin` is the part itself, else
+    one a search found measuring what `pin` measures in `currency`
+    (`Parts.constant_found`)."""
     reading = parts.unit_of(choice.spec_id) if choice.spec_id is not None else UnitReading()
     if (
-        choice.spec_id is not None
+        pin == part
+        and choice.spec_id is not None
         and reading.prices == "constant"
         and reading.base_year is not None
     ):
         return choice.spec_id, reading.base_year
-    found = parts.constant_found(part, currency)
+    found = parts.constant_found(pin, currency)
     if found is None or found[1].base_year is None:
         return None
     return found[0], found[1].base_year
@@ -288,6 +336,7 @@ def _refusal(
     lead: str,
     *,
     part: str,
+    reading: object,
     choice: PricesChoice,
     requirement_id: object,
     wanted: _Wanted,
@@ -303,7 +352,8 @@ def _refusal(
     offering `PRICES_OPTIONS`. Once the user has answered that question on
     the part and kept constant prices, only a search can find a series in
     them, and the planner has none: `PRICES_UNSERVED` ends the planner's
-    entry, and the orchestrator reads why (`harness.sentences`).
+    entry, naming the series the requirement pins as `reading`, and the
+    orchestrator reads why (`harness.sentences`).
     """
     detail: dict[str, Any] = {
         "slot": prices_slot(part),
@@ -317,7 +367,7 @@ def _refusal(
             f"{lead} No series shown serves it in {choice.label}, and the user kept them "
             "when asked, so a search for them has to find one first.",
             outcome=Outcome.REFUSED,
-            detail=detail,
+            detail={**detail, "reading": reading if isinstance(reading, str) else part},
         )
     if wanted.unit is None:
         return problem(
@@ -404,6 +454,7 @@ def prices_decisions(
                 f"The user chose {choice.label} for part {part} answering an ask, and "
                 f"{requirement.id!r} {opening}.",
                 part=part,
+                reading=parts.origin_of(requirement.source_spec_id),
                 choice=choice,
                 requirement_id=requirement.id,
                 wanted=wanted,
@@ -481,6 +532,7 @@ def base_year_refusal(
             f"The user chose {choice.label} for part {part} answering an ask, and "
             f"{raw.get('id')!r} states constant prices with no `base_year`.",
             part=part,
+            reading=pin,
             choice=choice,
             requirement_id=raw.get("id"),
             wanted=_wanted(

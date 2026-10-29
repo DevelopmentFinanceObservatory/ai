@@ -11957,6 +11957,62 @@ def _prices_refused_event(part: str, *, asks_user: bool) -> Any:
 _LANDED = response_event("propose_plan", {"outcome": "ok", "status": "draft", "version": 1})
 
 
+def _net_parts(*blocks: dict[str, Any]) -> Any:
+    """The `Parts` of the France to Kenya part, which offers net disbursements,
+    with each of `blocks` also shown."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, *blocks)
+    sources = _shown_readings(ctx)
+    return Parts(sources.get, sources.block, shown=pin_sources(ctx.state).keys())
+
+
+def test_prices_unserved_names_the_series_the_requirement_pins(
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """The user kept constant prices for the gross part, and the plan reads the
+    net count it offers, with no constant series of it shown. The hand-back
+    names net as the reading to search for."""
+    net = requirement(id="net", source_spec_id=_NET, unit=None)
+
+    refused = prices_decisions(
+        {_GROSS: PricesChoice("constant", asked=True)},
+        [net],
+        [net],
+        parts=_net_parts(),
+        propose="propose_plan",
+    )
+
+    assert isinstance(refused, dict), refused
+    assert refused["code"] == ProblemCode.PRICES_UNSERVED.value
+    assert (refused["detail"]["part"], refused["detail"]["reading"]) == (_GROSS, _NET)
+
+
+def test_current_prices_move_a_constant_net_pin_to_the_net_count(
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """The user chose current prices for the gross part, and the plan pins a
+    net series in constant prices a search found. It is told to pin the net
+    count the part offers, the same measure in current prices."""
+    later = _counted_net(_constant_block())
+    net = requirement(
+        id="net",
+        source_spec_id=_CONSTANT_GROSS,
+        unit=Unit(currency="USD", prices="current"),
+    )
+
+    refused = prices_decisions(
+        {_GROSS: PricesChoice("current")},
+        [net],
+        [net],
+        parts=_net_parts(later),
+        propose="propose_plan",
+    )
+
+    assert isinstance(refused, dict), refused
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value
+    assert refused["detail"]["pin"] == _NET
+
+
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
     """A prices refusal sent the planner to the user, and the user then typed
     a message, which releases every choice. A later ask offering
@@ -12004,22 +12060,34 @@ _DAC2A = "provenance/OECDDAC2A"
 
 
 def _with_provenance(block: dict[str, Any], provenance: str) -> dict[str, Any]:
-    """`block` with its identity bound to `provenance`."""
+    """`block` with its identity, and the identity of each series it offers,
+    bound to `provenance`."""
     block = copy.deepcopy(block)
-    block["definition"]["identity"]["facets"] = {
-        "provenance": {"state": "value", "ref": provenance}
-    }
+    for definition in (
+        block["definition"],
+        *(alt["definition"] for alt in block["resolved"]["alternative_measures"]),
+    ):
+        definition["identity"]["facets"] = {"provenance": {"state": "value", "ref": provenance}}
+    return block
+
+
+def _counted_net(block: dict[str, Any]) -> dict[str, Any]:
+    """`block` counting net disbursements in place of gross."""
+    for slot in block["definition"]["identity"]["slots"]:
+        if slot["property"] == "nettingBasis":
+            slot["binding"]["ref"] = "Net"
     return block
 
 
 @pytest.mark.parametrize(
-    ("ref", "currency", "provenance", "found"),
+    ("ref", "currency", "provenance", "pinned", "found"),
     [
-        ("ConstantUSD_2023", "USD", _DAC2A, True),
-        ("ConstantEUR_2023", "EUR", _DAC2A, False),
-        ("ConstantUSD_2023", "USD", "provenance/OECDCreditorReportingSystem", False),
+        ("ConstantUSD_2023", "USD", _DAC2A, _GROSS, True),
+        ("ConstantUSD_2023", "USD", _DAC2A, _NET, True),
+        ("ConstantEUR_2023", "EUR", _DAC2A, _GROSS, False),
+        ("ConstantUSD_2023", "USD", "provenance/OECDCreditorReportingSystem", _GROSS, False),
     ],
-    ids=["same-measure", "other-currency", "other-provenance"],
+    ids=["same-measure", "other-count", "other-currency", "other-provenance"],
 )
 def test_constant_prices_a_later_search_found_name_that_series(
     decision: DecisionFactory,
@@ -12027,18 +12095,22 @@ def test_constant_prices_a_later_search_found_name_that_series(
     ref: str,
     currency: str,
     provenance: str,
+    pinned: str,
     found: bool,
 ) -> None:
     """The user picked constant prices no search listed, and a later search
-    found a series in constant 2023 prices. When it measures what the part
-    measures, from the part's provenance and in its currency, a plan on the
-    part's current series is told to pin it, and the plan pinning it lands
+    found a series in constant 2023 prices. When it measures what the
+    requirement's pin measures, the part's own count or the other count the
+    part offers, from the part's provenance and in its currency, a plan on the
+    pin's current series is told to pin it, and the plan pinning it lands
     with the user's decision cited. A series from another provenance or in
     another currency is not named, and the planner asks the user."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     later = _with_provenance(_constant_block(), provenance)
     later["resolved"]["facets"]["unit"] = {"basis": "fallback", "ref": ref, "currency": currency}
+    if pinned == _NET:
+        _counted_net(later)
     _show_blocks(ctx, _with_provenance(_FRANCE_KENYA, _DAC2A), later)
     ctx.session.events = _prices_ask_events()
     dataset, derived = requirements
@@ -12047,7 +12119,7 @@ def test_constant_prices_a_later_search_found_name_that_series(
         tools,
         ctx,
         decision(),
-        [dataset.model_copy(update={"source_spec_id": _GROSS, "unit": None}), derived],
+        [dataset.model_copy(update={"source_spec_id": pinned, "unit": None}), derived],
     )
 
     if not found:
