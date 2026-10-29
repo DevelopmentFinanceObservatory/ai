@@ -46,5 +46,5 @@ precision = 2
 
 [tool.uv.sources]
 common = { workspace = true }
-dfo-spec-kit = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "b7a40ad6e3ab1a3b5e291133c34f04f2e32a4249", subdirectory = "python/spec-kit" }
-dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "b7a40ad6e3ab1a3b5e291133c34f04f2e32a4249", subdirectory = "python/frame-grammar" }
+dfo-spec-kit = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "0cb55e31d8aa319345d4ff42b6dabba823a82cf6", subdirectory = "python/spec-kit" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "0cb55e31d8aa319345d4ff42b6dabba823a82cf6", subdirectory = "python/frame-grammar" }
