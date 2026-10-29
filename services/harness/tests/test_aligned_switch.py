@@ -43,12 +43,19 @@ from planner.plan import (
     definitions_on_record,
     load_plan,
     period_window,
+    pin_sources,
     save_pin_sources,
 )
 from planner.tool_results import Outcome
 from planner.workflow import ResolvedGroup, ToolId
 
-from .basis_alignment import HEALTH, TOTAL, ProviderCompiles, provider_block
+from .basis_alignment import (
+    HEALTH,
+    TOTAL,
+    TOTAL_GROSS_BILATERAL,
+    ProviderCompiles,
+    provider_block,
+)
 from .decision_drafts import drafts
 from .planner.test_agent import (
     _COMPARE,
@@ -362,12 +369,19 @@ async def test_a_switch_of_the_aligned_row_holds_when_another_input_pins_its_sta
 
 
 _TOTAL_GROSS_INCLUSIVE = f"spec_{'8' * 32}"
+_HEALTH_INCLUSIVE = f"spec_{'7' * 32}"
 
 
 class _ProviderResubmits:
-    """A tool surface answering each resubmit of the US total with the options it
-    posts, as `_TOTAL_GROSS_INCLUSIVE`, each posted axis explicit. Every other tool
-    is unreachable."""
+    """A tool surface answering each resubmit with the options it posts, each
+    posted axis explicit, and recording each resubmit's spec_id and posted
+    options in `posted`: of the US total, posting a provider scope and a basis,
+    as `_TOTAL_GROSS_INCLUSIVE`; of US health aid, which Search counts gross,
+    posting a provider scope, as `_HEALTH_INCLUSIVE`. A resubmit posting
+    anything else is refused, as is every other tool."""
+
+    def __init__(self) -> None:
+        self.posted: list[tuple[str, dict[str, str]]] = []
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -379,11 +393,15 @@ class _ProviderResubmits:
         if tool.name != "resolve_definition":
             return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
         posted = {e["axis"]: e["option_id"] for e in arguments["scope_entries"]}
+        self.posted.append((arguments["spec_id"], posted))
+        health = arguments["spec_id"].startswith(HEALTH)
+        if "provider" not in posted or ("measure_basis" in posted) == health:
+            return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
         block = provider_block(
-            _TOTAL_GROSS_INCLUSIVE,
-            narrow=False,
+            _HEALTH_INCLUSIVE if health else _TOTAL_GROSS_INCLUSIVE,
+            narrow=health,
             active=posted["provider"],
-            basis=posted["measure_basis"],
+            basis="measure_basis:gross" if health else posted["measure_basis"],
         )
         scope = block["resolved"]["scope_choices"]
         scope["id"] = scope["base"]["spec_id"] = arguments["spec_id"]
@@ -396,16 +414,24 @@ class _ProviderResubmits:
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
-async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planners(
-    decision: DecisionFactory,
-) -> None:
-    """US health aid, which the user asked for bilateral, as a share of the US total,
-    which Search counts in grant equivalents with imputed multilateral flows.
-    Alignment compiles the total on gross and bilateral in one resubmit. The user
-    switches the total's provider row back to imputed multilateral flows: the total's
-    provider is now the user's, and its basis, which the user never stated, stays the
-    planner's."""
-    ctx = _FakeToolContext()
+def _us_dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+    """`measure` of the United States over 2015-2024, pinning `pin`."""
+    return DatasetRequirement(
+        id=requirement_id,
+        decision_ids=["measure"],
+        measure=measure,
+        entities=[Entity(name="United States", role="donor")],
+        period=Period(start=2015, end=2024),
+        source_spec_id=pin,
+    )
+
+
+async def _bilateral_share(ctx: _FakeToolContext, decision: DecisionFactory) -> Plan:
+    """Propose US health aid, which the user asked for bilateral, as a share of the
+    US total, which Search counts in grant equivalents with imputed multilateral
+    flows, and return the plan. Alignment compiles the total on gross and
+    bilateral in one resubmit (`TOTAL_GROSS_BILATERAL`). The turn's searches are
+    the two shown sources."""
     health = provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit")
     total = provider_block(
         TOTAL, narrow=False, active="provider:inclusive", basis="measure_basis:grant_equivalent"
@@ -413,25 +439,14 @@ async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planner
     _show_blocks(ctx, health, total)
     question = "What share of US bilateral aid goes to health?"
     ctx.state[ASKS_STATE_KEY] = [question]
-
-    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
-        return DatasetRequirement(
-            id=requirement_id,
-            decision_ids=["measure"],
-            measure=measure,
-            entities=[Entity(name="United States", role="donor")],
-            period=Period(start=2015, end=2024),
-            source_spec_id=pin,
-        )
-
     result = await _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"].func(
         question=question,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
         answered=[AskAnswer(ask=0, outputs=("share",))],
         evidence_requirements=[
-            dataset("health", "US aid to health", HEALTH),
-            dataset("total", "US total ODA", TOTAL),
+            _us_dataset("health", "US aid to health", HEALTH),
+            _us_dataset("total", "US total ODA", TOTAL),
             ShareOfRequirement(
                 id="share",
                 decision_ids=["measure"],
@@ -446,14 +461,26 @@ async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planner
     assert plan is not None
     assert set(alignments(ctx.state)) == {"total"}
     ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [_searched(health), _searched(total)]
+    return plan
+
+
+def _provider_row(plan: Plan, requirement_id: str) -> Decision:
+    """The provider decision `requirement_id` cites."""
     (row,) = [
         d
         for d in plan.decisions
-        if d.slot in plan.requirement("total").decision_ids
+        if d.slot in plan.requirement(requirement_id).decision_ids
         and d.scope is not None
         and d.scope.axis == "provider"
     ]
-    surface = _ProviderResubmits()
+    return row
+
+
+async def _switch_provider(
+    ctx: _FakeToolContext, plan: Plan, row: Decision, surface: _ProviderResubmits
+) -> _RevisingPlanner:
+    """Switch `row` of `plan` on the card to imputed multilateral flows, Search
+    answering through `surface`. Returns the planner the revision ran through."""
     planner = _RevisingPlanner(cast(ToolSurface, surface))
     with suppress(SwitchFailedError):
         await switch_module._switched_plan(
@@ -464,6 +491,19 @@ async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planner
             planner=cast(Any, planner),
             surface=cast(ToolSurface, surface),
         )
+    return planner
+
+
+async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planners(
+    decision: DecisionFactory,
+) -> None:
+    """The user switches the total's provider row, which alignment moved to
+    bilateral, back to imputed multilateral flows: the total's provider is now the
+    user's, and its basis, which the user never stated, stays the planner's."""
+    ctx = _FakeToolContext()
+    plan = await _bilateral_share(ctx, decision)
+
+    planner = await _switch_provider(ctx, plan, _provider_row(plan, "total"), _ProviderResubmits())
 
     (admitted,) = planner.admitted
     assert admitted.requirement("total").source_spec_id == _TOTAL_GROSS_INCLUSIVE
@@ -476,3 +516,157 @@ async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planner
         "measure_basis": ResolvedBy.PLANNER_DEFAULT,
         "provider": ResolvedBy.USER,
     }
+
+
+class _AcceptingPlanner:
+    """A `harness.graph.PlannerModel` whose revision records its arguments in
+    `revisions` and offers the plan it was given back, so the switch completes
+    and stores what it switched."""
+
+    def __init__(self) -> None:
+        self.revisions: list[dict[str, Any]] = []
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        self.revisions.append(kwargs)
+        return {"plan": kwargs["prior_plan"], "summary": "revised"}
+
+
+async def _pinning_the_compile(
+    ctx: _FakeToolContext, decision: DecisionFactory, *measures: str
+) -> Plan:
+    """`_bilateral_share` amended with health's share of each of `measures`, a
+    requirement `bilateral<i>` pinning `TOTAL_GROSS_BILATERAL`, the compile
+    alignment made for the share's total, which the planner was never shown.
+    Returns the plan on record."""
+    plan = await _bilateral_share(ctx, decision)
+    ids = [f"bilateral{index}" if index else "bilateral" for index in range(len(measures))]
+    amended = await _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"].func(
+        answered=[AskAnswer(ask=0, outputs=("share", *(f"of_{rid}" for rid in ids)))],
+        evidence_requirements=[
+            requirement
+            for rid, measure in zip(ids, measures, strict=True)
+            for requirement in (
+                _us_dataset(rid, measure, TOTAL_GROSS_BILATERAL),
+                ShareOfRequirement(
+                    id=f"of_{rid}",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="health"),
+                    denominator=RequirementSide(input_id=rid),
+                ),
+            )
+        ],
+        amends_version=plan.version,
+        tool_context=ctx,
+    )
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    return plan
+
+
+@pytest.mark.parametrize(
+    ("measures", "stored"),
+    [
+        (("US bilateral ODA", "US bilateral ODA"), "US bilateral ODA"),
+        (("US bilateral ODA", "US gross bilateral aid"), None),
+    ],
+    ids=["same-words", "different-words"],
+)
+async def test_a_compile_two_requirements_pin_switches_only_under_words_they_share(
+    decision: DecisionFactory, measures: tuple[str, str], stored: str | None
+) -> None:
+    """Two requirements pin the compile directly, and the switch re-pins both and
+    stores one reading of the switched dataset. Worded alike, it is stored under
+    their words. Worded apart, the switch is refused before any resubmit: one
+    reading would name one of them wrongly."""
+    ctx = _FakeToolContext()
+    plan = await _pinning_the_compile(ctx, decision, *measures)
+    surface = _ProviderResubmits()
+    planner = _AcceptingPlanner()
+    switching = switch_module._switched_plan(
+        cast(Any, ctx),
+        plan,
+        choice_id=choice_id(plan, _provider_row(plan, "bilateral")),
+        option_id="provider:inclusive",
+        planner=cast(Any, planner),
+        surface=cast(ToolSurface, surface),
+    )
+
+    if stored is None:
+        with pytest.raises(SwitchFailedError) as refused:
+            await switching
+        assert refused.value.code == switch_module.SCOPE_CHOICE_NOT_APPLIED
+        assert (surface.posted, planner.revisions) == ([], [])
+        return
+    await switching
+    texts = [
+        r["text"]
+        for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY]
+        if r["spec_id"] == _TOTAL_GROSS_INCLUSIVE
+    ]
+    assert texts == [stored]
+
+
+@pytest.mark.parametrize("unread", [(), (TOTAL,), (TOTAL, HEALTH)], ids=["read", "total", "both"])
+async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_compile(
+    decision: DecisionFactory, unread: tuple[str, ...]
+) -> None:
+    """An amendment adds health's share of the gross bilateral total, pinning the compile
+    alignment made for the share's total, which the planner was never shown. The card
+    lists that requirement's provider row, read from the compile's block, with
+    health's. A switch of the row posts the compile's scope, whether or not the total
+    it was compiled from has a stored reading, and health's from the block it was
+    shown with when it has none, re-pins each requirement onto its own
+    resubmit, and holds the switched compile under the words and parties of the
+    requirement pinning it, with none of the total's provenance."""
+    ctx = _FakeToolContext()
+    plan = await _pinning_the_compile(ctx, decision, "US bilateral ODA")
+    shown = pin_sources(ctx.state)
+    shown[TOTAL] = shown[TOTAL].model_copy(update={"provenance_ref": "oecd-dac1"})
+    save_pin_sources(ctx.state, shown)
+    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
+        r for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY] if r["spec_id"] not in unread
+    ]
+    surface = _ProviderResubmits()
+    planner = _AcceptingPlanner()
+
+    await switch_module._switched_plan(
+        cast(Any, ctx),
+        plan,
+        choice_id=choice_id(plan, _provider_row(plan, "bilateral")),
+        option_id="provider:inclusive",
+        planner=cast(Any, planner),
+        surface=cast(ToolSurface, surface),
+    )
+
+    assert surface.posted == [
+        (
+            f"{HEALTH}_base",
+            {
+                "sector": "sector:120",
+                "region": "region:members_only",
+                "provider": "provider:inclusive",
+            },
+        ),
+        (
+            f"{TOTAL}_base",
+            {"measure_basis": "measure_basis:gross", "provider": "provider:inclusive"},
+        ),
+    ]
+    (revision,) = planner.revisions
+    assert {r["id"]: r["source_spec_id"] for r in revision["evidence_requirements"]} == {
+        "health": _HEALTH_INCLUSIVE,
+        "bilateral": _TOTAL_GROSS_INCLUSIVE,
+    }
+    (stored,) = [
+        SearchReading.model_validate(r)
+        for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY]
+        if r["spec_id"] == _TOTAL_GROSS_INCLUSIVE
+    ]
+    assert (stored.text, stored.asked_roles, stored.provenance_ref) == (
+        "US bilateral ODA",
+        ("donor",),
+        None,
+    )
+    held = pin_sources(ctx.state)[_TOTAL_GROSS_INCLUSIVE]
+    assert (held.provenance_ref, held.asked_roles) == (None, ("donor",))

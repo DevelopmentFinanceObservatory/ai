@@ -127,6 +127,7 @@ from planner.plan import (
     PlanStatus,
     SessionState,
     UnsupportedOperation,
+    clear_plan,
     clear_unsupported,
     current_discovery_time_left,
     cut_user_text,
@@ -617,12 +618,14 @@ class PlannerSeam:
                 # would find the earlier entry's plan still on record and,
                 # with this seam's pair built with `question_fixed=True`,
                 # could only amend it, since `starts_new_plan` is refused.
-                # Clearing `_BRIEFED_STATE_KEY` alongside makes the very
+                # The plan's alignments go with it (`clear_plan`), so no
+                # amendment of the new draft reads an input the old plan
+                # moved. Clearing `_BRIEFED_STATE_KEY` alongside makes the very
                 # next read of it, two lines below, compute a fresh `True`
                 # for this call, so the entry gets the full brief rather
                 # than the continuing-call message a session that has
                 # already been briefed gets.
-                ctx.session.state[PLAN_STATE_KEY] = None
+                clear_plan(cast(SessionState, ctx.session.state))
                 ctx.session.state[_BRIEFED_STATE_KEY] = False
                 # A first draft may decline an ask no requirement kind states,
                 # which no tool's answer could ever earn, except one a
@@ -777,7 +780,7 @@ class PlannerSeam:
         if plan is not None:
             save_plan(cast(SessionState, ctx.state), plan)
         elif PLAN_STATE_KEY in ctx.session.state:
-            ctx.state[PLAN_STATE_KEY] = None
+            clear_plan(cast(SessionState, ctx.state))
         save_plan_rounds(cast(SessionState, ctx.state), load_plan_rounds(session_state))
         if ctx.session.state.get(_BRIEFED_STATE_KEY, False):
             ctx.state[_BRIEFED_STATE_KEY] = True
@@ -1930,9 +1933,10 @@ def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> No
 
     A pin compiled for a calculation's input (`submission.service.AlignedPin`)
     is no reading: admission derives it again on every proposal, a switch of
-    the axis it moved resubmits from the compile itself
-    (`harness.graph.switch`), and a later turn reads its spec_id as any source
-    the translator found (`harness.turn_records.PlanRecord.source_readings`).
+    the axis it moved, or of a row of a requirement pinning it directly,
+    resubmits from the compile itself (`harness.graph.switch`), and a later
+    turn reads its spec_id as any source the translator found
+    (`harness.turn_records.PlanRecord.source_readings`).
     """
     searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]
     if not searched:
