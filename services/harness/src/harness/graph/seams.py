@@ -14,6 +14,8 @@ from typing import Any, Protocol
 from compiler.surface import ProgressCallback
 from google.adk import Context
 
+from harness.decision_pick import DecisionPick
+
 
 class Executor(Protocol):
     """Runs one plan step against the data layer (data-mcp / analysis-mcp).
@@ -74,7 +76,11 @@ class PlannerModel(Protocol):
     hands the refusal back to the orchestrator.
     `prior_plan` is the record the graph holds, which the seam seeds its
     own session from before drafting. `refusal` / `amendment` are set on
-    the replan and amend re-entries.
+    the replan and amend re-entries. `pick` is set on the amend re-entry a
+    switch of a planner decision on the plan card opens: the option the user
+    picked, which the drafted plan has to state. A refused pick entry's
+    `refused` also carries `reason`, one sentence for the user, as `revise`'s
+    does.
 
     `on_progress`, when given, may be called any number of times before this
     returns, each call naming one round trip the underlying model pair made
@@ -107,6 +113,7 @@ class PlannerModel(Protocol):
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        pick: DecisionPick | None = None,
     ) -> dict[str, Any]: ...
 
     async def revise(

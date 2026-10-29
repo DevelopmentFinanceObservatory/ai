@@ -51,6 +51,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from google.genai import types
 from harness import plan_display, planner_seam
+from harness.decision_pick import DecisionPick
 from harness.graph import switch
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
@@ -104,6 +105,7 @@ from planner.plan import (
     AskBreakdown,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
     FullHistory,
     GrowthRequirement,
@@ -122,6 +124,7 @@ from planner.plan import (
     amendment_entry,
     current_discovery_time_left,
     current_earlier_block,
+    decision_pick,
     discovery_time_left,
     full_histories,
     load_plan,
@@ -318,8 +321,13 @@ class _SeamHarness:
         *,
         resume_inputs: dict[str, Any] | None = None,
         new_message: types.Content | None = None,
+        stoppable: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any] | None:
+        """Run `seam` once in this harness's session, under the switch's
+        `_unless_stopped` when `stoppable`, as the planner node runs a pick's
+        replan."""
+
         async def _node(ctx: Context, node_input: Any) -> Any:
             del node_input
             if resume_inputs is not None:
@@ -347,6 +355,8 @@ class _SeamHarness:
                 # in this suite stands in for one the framework would
                 # otherwise build.
                 ctx._resume_inputs = resume_inputs
+            if stoppable:
+                return await switch._unless_stopped(ctx, seam(ctx=ctx, **kwargs))
             return await seam(ctx=ctx, **kwargs)
 
         node_fn = node(_node, name="seam_under_test", rerun_on_resume=True)
@@ -1219,6 +1229,46 @@ def _pending_ask_interrupt_id(events: list[Event]) -> str:
     raise AssertionError("no adk_request_input call on record")
 
 
+async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """The planner node runs a pick's replan under the switch's
+    `_unless_stopped`, which runs the seam as a task so a Stop can reach it.
+    A planner-side ask pauses the run through a real `ctx.run_node`,
+    the pick survives the pause in durable state, the answer resumes and
+    finishes the draft, and the seam's callbacks find their own call
+    (`_active_call`) in the task, so its proposal is reported."""
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[[("adk_request_input", {"message": "Which source did you mean?"})], _DECLARE]
+    )
+    use_compiled_proposals(seam._agent)
+    harness = _SeamHarness()
+    reports: list[dict[str, Any]] = []
+    entry: dict[str, Any] = {
+        "question": plan.question,
+        "readings": [],
+        "prior_plan": plan.model_dump(mode="json"),
+        "pick": _PICKED,
+        "on_progress": reports.append,
+        "stoppable": True,
+    }
+
+    paused = await harness.run(seam, **entry)
+
+    assert paused is None, "the ask should pause the replan, not resolve it"
+    assert decision_pick(await harness.state()) == _PICKED
+    interrupt_id = _pending_ask_interrupt_id(await harness.events())
+    resume = types.Content(
+        role="user", parts=[create_request_input_response(interrupt_id, {"result": "2020"})]
+    )
+    resumed = await harness.run(seam, new_message=resume, **entry)
+    assert resumed is not None and resumed["plan"]["version"] == plan.version
+    assert decision_pick(await harness.state()) == _PICKED
+    assert [report["tools"] for report in reports] == [["adk_request_input"], ["propose_plan"]]
+
+
 async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -2069,6 +2119,62 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
     recorded.append(amendment_entry(await harness.state()))
 
     assert recorded == [False, True, True, False]
+
+
+_PICKED = DecisionPick(
+    slot="donor_scope",
+    chosen="the top 10 donors",
+    origin_fixes=DecisionFixes(entities=(Entity(name="DAC countries", role="donor"),)),
+    replaced_readings=("0" * 64,),
+    replaced_kinds=("dataset",),
+    cited_by_every=("donor_scope",),
+    cited_by_any=(),
+    kept_requirements={},
+    kept_decisions={},
+)
+
+
+async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_line() -> None:
+    """An entry a pick on the plan card opens records the pick in state for
+    `propose_plan` to hold, and tells the model on a line of its own, apart
+    from the user's amendment. Its refusal carries the sentence the card shows
+    under the decision. A resume inside the entry keeps the pick, and the
+    next entry without one clears it."""
+    harness = _SeamHarness()
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["Planned."] * 3)
+    seam._agent.model = llm
+    pick = _PICKED
+    recorded = []
+
+    refused = await harness.run(seam, question="kenya aid", readings=[], pick=pick)
+    state = await harness.state()
+    recorded.append((decision_pick(state), amendment_entry(state)))
+    asked = _prompt_text(SimpleNamespace(contents=llm.captured_requests[-1].contents[-1:]))
+    await harness.run(seam, question="kenya aid", readings=[], pick=pick, resume_inputs={"ask": {}})
+    recorded.append(decision_pick(await harness.state()))
+    amended = await harness.run(seam, question="kenya aid", readings=[], amendment="one total")
+    recorded.append(decision_pick(await harness.state()))
+
+    assert recorded == [(_PICKED, False), _PICKED, None]
+    assert (
+        "\nOn the plan card the user picked 'the top 10 donors' for decision 'donor_scope'. "
+        in asked
+    )
+    assert (
+        "Change only that decision and the requirements that cite it. Carry every other "
+        "requirement, with its id, its content and its citations, and every other decision "
+        "exactly as the plan card has them. Keep the id of any replaced requirement that "
+        "another requirement reads. Cite that decision, and every decision of the user's "
+        "that all the replaced requirements cited, from each requirement you add, and cite "
+        "any other decision of the user's a replaced requirement cited from at least one of "
+        "them.\n" in asked
+    )
+    assert "The user asks for this change" not in asked
+    assert refused is not None and amended is not None
+    assert refused["refused"]["code"] == amended["refused"]["code"] == SeamCode.PLAN_NOT_READY
+    assert refused["refused"]["reason"]
+    assert "reason" not in amended["refused"]
 
 
 async def test_an_amendment_still_works_through_the_seam(

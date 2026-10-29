@@ -21,8 +21,10 @@ description, and marks the one step whose result answers (`answer_step`);
 `card_title` titles the card by that step's ask; `card_summary` says in one
 sentence what the answer counts, for whom, when and from which source;
 `card_choice_text`, `card_decision_text` and `CHOICE_NAMES` give a
-decision's words; and `choice_id` gives a scope choice's row the id every
-switch keeps.
+decision's words; `choice_id` gives a scope choice's row the id every
+switch keeps; and `switchable_decision`, `decision_choice_id` and
+`decision_option_id` give a planner decision the card offers to switch its
+row's id and its options' ids.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -48,6 +50,7 @@ same way.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import typing
@@ -1285,6 +1288,49 @@ def choice_id(plan: Plan, decision: Decision) -> str:
         if member.fixes is not None and member.fixes.source_spec_id is not None
     }
     return pinned_choice_id(plan, pinned, decision.scope.axis) or decision.scope.choice_id
+
+
+# The prefix of the id a planner decision's row takes (`decision_choice_id`).
+# A slot holds no `/` or `:`, so that id holds no `:`, while every scope
+# choice's id does (`"<requirement id>:<axis>"`, `pinned_choice_id`, or
+# Search's `"<spec id>:<axis>"`): the two never meet, whatever a
+# requirement is called.
+DECISION_CHOICE_PREFIX = "decision/"
+
+
+def switchable_decision(decision: Decision) -> bool:
+    """Whether the card offers `decision`'s other options as a switch.
+
+    A decision the planner wrote that settles requirement fields (`fixes`)
+    is switchable. A switch of it replans with the user's pick held. The
+    decisions `propose_plan` writes are not: a search pin's measure
+    (`planner.plan.is_search_pin`) and a scope choice switch through Search
+    (`choice_id`), and one qualifying the answer (`Decision.caveat`) reaches
+    the card only as a caveat.
+    """
+    return (
+        decision.fixes is not None
+        and decision.scope is None
+        and decision.caveat is None
+        and not is_search_pin(decision)
+    )
+
+
+def decision_choice_id(decision: Decision) -> str:
+    """The id the plan card gives the row of planner decision `decision`:
+    `"decision/<slot>"`."""
+    return f"{DECISION_CHOICE_PREFIX}{decision.slot}"
+
+
+def decision_option_id(label: str) -> str:
+    """The id the plan card gives the planner decision option `label`:
+    `"option_"` and the first 12 hex digits of the label's SHA-256.
+
+    The label is the identity the planner gives an option, so the same label
+    keeps its id across revisions however a replan orders the options. A
+    decision's options are distinct (`planner.plan.Decision`), so their ids
+    are distinct within it."""
+    return f"option_{hashlib.sha256(label.encode()).hexdigest()[:12]}"
 
 
 def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | None:

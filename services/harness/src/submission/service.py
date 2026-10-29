@@ -119,6 +119,7 @@ from planner.plan import (
     Decision,
     DecisionDraft,
     DecisionFixes,
+    DecisionPick,
     DecisionScope,
     DecisionsUncitedError,
     Decline,
@@ -141,6 +142,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     SumOfRequirement,
+    UnreadablePickError,
     UnsupportedOperation,
     UnsupportedPlanError,
     WholeIsItsMemberError,
@@ -151,6 +153,7 @@ from planner.plan import (
     check_acyclic,
     check_references,
     check_wholes_span_their_totals,
+    content_digest,
     cut_user_text,
     dataset_roots,
     exact_codes,
@@ -160,6 +163,7 @@ from planner.plan import (
     full_history,
     identity_on_record,
     inputs_of,
+    is_code_written,
     is_scope_choice,
     is_search_pin,
     keep_years_admits,
@@ -180,7 +184,11 @@ from planner.plan import (
     pin_sources,
     predicate_key,
     reached,
+    read_fixes,
     repinned,
+    requirement_digest,
+    requirement_readings,
+    requirement_roots,
     requirements_over,
     roles_not_kept,
     scope_choice_slot,
@@ -258,7 +266,8 @@ class SessionView(Protocol):
     recorded plan, its rounds, pins shown and windowed, histories read,
     asks, the pending referral, the discovery log), read through their own
     loaders. The four readers answer from what the user was asked and
-    answered in this session. The four writes are the chain's only side
+    answered in this session, and `decision_pick` names the pick on the plan
+    card a planner entry replans for. The four writes are the chain's only side
     effects: an `unsupported` answer, an optional decline and the asks a
     `PERIOD_REDUCTION_UNSTATED` refusal names, each recorded even though the
     call is refused, and an admitted plan.
@@ -283,6 +292,10 @@ class SessionView(Protocol):
 
     def user_spoke_since(self, version: int) -> bool:
         """Whether the user has said anything (an answer, an amendment, a new message) since plan `version` was recorded."""
+        ...
+
+    def decision_pick(self) -> DecisionPick | None:
+        """The option the user picked on the plan card that this proposal's planner entry replans to hold, or `None`."""
         ...
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
@@ -475,16 +488,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
     if to_origin:
         _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
-    if previous is not None and to_origin:
-        unwindowed, unwindowed_requirements = _unwindowed_pins(
-            previous.decisions, previous.evidence_requirements, to_origin
-        )
-        previous = previous.model_copy(
-            update={
-                "decisions": tuple(unwindowed),
-                "evidence_requirements": tuple(unwindowed_requirements),
-            }
-        )
+    if previous is not None:
+        previous = unwindowed(previous, to_origin)
     pins = pin_sources(view.state)
     sources = SourceReadings.of_shown(pins)
     measures = measure_choices(
@@ -508,8 +513,20 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     # combine, and every requirement its id and inputs. A pending referral
     # also outranks an overridden user decision, since answering it may
     # change the patch.
-    # Between the user's turns, their decisions stand as they made them.
-    user_spoke = previous is None or view.user_spoke_since(previous.version)
+    # Between the user's turns, their decisions stand as they made them. A
+    # pick on the plan card is no word of the user's: its entry holds the
+    # rest of the card as the planner wrote it, whatever the session records
+    # (`_outside_pick`), before admission derives anything of its own.
+    try:
+        pick = view.decision_pick()
+    except UnreadablePickError:
+        return problem(
+            ProblemCode.USER_PICK_NOT_HELD,
+            "The option the user picked on the plan card cannot be read, so no plan can be "
+            "recorded for it in this entry; the user has to pick it again.",
+            outcome=Outcome.REFUSED,
+        )
+    user_spoke = pick is None and (previous is None or view.user_spoke_since(previous.version))
     blocked = (
         _across_years_unread(
             patch.across_years,
@@ -524,6 +541,20 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             previous=previous,
             user_spoke=user_spoke,
             proposer=proposer,
+        )
+        or (
+            _outside_pick(
+                pick,
+                _decisions_after(
+                    previous,
+                    settle_decisions(patch.decisions, written),
+                    removed=removed_decisions,
+                ),
+                written,
+                proposer,
+            )
+            if pick is not None
+            else None
         )
     )
     if blocked is not None:
@@ -610,27 +641,34 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             requirements_after,
             removed=removed_decisions,
             user_spoke=user_spoke,
+            picked=pick is not None,
         ),
     ]
+    decisions_after = _decisions_after(previous, settled, removed=removed_decisions)
+    held = (
+        _picked_decision(pick, decisions_after, requirements_after, proposer)
+        if pick is not None
+        else None
+    )
+    if isinstance(held, dict):
+        return held
     blocked = (
         (
             None
-            if user_spoke
+            if user_spoke or pick is not None
             else _user_decision_refused(
                 previous, settled, requirements_after, removed=removed_decisions
             )
         )
         or _shared_decision_contradicted(contradicted, proposer)
         or _measure_fixed_by_pin(
-            patch.decisions,
-            requirements_after,
-            _decisions_after(previous, settled, removed=removed_decisions),
-            measures,
-            proposer,
+            patch.decisions, requirements_after, decisions_after, measures, proposer
         )
     )
     if blocked is not None:
         return blocked
+    if held is not None:
+        settled = [*(d for d in settled if d.slot != held.slot), held]
     try:
         if previous is not None:
             plan = previous.amend(
@@ -2880,6 +2918,18 @@ def _repinned(
             )
         moved_requirements.append(requirement.model_copy(update=update) if update else requirement)
     return moved_decisions, moved_requirements
+
+
+def unwindowed(plan: Plan, to_origin: Mapping[str, str]) -> Plan:
+    """`plan` with every pin of a windowed copy moved back to the pin it copies (`_unwindowed_pins`)."""
+    if not to_origin:
+        return plan
+    decisions, requirements = _unwindowed_pins(
+        plan.decisions, plan.evidence_requirements, to_origin
+    )
+    return plan.model_copy(
+        update={"decisions": tuple(decisions), "evidence_requirements": tuple(requirements)}
+    )
 
 
 def _unwindowed_pins(
@@ -6492,6 +6542,7 @@ def _uncited_carried_decisions(
     *,
     removed: Collection[str],
     user_spoke: bool,
+    picked: bool = False,
 ) -> list[str]:
     """The slot of each decision `previous` records that no requirement of the patched plan cites.
 
@@ -6503,7 +6554,11 @@ def _uncited_carried_decisions(
     a decision the call states is the model's to cite. A user's decision is
     swept only once the user has spoken since `previous` (`user_spoke`),
     since the patch then acts on their new words; before that
-    `_user_decision_refused` refuses the patch instead.
+    `_user_decision_refused`, or `_outside_pick` for a pick on the plan
+    card, refuses the patch instead. A replan for a pick (`picked`) also
+    sweeps a user's decision code wrote (`is_code_written`), such as the
+    scope Search read off their words for a pin the replan no longer reads:
+    it went with the requirements the pick replaced.
 
     Args:
         previous: The plan this call amends, or `None`.
@@ -6511,6 +6566,7 @@ def _uncited_carried_decisions(
         requirements: Every requirement the patched plan states.
         removed: The slots this call removes.
         user_spoke: Whether the user has spoken since `previous` was recorded.
+        picked: Whether this call replans for a pick on the plan card.
     """
     if previous is None:
         return []
@@ -6521,7 +6577,11 @@ def _uncited_carried_decisions(
         for decision in previous.decisions
         if decision.slot not in restated
         and decision.slot not in cited
-        and (user_spoke or decision.resolved_by is ResolvedBy.PLANNER_DEFAULT)
+        and (
+            user_spoke
+            or decision.resolved_by is ResolvedBy.PLANNER_DEFAULT
+            or (picked and is_code_written(decision))
+        )
     ]
 
 
@@ -6875,6 +6935,188 @@ def _measure_fixed(
             "measure_decision": pinned.slot,
             "chosen": pinned.chosen,
             "counts": counts,
+        },
+    )
+
+
+def _outside_pick(
+    pick: DecisionPick,
+    decisions: Sequence[Decision],
+    requirements: Sequence[EvidenceRequirement],
+    proposer: Proposer,
+) -> dict[str, object] | None:
+    """The refusal for a replan that changes the plan card outside the user's `pick`, or `None`.
+
+    `decisions` and `requirements` are the plan as the planner wrote it,
+    before admission derives citations, caveats or pins of its own. The
+    replan holds the scope the card gave it (`DecisionPick.on_card`) when:
+
+    - every requirement `pick.kept_requirements` names is stated with the
+      same content, its id and citations included (`requirement_digest`);
+    - every decision `pick.kept_decisions` names is stated unchanged, cited,
+      and contradicted by no requirement citing it;
+    - at least one requirement replaces the card's that cited the picked
+      decision (C), and the figures they end in (`requirement_roots`) do
+      not read everything C's did (`requirement_readings`): a member of C
+      may survive unchanged, as the donors a ranking reads do when only its
+      limit moves, or as the numerator of a share that replaces it, but C
+      may not end where it ended;
+    - every replacing requirement cites each decision of
+      `pick.cited_by_every`, and some replacing requirement each of
+      `pick.cited_by_any`.
+
+    The refusal is `_pick_not_held`, naming the requirement or decision the
+    replan broke.
+    """
+    code_written = {decision.slot for decision in decisions if is_code_written(decision)}
+    by_slot = {decision.slot: decision for decision in decisions}
+    by_id = {requirement.id: requirement for requirement in requirements}
+
+    def refused(states: str, broken: str | None) -> dict[str, object]:
+        return _pick_not_held(pick, states, broken, proposer, stated=by_slot.get(pick.slot))
+
+    for requirement_id, digest in pick.kept_requirements.items():
+        kept = by_id.get(requirement_id)
+        if kept is None or requirement_digest(kept, code_written=code_written) != digest:
+            return refused(f"changes or drops requirement {requirement_id!r}", requirement_id)
+    for slot, digest in pick.kept_decisions.items():
+        decision = by_slot.get(slot)
+        citing = [r for r in requirements if slot in r.decision_ids]
+        if decision is None or content_digest(decision) != digest:
+            states = f"changes or drops decision {slot!r}"
+        elif not citing:
+            states = f"leaves decision {slot!r} cited by no requirement"
+        elif contradicting := next((r.id for r in citing if fix_disagreements(r, decision)), None):
+            states = f"states on {contradicting!r} a value decision {slot!r} fixes otherwise"
+        else:
+            continue
+        return refused(states, slot)
+    replacing = [r for r in requirements if r.id not in pick.kept_requirements]
+    if not replacing:
+        return refused("replaces the requirements that cited it with none", None)
+    readings = requirement_readings(requirements)
+    surviving = [
+        r.id for r in requirement_roots(replacing) if readings[r.id] in pick.replaced_readings
+    ]
+    if {readings[requirement_id] for requirement_id in surviving} >= set(pick.replaced_readings):
+        states = f"ends in {', '.join(map(repr, surviving))}, as the requirements citing it did"
+        return refused(f"{states} on the card", surviving[0])
+    cited = {slot for requirement in replacing for slot in requirement.decision_ids}
+    uncited = next(
+        (
+            (slot, requirement.id)
+            for requirement in replacing
+            for slot in pick.cited_by_every
+            if slot not in requirement.decision_ids
+        ),
+        None,
+    ) or next(((slot, None) for slot in pick.cited_by_any if slot not in cited), None)
+    if uncited is None:
+        return None
+    slot, requirement_id = uncited
+    where = f"on {requirement_id!r}" if requirement_id else "on every requirement it adds"
+    return refused(f"leaves decision {slot!r} uncited {where}", requirement_id or slot)
+
+
+def _picked_decision(
+    pick: DecisionPick,
+    decisions: Sequence[Decision],
+    requirements: Sequence[EvidenceRequirement],
+    proposer: Proposer,
+) -> Decision | dict[str, object]:
+    """The decision of `decisions` holding the user's `pick` on the plan card, as theirs, or the refusal.
+
+    The plan holds it when it states a decision under the pick's slot whose
+    `chosen` is the picked label and whose `fixes`, read off the
+    requirements citing it (`settle_decisions`), are set, and, where the
+    replan keeps the plan's shape (`_same_shape`), whose citing
+    `requirements` no longer read what the card's decision fixed
+    (`_fixes_kept`). That decision is
+    recorded `resolved_by=user`. Any other plan is refused (`_pick_not_held`).
+    What the rest of the plan may change is `_outside_pick`'s.
+    """
+    stated = next((decision for decision in decisions if decision.slot == pick.slot), None)
+    if stated is None:
+        states = "drops that decision"
+    elif stated.chosen != pick.chosen:
+        states = f"states {stated.chosen!r} for it"
+    elif stated.fixes is None:
+        states = "states it, but the requirements citing it fix none of what it names"
+    elif _same_shape(pick, requirements) and _fixes_kept(pick, requirements):
+        states = "states it, but the requirements citing it fix what the card's option fixed"
+    else:
+        return stated.model_copy(update={"resolved_by": ResolvedBy.USER})
+    return _pick_not_held(pick, states, None, proposer, stated=stated)
+
+
+def _same_shape(pick: DecisionPick, requirements: Sequence[EvidenceRequirement]) -> bool:
+    """Whether the requirements replacing the card's that cited the pick end in
+    figures of the kinds C's did (`pick.replaced_kinds`, `requirement_roots`).
+
+    A pick that changes the shape, a share for a total or a total back for a
+    share, is judged by `_outside_pick` alone: the fields the card's option
+    fixed can keep their values across such a change.
+    """
+    replacing = [r for r in requirements if r.id not in pick.kept_requirements]
+    return {r.kind for r in requirement_roots(replacing)} == set(pick.replaced_kinds)
+
+
+def _fixes_kept(pick: DecisionPick, requirements: Sequence[EvidenceRequirement]) -> bool:
+    """Whether the requirements citing the pick's slot still settle every field
+    the card's decision fixed (`pick.origin_fixes`) to the card's value
+    (`read_fixes`): the picked option then changes nothing the card's showed.
+
+    Only the card's fields are read, so a field the picked decision lists
+    beside them changes nothing here. A card field the citing requirements
+    no longer agree on has changed, as the entities do when a share replaces
+    a total, and a field both options fix alike, such as the unit beside
+    them, does not hold the pick back.
+    """
+    origin = pick.origin_fixes
+    read = read_fixes(
+        requirements, slot=pick.slot, fields=[name for name, value in origin if value is not None]
+    )
+    return not fixes_changes(origin, read)
+
+
+def _pick_not_held(
+    pick: DecisionPick,
+    states: str,
+    broken: str | None,
+    proposer: Proposer,
+    *,
+    stated: Decision | None = None,
+) -> dict[str, object]:
+    """The `USER_PICK_NOT_HELD` refusal for a replan for `pick` that `states` something else.
+
+    The message says what the replan may change. `action` calls `proposer`
+    to restate it. `detail` names the pick's `slot`, the picked label
+    (`chosen`), the label the plan `stated` for it when that is the fault,
+    and the requirement id or decision slot the replan broke (`kept`), `None`
+    when it is the picked decision or the replacement as a whole.
+    """
+    slot, chosen = pick.slot, pick.chosen
+    every = ", ".join(repr(cited) for cited in pick.cited_by_every)
+    some = (
+        f", and between them {', '.join(repr(cited) for cited in pick.cited_by_any)}"
+        if pick.cited_by_any
+        else ""
+    )
+    return problem(
+        ProblemCode.USER_PICK_NOT_HELD,
+        f"The user picked {chosen!r} for decision {slot!r} on the plan card, and this plan "
+        f"{states}. A replan for that pick may change two things only: decision {slot!r}, "
+        f"restated with `chosen` {chosen!r}, and the evidence requirements that cited it on "
+        "the card, replaced by requirements that state what that option asks for, end in "
+        f"something other than those did, and each cite {every}{some}. Keep every other "
+        "requirement and decision exactly as the card had them, ids and citations included.",
+        outcome=Outcome.REFUSED,
+        action=proposer.action(needs=("decisions", "evidence_requirements")),
+        detail={
+            "slot": slot,
+            "chosen": chosen,
+            "stated": stated.chosen if stated is not None else None,
+            "kept": broken,
         },
     )
 

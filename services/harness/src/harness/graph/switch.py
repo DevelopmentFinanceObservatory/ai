@@ -65,6 +65,7 @@ from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
+from google.adk.workflow._errors import NodeInterruptedError
 from planner.agent import run_together
 from planner.plan import (
     DatasetRequirement,
@@ -94,6 +95,7 @@ from translator.discovery import (
     resolving_once,
 )
 
+from harness.decision_pick import picks_the_chosen_option
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
@@ -239,30 +241,40 @@ def switch_node(
                 )
         except SwitchFailedError as exc:
             _restore(ctx, before)
-            logger.info(
-                "plan switch not applied: choice_id=%s option_id=%s code=%s",
-                choice_id,
-                option_id,
-                exc.code,
-            )
-            output = {
-                **plan.model_dump(mode="json"),
-                "summary": exc.reason,
-                "revision": plan_revision(plan),
-                "switch_failed": {
-                    "choice_id": choice_id,
-                    "option_id": option_id,
-                    "code": exc.code,
-                    "reason": exc.reason,
-                    "retryable": exc.retryable,
-                },
-            }
+            output = switch_failed_offer(plan, choice_id=choice_id, option_id=option_id, error=exc)
         except BaseException:
             _restore(ctx, before)
             raise
         yield Event(output=output, route="offer")
 
     return switch
+
+
+def switch_failed_offer(
+    plan: PlannerPlan, *, choice_id: str, option_id: str, error: SwitchFailedError
+) -> dict[str, Any]:
+    """The `approve` payload offering `plan` unchanged after the switch of row
+    `choice_id` to option `option_id` failed with `error`: `switch_failed`
+    names the row, the option, the code, the sentence saying why and
+    whether the same switch can succeed if asked again."""
+    logger.info(
+        "plan switch not applied: choice_id=%s option_id=%s code=%s",
+        choice_id,
+        option_id,
+        error.code,
+    )
+    return {
+        **plan.model_dump(mode="json"),
+        "summary": error.reason,
+        "revision": plan_revision(plan),
+        "switch_failed": {
+            "choice_id": choice_id,
+            "option_id": option_id,
+            "code": error.code,
+            "reason": error.reason,
+            "retryable": error.retryable,
+        },
+    }
 
 
 async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> dict[str, Any]:
@@ -273,11 +285,15 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
     raises included, ends stopped, as does one that finishes in the same wait
     as the Stop. The `switch` node puts the state it wrote back, so the plan
     stands unchanged. A cancellation of the node itself,
-    while the revision unwinds, still cancels the node.
+    while the revision unwinds, still cancels the node. A revision that
+    paused on a question to the user (`NodeInterruptedError`) stays paused
+    though the Stop came in the same wait: ADK has streamed the question, so
+    the node run ends as that pause and offers no plan beside it.
 
     Raises:
         SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
             the switch, else as `revision` raises it.
+        NodeInterruptedError: When `revision` paused on a question.
     """
     stop = SWITCH_STOP.get()
     running = asyncio.ensure_future(revision)
@@ -299,7 +315,10 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
             await asyncio.wait(unfinished)
     if running in finished and stopped not in finished and not running.cancelled():
         return running.result()
-    if not running.cancelled() and (error := running.exception()) is not None:
+    error = None if running.cancelled() else running.exception()
+    if isinstance(error, NodeInterruptedError):
+        raise error
+    if error is not None:
         logger.info("stopped plan switch raised: %r", error)
     raise SwitchFailedError(
         "You stopped this change, so the plan is as it was.",
@@ -322,6 +341,10 @@ async def _switched_plan(
     Raises:
         SwitchFailedError: If the switch cannot be applied, with the note to show.
     """
+    if picks_the_chosen_option(plan, choice_id=choice_id, option_id=option_id):
+        raise SwitchFailedError(
+            "That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
     clicked = chosen_scope_decision(plan, choice_id)
     if clicked is None or clicked.scope is None:
         raise SwitchFailedError(

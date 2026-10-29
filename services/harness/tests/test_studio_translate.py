@@ -30,6 +30,7 @@ from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
+from harness.plan_display import decision_option_id
 from harness.planner_seam import PlannerSeamError
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
@@ -81,7 +82,7 @@ from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
-from .test_plan_display import _recorded_payload, _recorded_plan
+from .test_plan_display import _fixing_measure, _recorded_payload, _recorded_plan
 from .test_planner_seam import ScriptedPlannerLlm, _seam
 from .test_turn_records import (
     _EXAMPLE_LINE,
@@ -377,6 +378,83 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
         "measure_basis:net": "unavailable",
         "measure_basis:grant_equivalent": "partial",
     }
+
+
+def test_a_planner_decision_settling_fields_is_a_row_the_card_can_switch() -> None:
+    """Kenya life expectancy with its measure decision fixing the measure: the
+    row names the decision by slot, offers each option as available with the
+    chosen one active, and a switch may name it. A rationale-only decision
+    stays a row with no choice."""
+    plan = _fixing_measure(scripted_plan("kenya life expectancy", spec_id=None))
+    (measure,) = plan.decisions
+    rationale = Decision(
+        slot="rounding",
+        description="How figures are rounded.",
+        options=("one decimal", "whole years"),
+        chosen="one decimal",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="Life expectancy is reported to one decimal.",
+    )
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    cited = dataset.model_copy(update={"decision_ids": (*dataset.decision_ids, "rounding")})
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [measure.model_copy(update={"chosen": measure.options[1]}), rationale],
+            "evidence_requirements": [
+                cited if r.id == dataset.id else r for r in plan.evidence_requirements
+            ],
+        }
+    )
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    rows = {row.id: row for row in frame.decisions}
+    switched, plain = rows["measure"], rows["rounding"]
+    birth, healthy = (decision_option_id(label) for label in measure.options)
+    assert (switched.choice_id, switched.active_option_id, switched.chosen) == (
+        "decision/measure",
+        healthy,
+        "healthy life expectancy",
+    )
+    assert switched.options == [
+        PlanDecisionOption(option_id=birth, label="life expectancy at birth", status="available"),
+        PlanDecisionOption(option_id=healthy, label="healthy life expectancy", status="available"),
+    ]
+    assert plain.choice_id is plain.options is plain.active_option_id is None
+    assert PlanAction.SWITCH in frame.actions
+    choices = translator._conversation.pending[frame.interrupt_id].choices
+    assert set(choices) == {"decision/measure"}
+    assert choices["decision/measure"].active == healthy
+    assert {k: o.label for k, o in choices["decision/measure"].options.items()} == {
+        birth: "life expectancy at birth",
+        healthy: "healthy life expectancy",
+    }
+
+
+def test_a_planner_decision_option_keeps_its_id_when_a_replan_reorders_the_options() -> None:
+    """The card's cross-revision marks compare option ids: a replan listing
+    the measure decision's options in the other order gives each label the
+    id it had."""
+    plan = _fixing_measure(scripted_plan("kenya life expectancy", spec_id=None))
+    (measure,) = plan.decisions
+    reordered = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [measure.model_copy(update={"options": measure.options[::-1]})],
+        }
+    )
+
+    def labels_by_id(shown: Plan) -> dict[str, str]:
+        payload = {**shown.model_dump(mode="json"), "revision": plan_revision(shown)}
+        (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+        (row,) = frame.decisions
+        return {option.option_id: option.label for option in row.options or ()}
+
+    assert labels_by_id(reordered) == labels_by_id(plan)
+    assert len(labels_by_id(plan)) == len(measure.options)
 
 
 def test_a_plan_a_switch_offers_says_what_else_moved_and_a_plain_plan_offers_no_switch() -> None:
@@ -1569,6 +1647,82 @@ def test_a_planner_draft_drops_the_labels_the_turns_switches_kept(revising: bool
     translator.translate(_node_event("planner", planner_started={"revising": revising}))
 
     assert translator._conversation.turn_choice_baseline == {}
+
+
+_PICKED_ROW = "decision/donor_scope"
+
+
+@pytest.mark.parametrize(
+    ("ending", "kept"),
+    [
+        pytest.param(None, {"aid:sector", _PICKED_ROW}, id="raised"),
+        pytest.param("pending_refusal", {"aid:sector", _PICKED_ROW}, id="stopped-or-refused"),
+        pytest.param("ok", {_PICKED_ROW}, id="landed"),
+    ],
+)
+def test_a_pick_replan_drops_the_scope_labels_the_turns_switches_kept_only_once_it_lands(
+    ending: str | None, kept: set[str]
+) -> None:
+    """A replan for a pick on the card that raises, is stopped or is refused
+    leaves the plan unchanged, so an earlier switch's label still names what
+    the approved plan changed. A plan the replan drafts drops the scope
+    choices' labels, whose ids it may reuse, and keeps the planner decision
+    rows', named by slot."""
+    translator = _translator()
+    baseline = {"aid:sector": "health (CRS 120)", _PICKED_ROW: "the DAC total"}
+    translator._conversation.turn_choice_baseline = dict(baseline)
+
+    translator.translate(_node_event("planner", planner_started={"revising": True, "pick": True}))
+    if ending is not None:
+        translator.translate(_node_event("planner", route=ending, output={"version": 2}))
+
+    assert translator._conversation.turn_choice_baseline == {
+        choice_id: label for choice_id, label in baseline.items() if choice_id in kept
+    }
+
+
+def test_an_approved_plan_a_pick_replan_drafted_names_the_label_the_pick_was_made_from() -> None:
+    """The user picks the top 10 donors on a card showing the DAC total, the
+    replan lands, and the user approves it: the switched row says what it
+    held before."""
+    translator = _translator()
+    translator._conversation.turn_choice_baseline = {_PICKED_ROW: "the DAC total"}
+    translator.translate(_node_event("planner", planner_started={"revising": True, "pick": True}))
+    translator.translate(_node_event("planner", route="ok", output={"version": 2}))
+    labels = ("the DAC total", "the top 10 donors")
+    card = PlanProposed(
+        event="plan.proposed",
+        seq=3,
+        interrupt_id="int_1",
+        plan_version_id="plan_1",
+        version=2,
+        title="Research plan",
+        summary="The top 10 donors to Kenya.",
+        steps=[PlanStep(id="s1", label="Rank donors", gives_answer=True)],
+        actions=[PlanAction.APPROVE],
+        decisions=[
+            PlanDecision(
+                id="d_donors",
+                question="Donors",
+                chosen=labels[1],
+                reason="The user picked it.",
+                resolved_by="user",
+                choice_id=_PICKED_ROW,
+                active_option_id=decision_option_id(labels[1]),
+                options=[
+                    PlanDecisionOption(
+                        option_id=decision_option_id(label), label=label, status="available"
+                    )
+                    for label in labels
+                ],
+            )
+        ],
+        revision="rev_2",
+    )
+
+    frame = plan_approved(card, seq=9, baseline=translator._conversation.turn_choice_baseline)
+
+    assert [choice.changed_from for choice in frame.choices] == ["the DAC total"]
 
 
 def test_the_planner_starting_a_first_draft_opens_working_on_a_plan() -> None:

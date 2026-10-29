@@ -63,6 +63,7 @@ from harness.conversation import (
     current_conversation_key,
     current_user_message,
 )
+from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
 from harness.graph.seams import Executor
 from harness.graph.state import (
@@ -261,9 +262,10 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
 
     A switch names the revision of the plan the user saw, or is refused
     409 `plan_revision_stale`. It moves a choice the card shows
-    (`_PendingInterrupt.choices`) to an option the card offers as available
-    or partial, other than the active one, or is refused 422
-    `switch_option_unavailable`. `detail` is copy the card shows.
+    (`_PendingInterrupt.choices`), a scope choice or a planner decision
+    (`harness.decision_pick.is_decision_choice`), to an option the card
+    offers as available or partial, other than the active one, or is refused
+    422 `switch_option_unavailable`. `detail` is copy the card shows.
     """
     if body.plan_revision != pending.plan_revision:
         return _stale_plan_refusal(pending)
@@ -274,7 +276,8 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
     elif option is None:
         detail = "That option is not offered for this choice."
     elif body.option_id == choice.active:
-        detail = f"The plan already counts {option.label}."
+        verb = "uses" if is_decision_choice(body.choice_id or "") else "counts"
+        detail = f"The plan already {verb} {option.label}."
     elif option.status == "unavailable":
         detail = f"{option.label} cannot be counted for this plan."
     else:
@@ -1569,6 +1572,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 lock.release()
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
+            # A stream that runs a plan-card switch arms the switch's Stop:
+            # one that answers the switch, and one that answers a question
+            # the planner asked while replanning for a pick on the card.
+            switching = body.decision is InterruptDecision.SWITCH or pending.pick_replan
             requested_answer: dict[str, Any] = {
                 "decision": body.decision.value,
                 "payload": body.payload,
@@ -1764,14 +1771,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 answer["at"] = recorded.at.isoformat()
         elif body.decision is InterruptDecision.SWITCH:
             # The graph's `switch` node revises the plan in code and offers
-            # it again; the turn's history record carries the choice.
+            # it again; a planner decision's switch (`is_decision_choice`)
+            # replans with the pick held (`harness.decision_pick`). The
+            # turn's history record carries the choice.
             assert body.choice_id is not None and body.option_id is not None
             answer = {
                 "approved": None,
                 "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
             }
             label = pending.choices[body.choice_id].options[body.option_id].label
-            conversation.add_to_turn(f"count {label}", user_words=False)
+            verb = "use" if is_decision_choice(body.choice_id) else "count"
+            conversation.add_to_turn(f"{verb} {label}", user_words=False)
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
             # An amendment refines the question, so the turn's history record
@@ -1812,7 +1822,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             frames,
                         ),
                         conversation=conversation,
-                        switch=body.decision is InterruptDecision.SWITCH,
+                        switch=switching,
                     )
                 ),
                 media_type=SSE_MEDIA_TYPE,
