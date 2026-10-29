@@ -508,6 +508,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     # combine, and every requirement its id and inputs. A pending referral
     # also outranks an overridden user decision, since answering it may
     # change the patch.
+    # Between the user's turns, their decisions stand as they made them.
+    user_spoke = previous is None or view.user_spoke_since(previous.version)
     blocked = (
         _across_years_unread(
             patch.across_years,
@@ -520,6 +522,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             patch,
             written if previous is not None else evidence_requirements,
             previous=previous,
+            user_spoke=user_spoke,
             proposer=proposer,
         )
     )
@@ -587,8 +590,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             user_settled=user_settled,
         ),
     ]
-    # Between the user's turns, their decisions stand as they made them.
-    user_spoke = previous is None or view.user_spoke_since(previous.version)
     contradicted = _contradicted_carried_decisions(
         previous, settled, requirements_after, removed=removed_decisions, user_spoke=user_spoke
     )
@@ -754,6 +755,7 @@ def _draft_unreferenced(
     requirements: Sequence[EvidenceRequirement],
     *,
     previous: Plan | None,
+    user_spoke: bool,
     proposer: Proposer,
 ) -> dict[str, object] | None:
     """The `INVALID_PLAN` refusal of the parts of `patch` that do not name each other once each, or `None`.
@@ -775,12 +777,20 @@ def _draft_unreferenced(
     give way to a compiled whole's (`_without_replaced_whole_decisions`), and
     one an amendment removes (`Plan.amend`). A carried decision left uncited
     is swept or kept for the user (`_uncited_carried_decisions`,
-    `_user_decision_refused`). So `Plan` validation refuses whatever this
+    `_user_decision_refused`). Until the user speaks again (`user_spoke`), a
+    draft restating a decision of theirs `previous` records is left to
+    `_user_decision_refused` too, which answers its lost citation as the
+    user's decision dropped. So `Plan` validation refuses whatever this
     refuses.
     """
     cited = {slot for requirement in requirements for slot in requirement.decision_ids}
     amends = previous is not None
     removed = set(patch.removed_decisions) if amends else set()
+    user_held = (
+        set()
+        if previous is None or user_spoke
+        else {d.slot for d in previous.decisions if d.resolved_by is ResolvedBy.USER}
+    )
     drafted = [draft.slot for draft in patch.decisions]
     slots = [
         draft.slot
@@ -788,6 +798,7 @@ def _draft_unreferenced(
         if not _slot_code_writes(draft.slot)
         and not ("measure" in (draft.fixes or ()) and draft.slot in cited)
         and draft.slot not in removed
+        and draft.slot not in user_held
     ]
     made = {
         *drafted,

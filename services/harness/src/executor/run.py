@@ -1480,9 +1480,9 @@ class _Run:
         A group `held` names by its key (`_group_key`) reads as the held
         result instead, renamed to the group's steps, and the entities its
         retrievals left out are taken from it; a retrieval runs only for a
-        group `held` does not name.
+        group `held` does not name. The surface is listed and checked
+        (`_surface_as_compiled`) only when some group is read.
         """
-        schemas = await self._surface_as_compiled()
         keys = {group.steps: self._group_key(group) for group in self.anchor_groups}
         standing = {
             group.steps: held[keys[group.steps]]
@@ -1495,6 +1495,8 @@ class _Run:
             if group.steps not in standing
             for root in group.roots
         }
+        reading = any(group.steps not in standing for group in self.anchor_groups)
+        schemas = await self._surface_as_compiled() if reading else {}
         for group in self.anchor_groups:
             if (anchor := standing.get(group.steps)) is not None:
                 for root, left_out in zip(group.roots, anchor.left_out, strict=True):

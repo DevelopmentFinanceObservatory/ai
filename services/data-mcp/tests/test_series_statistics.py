@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import io
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -1096,6 +1098,52 @@ async def test_a_fetch_that_runs_past_its_own_bound_fails_a_read_with_no_deadlin
                 continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
+
+
+async def test_a_fetch_failing_after_its_caller_gave_up_is_logged_and_retrieved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A caller's deadline passes while the shared fetch goes on, and the fetch then
+    fails. The failure is logged, and the loop reports no task exception left
+    unretrieved."""
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    unretrieved: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    async def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(0.05)
+        return httpx2.Response(503, content=data)
+
+    try:
+        async with _client(snapshot_handler) as upstream:
+            client_holder.set_client(upstream)
+            with pytest.raises(TimeoutError):
+                await fetch_series_statistics_table(
+                    subject_id=_SPEC_ID,
+                    content_version=_CONTENT_VERSION,
+                    artifact=artifact,
+                    expected_series=1,
+                    continuing=None,
+                    transport=httpx2.MockTransport(get_handler),
+                    deadline=CallDeadline.after(0.01),
+                )
+            flights = list(series_statistics._TABLES._flights.values())
+            with caplog.at_level(logging.WARNING, logger=series_statistics.__name__):
+                await asyncio.wait(flights)
+                del flights
+                gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+
+    assert unretrieved == []
+    logged = [r.levelno for r in caplog.records if r.name == series_statistics.__name__]
+    assert logged == [logging.WARNING]
 
 
 async def test_clearing_the_cache_cancels_the_fetch_in_flight() -> None:

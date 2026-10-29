@@ -6212,6 +6212,49 @@ async def test_a_reproposal_searches_again_only_for_the_input_search_could_not_a
     ]
 
 
+class _FirstSearchUnavailableOthersSilent(_FirstSearchUnavailable):
+    """`_FirstSearchUnavailable` whose every other search starts and never answers."""
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        if tool.name == "search" and arguments["parts"][0]["text"] != self.unavailable:
+            await asyncio.Event().wait()
+        return await super().call_tool(tool=tool, arguments=arguments)
+
+
+async def test_the_first_search_refused_is_answered_without_waiting_for_later_ones() -> None:
+    """A refusal asks for two unpinned inputs to be searched for. Search cannot answer
+    the first for now and never answers the second, so the proposal is answered as
+    unavailable as soon as the first is refused."""
+    surface = _FirstSearchUnavailableOthersSilent(unavailable="a")
+    ctx = _FakeToolContext()
+    refusal = {
+        "code": ProblemCode.BASIS_UNKNOWN.value,
+        "detail": {
+            "search": [
+                {
+                    "requirement_id": text,
+                    "step_id": "share",
+                    "requirement_key": f"key_{text}",
+                    "part": {"text": text},
+                    "asked_roles": [],
+                    "open_roles": [],
+                }
+                for text in ("a", "b")
+            ]
+        },
+    }
+
+    with resolving_once(ctx.state):
+        async with asyncio.timeout(1.0):
+            refused = await with_source_reads(lambda: refusal, state=ctx.state, surface=surface)
+
+    assert refused["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, refused
+    assert searched_pins(ctx.state) == ()
+
+
 async def test_a_search_for_an_unpinned_input_takes_only_the_time_the_entry_has_left(
     decision: DecisionFactory,
 ) -> None:
@@ -11544,6 +11587,39 @@ def test_a_user_decision_stands_until_the_user_speaks_again(
         **patches[route], amends_version=first["version"], tool_context=ctx
     )
     assert landed["outcome"] == Outcome.OK.value, landed
+
+
+def test_a_user_decision_restated_and_left_uncited_is_refused_as_dropped(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A patch restating the user's decision as they made it and leaving it uncited
+    drops it, so it is refused as dropped, sending the planner to the user, before
+    it is refused for an uncited draft."""
+    dataset, derived = requirements
+    cited = dataset.model_copy(update={"decision_ids": ("measure", "window")})
+    user_window = _period_decision(fixes=["period"], resolved_by="user")
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[*drafts([decision()]), user_window],
+        evidence_requirements=[cited, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value
+    _recorded(ctx, first)
+
+    refused = tools["propose_plan"].func(
+        decisions=[user_window],
+        evidence_requirements=[cited.model_copy(update={"decision_ids": ("measure",)})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
+    assert refused["detail"] == _DROPPED
+    assert refused["action"] == {"call": "adk_request_input"}
 
 
 def _typed(text: str, *, branch: str | None = None) -> Event:

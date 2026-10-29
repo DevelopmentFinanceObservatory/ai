@@ -263,6 +263,7 @@ async def test_a_translation_again_stands_on_the_read_of_a_group_left_as_it_was(
     )
     first = await _propose(context, surface)
     translated = context.plan()
+    listed_first = surface.listed
 
     if moved:
         again = rolling_draft(period=Period(start=2016, end=2024))
@@ -294,6 +295,8 @@ async def test_a_translation_again_stands_on_the_read_of_a_group_left_as_it_was(
     assert second.get("restated") == (None if restated else first.get("restated"))
     reads = [name for name, _ in surface.calls]
     assert reads == ["get_data", "resolve_anchor"] * (2 if moved else 1)
+    # A read standing wholly on the earlier one lists no surface for the run.
+    assert surface.listed - listed_first == listed_first - (0 if moved else 1)
     if restated:
         assert context.plan().workflow == translated.workflow
     elif not moved:

@@ -217,7 +217,8 @@ class _VerifiedTables:
 
         The fetch raises `TimeoutError` once it runs past `_FLIGHT_TIMEOUT_S`,
         and is forgotten once it ends, so the next miss after a failure
-        fetches again.
+        fetches again. A failure is logged as it ends, since every caller
+        may have given up on it by then.
         """
         if (task := self._flights.get(key)) is None:
             task = asyncio.create_task(asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S))
@@ -227,6 +228,14 @@ class _VerifiedTables:
                 # A fetch `clear` cancelled ends after the next one under `key` began.
                 if self._flights.get(key) is done:
                     del self._flights[key]
+                if not done.cancelled() and (exc := done.exception()) is not None:
+                    logger.warning(
+                        "series statistics: the fetch of %s through %s/%s failed: %r",
+                        key.table.artifact_digest,
+                        key.subject_id,
+                        key.content_version,
+                        exc,
+                    )
 
             task.add_done_callback(forget)
         return task

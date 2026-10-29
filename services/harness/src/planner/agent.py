@@ -2067,11 +2067,11 @@ async def with_source_reads(
     is answered as it stands, and inputs sharing a pin and a set of options
     compile it once (`_alignment_key`).
 
-    The reads one refusal asks for run at once (`run_together`), so a
-    proposal waits for its slowest read. Their writes are made in the order
-    the refusal names them, up to the first read refused, whose refusal is
-    answered (`_held_in_order`), so the state is the one reading them one
-    after another leaves. A search the refused read's writes discarded keeps
+    The reads one refusal asks for run at once. Their writes are made in the
+    order the refusal names them, up to the first read refused, whose
+    refusal is answered as soon as it and every read before it are made,
+    and the reads after it are cancelled (`_held_in_order`), so the state is
+    the one reading them one after another leaves. A search the refused read's writes discarded keeps
     its answer for the invocation (`pin_by_search`), so the next proposal
     searches only for what was refused.
     """
@@ -2092,8 +2092,9 @@ async def with_source_reads(
             continue
         unpinned = unpinned_wanted(result)
         if unpinned:
-            searched = await run_together(pin_by_search(surface, item) for item in unpinned)
-            refused = _held_in_order(searched, state=state)
+            refused = await _held_in_order(
+                (pin_by_search(surface, item) for item in unpinned), state=state
+            )
             if refused is not None:
                 return refused
             continue
@@ -2108,21 +2109,45 @@ async def with_source_reads(
         compiles: dict[tuple[str, tuple[str, ...], str | None], Realignment] = {}
         for key, item in zip(keys, wanted, strict=True):
             compiles.setdefault(key, item)
-        compiled = await run_together(
-            compile_on_basis(surface, item, state=state) for item in compiles.values()
+        refused = await _held_in_order(
+            (compile_on_basis(surface, item, state=state) for item in compiles.values()),
+            state=state,
         )
-        refused = _held_in_order(compiled, state=state)
         if refused is not None:
             return refused
 
 
-def _held_in_order(reads: Iterable[SourceRead], *, state: SessionState) -> dict[str, object] | None:
-    """Apply each of `reads` to `state` in order, stopping at the first refused, and answer its refusal."""
-    for read in reads:
-        refused = read(state)
-        if refused is not None:
-            return refused
-    return None
+async def _held_in_order(
+    reads: Iterable[Awaitable[SourceRead]], *, state: SessionState
+) -> dict[str, object] | None:
+    """Run `reads` at once and apply each to `state` in order, answering the first refused.
+
+    Each read is applied once it and every read before it are made, so a
+    refusal is answered without waiting for the reads after it, which are
+    cancelled. The first read to raise cancels the rest, as `run_together`
+    does. Every read takes `state` before its first wait, so none reads what
+    another wrote.
+    """
+    tasks = [asyncio.ensure_future(read) for read in reads]
+    try:
+        applied = 0
+        while applied < len(tasks):
+            await asyncio.wait(tasks[applied:], return_when=asyncio.FIRST_COMPLETED)
+            for task in tasks[applied:]:
+                if task.done():
+                    task.result()
+            while applied < len(tasks) and tasks[applied].done():
+                refused = tasks[applied].result()(state)
+                applied += 1
+                if refused is not None:
+                    return refused
+        return None
+    finally:
+        running = [task for task in tasks if not task.done()]
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.wait(running)
 
 
 def _alignment_key(
