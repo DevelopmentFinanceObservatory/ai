@@ -3914,7 +3914,9 @@ def test_one_move_across_two_switched_sources_with_no_row_is_listed_once(
         ],
     )
 
-    moved = switch_module._moved_entries(cast(Any, plan), [source("a"), source("b")], axis="sector")
+    moved = switch_module._moved_entries(
+        cast(Any, plan), [source("a"), source("b")], axis="sector", stated=cast(Any, plan)
+    )
 
     assert [entry["choice_id"] for entry in moved] == ["first:measure_basis"]
 

@@ -149,6 +149,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     Unit,
+    aligned_entry,
     alignments,
     authored,
     compiled_pin,
@@ -165,7 +166,6 @@ from planner.plan import (
     save_plan,
     side_entities,
     split_of,
-    unaligned_requirement,
     windowed_pins,
     with_authored_requirements,
 )
@@ -2520,8 +2520,8 @@ def _resolve_pin_block(
         return None
     shown = pin_sources(tool_context.state)
     held = alignments(tool_context.state)
-    entry = held.get(requirement.id)
-    if entry is not None and unaligned_requirement(requirement, held) is not requirement:
+    entry = aligned_entry(requirement, held)
+    if entry is not None:
         compiled = compiled_pin(tool_context.state, entry)
         origin = shown.get(entry.stated_pin or "")
         if compiled is None or (
@@ -2537,7 +2537,7 @@ def _resolve_pin_block(
         for item in plan.evidence_requirements
         if isinstance(item, DatasetRequirement)
         and item.source_spec_id == pin
-        and unaligned_requirement(item, held) is item
+        and aligned_entry(item, held) is None
     ]
     if len(pinning) != 1:
         return None

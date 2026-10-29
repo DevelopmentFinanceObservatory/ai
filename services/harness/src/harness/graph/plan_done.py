@@ -23,6 +23,7 @@ from google.adk import Context
 from planner.plan import (
     Plan,
     SessionState,
+    aligned_stated_pins,
     authored_text,
     copy_origins,
     load_asks,
@@ -638,6 +639,7 @@ def record_plan(
         failed_steps=frozenset(stopped.values()),
         run_id=run_id,
         windowed_from={copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()},
+        aligned_from=aligned_stated_pins(state),
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
         *(state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),

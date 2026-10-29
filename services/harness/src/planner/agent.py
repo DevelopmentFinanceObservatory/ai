@@ -1675,8 +1675,11 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     axes as the planner's, beside any axis the origin's block marks
     (`harness.scope_choices.mark_planner_axes`), and nowhere else: the
     datasets the planner was shown (`planner.plan.pin_sources`) are left as
-    shown, so a requirement pinning the answer's spec_id directly reads none
-    of the origin's provenance. The next proposal pins the input to it
+    shown, so a requirement pinning the answer's spec_id directly takes none
+    of the origin's `planner.plan.PinSource` fields (settled, warnings, asked
+    roles, provenance ref). Where it was not shown that spec_id it reads the
+    compile's block (`planner.plan.held_sources`), choice provenance and
+    planner marks included. The next proposal pins the input to it
     (`submission.service.admit`).
 
     The compile takes the time a resubmit has

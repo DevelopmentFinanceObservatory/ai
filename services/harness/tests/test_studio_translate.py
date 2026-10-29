@@ -481,6 +481,7 @@ def test_a_switch_to_an_option_the_card_words_picks_the_option_as_the_planner_wr
         choice_id=row.choice_id,
         option_id=labels["only donors picked by name"],
         to_origin={},
+        alignments={},
     ) == DecisionPick.on_card(plan, slot="measure", chosen="named")
 
 

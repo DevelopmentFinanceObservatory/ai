@@ -32,7 +32,7 @@ def decision_pick(
     choice_id: str,
     option_id: str,
     to_origin: Mapping[str, str],
-    alignments: Mapping[str, AlignedInput] = {},
+    alignments: Mapping[str, AlignedInput],
 ) -> DecisionPick | None:
     """The pick a switch of row `choice_id` to option `option_id` makes on `plan`.
 

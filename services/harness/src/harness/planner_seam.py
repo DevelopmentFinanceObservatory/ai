@@ -1499,8 +1499,7 @@ def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
     }
     blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     for pin in aligned_pins(state):
-        (part,) = pin.digest["part_digests"]
-        if (block := part.get("spec_block")) is not None:
+        if (block := pin.block) is not None:
             blocks[pin.spec_id] = block
     return blocks
 

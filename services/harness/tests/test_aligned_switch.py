@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
@@ -25,20 +26,44 @@ from harness.planner_seam import PlannerSeam
 from harness.settings import Settings
 from harness.turn_records import SearchReading
 from planner.plan import (
+    ASKS_STATE_KEY,
+    AnswerMode,
+    AskAnswer,
     DatasetRequirement,
     Decision,
+    Entity,
+    Period,
+    PinSource,
     Plan,
+    Reduction,
+    RequirementSide,
     ResolvedBy,
+    ShareOfRequirement,
     alignments,
+    definitions_on_record,
     load_plan,
+    period_window,
+    save_pin_sources,
 )
-from planner.workflow import ToolId
+from planner.tool_results import Outcome
+from planner.workflow import ResolvedGroup, ToolId
 
-from .planner.test_agent import DecisionFactory, _FakeToolContext
+from .basis_alignment import HEALTH, TOTAL, ProviderCompiles, provider_block
+from .decision_drafts import drafts
+from .planner.test_agent import (
+    _COMPARE,
+    DecisionFactory,
+    _difference,
+    _FakeToolContext,
+    _reduced,
+    _show_blocks,
+    _tools_reading,
+)
 from .planner.test_aligned_identity import (
     _GROSS,
     _NET,
     _gross_compared_with_net_average,
+    _gross_compiles,
     _left_on_net,
 )
 
@@ -257,3 +282,197 @@ async def test_a_switch_of_the_aligned_row_back_to_its_own_basis_keeps_the_input
     row = _basis_row(admitted, "second")
     assert row.resolved_by is ResolvedBy.USER
     assert row.chosen != _basis_row(admitted, "first").chosen
+
+
+@dataclass(frozen=True)
+class _Recorded:
+    """A definition a search in the conversation recorded (`planner.plan.RecordedDefinition`)."""
+
+    identity: Mapping[str, Any]
+    groups: tuple[ResolvedGroup, ...] = ()
+
+
+async def test_a_switch_of_the_aligned_row_holds_when_another_input_pins_its_stated_source(
+    decision: DecisionFactory,
+) -> None:
+    """The plan also reads the net average on its own, pinning the net source the
+    average states directly, and both sources' identities are on record over 2023.
+    The average's moved row still fixes the net pin the average states, and a switch
+    of that row posts from the net reading and re-pins the average alone."""
+    ctx = _FakeToolContext()
+    save_pin_sources(
+        ctx.state,
+        {
+            _GROSS["spec_id"]: PinSource(block=_GROSS, settled=True),
+            _NET: PinSource(block=_left_on_net(), settled=True),
+        },
+    )
+    question = (
+        "How does US gross ODA in 2023 compare with its average, and what was the net average?"
+    )
+    ctx.state[ASKS_STATE_KEY] = [question]
+
+    def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="US total ODA",
+            entities=[Entity(name="United States of America", role="donor")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=pin,
+        )
+
+    window = period_window(Period(start=2023, end=2023))
+    with definitions_on_record(
+        {
+            spec_id: _Recorded({"requested_window": window, "spec_id": spec_id})
+            for spec_id in (_GROSS["spec_id"], _NET)
+        }
+    ):
+        result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+            question=question,
+            answer_mode=AnswerMode.COMPUTED,
+            decisions=drafts([decision()]),
+            answered=[AskAnswer(ask=0, outputs=(_COMPARE, "three"))],
+            evidence_requirements=[
+                dataset("first", _GROSS["spec_id"]),
+                dataset("second", _NET),
+                dataset("alone", _NET),
+                _reduced("one", "first", Reduction.SUM),
+                _reduced("two", "second", Reduction.MEAN),
+                _reduced("three", "alone", Reduction.MEAN),
+                _difference("one", "two"),
+            ],
+            tool_context=ctx,
+        )
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    row = _basis_row(plan, "second")
+    assert row.fixes is not None
+    assert row.fixes.source_spec_id == _NET
+    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [_searched(_left_on_net())]
+
+    planner = await _switch(ctx, plan, row, "measure_basis:grant_equivalent")
+
+    (revision,) = planner.revisions
+    assert [(r["id"], r["source_spec_id"]) for r in revision["evidence_requirements"]] == [
+        ("second", _GRANT_EQUIVALENT)
+    ]
+
+
+_TOTAL_GROSS_INCLUSIVE = f"spec_{'8' * 32}"
+
+
+class _ProviderResubmits:
+    """A tool surface answering each resubmit of the US total with the options it
+    posts, as `_TOTAL_GROSS_INCLUSIVE`, each posted axis explicit. Every other tool
+    is unreachable."""
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        if tool.name != "resolve_definition":
+            return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
+        posted = {e["axis"]: e["option_id"] for e in arguments["scope_entries"]}
+        block = provider_block(
+            _TOTAL_GROSS_INCLUSIVE,
+            narrow=False,
+            active=posted["provider"],
+            basis=posted["measure_basis"],
+        )
+        scope = block["resolved"]["scope_choices"]
+        scope["id"] = scope["base"]["spec_id"] = arguments["spec_id"]
+        scope["base"]["identity"] = arguments["identity"]
+        scope["entries"] = arguments["scope_entries"]
+        for choice in scope["choices"]:
+            choice["id"] = f"{arguments['spec_id']}:{choice['axis']}"
+            choice["provenance"] = "explicit"
+        part = {"status": "definite", "spec": block}
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+async def test_a_switch_of_one_axis_a_compile_moved_leaves_the_other_the_planners(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid, which the user asked for bilateral, as a share of the US total,
+    which Search counts in grant equivalents with imputed multilateral flows.
+    Alignment compiles the total on gross and bilateral in one resubmit. The user
+    switches the total's provider row back to imputed multilateral flows: the total's
+    provider is now the user's, and its basis, which the user never stated, stays the
+    planner's."""
+    ctx = _FakeToolContext()
+    health = provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit")
+    total = provider_block(
+        TOTAL, narrow=False, active="provider:inclusive", basis="measure_basis:grant_equivalent"
+    )
+    _show_blocks(ctx, health, total)
+    question = "What share of US bilateral aid goes to health?"
+    ctx.state[ASKS_STATE_KEY] = [question]
+
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    result = await _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"].func(
+        question=question,
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        answered=[AskAnswer(ask=0, outputs=("share",))],
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total ODA", TOTAL),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert set(alignments(ctx.state)) == {"total"}
+    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [_searched(health), _searched(total)]
+    (row,) = [
+        d
+        for d in plan.decisions
+        if d.slot in plan.requirement("total").decision_ids
+        and d.scope is not None
+        and d.scope.axis == "provider"
+    ]
+    surface = _ProviderResubmits()
+    planner = _RevisingPlanner(cast(ToolSurface, surface))
+    with suppress(SwitchFailedError):
+        await switch_module._switched_plan(
+            cast(Any, ctx),
+            plan,
+            choice_id=choice_id(plan, row),
+            option_id="provider:inclusive",
+            planner=cast(Any, planner),
+            surface=cast(ToolSurface, surface),
+        )
+
+    (admitted,) = planner.admitted
+    assert admitted.requirement("total").source_spec_id == _TOTAL_GROSS_INCLUSIVE
+    by_axis = {
+        d.scope.axis: d.resolved_by
+        for d in admitted.decisions
+        if d.slot in admitted.requirement("total").decision_ids and d.scope is not None
+    }
+    assert by_axis == {
+        "measure_basis": ResolvedBy.PLANNER_DEFAULT,
+        "provider": ResolvedBy.USER,
+    }

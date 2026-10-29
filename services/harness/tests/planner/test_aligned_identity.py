@@ -46,10 +46,11 @@ from planner.plan import (
     save_pin_sources,
 )
 from planner.tool_results import Outcome, ProblemCode
-from planner.workflow import ToolId, Workflow
+from planner.workflow import SelectedSource, ToolId, Workflow
 from submission.service import COMBINE_OPTION
 from translator.discovery import build_discovery_tools, load_log
 from translator.mechanical import build_translation
+from translator.referral import Referral, ReferralKind, save_referral
 
 from ..basis_alignment import us_2023_block
 from ..decision_drafts import drafts
@@ -69,6 +70,7 @@ from .test_agent import (
     _FakeToolContext,
     _pins,
     _reduced,
+    _referred_event,
     _SearchRefused,
     _share,
     _show_blocks,
@@ -456,3 +458,105 @@ def test_propose_plan_reads_a_carried_sum_s_earlier_datasets_off_the_plan_it_ame
 
     assert result["code"] == ProblemCode.COMBINATION_UNASKED.value, result
     assert result["detail"] == {"requirement_id": "net_flows", "datasets": sorted([DAC2A, other])}
+
+
+async def test_an_amendment_dropping_the_comparison_reads_the_average_on_its_own_net_pin(
+    decision: DecisionFactory,
+) -> None:
+    """The user drops the comparison and keeps the average. Nothing aligns the average
+    any more, so it goes back to its net pin, and the card's basis row for it says net:
+    the gross row alignment wrote for it goes with the alignment."""
+    ctx = _FakeToolContext()
+    plan = await _gross_compared_with_net_average(ctx, decision)
+
+    result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+        question=plan.question,
+        removed_evidence_requirements=["first", "one", _COMPARE],
+        answered=[AskAnswer(ask=0, outputs=("two",))],
+        amends_version=plan.version,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    after = load_plan(ctx.state)
+    assert after is not None
+    assert after.requirement("second").source_spec_id == _NET
+    basis = [
+        d
+        for d in after.decisions
+        if d.slot in after.requirement("second").decision_ids
+        and d.scope is not None
+        and d.scope.axis == "measure_basis"
+    ]
+    assert [
+        (d.slot, cast(Any, d.scope).options[d.options.index(d.chosen)].option_id) for d in basis
+    ] == [(f"scope_measure_basis_{_NET}", "measure_basis:net")]
+
+
+async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
+    decision: DecisionFactory,
+) -> None:
+    """The replaced plan moved its `second` onto the gross pin. A new plan whose own
+    `second` pins gross directly reads gross: the old plan's alignment of an input with
+    that id says nothing of the new plan's pin."""
+    ctx = _FakeToolContext()
+    await _gross_compared_with_net_average(ctx, decision)
+
+    result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+        question="What was US gross ODA in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        answered=[AskAnswer(ask=0, outputs=("one",))],
+        evidence_requirements=[
+            _reduced("one", "second", Reduction.SUM),
+            DatasetRequirement(
+                id="second",
+                decision_ids=["measure"],
+                measure="US total ODA",
+                entities=[Entity(name="United States of America", role="donor")],
+                period=Period(start=2023, end=2023),
+                source_spec_id=_GROSS["spec_id"],
+            ),
+        ],
+        starts_new_plan=True,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [("second", _GROSS["spec_id"])]
+
+
+async def test_a_pending_source_choice_admits_its_offered_pin_alignment_moves(
+    decision: DecisionFactory,
+) -> None:
+    """Search found two sources for the average and the user is to pick one. The
+    planner pins the net source the choice offered, and alignment moves the average
+    onto gross, a source the choice never offered. The pin the planner states is the
+    offered one, so the choice holds it."""
+    ctx = _FakeToolContext()
+    plan = await _gross_compared_with_net_average(ctx, decision)
+    save_referral(
+        ctx.state,
+        Referral(
+            kind=ReferralKind.SOURCE_AMBIGUOUS,
+            reason="r",
+            requirement_id="second",
+            candidates=tuple(
+                SelectedSource(spec_id=spec_id, sentence=spec_id, has_data=True)
+                for spec_id in (_NET, f"spec_{'6' * 32}")
+            ),
+        ),
+    )
+    ctx.session.events.append(_referred_event(ReferralKind.SOURCE_AMBIGUOUS, "second"))
+
+    result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+        question=plan.question,
+        evidence_requirements=[
+            plan.requirement("second").model_copy(update={"source_spec_id": _NET})
+        ],
+        amends_version=plan.version,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert dict(_pins(ctx))["second"] == _GROSS["spec_id"]

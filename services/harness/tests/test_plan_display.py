@@ -3897,16 +3897,15 @@ def test_a_donor_whole_counted_on_another_series_is_named_by_its_own_concept(
     ],
     ids=["own_measure_label", "parts_measure_label", "parts_concept", "own_concept"],
 )
-def test_a_donor_whole_is_named_alike_on_the_card_and_its_stored_reading(
+def test_a_donor_whole_is_named_by_one_concept_on_the_card(
     decision: DecisionFactory,
     whole: dict[str, Any],
     numerator: dict[str, Any],
     concept: str,
 ) -> None:
     """A donor whole of the United States' ODA to Kenya, its source and its
-    part's stating a concept or only a measure label: the card's fetch and the
-    name its reading is stored under (`source_whole_name`, the "Counted as"
-    line) name it by one concept, with or without `concept_label`."""
+    part's stating a concept or only a measure label: the card's fetch names it
+    by one concept, with or without `concept_label`."""
     plan = us_share_of_kenya_oda(
         decision, whole={**DAC_DONORS, **whole}, numerator={**US_DONOR, **numerator}
     )
@@ -3921,18 +3920,9 @@ def test_a_donor_whole_is_named_alike_on_the_card_and_its_stored_reading(
             ],
         }
     )
-    assert plan.workflow is not None
-    steps = {binding.requirement_id: binding.step_id for binding in plan.workflow.evidence_bindings}
-    source, part = (plan.workflow.source_of(steps[key]) for key in ("all_oda", "us"))
-    assert source is not None
-
-    stored = plan_display.source_whole_name(
-        "donor", source=source, part=part, sector=None, measure=None
-    )
 
     # The card adds the parties each reads only to retrievals named alike.
     assert str(card_rows(plan)[1]["label"]).startswith(f"Fetch {concept} f")
-    assert stored == f"{concept} from official donors (DAC) to Kenya"
 
 
 def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
@@ -5021,7 +5011,7 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
     assert measure.chosen == birth
 
     picks = [
-        decision_pick(plan, choice_id=choice, option_id=option, to_origin={})
+        decision_pick(plan, choice_id=choice, option_id=option, to_origin={}, alignments={})
         for choice, option in [
             ("decision/measure", decision_option_id(healthy)),
             ("decision/measure", decision_option_id(birth)),
@@ -5046,6 +5036,7 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
             choice_id="decision/measure",
             option_id=decision_option_id(healthy),
             to_origin={},
+            alignments={},
         )
         is None
     )

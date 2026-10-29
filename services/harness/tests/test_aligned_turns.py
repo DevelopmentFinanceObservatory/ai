@@ -31,7 +31,10 @@ from harness.turn_records import PlanRecord, SearchReading
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
+    Period,
     Plan,
+    ResolvedBy,
+    aligned_stated_pins,
     current_earlier_block,
     load_plan,
     pin_sources,
@@ -119,14 +122,11 @@ async def _compiled(plan: Plan, blocks: dict[str, dict[str, Any]]) -> Plan:
     return plan.with_translation(translation=translation, workflow=compiled.workflow)
 
 
-async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_marks(
-    decision: DecisionFactory,
-) -> None:
-    """Turn 1 aligns the US total onto US multilateral ODA's spec_id, and the Studio
-    closes the turn. Turn 2, a fresh planner session, pins that spec_id directly as
-    the numerator of a share of the total. The direct pin reads no planner marks,
-    since the planner settled nothing of it, and the share keeps the total on its
-    own pin, so it does not divide one series by itself."""
+async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
+    """Run turn 1, which compares the US total with France's multilateral ODA and so
+    aligns the total onto US multilateral ODA's spec_id, and close it as the Studio
+    does. Returns the ledger turn 2 opens with, with the closed turn's blocks set as
+    the earlier blocks (`current_earlier_block`)."""
     surface = cast(ToolSurface, _multilateral_compiles())
     searched = [_searched(_US_TOTAL, "US ODA"), _searched(_FRANCE, "France's multilateral ODA")]
     turn_one = _SeamHarness(
@@ -168,14 +168,29 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
         compared, {_MULTILATERAL: _US_MULTILATERAL, _FRANCE["spec_id"]: _FRANCE}
     )
     conversation.turn_plans = [
-        PlanRecord.from_plan(recorded, searched=[_TOTAL, _FRANCE["spec_id"]]).model_dump(
-            mode="json"
-        )
+        PlanRecord.from_plan(
+            recorded,
+            searched=[_TOTAL, _FRANCE["spec_id"]],
+            aligned_from=aligned_stated_pins(state),
+        ).model_dump(mode="json")
     ]
     conversation.close_turn(final_text="The US gave more.")
     prior = conversation.prior_ledger_state()
     assert prior is not None
     current_earlier_block.set(conversation.earlier_block)
+    return prior
+
+
+async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_marks(
+    decision: DecisionFactory,
+) -> None:
+    """Turn 1 aligns the US total onto US multilateral ODA's spec_id, and the Studio
+    closes the turn. Turn 2, a fresh planner session, pins that spec_id directly as
+    the numerator of a share of the total. The direct pin reads no planner marks,
+    since the planner settled nothing of it, and the share keeps the total on its
+    own pin, so it does not divide one series by itself."""
+    prior = await _turn_one_closed(decision)
+    surface = cast(ToolSurface, _multilateral_compiles())
 
     turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
     seam = PlannerSeam(settings=Settings(), surface=surface)
@@ -209,6 +224,58 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
     assert reading.planner_axes == ()
     direct = pin_sources(state)[_MULTILATERAL]
     assert planner_axes(direct.spec_block(_MULTILATERAL)) == frozenset()
+
+
+async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
+    decision: DecisionFactory,
+) -> None:
+    """Turn 1 aligns the US total onto US multilateral ODA's spec_id. Turn 2 asks for
+    the same comparison over 2020. Each turn opens a fresh planner session with no
+    plan on record, so the planner restates both inputs on the sources it reads: the
+    total on its own pin, whose block turn 1 kept as the pin alignment moved. Alignment
+    moves it onto the multilateral row again, and the card's provider row for it is
+    the planner's, keyed by the total's id."""
+    prior = await _turn_one_closed(decision)
+    surface = _multilateral_compiles()
+    turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
+    seam = PlannerSeam(settings=Settings(), surface=cast(ToolSurface, surface))
+    question = "And in 2020?"
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[
+            [
+                _proposal(
+                    question,
+                    decision,
+                    _dac_countries("second", _US_TOTAL).model_copy(
+                        update={"period": Period(start=2020, end=2020)}
+                    ),
+                    _dac_countries("other", _FRANCE).model_copy(
+                        update={"period": Period(start=2020, end=2020)}
+                    ),
+                    _difference("second", "other"),
+                )
+            ]
+        ]
+    )
+    await turn_two.run(seam, question=question, readings=prior["readings"])
+    state = await turn_two.state()
+
+    plan = load_plan(state)
+    assert plan is not None
+    assert {
+        r.id: r.source_spec_id
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    } == {"second": _MULTILATERAL, "other": _FRANCE["spec_id"]}
+    assert len(surface.calls) == 1
+    provider = [
+        (d.slot, d.resolved_by)
+        for d in plan.decisions
+        if d.slot in plan.requirement("second").decision_ids
+        and d.scope is not None
+        and d.scope.axis == "provider"
+    ]
+    assert provider == [("scope_provider_of_second", ResolvedBy.PLANNER_DEFAULT)]
 
 
 async def test_a_declared_wholes_dataset_reaches_a_later_turn_under_the_wholes_own_words(

@@ -6396,6 +6396,16 @@ def alignments(state: SessionState) -> dict[str, AlignedInput]:
     return held
 
 
+def aligned_stated_pins(state: SessionState) -> dict[str, set[str]]:
+    """The pins the inputs alignment moved onto each compile state, by the
+    compile's spec_id (`alignments`, `AlignedInput.stated_pin`)."""
+    stated: dict[str, set[str]] = {}
+    for entry in alignments(state).values():
+        if entry.stated_pin is not None:
+            stated.setdefault(entry.spec_id, set()).add(entry.stated_pin)
+    return stated
+
+
 def save_alignments(state: SessionState, entries: Iterable[AlignedInput]) -> None:
     """Record `entries` as the requirements the recorded plan pins to compiled pins."""
     state[ALIGNMENTS_STATE_KEY] = [entry.model_dump(mode="json") for entry in entries]
@@ -6406,14 +6416,13 @@ def compiled_pin(state: SessionState, entry: AlignedInput) -> AlignedPin | None:
     return next((pin for pin in aligned_pins(state) if pin.key == entry.key), None)
 
 
-def unaligned_requirement(
+def aligned_entry(
     requirement: EvidenceRequirement, held: Mapping[str, AlignedInput]
-) -> EvidenceRequirement:
-    """`requirement` as the planner states it: one `held` pins to a compiled pin,
-    and still pinned there, reads its stated pin and source fields again; any
-    other pin is the planner's own. A declared whole restated on its compile
-    with no `whole_of` is no whole: the planner pins that compile directly,
-    as any plain requirement can."""
+) -> AlignedInput | None:
+    """The record of `held` pinning `requirement` to a compiled pin, while it is
+    still pinned there; `None` where its pin is the planner's own. A declared
+    whole restated on its compile with no `whole_of` is no whole: the planner
+    pins that compile directly, as any plain requirement can."""
     entry = held.get(requirement.id)
     if (
         entry is None
@@ -6421,6 +6430,18 @@ def unaligned_requirement(
         or requirement.source_spec_id != entry.spec_id
         or (entry.whole_axis is not None and requirement.whole_of is None)
     ):
+        return None
+    return entry
+
+
+def unaligned_requirement(
+    requirement: EvidenceRequirement, held: Mapping[str, AlignedInput]
+) -> EvidenceRequirement:
+    """`requirement` as the planner states it: one `held` pins to a compiled pin
+    (`aligned_entry`) reads its stated pin and source fields again; any other
+    pin is the planner's own."""
+    entry = aligned_entry(requirement, held)
+    if entry is None:
         return requirement
     return requirement.model_copy(
         update={

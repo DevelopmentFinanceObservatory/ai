@@ -141,7 +141,11 @@ class PlanSource(StrictModel):
     `windowed_from` is the spec_id a windowed copy was copied from
     (`planner.plan.WindowedPin.windowed_from`), the one the turn's search
     read, so the basis line finds that reading; left out for a source
-    retrieved as it was found.
+    retrieved as it was found. `aligned_from` are the pins the inputs
+    alignment moved onto this source state (`planner.plan.AlignedInput.stated_pin`),
+    so a later turn holds the block of each one the user's search read
+    (`harness.studio_state.ConversationState.close_turn`); left out when
+    alignment moved none onto it.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -170,6 +174,7 @@ class PlanSource(StrictModel):
         default=None, exclude_if=lambda elected: elected is None
     )
     windowed_from: str | None = Field(default=None, exclude_if=lambda origin: origin is None)
+    aligned_from: tuple[str, ...] = Field(default=(), exclude_if=lambda stated: not stated)
 
 
 class RecordedIdentity(StrictModel):
@@ -287,6 +292,7 @@ class PlanRecord(StrictModel):
         failed_steps: Collection[str] = (),
         run_id: str | None = None,
         windowed_from: Mapping[str, str] | None = None,
+        aligned_from: Mapping[str, Collection[str]] | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
 
@@ -297,6 +303,8 @@ class PlanRecord(StrictModel):
             run_id: The run the plan executed as, if the ledger admitted one.
             windowed_from: The spec_id each windowed copy the plan pins was
                 copied from, by the copy's spec_id (`planner.plan.windowed_pins`).
+            aligned_from: The pins the inputs alignment moved onto each compile
+                state, by the compile's spec_id (`aligned_from`).
 
         A source's origin is `search` when `searched` names it, else
         `translator`.
@@ -320,7 +328,12 @@ class PlanRecord(StrictModel):
             revision=plan_revision(plan),
             approved_revision=plan.approved_revision,
             periods=_periods(shown),
-            sources=_sources(shown, searched=searched, windowed_from=windowed_from or {}),
+            sources=_sources(
+                shown,
+                searched=searched,
+                windowed_from=windowed_from or {},
+                aligned_from=aligned_from or {},
+            ),
             decisions=tuple(
                 PlanDecision(
                     slot=decision.slot,
@@ -1808,9 +1821,16 @@ def _periods(plan: Plan) -> tuple[PlanPeriod, ...]:
 
 
 def _sources(
-    plan: Plan, *, searched: Collection[str], windowed_from: Mapping[str, str]
+    plan: Plan,
+    *,
+    searched: Collection[str],
+    windowed_from: Mapping[str, str],
+    aligned_from: Mapping[str, Collection[str]],
 ) -> tuple[PlanSource, ...]:
-    """One entry per distinct spec_id the workflow retrieves, in binding order."""
+    """One entry per distinct spec_id the workflow retrieves, in binding order.
+
+    A windowed copy of a compile takes the stated pins of the compile it copies.
+    """
     assert plan.workflow is not None
     measures = {
         requirement.id: requirement.measure
@@ -1848,6 +1868,14 @@ def _sources(
             groups=source.groups,
             elected_measure=source.elected_measure,
             windowed_from=windowed_from.get(source.spec_id),
+            aligned_from=tuple(
+                sorted(
+                    aligned_from.get(
+                        windowed_from.get(source.spec_id, source.spec_id),
+                        (),
+                    )
+                )
+            ),
         )
     return tuple(seen.values())
 

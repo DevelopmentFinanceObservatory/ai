@@ -146,6 +146,7 @@ def _pick_top_ten(ctx: Any) -> None:
         choice_id="decision/donor_scope",
         option_id=decision_option_id("the top 10 donors"),
         to_origin={},
+        alignments={},
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
@@ -812,6 +813,7 @@ def test_a_landed_pick_can_be_picked_back(decision: Callable[..., Decision]) -> 
         choice_id="decision/donor_scope",
         option_id=decision_option_id("the DAC total"),
         to_origin={},
+        alignments={},
     )
     assert back is not None
     save_decision_pick(ctx.state, back)
@@ -930,6 +932,7 @@ def test_a_pick_replacing_a_shares_input_keeps_the_share_whatever_admission_deri
         choice_id="decision/part",
         option_id=decision_option_id("another figure"),
         to_origin={},
+        alignments={},
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
@@ -991,6 +994,7 @@ def test_a_pick_keeping_part_of_what_it_replaces_unchanged_is_admitted(
         choice_id="decision/donor_scope",
         option_id=decision_option_id("the top 5 donors"),
         to_origin={},
+        alignments={},
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
@@ -1085,6 +1089,7 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
             choice_id="decision/shape",
             option_id=decision_option_id("the yearly average"),
             to_origin={copy.spec_id: copy.windowed_from},
+            alignments={},
         )
         assert pick is not None
         assert pick.cited_by_every == ("shape", "year")
@@ -1186,7 +1191,11 @@ def test_a_pick_asks_no_citation_of_a_scope_choice_admission_writes(pin: str) ->
     assert shown is not None
     assert any(d.scope is not None and d.resolved_by is ResolvedBy.USER for d in shown.decisions)
     pick = decision_pick(
-        shown, choice_id="decision/part", option_id=decision_option_id("2020-2024"), to_origin={}
+        shown,
+        choice_id="decision/part",
+        option_id=decision_option_id("2020-2024"),
+        to_origin={},
+        alignments={},
     )
     assert pick is not None
     assert pick.cited_by_every == ("part",)
@@ -1247,6 +1256,7 @@ def test_a_pick_whose_decision_settles_to_the_cards_value_is_refused(
         choice_id="decision/donor_scope",
         option_id=decision_option_id("the top 5 donors"),
         to_origin={},
+        alignments={},
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
@@ -1334,6 +1344,7 @@ def test_a_pick_over_figures_citing_different_user_years_keeps_each_year_cited(
         choice_id="decision/prices",
         option_id=decision_option_id("constant prices"),
         to_origin={},
+        alignments={},
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
@@ -1392,6 +1403,7 @@ def test_a_pick_may_keep_what_it_replaces_as_the_input_of_a_new_figure(
         choice_id="decision/donor_scope",
         option_id=decision_option_id("as a share of all aid to Kenya"),
         to_origin={},
+        alignments={},
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
@@ -1501,6 +1513,7 @@ def test_a_landed_shape_pick_can_be_picked_back(
             choice_id="decision/donor_scope",
             option_id=decision_option_id(label),
             to_origin={},
+            alignments={},
         )
         assert picked is not None
         save_decision_pick(ctx.state, picked)
@@ -1611,7 +1624,11 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     priced = f"user_prices_{_GROSS}"
     assert priced in shown.requirement("all").decision_ids
     pick = decision_pick(
-        shown, choice_id="decision/years", option_id=decision_option_id("2019-2022"), to_origin={}
+        shown,
+        choice_id="decision/years",
+        option_id=decision_option_id("2019-2022"),
+        to_origin={},
+        alignments={},
     )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
@@ -1738,7 +1755,9 @@ def test_a_switch_of_the_prices_row_is_the_users_new_prices(
     assert plan is not None
     slot = f"user_prices_{_GROSS}"
     option = decision_option_id(picked)
-    pick = decision_pick(plan, choice_id=f"decision/{slot}", option_id=option, to_origin={})
+    pick = decision_pick(
+        plan, choice_id=f"decision/{slot}", option_id=option, to_origin={}, alignments={}
+    )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
     ctx.session.events = [
@@ -1812,6 +1831,7 @@ def test_no_pick_is_built_for_a_scope_choice_admission_writes() -> None:
                 choice_id=f"decision/{decision.slot}",
                 option_id=decision_option_id(other),
                 to_origin={},
+                alignments={},
             )
             is None
         )
@@ -1867,7 +1887,9 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     assert plan is not None
     slot = f"user_prices_{_GROSS}"
     constant = decision_option_id("constant prices")
-    pick = decision_pick(plan, choice_id=f"decision/{slot}", option_id=constant, to_origin={})
+    pick = decision_pick(
+        plan, choice_id=f"decision/{slot}", option_id=constant, to_origin={}, alignments={}
+    )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
     ctx.session.events = [
@@ -1883,7 +1905,9 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     )
     assert switched["code"] == ProblemCode.PRICES_UNSERVED.value, switched
     later = decision_option_id("2019-2022")
-    pick = decision_pick(plan, choice_id="decision/years", option_id=later, to_origin={})
+    pick = decision_pick(
+        plan, choice_id="decision/years", option_id=later, to_origin={}, alignments={}
+    )
     assert pick is not None
     save_decision_pick(ctx.state, pick)
     ctx.session.events = [

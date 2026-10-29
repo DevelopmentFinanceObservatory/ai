@@ -6918,15 +6918,11 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     provenance and the planner's axes are the part's, so a later search carries
     from the whole what it carries from the part. The whole states no scope row of
     its own, since each would restate the part's; a decision of the planner's
-    states it, cited by the whole. The whole is held as a compile from its part,
-    whose source keeps the provenance it records."""
+    states it, cited by the whole. The whole is held as a compile from its part."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block(part), *([_us_block(whole)] if whole else []))
-    shown = pin_sources(ctx.state)
     part_pin = us_2023_block(part)["spec_id"]
-    provenance = {"provenance_ref": "provenance/OECD_CRS", "provenance_account": "OECD CRS"}
-    save_pin_sources(ctx.state, {**shown, part_pin: shown[part_pin].model_copy(update=provenance)})
 
     result = await _us_2023(
         _tools_reading(surface)["propose_plan"].func,
@@ -6965,11 +6961,6 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     assert (whole_compile.spec_id, whole_compile.origin) == (
         us_2023_block(compiled)["spec_id"],
         part_pin,
-    )
-    part_source = pin_sources(ctx.state)[part_pin]
-    assert (part_source.provenance_ref, part_source.provenance_account) == (
-        provenance["provenance_ref"],
-        provenance["provenance_account"],
     )
     held = whole_compile.block
     assert held is not None

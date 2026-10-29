@@ -128,6 +128,7 @@ from harness.scope_choices import (
     ScopeChoice,
     mark_planner_axes,
     moved_choices,
+    planner_axes,
     switch_entries,
 )
 from harness.sentences import SeamCode
@@ -231,7 +232,8 @@ class _Switched:
     """One source the switch moves: the pin it held, its reading and scope,
     the answer Search gave, and the spec_id and scope that answer states.
     `moved_for` names the one requirement it moves, `None` when it moves every
-    requirement stating `pin` (`_Target.moved_for`)."""
+    requirement stating `pin`, and `block` is the compile's spec block for one
+    it moves (`_Target`)."""
 
     pin: str
     reading: SearchReading
@@ -240,6 +242,7 @@ class _Switched:
     spec_id: str
     after: PartScope
     moved_for: str | None = None
+    block: Mapping[str, Any] | None = None
 
 
 def switch_node(
@@ -452,9 +455,7 @@ async def _switched_plan(
     taken_over = {item.moved_for: item.spec_id for item in switched if item.moved_for is not None}
     requirements = [
         repinned(requirement, new, codes[new]).model_dump(mode="json")
-        for requirement in statement(
-            plan, to_origin=to_origin, alignments=held
-        ).evidence_requirements
+        for requirement in _statement_of(plan, state).evidence_requirements
         if isinstance(requirement, DatasetRequirement)
         and (
             new := taken_over.get(requirement.id) or moved_to.get(requirement.source_spec_id or "")
@@ -504,15 +505,19 @@ async def _switched_plan(
             revised_plan,
             switched,
             axis=axis,
-            stated=statement(
-                revised_plan,
-                to_origin={
-                    copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()
-                },
-                alignments=alignments(state),
-            ),
+            stated=_statement_of(revised_plan, state),
         ),
     }
+
+
+def _statement_of(plan: PlannerPlan, state: SessionState) -> PlannerPlan:
+    """`plan` as the planner states it (`submission.service.statement`), read with
+    the windowed copies and alignments `state` holds."""
+    return statement(
+        plan,
+        to_origin={copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()},
+        alignments=alignments(state),
+    )
 
 
 def _moved_entries(
@@ -520,16 +525,14 @@ def _moved_entries(
     switched: Sequence[_Switched],
     *,
     axis: str,
-    stated: PlannerPlan | None = None,
+    stated: PlannerPlan,
 ) -> list[dict[str, str]]:
     """Each other choice the switch on `axis` moved (`moved_choices`), once per card row.
 
     A move is listed under its row's id (`_moved_row`), so one move across
     several switched sources sharing a row, or showing none, is listed once.
-    `stated` is `plan` as the planner states it (`submission.service.statement`),
-    `plan` itself when `None`.
+    `stated` is `plan` as the planner states it (`submission.service.statement`).
     """
-    stated = stated if stated is not None else plan
     pins = {item.spec_id for item in switched}
     moved: dict[str, dict[str, str]] = {}
     for item in switched:
@@ -610,8 +613,9 @@ def _target(
     on an axis alignment moved for one requirement (`held`), which only that
     requirement cites and which fixes the pin it states, moves that requirement
     alone, from the compile it is pinned to (`planner.plan.compiled_pin`): its scope
-    and block are the compile's, and its reading the newest of the pin it
-    states, with a scope or none, whose words and roles the input keeps.
+    and block are the compile's, and its reading the newest of the pin the
+    alignment record says it states (`AlignedInput.stated_pin`), with a scope or
+    none, whose words and roles the input keeps.
 
     Raises:
         SwitchFailedError: If `decision` is neither, no stored reading of its
@@ -647,13 +651,14 @@ def _target(
         raise SwitchFailedError(
             "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
         )
-    reading = next((reading for reading in readings if reading.spec_id == pin), None)
-    if reading is None:
+    stated = moved.stated_pin
+    reading = next((reading for reading in readings if reading.spec_id == stated), None)
+    if stated is None or reading is None:
         raise SwitchFailedError(
             "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
         )
     return _Target(
-        pin=pin,
+        pin=stated,
         reading=reading,
         scope=scope,
         choice=choice,
@@ -785,6 +790,7 @@ async def _resubmit(
         spec_id=str(spec["spec_id"]),
         after=after,
         moved_for=target.moved_for,
+        block=target.block,
     )
 
 
@@ -809,15 +815,18 @@ def _reading_digest(item: _Switched, *, axis: str) -> dict[str, Any]:
     """The digest `store_search` stores for `item`'s answer, switched on `axis`, under the text of the reading it replaces.
 
     Search echoes the spec_id data-mcp posts as the part's text, so the
-    reading keeps the words the user's search used. The axes the planner's
-    words settled on the reading (`SearchReading.planner_axes`) stay the
-    planner's through the switch, less the switched axis, which is now the
-    user's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`).
+    reading keeps the words the user's search used. The axes the planner
+    settled stay the planner's through the switch, less the switched axis,
+    which is now the user's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`):
+    those its words settled on the reading (`SearchReading.planner_axes`), or,
+    for an input alignment moved, those the compile's block marks, every axis
+    alignment moved among them.
     """
     digest = resolver_digest(item.envelope)
     (part,) = digest.get("part_digests") or [{}]
     part["variable"] = item.reading.text
-    mark_planner_axes(digest, set(item.reading.planner_axes) - {axis})
+    settled = item.reading.planner_axes if item.block is None else planner_axes(item.block)
+    mark_planner_axes(digest, set(settled) - {axis})
     return digest
 
 

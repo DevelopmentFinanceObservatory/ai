@@ -650,39 +650,6 @@ def _sides_phrase(sides: Mapping[str | None, Sequence[str]]) -> str:
     )
 
 
-def source_whole_name(
-    axis: str,
-    *,
-    source: SelectedSource,
-    part: SelectedSource | None,
-    sector: str | None,
-    measure: str | None,
-) -> str | None:
-    """What a declared whole leaving the donor or recipient `axis` open
-    fetches, named off the source Search answered for it alone, with no plan.
-
-    The concept as the plan card names it (`_entity_whole_concept`). Then the
-    parties `source` binds, each side by the named set bound there, else its
-    entities, else the members its open axis holds, and the opened side,
-    still unnamed, as every party there: "official development assistance
-    from DAC countries", "gross disbursements (official development
-    assistance) from official donors (DAC) to Kenya". `None` where `axis` is
-    on no side of a flow or nothing names the concept."""
-    side = flow_side(axis)
-    concept = _entity_whole_concept(source=source, part=part, sector=sector, measure=measure or "")
-    if side is None or not concept:
-        return None
-    sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
-    bound = {flow_side(group.role) for group in source.groups}
-    for entity in source.entities:
-        if (entity_side := flow_side(entity.role)) is not None and entity_side not in bound:
-            sides[entity_side].append(entity.label)
-    _source_parties(source, sides)
-    if not sides[side]:
-        sides[side].append(whole_name(axis))
-    return f"{concept} {_sides_phrase(sides)}"
-
-
 def _entity_whole_concept(
     *,
     source: SelectedSource | None,
@@ -691,8 +658,7 @@ def _entity_whole_concept(
     measure: str,
 ) -> str:
     """What a declared whole leaving a donor or recipient axis open fetches,
-    the one rule the plan card (`_concept`) and its stored reading
-    (`source_whole_name`) share, by `concept_name`'s order: the concept
+    as the plan card names it (`_concept`), by `concept_name`'s order: the concept
     Search states for the whole's `source`, else for its part's `part`, else
     the `sector` option the whole was counted on, else the label Search
     composed for `source`'s measure, which differs from the part's where

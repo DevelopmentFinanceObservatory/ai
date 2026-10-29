@@ -512,7 +512,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     previous, rounds = resolved
     held_copies = windowed_pins(view.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
-    held_alignments = alignments(view.state)
+    # Alignments are the plan's this call amends; a fresh plan states its own pins.
+    held_alignments = alignments(view.state) if previous is not None else {}
     if to_origin:
         _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
     evidence_requirements = [
@@ -603,6 +604,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     if isinstance(realigned, dict):
         return realigned
     evidence_requirements, targets = realigned
+    # A carried input alignment moved before is restated too, so one it no longer
+    # moves has its decisions derived again on the pin it states.
+    own = {requirement.id for requirement in evidence_requirements}
+    evidence_requirements = [
+        *evidence_requirements,
+        *(r for r in written if r.id in held_alignments and r.id not in own),
+    ]
     # Every requirement pinned as stated, each search's pin taken; the
     # decisions below change citations alone, and the requirements alignment
     # moves are pinned to their compiles once every decision is derived.
@@ -2531,9 +2539,10 @@ def _unrecordable(
     does not name, so the amended plan is checked whole for a source
     reference the user did not pick (`_source_ref_unpicked`), an entity
     node no referral offered (`_entity_dcid_unoffered`) or other than the one
-    the user picked for it (`_entity_dcid_unpicked`), and a pin a
-    pending source choice did not offer (`_choice_not_offered`), each
-    against `stated`, the plan before its split and `_window_pins`, with
+    the user picked for it (`_entity_dcid_unpicked`), each against
+    `stated`, the plan before its split and `_window_pins`, and a pin a
+    pending source choice did not offer (`_choice_not_offered`, against
+    `statement`, since the planner states the pin and alignment moves it), with
     `referral`, the pending referral naming the requirements the model wrote
     (`_authored_referral`), for a
     sum of two datasets the user was not asked to combine
@@ -2564,7 +2573,7 @@ def _unrecordable(
         _source_ref_unpicked(stated, referral, view, previous)
         or _entity_dcid_unoffered(stated, referral, previous)
         or _entity_dcid_unpicked(stated, referral, view, previous)
-        or _choice_not_offered(stated, referral, view)
+        or _choice_not_offered(statement, referral, view)
         or _combination_unasked(statement, view, previous=previous, sources=sources)
         or _decline_unearned(plan, previous, view)
         or _breakdown_decline_unearned(statement, view)
@@ -3388,7 +3397,9 @@ def _window_pins(
     slots: dict[str, str] = {}
     for decision in plan.decisions:
         pin = decision.fixes.source_spec_id if decision.fixes is not None else None
-        if pin is None or pin not in origins:
+        # An axis alignment moved for one requirement fixes the pin it states,
+        # not the compile it reads (`_moved_axis_decisions`).
+        if pin is None or pin not in origins or _moved_for_one(decision):
             continue
         pinned = targets.get(decision.slot, set())
         if len(pinned) == 1 and pinned != {pin}:
@@ -3768,6 +3779,12 @@ def _moved_axis_slot(requirement_id: str, axis: str) -> str:
     A slot of a pin's own scope decision (`planner.plan.scope_choice_slot`)
     holds a spec_id, which starts `spec_`, so the two never meet."""
     return _derived_slot(f"scope_{axis}_of_", requirement_id)
+
+
+def _moved_for_one(decision: Decision) -> bool:
+    """Whether `decision` states an axis alignment moved for one requirement
+    (`_moved_axis_decisions`): a scope decision under no pin's own slot."""
+    return decision.scope is not None and not is_scope_choice(decision)
 
 
 def _moved_axis_decisions(moved: Mapping[str, AlignedPin]) -> dict[str, tuple[Decision, ...]]:
@@ -6319,12 +6336,6 @@ def _block_scope(block: Mapping[str, Any] | None) -> PartScope | None:
     """The scope record `block`, a spec block, states (`part_scope`), `None` where it
     states none this release reads."""
     return part_scope(str((block or {}).get("spec_id")), block)
-
-
-def held_sector(block: Mapping[str, Any] | None) -> Option | None:
-    """The option the scope choices of `block`, a spec block, hold on their sector
-    choice (`_active_option`), `None` where they state none."""
-    return _active_option(_block_scope(block), _SECTOR_AXIS)
 
 
 def _dataset_title(block: Mapping[str, Any] | None) -> str | None:
