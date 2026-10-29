@@ -158,12 +158,22 @@ def _per_head(aid: dict, population: dict, place: str) -> dict[str, object]:
 # One per-head question through the registered tool -----------------------------
 
 
+@pytest.mark.parametrize(
+    ("tool", "form"),
+    [("quotient_of", {}), ("share_of", {"operation": "quotient"})],
+    ids=["quotient_of", "share_of"],
+)
 async def test_gdp_per_head_through_the_registered_tool(
-    monkeypatch: pytest.MonkeyPatch, store: InMemoryMaterialisationStore, runner: ReplayedRunner
+    monkeypatch: pytest.MonkeyPatch,
+    store: InMemoryMaterialisationStore,
+    runner: ReplayedRunner,
+    tool: str,
+    form: dict[str, str],
 ) -> None:
     """Guatemala's GDP in US dollars (2019-2022) over its unit-less population
-    (2020-2023), through the live FastMCP `Client`: one series over 2020-2022
-    in the unit the two sides compose, under the operation's own ref."""
+    (2020-2023), through the live FastMCP `Client`, as `quotient_of` and as
+    `share_of`'s quotient form: one series over 2020-2022 in the unit the two
+    sides compose, under the operation's own ref."""
     gdp = await _seed(
         store, GDP, {GTM: {"2019": 770.0, "2020": 780.0, "2021": 860.0, "2022": 950.0}}, unit=USD
     )
@@ -178,7 +188,7 @@ async def test_gdp_per_head_through_the_registered_tool(
 
     async with Client(server_module.mcp) as client:
         result = await client.call_tool(
-            "quotient_of", {"frame_ref": gdp, "denominator_frame_ref": population}
+            tool, {"frame_ref": gdp, "denominator_frame_ref": population, **form}
         )
 
     assert result.is_error is False
@@ -299,6 +309,17 @@ async def test_a_sum_that_declares_a_unit_divides(store: InMemoryMaterialisation
     )
 
     assert await _units(store, result) == [USD_PER_PERSON]
+
+
+async def test_share_ofs_quotient_form_is_quotient_of(store: InMemoryMaterialisationStore) -> None:
+    aid, population = await _aid_and_population(store)
+    arguments = _per_head(aid, population, KEN)
+
+    divided = await quotient_of(**arguments)
+    shared = await share_of(**arguments, operation="quotient")
+
+    assert shared.structured_content == divided.structured_content
+    assert shared.content == divided.content
 
 
 async def test_a_unit_less_summed_family_is_the_denominator_part(

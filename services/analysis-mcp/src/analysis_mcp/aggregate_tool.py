@@ -63,7 +63,7 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frame,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import AggregateOpSpec, PinnedUnit
+from analysis_mcp.op_spec import AggregateOpSpec, FrameRefArgument, PinnedUnit
 from analysis_mcp.settings import Settings
 from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -160,12 +160,13 @@ def _aggregate_step(op_spec: AggregateOpSpec, result: AggregateResult, *, trace:
 @holds_input_rows
 async def aggregate(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The {spec_id, content_version} pair naming a materialised frame or a "
                 "prior verb result. Obtained from get_data's or a prior verb's own digest "
-                "-- never invented."
+                "-- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],

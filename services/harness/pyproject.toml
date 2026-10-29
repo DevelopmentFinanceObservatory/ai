@@ -80,6 +80,12 @@ exclude_lines = [
 show_missing = true
 precision = 2
 
+[dependency-groups]
+dev = [
+    # test_combined_mcp counts the public tool list in o200k tokens.
+    "tiktoken>=0.14.0",
+]
+
 [tool.uv.sources]
 analysis_mcp = { workspace = true }
 common = { workspace = true }

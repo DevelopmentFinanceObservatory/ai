@@ -4,6 +4,7 @@ answer maps to."""
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
@@ -869,6 +870,118 @@ async def test_an_op_spec_that_does_not_validate_refuses_before_any_call(
     assert result.structured_content is not None
     assert result.structured_content["code"] == "op_spec_invalid"
     assert runner.requests == []
+
+
+@pytest.mark.parametrize(
+    ("call", "argument"),
+    [
+        (lambda: verbs.aggregate(frame_ref={"spec_id": _SPEC}, aggregation="sum"), "frame_ref"),
+        (
+            lambda: verbs.compare(frame_ref=_FRAME, right_frame_ref={"spec_id": _OTHER_SPEC}),
+            "right_frame_ref",
+        ),
+        (
+            lambda: verbs.share_of(frame_ref=_FRAME, denominator_frame_ref={"spec_id": _SPEC}),
+            "denominator_frame_ref",
+        ),
+    ],
+    ids=["frame_ref", "right_frame_ref", "denominator_frame_ref"],
+)
+async def test_a_frame_argument_without_its_content_version_refuses_before_any_call(
+    store: InMemoryMaterialisationStore, call: Callable[[], Any], argument: str
+) -> None:
+    runner = _install(_problem(422, "op_spec_invalid"))
+    result = await call()
+
+    assert result.structured_content is not None
+    assert (result.structured_content["code"], result.structured_content["retry_mode"]) == (
+        "frame_ref_incomplete",
+        "correct_and_retry",
+    )
+    assert result.structured_content["fix"]["argument"] == argument
+    assert runner.requests == []
+
+
+# The merged forms ------------------------------------------------------------------
+
+_ONE_FRAME = {"frame_ref": _FRAME}
+_TWO_FRAMES = {"frame_ref": _FRAME, "right_frame_ref": _DERIVED}
+_KEYED_SHARE = {
+    "frame_ref": _FRAME,
+    "denominator_frame_ref": _DERIVED,
+    "numerator_by": ["recipient"],
+    "denominator_by": {"recipient": "observationAbout"},
+}
+
+
+@pytest.mark.parametrize(
+    ("merged", "own", "arguments"),
+    [
+        (
+            functools.partial(verbs.compare, operation="sum"),
+            verbs.sum_of,
+            _TWO_FRAMES,
+        ),
+        (functools.partial(verbs.compare, operation="sum"), verbs.sum_of, _ONE_FRAME),
+        (
+            functools.partial(verbs.share_of, operation="quotient"),
+            verbs.quotient_of,
+            {"frame_ref": _FRAME, "denominator_frame_ref": _DERIVED},
+        ),
+        (
+            functools.partial(verbs.share_of, operation="quotient"),
+            verbs.quotient_of,
+            _KEYED_SHARE,
+        ),
+        (verbs.compare, functools.partial(verbs.compare, operation="difference"), _TWO_FRAMES),
+        (verbs.share_of, functools.partial(verbs.share_of, operation="share"), _KEYED_SHARE),
+    ],
+    ids=["sum", "sum-one-frame", "quotient", "quotient-keyed", "difference", "share"],
+)
+@pytest.mark.parametrize("answer", ["ready", "refused"])
+async def test_a_merged_form_sends_and_replies_as_its_own_tool(
+    store: InMemoryMaterialisationStore,
+    merged: Callable[..., Any],
+    own: Callable[..., Any],
+    arguments: dict[str, Any],
+    answer: str,
+) -> None:
+    """`compare(operation="sum")` is `sum_of` and `share_of(operation="quotient")` is
+    `quotient_of`: the same tree to the runner, and the same reply or refusal."""
+    response = (
+        httpx2.Response(200, json=_recorded_ready())
+        if answer == "ready"
+        else _problem(422, "comparison_periods_disjoint", fix={"left_periods": ["2020"]})
+    )
+    replies = []
+    bodies = []
+    for tool in (merged, own):
+        runner = _install(response)
+        replies.append(await tool(**arguments))
+        bodies.append(runner.body)
+
+    assert bodies[0] == bodies[1]
+    assert replies[0].structured_content == replies[1].structured_content
+    assert replies[0].content == replies[1].content
+    assert replies[0].is_error is replies[1].is_error is (answer == "refused")
+
+
+async def test_a_share_across_two_units_refuses_naming_the_quotient_form(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    units = {"numerator": "dcid:CurrencyUSD", "denominator": "dcid:USDollar"}
+    _install(_problem(422, "cross_frame_unit_mismatch", fix=units))
+    share = await verbs.share_of(frame_ref=_FRAME, denominator_frame_ref=_DERIVED)
+    _install(_problem(422, "cross_frame_unit_mismatch", fix={"left": "a", "right": "b"}))
+    difference = await verbs.compare(frame_ref=_FRAME, right_frame_ref=_DERIVED)
+
+    assert share.structured_content is not None
+    assert (share.structured_content["code"], share.structured_content["fix"]) == (
+        "cross_frame_unit_mismatch",
+        {"operation": "quotient"},
+    )
+    assert difference.structured_content is not None
+    assert difference.structured_content["fix"] == {"left": "a", "right": "b"}
 
 
 # Derived frame reads --------------------------------------------------------------

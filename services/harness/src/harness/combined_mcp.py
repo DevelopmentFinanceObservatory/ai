@@ -43,6 +43,10 @@ callers goes. `build_combined_mcp` adds it outermost first:
 - `_ShapeResults` drops `structuredContent` and `search`'s envelope in
   `_meta` from successful results of tools that declare no MCP App view,
   and `outputSchema` from `tools/list`.
+- `_PublicArguments` leaves the harness's rolling arguments and `get_data`'s
+  `place_types` out of `tools/list` (`public_tool`), and sends every
+  `get_data` call with `place_types` true, so a public frame always carries
+  its type columns.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
   unknown tool name, arguments that fail the tool's input schema, or an
   exception from the tool itself. A resource read that raised an
@@ -75,6 +79,7 @@ knows when an upstream mint has ended (`data_mcp.mint_ledger`).
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -124,6 +129,7 @@ from mcp_types import INTERNAL_ERROR
 from presentation_mcp.server import healthz as presentation_healthz
 from presentation_mcp.server import mcp as presentation_mcp
 from presentation_mcp.server import view_support
+from pydantic import ValidationError as PydanticValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute
@@ -143,13 +149,11 @@ COMBINED_MCP_INSTRUCTIONS = (
     "definitions, each identified by a spec_id, and `get_data` fetches one as a frame, "
     "with its source. `sources` lists what DFO holds and how a dataset is made; "
     "`describe` explains graph ids read from a result. The analysis tools "
-    "(`aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join`, `sum_of`, "
-    "`quotient_of`) take frames and return a new frame, and `resolve_anchor` finds the "
-    "latest period a rolling `growth`, `rank` or `filter` call counts from. "
-    "`describe_frame` summarises a frame, and "
+    "(`aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join`) take frames "
+    "and return a new frame. `describe_frame` summarises a frame, and "
     "`write_component` turns a frame into a chart, table or card, which "
     "`describe_component` reads back. A `search` result can list skills: `get_skill` "
-    "loads one, and `get_skill_file` reads a file it lists."
+    "loads one, or a file it lists."
 )
 
 # data-mcp's `resolve_definition`, which resolves each Search result a Studio
@@ -158,8 +162,53 @@ COMBINED_MCP_INSTRUCTIONS = (
 # `explain_dfo` quotes. `sources` gives an outside client the same counts. The
 # harness calls both at `DATA_MCP_URL`
 # (`translator.discovery.resolve_definition`,
-# `harness.dfo_faq.read_catalogue_counts`).
-HARNESS_ONLY_TOOLS = frozenset({"resolve_definition", "catalogue_counts"})
+# `harness.dfo_faq.read_catalogue_counts`). The harness also calls
+# `sum_of`, `quotient_of` and `get_skill_file`, whose work an outside client
+# reaches through `compare`, `share_of` and `get_skill` (`_MERGED_NAMES`), and
+# `resolve_anchor`, which writes the `rolling` and `anchor_key` arguments the
+# public list leaves out (`_HARNESS_ARGUMENTS`).
+HARNESS_ONLY_TOOLS = frozenset(
+    {
+        "resolve_definition",
+        "catalogue_counts",
+        "sum_of",
+        "quotient_of",
+        "get_skill_file",
+        "resolve_anchor",
+    }
+)
+
+# Each harness-only name whose work a listed tool does, with that tool and the
+# `operation` that picks the form. A call to one refuses `tool_not_found` naming
+# the listed call.
+_MERGED_NAMES: dict[str, tuple[str, str | None]] = {
+    "sum_of": ("compare", "sum"),
+    "quotient_of": ("share_of", "quotient"),
+    "get_skill_file": ("get_skill", None),
+}
+
+# The arguments of the rolling path the harness drives, which the public list
+# leaves out of the tools that take them, with every sentence naming them.
+_HARNESS_ARGUMENTS = frozenset({"rolling", "anchor_key"})
+_HARNESS_ARGUMENT_TOOLS = frozenset({"growth", "rank", "filter"})
+_NAMES_HARNESS_ARGUMENT = re.compile(r"\b(?:rolling|anchor_key)\b")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=[A-Z`])")
+
+# Every public `get_data` call asks for the type columns, so its listing drops
+# `place_types` and states what every frame carries instead. data-mcp's own mount
+# keeps the argument, default false, for the harness.
+_PLACE_TYPES = "place_types"
+_NAMES_PLACE_TYPES = re.compile(r"\bplace_types\b")
+_TYPE_COLUMNS = (
+    "Every frame carries place or party types. A frame that names places gets an "
+    "observationAbout_type column. A flow frame gets financingProvider_party_kind and "
+    "financingRecipient_party_kind: party, residual, or total for a group total such as "
+    "Africa, Total. rank, aggregate and share_of read these columns to leave group totals "
+    "out and, with place_level, to keep one level of place."
+)
+# A clause in `without_party_totals`' description that names `place_types`, and what
+# the public listing says in its place.
+_PARTY_CELLS_CLAUSE = ("add the party cells as place_types does", "keep the party cells")
 
 # The wait a caller is told before repeating a call the in-flight cap refused. A call
 # runs for up to `EXTERNAL_CALL_LIMIT_S`, and most finish within a few seconds.
@@ -237,6 +286,7 @@ def build_combined_mcp(
         ),
         _CallLimit(limit_s=call_limit_s),
         _ShapeResults(server=combined),
+        _PublicArguments(),
         _RefuseRaisedErrors(server=combined),
     ):
         combined.add_middleware(middleware)
@@ -895,6 +945,125 @@ class _ShapeResults(Middleware):
         return ToolResult(content=result.content, meta=meta or None)
 
 
+class _PublicArguments(Middleware):
+    """Lists each tool as `public_tool` declares it, and sends `get_data` with
+    `place_types` true whatever the call says, so every public frame carries its
+    type columns."""
+
+    @override
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
+    ) -> Sequence[Tool]:
+        return [public_tool(tool) for tool in await call_next(context)]
+
+    @override
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        if context.message.name != "get_data":
+            return await call_next(context)
+        arguments = {**(context.message.arguments or {}), "place_types": True}
+        message = context.message.model_copy(update={"arguments": arguments})
+        return await call_next(context.copy(message=message))
+
+
+def public_tool(tool: Tool) -> Tool:
+    """`tool` as the combined server lists it. `growth`, `rank` and `filter` lose
+    `_HARNESS_ARGUMENTS` wherever their schema holds them, and every sentence
+    naming one: a paragraph whose first sentence names one goes whole.
+    `get_data` loses `place_types` (`_public_get_data`). Every
+    other tool is listed as its server declares it."""
+    if tool.name == "get_data":
+        return _public_get_data(tool)
+    if tool.name not in _HARNESS_ARGUMENT_TOOLS:
+        return tool
+    return tool.model_copy(
+        update={
+            "description": _without_harness_sentences(tool.description or ""),
+            "parameters": _without_harness_arguments(tool.parameters),
+        }
+    )
+
+
+def _public_get_data(tool: Tool) -> Tool:
+    """`get_data` without `place_types`, its description stating the type columns
+    every public call asks for (`_PublicArguments.on_call_tool`): in the paragraph
+    that first names `place_types`, that sentence and every one after it give way to
+    `_TYPE_COLUMNS`, and any later sentence naming it goes."""
+    parameters = copy.deepcopy(tool.parameters)
+    properties = parameters.get("properties", {})
+    properties.pop(_PLACE_TYPES, None)
+    if "required" in parameters:
+        parameters["required"] = [name for name in parameters["required"] if name != _PLACE_TYPES]
+    for prop in properties.values():
+        if isinstance(prop.get("description"), str):
+            prop["description"] = prop["description"].replace(*_PARTY_CELLS_CLAUSE)
+    return tool.model_copy(
+        update={
+            "description": _with_type_columns(tool.description or ""),
+            "parameters": parameters,
+        }
+    )
+
+
+def _with_type_columns(text: str) -> str:
+    paragraphs: list[str] = []
+    placed = False
+    for paragraph in text.split("\n\n"):
+        sentences = _SENTENCE_BREAK.split(paragraph)
+        named = [bool(_NAMES_PLACE_TYPES.search(sentence)) for sentence in sentences]
+        if not any(named):
+            paragraphs.append(paragraph)
+        elif placed:
+            kept = [sentence for sentence, names in zip(sentences, named, strict=True) if not names]
+            paragraphs.extend([" ".join(kept)] if kept else [])
+        else:
+            before = sentences[: named.index(True)]
+            paragraphs.extend([" ".join(before), _TYPE_COLUMNS] if before else [_TYPE_COLUMNS])
+            placed = True
+    if not placed:
+        paragraphs.append(_TYPE_COLUMNS)
+    return "\n\n".join(paragraphs)
+
+
+def _without_harness_arguments(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_without_harness_arguments(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    kept: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "description" and isinstance(value, str):
+            if text := _without_harness_sentences(value):
+                kept[key] = text
+        elif key == "properties" and isinstance(value, dict):
+            kept[key] = {
+                name: _without_harness_arguments(prop)
+                for name, prop in value.items()
+                if name not in _HARNESS_ARGUMENTS
+            }
+        elif key == "required" and isinstance(value, list):
+            kept[key] = [name for name in value if name not in _HARNESS_ARGUMENTS]
+        else:
+            kept[key] = _without_harness_arguments(value)
+    return kept
+
+
+def _without_harness_sentences(text: str) -> str:
+    paragraphs = []
+    for paragraph in text.split("\n\n"):
+        sentences = _SENTENCE_BREAK.split(paragraph)
+        if _NAMES_HARNESS_ARGUMENT.search(sentences[0]):
+            continue
+        kept = [sentence for sentence in sentences if not _NAMES_HARNESS_ARGUMENT.search(sentence)]
+        paragraphs.append(paragraph if len(kept) == len(sentences) else " ".join(kept))
+    return "\n\n".join(paragraphs)
+
+
 def _declares_app_view(tool: Tool | None) -> bool:
     """Whether `tool` declares an MCP App view, `_meta.ui.resourceUri`, in `tools/list`."""
     ui = (tool.meta or {}).get("ui") if tool is not None else None
@@ -910,10 +1079,12 @@ class _RefuseRaisedErrors(Middleware):
 
     - `NotFoundError`, a name no tool carries: `tool_not_found`, naming the
       tools `server` serves. The parent resolves the name before any child
-      sees the call.
+      sees the call. A name in `_MERGED_NAMES` is answered with the listed
+      call that does its work instead.
     - `ValidationError`, arguments that fail the tool's input schema:
-      `request_invalid`, with fastmcp's account of what failed, which names
-      the argument and the rule and is written for the caller to act on.
+      `request_invalid`, whose `fix` holds `problems`, one `field: problem`
+      line per error pydantic found, and `accepted`, the arguments the tool's
+      listing (`public_tool`) declares.
     - Any other exception, which fastmcp has already wrapped in a `ToolError`
       for an exception the tool raised: `internal_error`, which repeating the
       call will not clear. Its text can hold a bucket path or a service
@@ -946,6 +1117,8 @@ class _RefuseRaisedErrors(Middleware):
         try:
             return await call_next(context)
         except NotFoundError:
+            if name in _MERGED_NAMES:
+                return _merged_name_refusal(name)
             tools = sorted(
                 tool.name for tool in await self._server.list_tools(run_middleware=False)
             )
@@ -956,14 +1129,21 @@ class _RefuseRaisedErrors(Middleware):
                 fix={"tools": tools},
             )
         except ValidationError as exc:
+            tool = await self._server.get_tool(name)
+            parameters = public_tool(tool).parameters if tool is not None else {}
+            problems = _problems(exc, parameters)
             return _refusal(
                 code="request_invalid",
                 retry_mode="correct_and_retry",
                 message=(
-                    f"The arguments to {name} do not match its input schema: {exc}. "
-                    "Correct them and call again."
+                    f"The arguments to {name} do not match its input schema: "
+                    f"{'; '.join(problems)}. Correct them and call again."
                 ),
-                fix={"tool": name, "detail": str(exc)},
+                fix={
+                    "tool": name,
+                    "problems": problems,
+                    "accepted": list(parameters.get("properties", {})),
+                },
             )
         except Exception:
             log_unexpected_error(logger, f"combined mcp: tool {name}")
@@ -989,6 +1169,44 @@ class _RefuseRaisedErrors(Middleware):
             raise ResourceError(
                 "internal_error: " + internal_error_message(subject="Reading this resource")
             ) from None
+
+
+def _merged_name_refusal(name: str) -> ToolResult:
+    """`tool_not_found` for `name`, naming the listed call that does its work."""
+    tool, operation = _MERGED_NAMES[name]
+    if operation is None:
+        message = (
+            f"No tool is named {name!r}. Call {tool} with the same skill_id, path, offset "
+            "and digest."
+        )
+        fix: dict[str, Any] = {"tool": tool}
+    else:
+        message = (
+            f'No tool is named {name!r}. Call {tool} with operation="{operation}" and the '
+            "same arguments."
+        )
+        fix = {"tool": tool, "operation": operation}
+    return _refusal(code="tool_not_found", retry_mode="correct_and_retry", message=message, fix=fix)
+
+
+def _problems(exc: ValidationError, parameters: dict[str, Any]) -> list[str]:
+    """One `field: problem` line per error in the pydantic `ValidationError` fastmcp
+    raised `exc` from. A value outside a top-level enum in `parameters` names the
+    values the enum allows."""
+    cause = exc.__cause__
+    if not isinstance(cause, PydanticValidationError):
+        return [str(exc)]
+    properties = parameters.get("properties", {})
+    problems = []
+    for error in cause.errors(include_url=False):
+        field = ".".join(str(part) for part in error["loc"])
+        allowed = properties.get(field, {}).get("enum")
+        if error["type"] == "literal_error" and allowed:
+            values = ", ".join(str(value) for value in allowed)
+            problems.append(f"{field}: must be one of {values}, not {error['input']!r}")
+        else:
+            problems.append(f"{field}: {error['msg']}")
+    return problems
 
 
 def combined_http_app(combined: FastMCP) -> StarletteWithLifespan:

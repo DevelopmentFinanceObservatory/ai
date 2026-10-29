@@ -68,6 +68,7 @@ from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import (
     ANCHOR_KEY_PATTERN,
     MAX_RANK_LIMIT,
+    FrameRefArgument,
     PinnedUnit,
     RankOpSpec,
     WindowRolling,
@@ -238,12 +239,13 @@ async def _resolve_measured_frame(
 @holds_input_rows
 async def rank(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The {spec_id, content_version} pair naming a materialised frame or a "
                 "prior verb result. Obtained from get_data's or a prior verb's own digest "
-                "-- never invented."
+                "-- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],

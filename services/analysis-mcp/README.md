@@ -9,16 +9,20 @@ The service registers nine analytical tools.
 | Tool          | Operation                                                                                                                                                                                                  |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `aggregate`   | Groups rows by specified dimensions and computes a sum, mean, max, or min reduction, reporting the winning period for max and min                                                                          |
-| `compare`     | Computes period-aligned values and absolute differences across entities or frames                                                                                                                          |
+| `compare`     | Computes period-aligned values and absolute differences across entities or frames, or with `operation` set to `sum` hands the call to `sum_of`                                                             |
 | `growth`      | Computes each entity's change between the window's two endpoint years, excluding and reporting any entity it cannot compute                                                                                |
 | `rank`        | Orders entities by observed values or windowed aggregations                                                                                                                                                |
-| `share_of`    | Calculates proportional shares between numerator and denominator definitions across time periods                                                                                                           |
+| `share_of`    | Calculates proportional shares between numerator and denominator definitions across time periods, or with `operation` set to `quotient` hands the call to `quotient_of`                                    |
 | `join`        | Merges two distinct frames on matching time periods and shared role dimensions, or role columns paired by `right_keys`                                                                                     |
 | `filter`      | Selects rows by an ordered threshold, including a bound on `time_period`, by a category set, or by a level of place                                                                                        |
 | `sum_of`      | Adds two single-series slices for each period both report, leaving out a period only one side reports                                                                                                      |
 | `quotient_of` | Divides one measure by another at each period both report and states a composed unit, leaving out and recording unmatched periods, unmatched keys and zero denominators, and refusing when nothing is left |
 
 It also registers `resolve_anchor`, which computes no frame. A `growth`, `rank` or `filter` call can state a period as rolling: relative to the latest period of the data, the newest calendar year at least half of the series hold. `resolve_anchor` takes the populations of a question (each root dataset with the bindings that narrow its series) and the root frames, finds that period, stores it as an anchor record in the materialisation store, and returns an `anchor_key`, the period, and the series that hold no value at it. A rolling call carries the key and the literal periods written from the period, and runs only when the record covers it: the same populations, every root frame the input was computed from, and each literal equal to the period moved by its offset. Anything else refuses `rolling_anchor_unresolved`, with the failed check in `fix.detail`.
+
+The combined server at `/mcp/` (`harness.combined_mcp`) lists `compare` and `share_of` with their `operation` argument and leaves out `sum_of`, `quotient_of` and `resolve_anchor`, which the harness calls on this server's own mount. A call to `sum_of` or `quotient_of` there refuses `tool_not_found` with a `fix` naming the merged tool and its `operation`. The combined server also lists `growth`, `rank` and `filter` without their `rolling` and `anchor_key` arguments.
+
+Each frame argument (`frame_ref`, `right_frame_ref`, `denominator_frame_ref`) is declared as an object with `spec_id` required and `content_version` optional. A frame argument that names a `spec_id` without its `content_version` refuses `frame_ref_incomplete` before any call to the runner.
 
 ## Operation specifications and execution pipeline
 
@@ -54,6 +58,7 @@ A tool call that fails returns a typed refusal, carrying a `code`, a `message`, 
 | `role_ambiguous`                     | `correct_and_retry` | every verb                                                                            |
 | `operation_uncovered`                | `correct_and_retry` | `aggregate`, `rank`                                                                   |
 | `frame_too_large`                    | `correct_and_retry` | every verb                                                                            |
+| `frame_ref_incomplete`               | `correct_and_retry` | every verb                                                                            |
 | `unit_heterogeneous`                 | `correct_and_retry` | `aggregate`, `compare`, `growth`, `join`, `quotient_of`, `rank`, `share_of`, `sum_of` |
 | `facet_heterogeneous`                | `correct_and_retry` | `aggregate`, `compare`, `growth`, `join`, `quotient_of`, `rank`, `share_of`, `sum_of` |
 | `coverage_insufficient`              | `correct_and_retry` | `aggregate`, `rank`                                                                   |

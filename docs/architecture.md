@@ -81,7 +81,8 @@ the model to compute a number directly, the model emits an op-spec against a
 closed verb set (`aggregate`, `compare`, `growth`, `rank`, `share_of`,
 `quotient_of`, `sum_of`, `join`, `filter`). Deterministic code executes that spec and returns a
 frame reference, a summary, and a trace (instead of raw bulk data back into the model's
-context).
+context). The public tool list serves `sum_of` as `compare`'s sum form and `quotient_of` as
+`share_of`'s quotient form.
 
 **`packages/common`** holds the small pieces of shared internals every
 service needs: a settings base class, a logging setup, a telemetry

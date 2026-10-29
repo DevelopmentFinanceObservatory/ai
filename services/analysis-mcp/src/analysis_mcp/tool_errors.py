@@ -31,6 +31,9 @@ both of growth's endpoint years. `cross_frame_unit_mismatch`/`cross_frame_unit_u
 (`compare`'s left/right, `share_of`'s numerator/denominator) disagree on
 unit or facet -- distinct from `unit_heterogeneous`/`facet_heterogeneous`,
 which fire when *one* frame itself carries more than one value.
+A `share_of` call in share mode whose sides resolve to two units refuses
+`cross_frame_unit_mismatch` with `fix["operation"]` `quotient`, the form that
+divides across units (`share_units_differ`).
 `cross_frame_facet_mismatch` fires only when the two sides hold the same
 StatVar; two different measures each keep their own facet selection.
 `cross_frame_unit_unbound` is the narrower case where one side's rows leave
@@ -106,6 +109,8 @@ fires when a pair aged out past an in-memory store's TTL, with a `get_data`
 retry only for a Datasets-family (`spec_...`) pair; a durable, bucket-backed
 store never raises it, since a pair its lifecycle rule has deleted comes
 back as the same `frame_not_held` a pair that was never registered would.
+`frame_ref_incomplete` fires when a frame argument names a `spec_id` with no
+`content_version`; the call is retryable with the full pair.
 `frame_integrity_failed` fires when a durable store's read-time check finds
 the stored object itself is wrong: its bytes don't match what was recorded
 at write time, its row count differs from the count recorded beside it,
@@ -257,6 +262,7 @@ class ToolErrorCode(StrEnum):
     NON_FINITE_RESULT = "non_finite_result"
     FRAME_NOT_HELD = "frame_not_held"
     FRAME_EXPIRED = "frame_expired"
+    FRAME_REF_INCOMPLETE = "frame_ref_incomplete"
     MIXED_TIME_GRAIN = "mixed_time_grain"
     FRAME_INTEGRITY_FAILED = "frame_integrity_failed"
     COMPARISON_PERIODS_DISJOINT = "comparison_periods_disjoint"
@@ -319,6 +325,7 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.NON_FINITE_RESULT: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.FRAME_NOT_HELD: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.FRAME_EXPIRED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.FRAME_REF_INCOMPLETE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.MIXED_TIME_GRAIN: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.FRAME_INTEGRITY_FAILED: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.COMPARISON_PERIODS_DISJOINT: RetryMode.CORRECT_AND_RETRY,
@@ -733,6 +740,19 @@ class ToolRefusal:
         )
 
     @classmethod
+    def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
+        """The frame argument `argument` names `spec_id` with no `content_version`."""
+        return cls(
+            code=ToolErrorCode.FRAME_REF_INCOMPLETE,
+            message=(
+                f"{argument} names spec_id {spec_id!r} without its content_version. Pass the "
+                "full {spec_id, content_version} pair from the get_data or verb result that "
+                "made the frame."
+            ),
+            fix={"argument": argument, "spec_id": spec_id},
+        )
+
+    @classmethod
     def mixed_time_grain(cls, *, grains: list[str], periods: list[str]) -> Self:
         """`grains` names every distinct grain the resolved input's own
         `time_period` column carries, in `year`/`month`/`day` order, and
@@ -838,6 +858,23 @@ class ToolRefusal:
                 left_label: unit_json(left_unit),
                 right_label: unit_json(right_unit),
             },
+        )
+
+    @classmethod
+    def share_units_differ(cls, *, numerator_unit: object, denominator_unit: object) -> Self:
+        """A share whose numerator and denominator resolved to two units, each a
+        unit as the runner's refusal states it: a unit ref, or a converted or
+        composed unit's object. Two units make a quotient, so `fix` names that
+        form."""
+        units = (json.dumps(numerator_unit), json.dumps(denominator_unit))
+        return cls(
+            code=ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH,
+            message=(
+                f"The numerator is in {units[0]} and the denominator in {units[1]}, so the "
+                "numerator is no share of the denominator. Repeat the call with "
+                'operation="quotient" and the same arguments to divide one by the other.'
+            ),
+            fix={"operation": "quotient"},
         )
 
     @classmethod

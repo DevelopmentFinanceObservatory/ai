@@ -20,12 +20,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mutabl
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 from itertools import pairwise
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
 
 import httpx2
 import langfuse
 import pytest
+import tiktoken
 from analysis_mcp import server as analysis_server
 from analysis_mcp import tool_errors as analysis_tool_errors
 from analysis_mcp.fixtures import seed_fixture_store
@@ -48,6 +50,7 @@ from data_mcp.deadline import (
     CallBudget,
 )
 from data_mcp.definition_store import InMemoryDefinitionStore, set_store
+from data_mcp.definition_store.identity import canonicalize, spec_id_for
 from data_mcp.mint_ledger import MintLedger
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.settings import Settings as DataMcpSettings
@@ -108,6 +111,7 @@ DIRECT = (
     f"{PRESENTATION_MCP_MOUNT_PATH}/mcp",
 )
 PRESENTATION_TOOLS = ("write_component", "describe_frame", "describe_component")
+ROLLING_ARGUMENT_TOOLS = ("growth", "rank", "filter")
 
 REVISIONS = pytest.mark.parametrize(
     ("mode", "revision"),
@@ -262,7 +266,14 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     assert {"search", "get_data", "aggregate", *PRESENTATION_TOOLS} <= _described(
         combined_tools
     ).keys()
-    assert _described(combined_tools) == _described(direct_tools)
+    # `get_data` is listed without `place_types`, and `growth`, `rank` and `filter`
+    # without the harness's rolling arguments
+    # (`test_the_public_get_data_lists_the_type_columns_in_place_of_place_types`,
+    # `test_the_public_list_leaves_out_the_harness_rolling_arguments`).
+    combined_described, direct_described = _described(combined_tools), _described(direct_tools)
+    assert [
+        name for name in combined_described if combined_described[name] != direct_described[name]
+    ] == ["get_data", *ROLLING_ARGUMENT_TOOLS]
     assert any(tool.output_schema is not None for tool in direct_tools)
     assert [tool.output_schema for tool in combined_tools] == [None] * len(combined_tools)
     assert combined_templates == direct_templates
@@ -798,7 +809,251 @@ async def test_arguments_that_fail_the_input_schema_refuse_in_the_envelope(
     envelope = _envelope(combined)
     assert (envelope["code"], envelope["retry_mode"]) == ("request_invalid", "correct_and_retry")
     assert envelope["fix"]["tool"] == "aggregate"
-    assert "aggregation" in envelope["fix"]["detail"]
+    assert [problem.split(":")[0] for problem in envelope["fix"]["problems"]] == ["aggregation"]
+    aggregate = await analysis_server.mcp.get_tool("aggregate")
+    assert aggregate is not None
+    assert envelope["fix"]["accepted"] == list(aggregate.parameters["properties"])
+
+
+@REVISIONS
+async def test_an_operation_outside_the_enum_names_the_values_it_takes(
+    mode: str,
+    revision: str,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+) -> None:
+    """`accepted` is the listed schema's: `growth` without `rolling` and `anchor_key`."""
+    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+
+    async with (
+        running_lifespan(app),
+        Client(mounted_mcp_transport(app, COMBINED, token=TOKEN), mode=mode) as client,
+    ):
+        assert client.protocol_version == revision
+        compare = await client.call_tool(
+            "compare", {"frame_ref": UNHELD_FRAME, "operation": "product"}, raise_on_error=False
+        )
+        growth = await client.call_tool(
+            "growth", {"frame_ref": UNHELD_FRAME, "window_start": "2020"}, raise_on_error=False
+        )
+        listed = {tool.name: tool for tool in await client.list_tools()}
+
+    assert _envelope(compare)["code"] == "request_invalid"
+    assert _envelope(compare)["fix"]["problems"] == [
+        "operation: must be one of difference, sum, not 'product'"
+    ]
+    assert _envelope(growth)["fix"]["accepted"] == list(listed["growth"].input_schema["properties"])
+    assert not {"rolling", "anchor_key"} & set(_envelope(growth)["fix"]["accepted"])
+
+
+@REVISIONS
+@pytest.mark.parametrize(
+    ("name", "fix"),
+    [
+        ("sum_of", {"tool": "compare", "operation": "sum"}),
+        ("quotient_of", {"tool": "share_of", "operation": "quotient"}),
+        ("get_skill_file", {"tool": "get_skill"}),
+    ],
+)
+async def test_a_merged_name_refuses_naming_the_listed_call(
+    mode: str,
+    revision: str,
+    name: str,
+    fix: dict[str, str],
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+) -> None:
+    """A client holding a list from before the merge recovers in one call."""
+    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+
+    async with (
+        running_lifespan(app),
+        Client(mounted_mcp_transport(app, COMBINED, token=TOKEN), mode=mode) as client,
+    ):
+        assert client.protocol_version == revision
+        result = await client.call_tool(name, {"frame_ref": UNHELD_FRAME}, raise_on_error=False)
+
+    assert result.is_error is True
+    assert _envelope(result) == {
+        "code": "tool_not_found",
+        "retry_mode": "correct_and_retry",
+        "fix": fix,
+    }
+    assert result.content[0].text.startswith(f"No tool is named {name!r}. Call {fix['tool']} ")
+
+
+# presentation-mcp's recorded release document, whose `write_component` schema is the
+# size the deployed one is.
+_RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
+    "presentation-mcp/tests/fixtures/release.json"
+)
+
+# The most o200k tokens the public tool list may cost, as a client hands it to its
+# model: the compact JSON of each tool's name, description and input schema. Every
+# client pays it on every turn. The bound is the measured count, 19,467, rounded up
+# to the next 500. The list must stay within 20,000; lower the bound as it shrinks.
+_PUBLIC_LIST_TOKEN_BOUND = 19_500
+
+
+async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
+    """The combined server's `tools/list`, presentation-mcp's tools assembled from
+    `_RECORDED_RELEASE`."""
+    release = json.loads(_RECORDED_RELEASE.read_text())
+
+    class _RecordedPlatform(_StubPlatform):
+        @override
+        async def release(self) -> dict[str, Any]:
+            return release
+
+    monkeypatch.setattr(presentation_server, "PlatformAssembler", _RecordedPlatform)
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        return await client.list_tools()
+
+
+async def test_the_public_list_stays_within_its_token_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoding = tiktoken.get_encoding("o200k_base")
+    counted = {
+        tool.name: len(
+            encoding.encode(
+                json.dumps(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "inputSchema": tool.input_schema,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        )
+        for tool in await _public_list(monkeypatch)
+    }
+
+    assert sum(counted.values()) <= _PUBLIC_LIST_TOKEN_BOUND, counted
+
+
+def _schema_faults(node: object, path: str = "") -> Iterator[str]:
+    """Where `node`, a JSON schema, holds what a client's model reads as noise or
+    drops: a `$comment`, `$ref` or `$defs`, an empty `required`, or an `anyOf` with
+    a null branch."""
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            yield from _schema_faults(item, f"{path}[{index}]")
+        return
+    if not isinstance(node, dict):
+        return
+    for key in ("$comment", "$ref", "$defs"):
+        if key in node:
+            yield f"{path}/{key}"
+    if node.get("required") == []:
+        yield f"{path}/required"
+    branches = node.get("anyOf")
+    if isinstance(branches, list) and {"type": "null"} in branches:
+        yield f"{path}/anyOf"
+    for key, value in node.items():
+        yield from _schema_faults(value, f"{path}/{key}")
+
+
+async def test_no_analysis_schema_holds_noise_or_a_nullable_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = {tool.name for tool in await analysis_server.mcp.list_tools()}
+    faults = {
+        tool.name: faults
+        for tool in await _public_list(monkeypatch)
+        if tool.name in analysis and (faults := list(_schema_faults(tool.input_schema)))
+    }
+
+    assert faults == {}
+
+
+class _ForwardedArguments(Middleware):
+    """Innermost: records each call's arguments as the parent forwards them to a
+    child, and answers without running the tool."""
+
+    def __init__(self) -> None:
+        self.arguments: list[dict[str, Any]] = []
+
+    @override
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        self.arguments.append(dict(context.message.arguments or {}))
+        return ToolResult(content="recorded")
+
+
+@pytest.mark.parametrize("sent", [{"place_types": False}, {}], ids=["false", "absent"])
+async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str, bool]) -> None:
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+    forwarded = _ForwardedArguments()
+    combined.add_middleware(forwarded)
+    arguments = {"spec_id": "spec_" + "0" * 32, **sent}
+
+    async with Client(combined) as client:
+        await client.call_tool("get_data", arguments)
+        await client.call_tool("aggregate", {"frame_ref": UNHELD_FRAME, "aggregation": "sum"})
+
+    assert forwarded.arguments == [
+        {**arguments, "place_types": True},
+        {"frame_ref": UNHELD_FRAME, "aggregation": "sum"},
+    ]
+
+
+async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_types() -> None:
+    """data-mcp's own mount keeps `place_types` for the harness. The public listing
+    names neither the argument nor a sentence about it, and its description names
+    the columns and party kinds every public frame carries."""
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+
+    async with Client(combined) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+    served = await data_server.mcp.get_tool("get_data")
+
+    assert served is not None
+    assert "place_types" in served.parameters["properties"]
+    get_data = listed["get_data"]
+    assert set(get_data.input_schema["properties"]) == set(served.parameters["properties"]) - {
+        "place_types"
+    }
+    assert "place_types" not in json.dumps([get_data.description, get_data.input_schema])
+    description = get_data.description or ""
+    for named in (
+        "observationAbout_type",
+        "financingProvider_party_kind",
+        "financingRecipient_party_kind",
+        "party, residual, or total",
+    ):
+        assert named in description, named
+
+
+async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> None:
+    """analysis-mcp's own mount keeps `rolling` and `anchor_key` for the harness. The
+    public list has neither, nor a sentence naming one."""
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+
+    async with Client(combined) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+    served = {tool.name: tool for tool in await analysis_server.mcp.list_tools()}
+
+    for name in ROLLING_ARGUMENT_TOOLS:
+        public = json.dumps({"d": listed[name].description, "s": listed[name].input_schema})
+        assert re.search(r"\b(rolling|anchor_key)\b", public) is None, name
+        assert set(listed[name].input_schema["properties"]) == set(
+            served[name].parameters["properties"]
+        ) - {"rolling", "anchor_key"}
+    assert {"rolling", "anchor_key"} <= set(served["growth"].parameters["properties"])
+    assert not {"sum_of", "quotient_of", "get_skill_file", "resolve_anchor"} & listed.keys()
+    assert listed["compare"].input_schema["properties"]["operation"]["enum"] == [
+        "difference",
+        "sum",
+    ]
+    assert listed["share_of"].input_schema["properties"]["operation"]["enum"] == [
+        "share",
+        "quotient",
+    ]
 
 
 _KNOWN_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
@@ -1032,18 +1287,35 @@ LIMIT_S = 0.5
 _CLIENT_TIMEOUT_S = 10
 
 _ARTIFACT_URI = f"dfo://artifact/spec_{'5' * 32}/cv_1/sha256:{'1' * 64}"
-_UNSTORED_SPEC = "spec_" + "5" * 32
+# A spec the definition store does not hold, and apis' registry answer for it
+# (`GET /api/datasets/{id}/options`), which a public `get_data` reads to choose the
+# type columns it always asks for.
+_UNSTORED_IDENTITY = {
+    "identity_version": "spec1",
+    "shape": {"id": "LimitTestShape", "kind": "stat_var"},
+    "entities": {"reporter": ["country/KEN"]},
+    "facets": {},
+    "requested_window": {"kind": "all"},
+    "slots": [],
+}
+_UNSTORED_SPEC = spec_id_for(canonicalize(_UNSTORED_IDENTITY))
+_REGISTRY_DEFINITION = {
+    "definition": {"schema_version": 1, "spec_id": _UNSTORED_SPEC, "identity": _UNSTORED_IDENTITY}
+}
 
 
 class _StalledUpstream:
-    """apis holding every request until `release` is set, recording the path of
-    each request whose wait was cancelled. Once released, it answers 400."""
+    """apis holding every request but a registry read until `release` is set,
+    recording the path of each request whose wait was cancelled. Once released,
+    it answers 400."""
 
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.cancelled: list[str] = []
 
     async def handler(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.endswith("/options"):
+            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -1246,6 +1518,8 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
                 - poll_time_left_s
             )
             return httpx2.Response(202, json={"operation": operation})
+        if request.url.path.endswith("/options"):
+            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         assert request.url.path == operation["poll"]
         return httpx2.Response(200, json={"operation": operation})
 
@@ -1698,7 +1972,7 @@ async def test_a_presentation_refusal_records_its_code_with_or_without_a_view(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
 ) -> None:
-    """presentation-mcp names its code `error` in `structuredContent`, and an MCP
+    """presentation-mcp names its code `code` in `structuredContent`, and an MCP
     Apps host gets a notice view there instead. The span and the log line name
     the code either way: the platform's `not_found` is the caller's to correct,
     and `transient_unavailable`, a platform the assembler could not reach, is
@@ -1724,7 +1998,7 @@ async def test_a_presentation_refusal_records_its_code_with_or_without_a_view(
 
     for result in (revised, described):
         assert result.is_error is True
-        assert ("error" in (result.structured_content or {})) is not apps_host
+        assert ("code" in (result.structured_content or {})) is not apps_host
     assert langfuse_observations == [
         (
             "combined mcp tools/call write_component",

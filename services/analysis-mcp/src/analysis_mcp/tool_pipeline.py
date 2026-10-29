@@ -212,11 +212,17 @@ async def store_result_and_render(
     )
 
 
-async def run_on_runner(op_spec: OpSpecVariant, *, anchor_key: str | None = None) -> ToolResult:
+async def run_on_runner(
+    op_spec: OpSpecVariant,
+    *,
+    anchor_key: str | None = None,
+    refine: Callable[[ToolRefusal], ToolRefusal] | None = None,
+) -> ToolResult:
     """The reply every registered verb returns for `op_spec`, computed by the runner.
     A rolling call's `anchor_key` sends the roots of its anchor record beside the
     tree (`runner_tree.verb_tree`), and its answer is checked against them
-    (`runner_client.run_tree`).
+    (`runner_client.run_tree`). `refine`, when given, rewrites a runner refusal
+    before it is returned.
 
     `structured_content` is the summary's `VerbResult` fields and `content` the
     digest rendered from its facts, as the in-process tools built both. A frame
@@ -228,7 +234,7 @@ async def run_on_runner(op_spec: OpSpecVariant, *, anchor_key: str | None = None
         return to_tool_result(tree)
     summary = await run_tree(tree.node, anchor=tree.anchor, refs_by_root=tree.refs_by_root)
     if isinstance(summary, ToolRefusal):
-        return to_tool_result(summary)
+        return to_tool_result(summary if refine is None else refine(summary))
     return ToolResult(
         content=render_summary_digest(summary),
         structured_content=summary.verb_result().model_dump(mode="json"),

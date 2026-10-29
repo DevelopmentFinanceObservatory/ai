@@ -166,6 +166,8 @@ COMPILER_PROVABLE_CODES = frozenset(
         "role_ambiguous",
         "op_spec_invalid",
         "request_invalid",
+        # The compiler writes every frame argument as a full pair.
+        "frame_ref_incomplete",
         "operation_uncovered",
         "join_no_common_key_columns",
         "filter_predicate_type_mismatch",

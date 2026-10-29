@@ -75,7 +75,7 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frames,
 )
 from analysis_mcp.identity import OP_SPEC_HASH_PATTERN, canonicalize_op_spec
-from analysis_mcp.op_spec import PinnedUnit, QuotientOfOpSpec
+from analysis_mcp.op_spec import FrameRefArgument, PinnedUnit, QuotientOfOpSpec
 from analysis_mcp.settings import Settings
 from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, left_out_keys, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -343,22 +343,24 @@ def _quotient_step(op_spec: QuotientOfOpSpec, result: QuotientOfResult, *, trace
 @holds_input_rows
 async def quotient_of(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The numerator's {spec_id, content_version} pair, naming a materialised "
                 "frame or a prior verb result. Obtained from get_data's or a prior verb's "
-                "own digest -- never invented."
+                "own digest -- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],
     denominator_frame_ref: Annotated[
-        dict[str, str] | None,
+        FrameRefArgument | None,
         Field(
             default=None,
             description=(
                 "The denominator's frame_ref. Omit to divide two slices of the same "
-                "frame_ref, narrowed by numerator_entity/denominator_entity instead."
+                "frame_ref, narrowed by numerator_entity/denominator_entity instead. "
+                "A bare spec_id also works: the server fetches the data itself."
             ),
         ),
     ] = None,

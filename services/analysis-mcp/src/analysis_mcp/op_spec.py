@@ -22,7 +22,8 @@ predicates, closed to `OrderedThresholdPredicate`, `CategoryMatchPredicate` and
 `frame_ref` is `common.materialisation.FrameRef`: one pair type,
 `{spec_id, content_version}`, naming either a Datasets snapshot or a prior
 toolkit result -- see that model's own docstring for the two families it
-accepts.
+accepts. A tool declares each frame argument as `FrameRefArgument`, whose
+`content_version` is optional.
 
 A period can be stated as rolling. The op-spec keeps the literal period
 (`window_start`, `window_end`, a threshold's `value`), which is all an engine
@@ -111,6 +112,15 @@ class Verb(StrEnum):
     QUOTIENT_OF = "quotient_of"
 
 
+@with_config(ConfigDict(extra="forbid"))
+class FrameRefArgument(TypedDict):
+    """A frame argument as a tool declares it: `spec_id`, and `content_version`
+    when the caller holds it (`verbs.frame_ref_incomplete`)."""
+
+    spec_id: str
+    content_version: NotRequired[str]
+
+
 class RollingRef(BaseModel):
     """A period stated relative to the latest period of the data.
 
@@ -185,8 +195,8 @@ class RootPopulation(BaseModel):
 
 
 class PairingPopulation(BaseModel):
-    """The series a keyed verb (`share_of` or `quotient_of` with
-    `denominator_by`, `join` with `join_keys`) pairs key by key.
+    """The series a keyed verb (`share_of` with `denominator_by`, `join` with
+    `join_keys`) pairs key by key.
 
     `pair` holds the populations of the verb's two sides, left then right,
     each flat or pairing. `keys` maps each key column of the left side's frame
