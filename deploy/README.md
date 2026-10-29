@@ -251,6 +251,56 @@ Oldest frame object: 23.0 days (written 2026-09-14T00:01:00Z)
 
 The first number is the frames whose cards can be refreshed after the bucket's objects are deleted. Every frame under the second is listed above with its reason, and a card drawn from one of them cannot be refreshed. A `conflict` whose detail is `recipe_requires_matching_normal_form_hash` or `recipe_requires_matching_replay_key` means apis holds another recipe for the pair. The last line is the age of the oldest object the walk saw: a restored 30-day rule deletes every object older than 30 days on its next pass.
 
+## Bound refs migration
+
+`python -m harness.bound_refs_migration` rewrites the `_bound_refs` of every spec block in the session store from a mapping of entity text to refs into the list of `BoundEntity` rows `compiler.sources.source_from_spec_block` reads. A block still holding the mapping reads as no source, so a conversation's earlier sources lose their entity refs on its next turn. Run it against each environment's store as that environment moves to the first release that writes the list. The module docstring describes where the blocks sit and how each entry converts.
+
+The job reads the store from the settings the service uses: `DATABASE_URL`, or `SESSION_STORE_INSTANCE_CONNECTION_NAME`, `SESSION_STORE_DATABASE` and `SESSION_STORE_RUNTIME_DB_USER`. It exits 2 when none is set. On dev and production the only database user is the `ai` service's runtime service account, connecting over IAM auth, and the instance is reachable only through the service's PSC network, so the job runs as a Cloud Run job execution on the release's image, under that service account, on that network. A workstation cannot reach it.
+
+```
+uv run --package harness python -m harness.bound_refs_migration            # dry run, the default
+uv run --package harness python -m harness.bound_refs_migration --apply
+```
+
+A dry run reads every session and writes nothing. `--apply` writes each changed session's state in one statement that matches only while the session's `update_time` is the one read, and keeps that `update_time`, so it never overwrites a concurrent append and an instance holding the session appends on. A run can be repeated: a converted block reads as `already_list` on the next one. The report counts sessions and blocks, each outcome by the state key that held the block, and the sessions written. Exit status is 0 when every change was written, and 1 when a session changed between the job's read and its write and was left for a rerun.
+
+For production, with `REGION`, `PROJECT_ID`, `AR_REPO` and `SERVICE_AI` set to the `production` Environment's values and `SHA` to the commit being released:
+
+1. Build the release image and push it to production's registry:
+
+   ```
+   IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/dfo-ai:$SHA"
+   git checkout "$SHA"
+   docker buildx build --platform=linux/amd64 -f deploy/Dockerfile.ai -t "$IMAGE" --push .
+   ```
+
+1. Create a job on that image with the service's identity, network and session store settings:
+
+   ```
+   SA=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+     --format='value(spec.template.spec.serviceAccountName)')
+   ENV=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" --format=json \
+     | jq -r '[.spec.template.spec.containers[0].env[] | select(.name | startswith("SESSION_STORE_")) | "\(.name)=\(.value)"] | join(",")')
+   gcloud run jobs deploy "$SERVICE_AI-bound-refs" --image="$IMAGE" --region="$REGION" --project="$PROJECT_ID" \
+     --service-account="$SA" --network="$SERVICE_AI-psc" --subnet="$SERVICE_AI-psc-subnet" \
+     --vpc-egress=private-ranges-only --set-env-vars="$ENV" --max-retries=0 --task-timeout=1800s \
+     --command=python --args=-m,harness.bound_refs_migration
+   ```
+
+1. Execute the dry run and read its counts in the execution's log, then apply:
+
+   ```
+   gcloud run jobs execute "$SERVICE_AI-bound-refs" --region="$REGION" --project="$PROJECT_ID" --wait
+   gcloud run jobs execute "$SERVICE_AI-bound-refs" --region="$REGION" --project="$PROJECT_ID" --wait \
+     --args=-m,harness.bound_refs_migration,--apply
+   ```
+
+1. Deploy the release. The old revision keeps writing the mapping until it drains, so once it has, execute the `--apply` run again. It converts only the blocks written since the first run.
+
+1. Delete the job: `gcloud run jobs delete "$SERVICE_AI-bound-refs" --region="$REGION" --project="$PROJECT_ID" --quiet`.
+
+The person running these needs to create and execute Cloud Run jobs in the project (`roles/run.developer`), act as the runtime service account (`roles/iam.serviceAccountUser` on it), and push to the registry. The job's own identity needs nothing the service does not already hold.
+
 ## Langfuse export
 
 `python -m harness.langfuse_export` loads the Langfuse observations of one environment into the BigQuery table `observations`, day-partitioned on `start_time`. It runs as the Cloud Run job named by `JOB_LANGFUSE_EXPORT` on this image, and `build-deploy.yml` points that job at each new image in an Environment that sets the var. It reads these settings from the environment or `.env` and exits 2 naming any that is unset:
