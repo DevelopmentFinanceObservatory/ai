@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import rfc8785
+from compiler.surface import ToolSchema, ToolSurfaceUnavailableError
 from google.adk.tools.tool_context import ToolContext
 from planner.operations import (
     AggregateOperation,
@@ -80,7 +81,7 @@ from planner.plan import (
     SumOfRequirement,
     inputs_of,
 )
-from planner.tool_results import Action, ProblemCode
+from planner.tool_results import Action, Outcome, ProblemCode, problem
 
 from translator.discovery import (
     current_draft,
@@ -98,18 +99,19 @@ from translator.referral import ReferralKind
 # does not cover.
 MAX_ROUNDS = 4
 
-# The translator's core: the three functions this loop drives directly,
-# bypassing ADK's model-turn dispatch. `discover_source` and
-# `propose_operations` are async (they call the tool surface);
-# `return_to_planner` is not.
+# The translator's core: the functions this loop drives directly, bypassing
+# ADK's model-turn dispatch. `discover_source`, `propose_operations` and
+# `list_tools` are async (they call the tool surface); `return_to_planner`
+# is not.
 DiscoverSource = Callable[..., Awaitable[dict[str, object]]]
 ProposeOperations = Callable[..., Awaitable[dict[str, object]]]
 ReturnToPlanner = Callable[..., dict[str, object]]
+ListTools = Callable[[], Awaitable[list[ToolSchema]]]
 
 
 @dataclass(frozen=True)
 class TranslatorCore:
-    """The translator's three core functions.
+    """The translator's core functions, and the listing of the surface they call.
 
     Built once by `translator.tool` and closed over by the translation
     `propose_plan` runs (`translator.tool.build_translate`).
@@ -118,6 +120,7 @@ class TranslatorCore:
     discover_source: DiscoverSource
     propose_operations: ProposeOperations
     return_to_planner: ReturnToPlanner
+    list_tools: ListTools
 
 
 # The session-state slot holding `_failure_fingerprint` of every translation
@@ -626,7 +629,12 @@ def _uncompiled(
 
 
 async def _propose_until_settled(
-    core: TranslatorCore, tool_context: ToolContext, *, plan: Plan, discovered: dict[str, str]
+    core: TranslatorCore,
+    tool_context: ToolContext,
+    *,
+    plan: Plan,
+    discovered: dict[str, str],
+    schemas: list[ToolSchema],
 ) -> dict[str, object]:
     """Build and propose a translation, following `_compile_failure_action` up to `MAX_ROUNDS`.
 
@@ -635,10 +643,14 @@ async def _propose_until_settled(
     `_failure_fingerprint` failed before in this session closes marked
     `repeated`. Only a compile failure counts towards the guard: a transient
     failure repeats legitimately.
+    Every round compiles against `schemas`, the surface as `run_translate`
+    listed it.
     """
     for _round in range(MAX_ROUNDS):
         translation = build_translation(plan, discovered)
-        result = await core.propose_operations(translation=translation, tool_context=tool_context)
+        result = await core.propose_operations(
+            translation=translation, tool_context=tool_context, schemas=schemas
+        )
         if result.get("outcome") == "ok":
             return result
 
@@ -673,7 +685,8 @@ async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> d
     """Run the translator's whole discover-then-compile loop without a model turn.
 
     Drives `discover_source` for every dataset requirement, then
-    `propose_operations`, following each step's own `action`. It runs on
+    `propose_operations`, following each step's own `action`, every round
+    against one listing of the surface (`TranslatorCore.list_tools`). It runs on
     a plan with no referral pending, since `propose_plan` clears the last one
     when it records the plan it translates.
 
@@ -704,4 +717,16 @@ async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> d
     if isinstance(resolved, _Stopped):
         return resolved.result
 
-    return await _propose_until_settled(core, tool_context, plan=plan, discovered=resolved)
+    # Listed once for every proposal round. A surface that cannot be listed
+    # refers the plan as `propose_operations` refers it.
+    try:
+        schemas = await core.list_tools()
+    except ToolSurfaceUnavailableError as exc:
+        return _uncompiled(
+            core,
+            tool_context,
+            problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED),
+        )
+    return await _propose_until_settled(
+        core, tool_context, plan=plan, discovered=resolved, schemas=schemas
+    )

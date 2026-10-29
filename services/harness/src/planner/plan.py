@@ -47,7 +47,8 @@ import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
@@ -1980,6 +1981,17 @@ def _check_asks_accounted(
         raise AsksUnaccountedError(asks=asks, uncovered=uncovered, repeated=repeated)
 
 
+class DecisionsUncitedError(ValueError):
+    """A plan stating requirements makes decisions none of them cites.
+
+    `slots` are those decisions' slots, sorted (`check_references`).
+    """
+
+    def __init__(self, slots: Iterable[str]) -> None:
+        self.slots = tuple(sorted(slots))
+        super().__init__(f"no evidence requirement cites the decisions {list(self.slots)!r}")
+
+
 class WholeIsItsMemberError(ValueError):
     """A share or quotient answering an ask that totals across a party divides by its own members of that party.
 
@@ -2326,6 +2338,53 @@ class AnswerMode(TitlelessEnum):
 
     SERIES = "series"
     COMPUTED = "computed"
+
+
+def check_references(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    slots: Sequence[str],
+    declines: Iterable[str],
+    made: Collection[str] | None,
+) -> None:
+    """Reject a plan's parts that do not name each other once each.
+
+    Slots (`slots`), declines by key (`declines`) and requirement ids are
+    unique, so a citation is unambiguous. When `made`, every slot the plan
+    makes, is given, every citation names one of them. Once `requirements`
+    holds any, a requirement cites each of `slots` (`DecisionsUncitedError`),
+    and every input a requirement reads names one of `requirements`, with no
+    cycle.
+
+    `Plan` validation passes every decision as both `slots` and `made`.
+    `propose_plan` checks the model's drafts the same way before any Search
+    read the plan waits on (`submission.service._draft_unreferenced`), since
+    none of these rules reads a pin.
+
+    Raises:
+        DecisionsUncitedError: If a decision of `slots` is cited by none of
+            `requirements`.
+        ValueError: If any other rule is broken.
+    """
+    _reject_repeats(slots, what="decision slot")
+    _reject_repeats(declines, what="decline")
+    _reject_repeats(
+        [requirement.id for requirement in requirements], what="evidence requirement id"
+    )
+    cited = {
+        decision_id for requirement in requirements for decision_id in requirement.decision_ids
+    }
+    if made is not None:
+        unknown = sorted(cited - set(made))
+        if unknown:
+            raise ValueError(
+                f"evidence requirements cite decisions the plan does not make: {unknown!r}"
+            )
+    if requirements:
+        uncited = set(slots) - cited
+        if uncited:
+            raise DecisionsUncitedError(uncited)
+    _check_reads_resolve({r.id: r for r in requirements})
 
 
 def _check_reads_resolve(requirements_by_id: Mapping[str, EvidenceRequirement]) -> None:
@@ -4365,7 +4424,7 @@ class Plan(StrictModel):
         """Reject a plan whose parts do not agree with each other.
 
         Slots, requirement ids and declines (by code and ask) are unique, so a
-        citation is unambiguous.
+        citation is unambiguous (`check_references`).
         Every `decision_ids` entry names a decision the plan makes, and once
         the plan states any requirement, every decision is cited by one: a
         decision no requirement rests on is either a decision about nothing or
@@ -4401,27 +4460,12 @@ class Plan(StrictModel):
         its text (`_naming_origins`).
         """
         slots = [decision.slot for decision in self.decisions]
-        _reject_repeats(slots, what="decision slot")
-        _reject_repeats([decline.key for decline in self.declined], what="decline")
-        _reject_repeats(
-            [requirement.id for requirement in self.evidence_requirements],
-            what="evidence requirement id",
+        check_references(
+            self.evidence_requirements,
+            slots=slots,
+            declines=[decline.key for decline in self.declined],
+            made=slots,
         )
-        cited = {
-            decision_id
-            for requirement in self.evidence_requirements
-            for decision_id in requirement.decision_ids
-        }
-        unknown = sorted(cited - set(slots))
-        if unknown:
-            raise ValueError(
-                f"evidence requirements cite decisions the plan does not make: {unknown!r}"
-            )
-        if self.evidence_requirements:
-            uncited = sorted(set(slots) - cited)
-            if uncited:
-                raise ValueError(f"no evidence requirement cites the decisions {uncited!r}")
-        _check_reads_resolve({r.id: r for r in self.evidence_requirements})
         # The model's own requirements: a copy the split adds reads copies of a
         # whole's part.
         copied = copy_origins(self.rolling_copies)
@@ -6079,6 +6123,30 @@ def recorded_identity(spec_id: str) -> RecordedDefinition | None:
     `spec_id`; `None` outside a conversation or when none recorded one."""
     lookup = current_recorded_identity.get()
     return lookup(spec_id) if lookup is not None else None
+
+
+@contextmanager
+def definitions_on_record(definitions: Mapping[str, RecordedDefinition]) -> Iterator[None]:
+    """Put `definitions`, by spec_id, on record inside the block (`recorded_identity`).
+
+    Each is looked up before what the conversation recorded. A plan card
+    switch (`harness.graph.switch`) puts the datasets Search compiled for it
+    on record while the plan is revised, since the conversation records a
+    search only once the node that made it yields.
+    """
+    outer = current_recorded_identity.get()
+
+    def lookup(spec_id: str) -> RecordedDefinition | None:
+        found = definitions.get(spec_id)
+        if found is None and outer is not None:
+            return outer(spec_id)
+        return found
+
+    token = current_recorded_identity.set(lookup)
+    try:
+        yield
+    finally:
+        current_recorded_identity.reset(token)
 
 
 class _ShownDefinition(NamedTuple):

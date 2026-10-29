@@ -84,11 +84,12 @@ async def test_a_whole_whose_kept_sets_cannot_be_read_is_refused_unposted(
     block = _with_groups(us_2023_block("health"), {role: group})
     save_pin_sources(state, {block["spec_id"]: PinSource(block=block, settled=True)})
 
-    refused = await planner_agent.compile_whole(
+    read = await planner_agent.compile_whole(
         cast(ToolSurface, surface),
         Realignment(block["spec_id"], (), _WHOLE, _WHOLE, whole_axis=axis),
         state=state,
     )
+    refused = read(state)
 
     if posted is not None:
         (call,) = surface.calls
@@ -125,11 +126,12 @@ async def test_a_basis_compile_whose_sets_cannot_be_read_is_refused_unposted(
     )
     save_pin_sources(state, {TOTAL: PinSource(block=block, settled=True)})
 
-    refused = await planner_agent.compile_on_basis(
+    read = await planner_agent.compile_on_basis(
         cast(ToolSurface, surface),
         Realignment(TOTAL, ("measure_basis:gross",), "total", "share"),
         state=state,
     )
+    refused = read(state)
 
     if posted is not None:
         (call,) = surface.calls
@@ -169,9 +171,10 @@ async def test_a_compile_answered_with_a_shown_spec_id_leaves_it_as_shown(
         state, {origin["spec_id"]: PinSource(block=origin, settled=True), compiled: shown}
     )
 
-    refused = await planner_agent.compile_on_basis(
+    read = await planner_agent.compile_on_basis(
         cast(ToolSurface, surface), realignment, state=state
     )
+    refused = read(state)
 
     assert refused is None
     (held,) = aligned_pins(state)
@@ -210,7 +213,7 @@ async def test_a_whole_of_an_aligned_part_reads_the_part_from_its_compile() -> N
         ),
     )
 
-    refused = await planner_agent.compile_whole(
+    read = await planner_agent.compile_whole(
         cast(ToolSurface, WholeCompiles()),
         Realignment(
             part["spec_id"],
@@ -223,6 +226,7 @@ async def test_a_whole_of_an_aligned_part_reads_the_part_from_its_compile() -> N
         ),
         state=state,
     )
+    refused = read(state)
 
     assert refused is None
     whole = next(pin for pin in aligned_pins(state) if pin.whole_axis == "sector")

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import gc
 import inspect
 import json
 import logging
@@ -138,6 +139,7 @@ from planner.plan import (
     is_search_pin,
     load_plan,
     load_plan_rounds,
+    load_unsupported,
     migrate_stored_origins,
     open_window,
     pin_slot_moves,
@@ -213,6 +215,7 @@ from translator.discovery import (
     build_discovery_tools,
     load_log,
     name_pinned_groups,
+    resolving_once,
     save_log,
 )
 from translator.mechanical import build_translation
@@ -235,6 +238,7 @@ from ..basis_alignment import (
     TOTAL_GROSS,
     TOTAL_GROSS_BILATERAL,
     BasisCompiles,
+    Overlapping,
     ProviderCompiles,
     WholeCompiles,
     basis_block,
@@ -5167,9 +5171,31 @@ def test_a_share_whose_inputs_the_user_stated_on_different_bases_keeps_both(
     ) == (HEALTH, TOTAL)
 
 
-async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
+def _realign(spec_id: str, option_id: str, requirement_id: str) -> dict[str, Any]:
+    """One `BASES_UNALIGNED` realignment: `requirement_id`, of the share, wanted on `option_id`."""
+    return {
+        "spec_id": spec_id,
+        "option_ids": [option_id],
+        "requirement_id": requirement_id,
+        "step_id": "share",
+    }
+
+
+@pytest.mark.parametrize(
+    ("option_id", "answered", "calls"),
+    [
+        ("measure_basis:gross", {"outcome": Outcome.OK.value}, ["resolve_definition"]),
+        ("provider:bilateral", {"requirement_id": "total"}, []),
+    ],
+    ids=["compiled-once", "refusal-names-the-first"],
+)
+async def test_two_requirements_on_one_pin_and_basis_compile_it_once(
+    option_id: str, answered: dict[str, Any], calls: list[str]
+) -> None:
     """A refusal asking two requirements pinning the US total to be counted gross
-    compiles the total on gross once, and the next proposal is answered."""
+    compiles the total on gross once, and the next proposal is answered. Asked to
+    count both on a provider scope the total offers no choice on, the refusal
+    names the first requirement, as compiling it alone would."""
     surface = BasisCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"))
@@ -5177,12 +5203,7 @@ async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
         "code": ProblemCode.BASES_UNALIGNED.value,
         "detail": {
             "realign": [
-                {
-                    "spec_id": TOTAL,
-                    "option_ids": ["measure_basis:gross"],
-                    "requirement_id": requirement_id,
-                    "step_id": "share",
-                }
+                _realign(TOTAL, option_id, requirement_id)
                 for requirement_id in ("total", "total_again")
             ]
         },
@@ -5191,8 +5212,122 @@ async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
 
     result = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
 
-    assert result == {"outcome": Outcome.OK.value}
+    if "outcome" in answered:
+        assert result == answered
+    else:
+        assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
+        assert result["detail"]["basis"]["requirement_id"] == answered["requirement_id"]
+    assert surface.tools == calls
+
+
+class _ResolveUnavailable(BasisCompiles):
+    """`BasisCompiles` whose `resolve_definition` is refused as unavailable for now."""
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        self.tools.append(tool.name)
+        return ToolCallResult(
+            is_error=True,
+            structured_content={"code": "upstream_unavailable", "retry_mode": "retry_after_delay"},
+        )
+
+
+async def test_a_compile_after_a_refused_one_records_nothing() -> None:
+    """The US total wanted gross, which Search cannot compile now, and on bilateral
+    aid, a choice the total does not offer. Both compiles run at once, but the
+    proposal is answered the first refusal alone, and the decline the second would
+    record is not recorded, as when the first stops the reads one after another."""
+    surface = _ResolveUnavailable()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"))
+    refusal = {
+        "code": ProblemCode.BASES_UNALIGNED.value,
+        "detail": {
+            "realign": [
+                _realign(TOTAL, "measure_basis:gross", "total"),
+                _realign(TOTAL, "provider:bilateral", "total_bilateral"),
+            ]
+        },
+    }
+
+    result = await with_source_reads(lambda: refusal, state=ctx.state, surface=surface)
+
+    assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
     assert surface.tools == ["resolve_definition"]
+    assert load_unsupported(ctx.state) == frozenset()
+
+
+async def test_a_refused_read_is_answered_before_a_later_one_that_crashed() -> None:
+    """Two reads run at once. The second crashes before the first is refused, and the
+    first's refusal is answered, as when the reads run one after another, with the
+    crash retrieved and none reported unretrieved."""
+    crashed = asyncio.Event()
+    refusal = {"code": ProblemCode.SURFACE_UNAVAILABLE.value}
+
+    async def refused() -> Callable[[Any], dict[str, object] | None]:
+        await crashed.wait()
+        return lambda _: refusal
+
+    async def crashing() -> Callable[[Any], dict[str, object] | None]:
+        crashed.set()
+        raise RuntimeError("the second read crashed")
+
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _, context: unretrieved.append(context))
+    try:
+        result = await planner_agent._held_in_order(
+            [refused(), crashing()], state=_FakeToolContext().state
+        )
+        gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+
+    assert result == refusal
+    assert unretrieved == []
+
+
+class _FirstResolveUnavailable(BasisCompiles):
+    """`BasisCompiles` whose first `resolve_definition` is refused as unavailable for now."""
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        if tool.name == "resolve_definition" and "resolve_definition" not in self.tools:
+            self.tools.append(tool.name)
+            return ToolCallResult(
+                is_error=True,
+                structured_content={
+                    "code": "upstream_unavailable",
+                    "retry_mode": "retry_after_delay",
+                },
+            )
+        return await super().call_tool(tool=tool, arguments=arguments)
+
+
+async def test_a_compile_search_could_not_answer_is_made_again_when_proposed_again() -> None:
+    """In one planner entry, Search cannot compile the US total gross for now, so the
+    proposal is answered as unavailable. Proposed again, the total is compiled again,
+    and the proposal is answered."""
+    surface = _FirstResolveUnavailable()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"))
+    refusal = {
+        "code": ProblemCode.BASES_UNALIGNED.value,
+        "detail": {"realign": [_realign(TOTAL, "measure_basis:gross", "total")]},
+    }
+    answers = iter([refusal, refusal, {"outcome": Outcome.OK.value}])
+
+    with resolving_once(ctx.state):
+        refused = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
+        result = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
+
+    assert refused["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, refused
+    assert result == {"outcome": Outcome.OK.value}
+    assert surface.tools == ["resolve_definition", "resolve_definition"]
 
 
 async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refused(
@@ -6014,6 +6149,72 @@ async def test_a_basis_search_read_in_the_planners_words_is_never_the_users(
     assert _search_context(ctx.state).carried_entries == []
 
 
+async def test_no_pin_check_runs_on_a_pin_a_pending_read_will_move(
+    decision: DecisionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US health aid counted gross as a share of a US total the planner pinned no
+    dataset for. Search pins the total, then the total is compiled gross. The checks
+    reading the pins run once, on the compiled total."""
+    checked: list[str | None] = []
+    check = submission_service._measure_fixed_by_pin
+
+    def spy(drafts: Any, requirements: Any, *args: Any) -> Any:
+        checked.extend(
+            r.source_spec_id
+            for r in requirements
+            if isinstance(r, DatasetRequirement) and r.id == "total"
+        )
+        return check(drafts, requirements, *args)
+
+    monkeypatch.setattr(submission_service, "_measure_fixed_by_pin", spy)
+    surface = BasisCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+
+    result = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert surface.tools == ["search", "resolve_definition"]
+    assert checked == [TOTAL_GROSS]
+
+
+async def test_an_unanswered_referral_is_refused_before_a_search_for_an_unpinned_input(
+    decision: DecisionFactory,
+) -> None:
+    """A recorded share of US health aid in the US total, handed back as
+    unmeetable on the total, which the user has not answered. An amendment
+    restating the total unpinned would need Search to settle it, and is refused
+    for the referral before anything is posted to Search."""
+    surface = BasisCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+    propose = _tools_reading(surface)["propose_plan"].func
+    recorded = await _share_of_health(propose, ctx, decision(), total=None)
+    assert recorded["outcome"] == Outcome.OK.value, recorded
+    _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, "total")
+    searched = list(surface.tools)
+
+    refused = await propose(
+        amends_version=1,
+        decisions=[],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="total",
+                decision_ids=["measure"],
+                measure="US total gross ODA",
+                entities=[Entity(name="United States", role="donor")],
+                period=Period(start=2015, end=2024),
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.REFERRAL_PENDING.value, refused
+    assert surface.tools == searched
+
+
 async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     decision: DecisionFactory,
 ) -> None:
@@ -6070,6 +6271,119 @@ async def test_a_refused_search_for_an_unpinned_input_is_held_only_when_it_settl
     assert refused["code"] == code.value, refused
     assert tuple(pin.status for pin in searched_pins(ctx.state)) == held
     assert load_plan(ctx.state) is None
+
+
+class _FirstSearchUnavailable(BasisCompiles):
+    """`BasisCompiles` refusing the first search whose part names `unavailable` as
+    unavailable for now, recording every search's part text in `parts_searched`."""
+
+    def __init__(self, *, unavailable: str) -> None:
+        super().__init__()
+        self.unavailable = unavailable
+        self.parts_searched: list[str] = []
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        if tool.name != "search":
+            return await super().call_tool(tool=tool, arguments=arguments)
+        (part,) = arguments["parts"]
+        self.parts_searched.append(part["text"])
+        if part["text"] == self.unavailable and self.parts_searched.count(part["text"]) == 1:
+            return ToolCallResult(
+                is_error=True,
+                structured_content={
+                    "code": "upstream_unavailable",
+                    "retry_mode": "retry_after_delay",
+                },
+            )
+        return await super().call_tool(tool=tool, arguments=arguments)
+
+
+async def test_a_reproposal_searches_again_only_for_the_input_search_could_not_answer() -> None:
+    """A refusal asks for three unpinned inputs to be searched for. Search cannot
+    answer the first for now and answers the other two, so the proposal is
+    answered as unavailable and nothing is held. Proposed again in the same
+    invocation, only the first is searched for, and the other two are served the
+    answers Search gave."""
+    surface = _FirstSearchUnavailable(unavailable="a")
+    ctx = _FakeToolContext()
+    refusal = {
+        "code": ProblemCode.BASIS_UNKNOWN.value,
+        "detail": {
+            "search": [
+                {
+                    "requirement_id": text,
+                    "step_id": "share",
+                    "requirement_key": f"key_{text}",
+                    "part": {"text": text},
+                    "asked_roles": [],
+                    "open_roles": [],
+                }
+                for text in ("a", "b", "c")
+            ]
+        },
+    }
+    answers = iter([refusal, refusal, {"outcome": Outcome.OK.value}])
+
+    with resolving_once(ctx.state):
+        refused = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
+        first = list(surface.parts_searched)
+        result = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
+
+    assert refused["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, refused
+    assert sorted(first) == ["a", "b", "c"]
+    assert surface.parts_searched[len(first) :] == ["a"]
+    assert result == {"outcome": Outcome.OK.value}
+    assert sorted(pin.requirement_key for pin in searched_pins(ctx.state)) == [
+        "key_a",
+        "key_b",
+        "key_c",
+    ]
+
+
+class _FirstSearchUnavailableOthersSilent(_FirstSearchUnavailable):
+    """`_FirstSearchUnavailable` whose every other search starts and never answers."""
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        if tool.name == "search" and arguments["parts"][0]["text"] != self.unavailable:
+            await asyncio.Event().wait()
+        return await super().call_tool(tool=tool, arguments=arguments)
+
+
+async def test_the_first_search_refused_is_answered_without_waiting_for_later_ones() -> None:
+    """A refusal asks for two unpinned inputs to be searched for. Search cannot answer
+    the first for now and never answers the second, so the proposal is answered as
+    unavailable as soon as the first is refused."""
+    surface = _FirstSearchUnavailableOthersSilent(unavailable="a")
+    ctx = _FakeToolContext()
+    refusal = {
+        "code": ProblemCode.BASIS_UNKNOWN.value,
+        "detail": {
+            "search": [
+                {
+                    "requirement_id": text,
+                    "step_id": "share",
+                    "requirement_key": f"key_{text}",
+                    "part": {"text": text},
+                    "asked_roles": [],
+                    "open_roles": [],
+                }
+                for text in ("a", "b")
+            ]
+        },
+    }
+
+    with resolving_once(ctx.state):
+        async with asyncio.timeout(1.0):
+            refused = await with_source_reads(lambda: refusal, state=ctx.state, surface=surface)
+
+    assert refused["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, refused
+    assert searched_pins(ctx.state) == ()
 
 
 async def test_a_search_for_an_unpinned_input_takes_only_the_time_the_entry_has_left(
@@ -7222,8 +7536,10 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
 ) -> None:
     """US health aid and US aid to CRS 120 alone, each a share of a declared whole over
     every sector. Both wholes compile to the one CRS total, yet each whole states its
-    own decision, cited by it alone, naming the part it was declared over."""
+    own decision, cited by it alone, naming the part it was declared over. The two
+    compiles run at once, so the proposal waits for the slower alone."""
     surface = WholeCompiles()
+    overlapping = Overlapping(surface)
     ctx = _FakeToolContext()
     narrow = _malaria_block()
     sector = narrow["resolved"]["scope_choices"]["choices"][0]
@@ -7232,7 +7548,7 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     united_states = Entity(name="United States", role="donor")
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        _tools_reading(cast(Any, overlapping))["propose_plan"].func,
         ctx,
         decision(),
         part="health",
@@ -7265,6 +7581,7 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     )
 
     assert result["outcome"] == Outcome.OK.value, result
+    assert (len(surface.calls), overlapping.most) == (2, 2)
     compiled = us_2023_block("whole")["spec_id"]
     assert [pin for rid, pin in _pins(ctx) if rid in (_WHOLE, "narrow_whole")] == [
         compiled,
@@ -7280,6 +7597,31 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     assert len(stated) == 2
     assert "health incl. population and reproductive health" in named[_WHOLE]
     assert "health, CRS 120 alone" in named["narrow_whole"]
+
+
+async def test_a_plan_its_own_rules_refuse_makes_no_read_it_would_wait_on(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid as a share of a declared whole, with a decision no requirement
+    cites. The whole needs compiling before the plan can record, and the plan breaks
+    a rule that holds whatever it pins, so it is refused for that rule and nothing
+    is posted to Search."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"))
+    uncited = decision(slot="denominator_source", description="Which total?")
+    propose = _tools_reading(surface)["propose_plan"].func
+
+    async def with_uncited(**arguments: Any) -> Any:
+        return await propose(
+            **{**arguments, "decisions": [*arguments["decisions"], *drafts([uncited])]}
+        )
+
+    result = await _us_2023(with_uncited, ctx, decision(), part="health", whole=None, declared=True)
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert result["detail"] == {"uncited": ["denominator_source"]}
+    assert surface.calls == []
 
 
 def _uk_total(spec_id: str) -> dict[str, Any]:
@@ -8239,8 +8581,17 @@ async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_cou
         assert stated.rationale.count(label) == 1, (label, stated.rationale)
 
 
+@pytest.mark.parametrize(
+    "cited",
+    [
+        pytest.param((), id="difference-uncited"),
+        # The comparison cites the difference decision code writes for it, so the
+        # check made before any Search read takes the slot as one code writes.
+        pytest.param((f"bases_differ_{_COMPARE}",), id="difference-cited"),
+    ],
+)
 async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_counted_on_once(
-    decision: DecisionFactory,
+    decision: DecisionFactory, cited: tuple[str, ...]
 ) -> None:
     """US total ODA counted net set against the same total counted in grant
     equivalents, both bases in the user's words. The card names each input by
@@ -8279,7 +8630,7 @@ async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_cou
             *datasets,
             ComparisonRequirement(
                 id=_COMPARE,
-                decision_ids=["measure"],
+                decision_ids=["measure", *cited],
                 minuend=RequirementSide(input_id="net"),
                 subtrahend=RequirementSide(input_id="grant_equivalent"),
             ),
@@ -8291,6 +8642,7 @@ async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_cou
     plan = load_plan(ctx.state)
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat == "bases_differ"]
+    assert stated.slot in plan.requirement(_COMPARE).decision_ids
     pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks.values()}
     words = plan_words(plan, pinned=_by_requirement(plan, pinned))
     for requirement_id, block in blocks.items():
@@ -9215,11 +9567,12 @@ async def test_a_whole_compile_names_why_it_could_not_read_its_part(
     pin = us_2023_block("health")["spec_id"]
     save_pin_sources(ctx.state, {pin: source} if source is not None else {})
 
-    refused = await planner_agent.compile_whole(
+    read = await planner_agent.compile_whole(
         cast(ToolSurface, surface),
         Realignment(pin, (), _WHOLE, _WHOLE, whole_axis=axis),
         state=ctx.state,
     )
+    refused = read(ctx.state)
 
     assert refused is not None
     assert refused["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value
@@ -12120,6 +12473,39 @@ def test_a_user_decision_stands_until_the_user_speaks_again(
         **patches[route], amends_version=first["version"], tool_context=ctx
     )
     assert landed["outcome"] == Outcome.OK.value, landed
+
+
+def test_a_user_decision_restated_and_left_uncited_is_refused_as_dropped(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A patch restating the user's decision as they made it and leaving it uncited
+    drops it, so it is refused as dropped, sending the planner to the user, before
+    it is refused for an uncited draft."""
+    dataset, derived = requirements
+    cited = dataset.model_copy(update={"decision_ids": ("measure", "window")})
+    user_window = _period_decision(fixes=["period"], resolved_by="user")
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[*drafts([decision()]), user_window],
+        evidence_requirements=[cited, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value
+    _recorded(ctx, first)
+
+    refused = tools["propose_plan"].func(
+        decisions=[user_window],
+        evidence_requirements=[cited.model_copy(update={"decision_ids": ("measure",)})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
+    assert refused["detail"] == _DROPPED
+    assert refused["action"] == {"call": "adk_request_input"}
 
 
 def _typed(text: str, *, branch: str | None = None) -> Event:

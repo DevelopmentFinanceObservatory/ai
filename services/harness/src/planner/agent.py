@@ -46,7 +46,7 @@ import asyncio
 import copy
 import functools
 import logging
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
@@ -107,6 +107,7 @@ from translator.discovery import (
     SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
+    answered_once,
     call_within_entry,
     load_log,
     refusal_retryable,
@@ -1413,12 +1414,24 @@ def _first_year_unreadable(
     )
 
 
+# A read of a source, made: applied to the session state, it makes the read's
+# writes and answers the refusal the proposal is given, or `None` once the
+# read is held. `with_source_reads` makes the reads one refusal asks for at
+# once and applies them in order, so a read after a refused one writes nothing.
+type SourceRead = Callable[[SessionState], dict[str, object] | None]
+
+
+def _refusing(refused: dict[str, object]) -> SourceRead:
+    """The read answering `refused`, writing nothing."""
+    return lambda _: refused
+
+
 async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
     surface: ToolSurface,
     realignment: Realignment,
     *,
     state: SessionState,
-) -> dict[str, object] | None:
+) -> SourceRead:
     """Compile `realignment`'s pin on its calculation's options and hold the pin Search answers.
 
     Posts the pin's base identity with its scope entries and each option, on
@@ -1448,11 +1461,13 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     timeout, above data-mcp's resubmit budget, within the planner entry's
     time left.
 
-    Returns `None` once the pin is held, or the refusal the proposal
-    answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
-    `OPERATION_UNSUPPORTED` when it refuses the options or answers with no
-    one dataset, or when what it posts of the part's entity groups is not
-    readable, since a resubmit posted without them can bind another population.
+    `state` is read; the writes are made when the read returned is applied
+    (`SourceRead`). It answers `None` once the pin is held, or the refusal
+    the proposal answers: `SURFACE_UNAVAILABLE` when Search did not answer
+    and can later, `OPERATION_UNSUPPORTED` when it refuses the options or
+    answers with no one dataset, or when what it posts of the part's entity
+    groups is not readable, since a resubmit posted without them can bind
+    another population.
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -1466,14 +1481,14 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     )
     axes = [option_axis(option_id) for option_id in realignment.option_ids]
 
-    def unservable(reason: str) -> dict[str, object]:
-        return basis_unservable(
+    def unservable(reason: str) -> SourceRead:
+        return lambda into: basis_unservable(
             spec_id=realignment.spec_id,
             option_ids=realignment.option_ids,
             requirement_id=realignment.requirement_id,
             step_id=realignment.step_id,
             reason=reason,
-            record=lambda operation: record_unsupported(state, operation),
+            record=lambda operation: record_unsupported(into, operation),
             proposer=PROPOSE_PLAN_PROPOSER,
         )
 
@@ -1508,7 +1523,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
         )
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
-            return _basis_uncompiled(realignment, str(exc))
+            return _refusing(_basis_uncompiled(realignment, str(exc)))
         return unservable(
             f"Search does not count {realignment.requirement_id!r}'s dataset the way its "
             f"calculation's other inputs share ({exc.code or 'refused'})"
@@ -1522,17 +1537,20 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
         )
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))
-    save_aligned_pin(
-        state,
-        AlignedPin(
-            origin=realignment.spec_id,
-            option_ids=realignment.option_ids,
-            spec_id=spec_id,
-            digest=digest,
-            records_origin=True,
-        ),
-    )
-    return None
+
+    def hold(into: SessionState) -> None:
+        save_aligned_pin(
+            into,
+            AlignedPin(
+                origin=realignment.spec_id,
+                option_ids=realignment.option_ids,
+                spec_id=spec_id,
+                digest=digest,
+                records_origin=True,
+            ),
+        )
+
+    return hold
 
 
 async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
@@ -1540,7 +1558,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     realignment: Realignment,
     *,
     state: SessionState,
-) -> dict[str, object] | None:
+) -> SourceRead:
     """Compile the declared whole `realignment` names from its part, and hold it as a pin.
 
     The part is the pin `realignment.spec_id` and the axis left open
@@ -1582,8 +1600,10 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     `planner.plan.AlignedPin` from the part on that axis and the part's own
     compile, which every whole declaring the part and the axis pins.
 
-    Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
-    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` under a cause
+    `state` is read; the writes are made when the read returned is applied
+    (`SourceRead`). It answers `None` once the pin is held,
+    `SURFACE_UNAVAILABLE` when Search did not answer and can later, or
+    `SHARE_WHOLE_UNDERIVABLE` under a cause
     naming why: the part's pin is not among the datasets shown
     (`part_not_shown`), is shown with no block (`part_block_missing`), holds
     scope choices this release cannot read (`scope_unreadable`), binds
@@ -1600,9 +1620,14 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     """
     part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
 
-    def underivable(reason: str, cause: str = "whole_refused") -> dict[str, object]:
-        return share_whole_underivable(
-            whole_id=realignment.requirement_id, part_spec_id=part_pin, reason=reason, cause=cause
+    def underivable(reason: str, cause: str = "whole_refused") -> SourceRead:
+        return _refusing(
+            share_whole_underivable(
+                whole_id=realignment.requirement_id,
+                part_spec_id=part_pin,
+                reason=reason,
+                cause=cause,
+            )
         )
 
     source = HeldSources.of(state).source_at(
@@ -1645,7 +1670,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         )
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
-            return _basis_uncompiled(realignment, str(exc))
+            return _refusing(_basis_uncompiled(realignment, str(exc)))
         return underivable(
             f"Search does not count {part_pin}'s dataset over every {axis} the way the part is "
             f"counted ({exc.code or 'refused'}): {exc}"
@@ -1669,20 +1694,49 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     }
     digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
-    save_aligned_pin(
-        state,
-        AlignedPin(
-            origin=part_pin,
-            option_ids=(),
-            spec_id=spec_id,
-            digest=digest,
-            whole_axis=axis,
-            part_origin=realignment.part_origin,
-            part_option_ids=realignment.part_option_ids,
-            records_origin=True,
-        ),
-    )
-    return None
+
+    def hold(into: SessionState) -> None:
+        save_aligned_pin(
+            into,
+            AlignedPin(
+                origin=part_pin,
+                option_ids=(),
+                spec_id=spec_id,
+                digest=digest,
+                whole_axis=axis,
+                part_origin=realignment.part_origin,
+                part_option_ids=realignment.part_option_ids,
+                records_origin=True,
+            ),
+        )
+
+    return hold
+
+
+async def run_together[T](calls: Iterable[Awaitable[T]]) -> list[T]:
+    """Each of `calls`' results in order, run at once.
+
+    The first to raise cancels the rest, which are waited for before it is
+    raised, so none is left running.
+    """
+    tasks = [asyncio.ensure_future(call) for call in calls]
+    try:
+        return list(await asyncio.gather(*tasks))
+    finally:
+        await _cancel_and_drain(tasks)
+
+
+async def _cancel_and_drain(tasks: Sequence[asyncio.Future[Any]]) -> None:
+    """Cancel each of `tasks` still running, wait for every one, and retrieve each
+    exception, so none is reported as never retrieved."""
+    running = [task for task in tasks if not task.done()]
+    for task in running:
+        task.cancel()
+    if running:
+        await asyncio.wait(running)
+    for task in tasks:
+        if not task.cancelled():
+            task.exception()
 
 
 def _opened(scope: PartScope, axis: str) -> tuple[dict[str, Any], list[ScopeChoice]]:
@@ -1911,12 +1965,7 @@ def _changed_nothing(
     return dropped.get("cause") == _AXIS_ABSENT or answered.get(str(axis)) == option_id
 
 
-async def pin_by_search(
-    surface: ToolSurface,
-    unpinned: Unpinned,
-    *,
-    state: SessionState,
-) -> dict[str, object] | None:
+async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     """Search for `unpinned`, a calculation's input the planner pinned no dataset for, and hold what Search settles on.
 
     Posts the `search` part the translator's own discovery sends for the
@@ -1933,21 +1982,30 @@ async def pin_by_search(
     `refused` for a refusal, and the next proposal is refused
     (`submission.service._aligned_bases`). The search takes the time the
     translator's own discovery gives one
-    (`translator.discovery.call_within_entry`).
+    (`translator.discovery.call_within_entry`), and is made once an
+    invocation (`translator.discovery.answered_once`), so a read the
+    proposal's other refused search discarded (`with_source_reads`) is not
+    repeated.
 
-    Returns `None` once the search is held, or `SURFACE_UNAVAILABLE` when
+    The holds are made when the read returned is applied (`SourceRead`). It
+    answers `None` once the search is held, or `SURFACE_UNAVAILABLE` when
     Search did not answer, or refused in a way that can succeed later
     (`translator.discovery.refusal_retryable`); nothing is held then, so the
     next proposal searches again.
     """
+    arguments = {"parts": [unpinned.part]}
     try:
-        answer = await call_within_entry(surface, tool=SEARCH, arguments={"parts": [unpinned.part]})
+        answer = await answered_once(
+            SEARCH,
+            arguments,
+            lambda: call_within_entry(surface, tool=SEARCH, arguments=arguments),
+        )
     except ToolSurfaceUnavailableError as exc:
-        return _search_unavailable(unpinned, str(exc))
+        return _refusing(_search_unavailable(unpinned, str(exc)))
     if answer.is_error and refusal_retryable(answer):
         refusal = answer.structured_content or {}
         cause = refusal.get("message") or answer.text or "Search refused it for now"
-        return _search_unavailable(unpinned, str(cause))
+        return _refusing(_search_unavailable(unpinned, str(cause)))
     envelope = None if answer.is_error else (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
     parts = envelope.get("parts") if isinstance(envelope, dict) else None
     part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
@@ -1965,8 +2023,7 @@ async def pin_by_search(
         open_roles=unpinned.open_roles,
     )
     if not isinstance(spec_id, str) or not isinstance(envelope, dict):
-        save_searched_pin(state, searched)
-        return None
+        return lambda into: save_searched_pin(into, searched)
     digest = resolver_digest(cast(dict[str, Any], envelope))
     scope = part_scope(spec_id, digest["spec_block"])
     mark_planner_axes(
@@ -1976,9 +2033,12 @@ async def pin_by_search(
         else (),
     )
     shown = PinSource(block=digest["spec_block"], settled=True, asked_roles=unpinned.asked_roles)
-    save_pin_sources(state, {**pin_sources(state), spec_id: shown})
-    save_searched_pin(state, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
-    return None
+
+    def hold(into: SessionState) -> None:
+        save_pin_sources(into, {**pin_sources(into), spec_id: shown})
+        save_searched_pin(into, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
+
+    return hold
 
 
 def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
@@ -2035,6 +2095,14 @@ async def with_source_reads(
     is asked for once, so a refusal naming one
     is answered as it stands, and inputs sharing a pin and a set of options
     compile it once (`submission.service.Realignment.key`).
+
+    The reads one refusal asks for run at once. Their writes are made in the
+    order the refusal names them, up to the first read refused, whose
+    refusal is answered as soon as it and every read before it are made,
+    and the reads after it are cancelled (`_held_in_order`), so the state is
+    the one reading them one after another leaves. A search the refused read's writes discarded keeps
+    its answer for the invocation (`pin_by_search`), so the next proposal
+    searches only for what was refused.
     """
     while True:
         result = propose()
@@ -2053,23 +2121,48 @@ async def with_source_reads(
             continue
         unpinned = unpinned_wanted(result)
         if unpinned:
-            for item in unpinned:
-                refused = await pin_by_search(surface, item, state=state)
-                if refused is not None:
-                    return refused
+            refused = await _held_in_order(
+                (pin_by_search(surface, item) for item in unpinned), state=state
+            )
+            if refused is not None:
+                return refused
             continue
         wanted = realignments_wanted(result)
         done = {pin.key for pin in aligned_pins(state)}
         keys = [item.key for item in wanted]
         if not wanted or any(key in done for key in keys):
             return result
-        for item, key in zip(wanted, keys, strict=True):
-            if key in done:
-                continue
-            refused = await compile_on_basis(surface, item, state=state)
+        compiles: dict[AlignmentKey, Realignment] = {}
+        for key, item in zip(keys, wanted, strict=True):
+            compiles.setdefault(key, item)
+        refused = await _held_in_order(
+            (compile_on_basis(surface, item, state=state) for item in compiles.values()),
+            state=state,
+        )
+        if refused is not None:
+            return refused
+
+
+async def _held_in_order(
+    reads: Iterable[Awaitable[SourceRead]], *, state: SessionState
+) -> dict[str, object] | None:
+    """Run `reads` at once and apply each to `state` in order, answering the first refused.
+
+    Each read is applied once it and every read before it are made, so a
+    refusal is answered without waiting for the reads after it, which are
+    cancelled. A read that raises raises once every read before it is
+    applied without a refusal, and cancels the reads after it. Every read
+    takes `state` before its first wait, so none reads what another wrote.
+    """
+    tasks = [asyncio.ensure_future(read) for read in reads]
+    try:
+        for task in tasks:
+            refused = (await task)(state)
             if refused is not None:
                 return refused
-            done.add(key)
+        return None
+    finally:
+        await _cancel_and_drain(tasks)
 
 
 def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:

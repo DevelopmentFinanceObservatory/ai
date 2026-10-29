@@ -7,7 +7,15 @@ and that source's stored scope (`harness.turn_records.SearchReading.scope`).
 It posts the scope's base identity with its entries and the switch
 (`harness.scope_choices.switch_entries`) through data-mcp's
 `resolve_definition` (`translator.discovery.resolve_definition`), which
-registers the identity they compile to. The
+registers the identity they compile to. That answer is the switched pin.
+The plan pins it, and its reading and pin source state the dataset over
+the years the question asked for. Admission finds it on record
+(`planner.plan.definitions_on_record`), so where the plan reads it over a
+window of its own, admission copies it over that window
+(`submission.service._window_pins`) and the translation resolves the copy.
+The turn keeps Search's answers
+(`translator.discovery.resolving_once`), so a switch repeating one the
+turn made posts nothing. The
 plan is then revised by the planner seam with no model call
 (`harness.graph.seams.PlannerModel.revise`): each requirement a switched
 row is for pins the compiled source, the decisions follow their pins, and
@@ -58,7 +66,9 @@ from typing import Any, TypedDict, cast
 
 from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
+from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
+from planner.agent import run_together
 from planner.plan import (
     DatasetRequirement,
     Decision,
@@ -68,8 +78,10 @@ from planner.plan import (
     SessionState,
     authored,
     compile_key,
+    definitions_on_record,
     earlier_block,
     exact_codes,
+    identity_on_record,
     is_scope_choice,
     pin_sources,
     plan_revision,
@@ -79,8 +91,14 @@ from planner.plan import (
 )
 from planner.plan import Plan as PlannerPlan
 from planner.tool_results import ProblemCode
+from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
-from translator.discovery import DefinitionNotResolvedError, resolve_definition
+from translator.discovery import (
+    RESOLVED_STATE_PREFIX,
+    DefinitionNotResolvedError,
+    resolve_definition,
+    resolving_once,
+)
 
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
@@ -126,7 +144,9 @@ _RETRYABLE_REVISION_CODES = frozenset(
 )
 
 # The state the planner seam and the translator keep while drafting, which a
-# revision that fails leaves as it found.
+# revision that fails leaves as it found. The parts Search answered this turn
+# (`RESOLVED_STATE_PREFIX`) are not drafting state. Each holds whatever the
+# switch's outcome, so a failed switch keeps them.
 _DRAFTING_PREFIXES = ("planner:", "translator:")
 # The other state a revision writes, which a switch that fails or is stopped
 # puts back too: the plan, and the readings `store_search` stores for the
@@ -213,17 +233,20 @@ def switch_node(
         # ends on any other error leaves as it found.
         before = _restorable_state(ctx)
         try:
-            output = await _unless_stopped(
-                ctx,
-                _switched_plan(
+            # A `resolve_definition` call this turn already made is served its
+            # answer (`translator.discovery.resolving_once`).
+            with resolving_once(cast(SessionState, ctx.state)):
+                output = await _unless_stopped(
                     ctx,
-                    plan,
-                    choice_id=choice_id,
-                    option_id=option_id,
-                    planner=planner,
-                    surface=definition_surface,
-                ),
-            )
+                    _switched_plan(
+                        ctx,
+                        plan,
+                        choice_id=choice_id,
+                        option_id=option_id,
+                        planner=planner,
+                        surface=definition_surface,
+                    ),
+                )
         except SwitchFailedError as exc:
             _restore(ctx, before)
             logger.info(
@@ -334,26 +357,23 @@ async def _switched_plan(
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
     held = HeldSources.of(state)
-    switched = await asyncio.gather(
-        *(
-            _resubmit(
-                surface,
-                pin=target.pin,
-                reading=target.reading,
-                scope=target.reading_scope,
-                entries=[
-                    entry.model_dump(mode="json", exclude_none=True)
-                    for entry in switch_entries(
-                        target.reading_scope, choice=target.choice, option_id=option_id
-                    )
-                ],
-                block=specs.get(target.pin)
+    switched = await run_together(
+        _resubmit(
+            surface,
+            pin=target.pin,
+            reading=target.reading,
+            scope=target.reading_scope,
+            entries=switch_entries(target.reading_scope, choice=target.choice, option_id=option_id),
+            groups=_groups(
+                target.reading,
+                specs.get(target.pin)
                 or _source_block(sources.get(target.pin), target.pin)
                 or _compiled_block(state, target.reading, target.pin),
-                label=label,
-            )
-            for target in targets
+                pin=target.pin,
+            ),
+            label=label,
         )
+        for target in targets
     )
     digests = [_reading_digest(item, axis=axis) for item in switched]
     save_pin_sources(
@@ -368,6 +388,12 @@ async def _switched_plan(
             },
         },
     )
+    shown = pin_sources(state)
+    on_record = {
+        item.spec_id: recorded
+        for item in switched
+        if (recorded := identity_on_record(item.spec_id, shown=shown, end_open=True)) is not None
+    }
     codes = {
         item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
     }
@@ -383,12 +409,15 @@ async def _switched_plan(
         for requirement in by_id.values()
         if isinstance(requirement, DatasetRequirement) and requirement.id in moved_to
     ]
-    revised = await planner.revise(
-        ctx=ctx,
-        prior_plan=plan.model_dump(mode="json"),
-        evidence_requirements=requirements,
-        inherits={item.spec_id: item.pin for item in switched},
-    )
+    # Admission finds each switched dataset on record, so it copies the dataset
+    # over the plan's years.
+    with definitions_on_record(on_record):
+        revised = await planner.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=requirements,
+            inherits={item.spec_id: item.pin for item in switched},
+        )
     if "plan" not in revised:
         refused = revised.get("refused") or {}
         logger.warning("plan switch not revised: %s", refused)
@@ -598,39 +627,26 @@ def _compiled_block(
     return compiled_block(state, compiled.key, pin) if compiled is not None else None
 
 
-async def _resubmit(
-    surface: ToolSurface,
-    *,
-    pin: str,
-    reading: SearchReading,
-    scope: PartScope,
-    entries: list[dict[str, Any]],
-    block: Mapping[str, Any] | None,
-    label: str,
-) -> _Switched:
-    """Post `scope`'s base identity with `entries` through data-mcp's `resolve_definition`.
+def _groups(
+    reading: SearchReading, block: Mapping[str, Any] | None, *, pin: str
+) -> tuple[ResolvedGroup, ...]:
+    """The entity groups a switch of `reading`, pinned as `pin`, posts beside the part,
+    as every resubmit posts them (`compiler.sources.wire_groups`), so Search names
+    them again.
 
-    The same resubmit a compile on another basis posts
-    (`planner.agent.compile_on_basis`), through
-    `translator.discovery.resolve_definition`: the part's entity groups
-    beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
-    so Search names them again. They are `block`'s groups, read for what the
-    resubmit posts alone (`compiler.sources.readable_wire_groups`), where `block`
-    is at hand and names sets that read, else the groups `reading` was resolved
-    with (`SearchReading.entity_groups`) where those read, else none where
-    `block` reads and names none.
+    They are `block`'s groups, read for what the resubmit posts alone
+    (`compiler.sources.readable_wire_groups`), where `block` is at hand and names
+    sets that read, else the groups `reading` was resolved with
+    (`SearchReading.entity_groups`) where those read, else none where `block`
+    reads and names none.
 
     Raises:
         SwitchFailedError: If neither reads: what `block`'s groups post is not
-            readable or there is no `block`, and `reading`'s were not readable when it was
-            stored (`SearchReading.entity_groups_unreadable`) or, beside a block
-            naming sets, it holds none, since the switch would post the part
-            without them. Also if the call does not complete,
-            Search refuses it, or its answer is not one definite part with a scope.
+            readable or there is no `block`, and `reading`'s were not readable when
+            it was stored (`SearchReading.entity_groups_unreadable`) or, beside a
+            block naming sets, it holds none, since the switch would post the part
+            without them.
     """
-    unreadable = SwitchFailedError(
-        "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
-    )
     groups = readable_wire_groups(block) if block is not None else None
     # A block naming no sets says nothing of the reading's, so readable stored sets
     # stand. A block whose sets do not read falls back only to stored sets that
@@ -642,14 +658,42 @@ async def _resubmit(
         groups = reading.entity_groups
     if groups is None:
         logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
-        raise unreadable
+        raise SwitchFailedError(
+            "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
+    return tuple(groups)
+
+
+async def _resubmit(
+    surface: ToolSurface,
+    *,
+    pin: str,
+    reading: SearchReading,
+    scope: PartScope,
+    entries: Sequence[ScopeEntry],
+    groups: Sequence[ResolvedGroup],
+    label: str,
+) -> _Switched:
+    """Post `scope`'s base identity with `entries` through data-mcp's `resolve_definition`.
+
+    `scope` is the reading's, and `entries` the switch's (`switch_entries`). The same
+    resubmit a compile on another basis posts
+    (`planner.agent.compile_on_basis`), through
+    `translator.discovery.resolve_definition`: the part's entity groups
+    beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
+    so Search names them again (`_groups`).
+
+    Raises:
+        SwitchFailedError: If the call does not complete, Search refuses it,
+            or its answer is not one definite part with a scope.
+    """
     try:
         part = await resolve_definition(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
             groups=groups,
-            scope_entries=entries,
+            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
         )
     except DefinitionNotResolvedError as exc:
         logger.info("plan switch not compiled: pin=%s code=%s: %s", pin, exc.code, exc)
@@ -730,9 +774,10 @@ def _pin_source(
 
 def _restorable_state(ctx: Context) -> dict[str, Any]:
     """A copy of the state a switch that fails, is stopped or raises puts back:
-    the drafting state (`_DRAFTING_PREFIXES`) and `_RESTORED_KEYS`."""
+    the drafting state (`_DRAFTING_PREFIXES`, less `RESOLVED_STATE_PREFIX`) and
+    `_RESTORED_KEYS`."""
     state = ctx.state.to_dict()
-    kept = {key: value for key, value in state.items() if key.startswith(_DRAFTING_PREFIXES)}
+    kept = {key: value for key, value in state.items() if _drafting(key)}
     kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}
     return json.loads(json.dumps(kept))
 
@@ -740,10 +785,15 @@ def _restorable_state(ctx: Context) -> dict[str, Any]:
 def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
     """Put the state back as `before` holds it, clearing any drafting key written since."""
     for key in ctx.state.to_dict():
-        if key.startswith(_DRAFTING_PREFIXES) and key not in before:
+        if _drafting(key) and key not in before:
             ctx.state[key] = None
     for key, value in before.items():
         ctx.state[key] = value
+
+
+def _drafting(key: str) -> bool:
+    """Whether `key` is drafting state a failed switch puts back (`_DRAFTING_PREFIXES`)."""
+    return key.startswith(_DRAFTING_PREFIXES) and not key.startswith(RESOLVED_STATE_PREFIX)
 
 
 async def apply_stored_choice(
@@ -810,13 +860,14 @@ async def apply_stored_choice(
             pin=pin,
             reading=reading,
             scope=reading.scope,
-            entries=[
-                entry.model_dump(mode="json", exclude_none=True)
-                for entry in switch_entries(reading.scope, choice=choice, option_id=option_id)
-            ],
-            block=(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin)
-            or _compiled_block(cast(SessionState, ctx.state), reading, pin)
-            or earlier_block(pin),
+            entries=switch_entries(reading.scope, choice=choice, option_id=option_id),
+            groups=_groups(
+                reading,
+                (ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin)
+                or _compiled_block(cast(SessionState, ctx.state), reading, pin)
+                or earlier_block(pin),
+                pin=pin,
+            ),
             label=label,
         )
     except SwitchFailedError as exc:
