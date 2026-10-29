@@ -986,18 +986,17 @@ def _share_divides_by(
 
 def _by_party(plan: Plan, decision: Decision) -> str | None:
     """`GroupBy.ENTITY` in words: by each dimension every aggregate citing
-    `decision` keeps when it groups by entity, the named roles of its input
-    (an open `across` role is summed away, `planner.shapes.aggregated`), and
-    the places named with no role as "each place named". `None` where the
-    aggregates keep different ones, or none cites `decision`."""
+    `decision` keeps when it groups by entity, its input's roles but an open
+    `across` one, which it sums away (`planner.shapes.aggregated`): each
+    named party, a breakdown by its dimension ("sector"), and the places
+    named with no role as "each place named". `None` where the aggregates
+    keep different ones, or none cites `decision`."""
     shapes = frame_shapes(plan)
     kept = _agreed(
         [
             tuple(
                 dict.fromkeys(
-                    role.role
-                    for role in shapes[aggregate.input_id].roles
-                    if not role.open and not role.breakdown
+                    role.role for role in shapes[aggregate.input_id].roles if not role.open
                 )
             )
             for aggregate in _citing(plan, decision, AggregateRequirement)
@@ -1007,6 +1006,16 @@ def _by_party(plan: Plan, decision: Decision) -> str | None:
         return None
     parties = [singular(role) for role in kept if role is not None]
     return f"by {_joined([*parties, *(['each place named'] if None in kept else [])])}"
+
+
+def _by_breakdown(plan: Plan, decision: Decision) -> str | None:
+    """`GroupBy.BREAKDOWN` in words: by the dimension every aggregate citing
+    `decision` reads a breakdown of (`_breakdown_of`), as the step sentence
+    names it; `None` where they read different ones or none."""
+    breakdown = _agreed(
+        [_breakdown_of(r, plan) for r in _citing(plan, decision, AggregateRequirement)]
+    )
+    return f"by {breakdown.dimension.value}" if breakdown is not None else None
 
 
 # The card's words for each value a decision option can fix, so an option the
@@ -1020,8 +1029,8 @@ FIXED_VALUE_WORDS: Mapping[enum.StrEnum, _Words] = {
     Reduction.MAX: _Words("highest value"),
     Reduction.MIN: _Words("lowest value"),
     GroupBy.PERIOD: _Words("by year"),
-    GroupBy.ENTITY: _Words("by each party or place named", _by_party),
-    GroupBy.BREAKDOWN: _Words("by category"),
+    GroupBy.ENTITY: _Words("by each party, place or category kept", _by_party),
+    GroupBy.BREAKDOWN: _Words("by category", _by_breakdown),
     RankDirection.HIGHEST_FIRST: _Words("highest value first"),
     RankDirection.LOWEST_FIRST: _Words("lowest value first"),
     RankAmong.POPULATION: _Words("every member the source holds", _rank_population),

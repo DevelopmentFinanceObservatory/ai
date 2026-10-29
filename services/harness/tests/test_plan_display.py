@@ -2381,8 +2381,11 @@ def test_a_share_option_written_as_its_scope_names_the_denominator(
     ] == shown
 
 
-def _oda_to_kenya(*kenya: Entity, across: tuple[str, ...] = ("donor",)) -> DatasetRequirement:
-    """ODA from every donor (`across`) to `kenya`, the input of a total grouped by entity."""
+def _oda_to_kenya(
+    *kenya: Entity, across: tuple[str, ...] = ("donor",), by_sector: bool = False
+) -> DatasetRequirement:
+    """ODA from every donor (`across`) to `kenya`, broken down by sector when
+    `by_sector`, the input of a total grouped by entity."""
     return DatasetRequirement(
         id="debt",
         decision_ids=["measure"],
@@ -2390,6 +2393,8 @@ def _oda_to_kenya(*kenya: Entity, across: tuple[str, ...] = ("donor",)) -> Datas
         entities=list(kenya),
         across=across,
         period=Period(start=2015, end=2024),
+        stat_vars=StatVarReading.SEPARATE if by_sector else None,
+        breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0) if by_sector else None,
     )
 
 
@@ -2416,19 +2421,25 @@ def _oda_to_kenya(*kenya: Entity, across: tuple[str, ...] = ("donor",)) -> Datas
             ["by donor and recipient", "by year"],
             id="two-parties",
         ),
+        pytest.param(
+            _oda_to_kenya(Entity(name="Kenya", role="recipient"), by_sector=True),
+            ["by recipient and sector", "by sector"],
+            id="party-and-sector",
+        ),
     ],
 )
 def test_a_group_by_option_written_as_entity_names_the_party(
     decision: DecisionFactory, dataset: DatasetRequirement, shown: list[str]
 ) -> None:
     # "entity" reads as what a total grouped by entity keeps: each party
-    # named, and the places named with no role. An open `across` party is
-    # summed away, so it names nothing.
+    # named, a breakdown by its dimension, and the places named with no role.
+    # An open `across` party is summed away, so it names nothing. Over a
+    # breakdown the other option is "breakdown", by the same dimension.
     plan = Plan(
         question="q",
         decisions=[
             decision(
-                options=["entity", "period"],
+                options=["entity", "breakdown" if dataset.breakdown else "period"],
                 chosen="entity",
                 fixes=DecisionFixes(group_by=(GroupBy.ENTITY,)),
             )
