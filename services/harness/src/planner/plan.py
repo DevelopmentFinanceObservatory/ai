@@ -218,6 +218,18 @@ SEEDS_STATE_KEY = "seeds"
 # Unset until a plan pins such a copy.
 WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 
+# The session-state slot holding each pin compiled to put a calculation's
+# inputs on one measure basis or provider scope, or a declared whole over its
+# part (`AlignedPin`), which `submission.service._aligned_bases` reads and
+# `planner.agent.with_source_reads` writes (`submission.service.save_aligned_pin`).
+ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
+
+# The session-state slot holding an `AlignedInput` for every dataset
+# requirement of the plan `planner.agent.propose_plan` last recorded that
+# admission pinned to a compiled pin (`AlignedPin`) in place of the pin it
+# states. Unset until a plan holds one.
+ALIGNMENTS_STATE_KEY = "planner:alignments"
+
 # The session-state slot holding what `planner.agent.propose_plan` read about
 # every year a pinned dataset holds, by the pin's spec_id, as its first year and
 # its rows, or null when Search's answer over no window stated no first year.
@@ -6262,6 +6274,163 @@ def save_pin_sources(state: SessionState, sources: Mapping[str, PinSource]) -> N
     state[PIN_SOURCES_STATE_KEY] = {
         spec_id: source.model_dump(mode="json") for spec_id, source in sources.items()
     }
+
+
+class AlignedPin(StrictModel):
+    """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
+
+    `option_ids` holds one option per axis moved, measure basis or provider
+    scope, sorted (`submission.service.Realignment.option_ids`). `digest` is
+    Search's answer as a search's digest
+    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    as a reading of the conversation.
+
+    A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is
+    the part pinned to `origin` with its choice on `whole_axis` left open
+    and every other choice on the part's options, and moves no option
+    (`option_ids` empty, `submission.service.Realignment.whole_axis`).
+    """
+
+    origin: str
+    option_ids: tuple[str, ...]
+    spec_id: str
+    digest: dict[str, Any]
+    whole_axis: str | None = None
+
+    @property
+    def key(self) -> tuple[str, tuple[str, ...], str | None]:
+        """What this pin was compiled for: its origin, its options and the axis it leaves open."""
+        return self.origin, self.option_ids, self.whole_axis
+
+    @property
+    def block(self) -> Mapping[str, Any] | None:
+        """The spec block Search answered the compile with, `None` where it states none."""
+        block = self.digest.get("spec_block")
+        return block if isinstance(block, Mapping) else None
+
+
+def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
+    """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
+    return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
+
+
+def held_sources(state: SessionState) -> dict[str, PinSource]:
+    """The spec block on record for each spec_id `state` holds one for: the datasets
+    the planner was shown (`pin_sources`), then each compiled pin's
+    (`AlignedPin.block`) the planner was not shown.
+
+    Read for what a spec_id is, its identity, years and codes, which every
+    holder of the spec_id shares. A compiled pin's entry states that block
+    alone, so nothing about how the pin was chosen is read from it.
+    """
+    shown = pin_sources(state)
+    compiled = {
+        pin.spec_id: PinSource(block=dict(block))
+        for pin in aligned_pins(state)
+        if pin.spec_id not in shown and (block := pin.block) is not None
+    }
+    return {**compiled, **shown}
+
+
+class AlignedInput(StrictModel):
+    """A dataset requirement admission pinned to the compiled pin `spec_id` in place of the pin it states.
+
+    `submission.service._aligned_bases` derives it on every proposal, from
+    the requirement as the planner states it and the pins compiled so far,
+    as `key` names the compile (`AlignedPin.key`). The recorded plan pins
+    `spec_id`. `stated_pin` and the source fields are the requirement's as
+    stated, which the pin to `spec_id` cleared (`repinned`), so the
+    requirement reads as stated again (`unaligned_requirement`).
+    """
+
+    requirement_id: str
+    spec_id: SpecId
+    origin: str
+    option_ids: tuple[str, ...] = ()
+    whole_axis: str | None = None
+    stated_pin: SpecId | None
+    source: str | None = None
+    source_ref: str | None = None
+    source_exclude: bool = False
+    source_code: str | None = None
+
+    @property
+    def key(self) -> tuple[str, tuple[str, ...], str | None]:
+        """The compile the requirement is pinned to (`AlignedPin.key`)."""
+        return self.origin, self.option_ids, self.whole_axis
+
+
+def aligned_input(requirement: DatasetRequirement, pin: AlignedPin) -> AlignedInput:
+    """`requirement`, as stated, pinned to the compiled `pin`."""
+    return AlignedInput(
+        requirement_id=requirement.id,
+        spec_id=pin.spec_id,
+        origin=pin.origin,
+        option_ids=pin.option_ids,
+        whole_axis=pin.whole_axis,
+        stated_pin=requirement.source_spec_id,
+        source=requirement.source,
+        source_ref=requirement.source_ref,
+        source_exclude=requirement.source_exclude,
+        source_code=requirement.source_code,
+    )
+
+
+def alignments(state: SessionState) -> dict[str, AlignedInput]:
+    """The entries `ALIGNMENTS_STATE_KEY` holds, by requirement id; empty when unset.
+
+    An entry stored in a shape `AlignedInput` rejects is left out, and the
+    omission is logged. Its requirement then reads as pinned to the compile.
+    """
+    held: dict[str, AlignedInput] = {}
+    errors: list[ValidationError] = []
+    for raw in state.get(ALIGNMENTS_STATE_KEY) or []:
+        try:
+            entry = AlignedInput.model_validate(raw)
+        except ValidationError as exc:
+            errors.append(exc)
+        else:
+            held[entry.requirement_id] = entry
+    if errors:
+        warn_left_out(logger, ALIGNMENTS_STATE_KEY, errors, entries=len(errors))
+    return held
+
+
+def save_alignments(state: SessionState, entries: Iterable[AlignedInput]) -> None:
+    """Record `entries` as the requirements the recorded plan pins to compiled pins."""
+    state[ALIGNMENTS_STATE_KEY] = [entry.model_dump(mode="json") for entry in entries]
+
+
+def compiled_pin(state: SessionState, entry: AlignedInput) -> AlignedPin | None:
+    """The compile `entry` pins its requirement to (`AlignedInput.key`), `None` when none is held."""
+    return next((pin for pin in aligned_pins(state) if pin.key == entry.key), None)
+
+
+def unaligned_requirement(
+    requirement: EvidenceRequirement, held: Mapping[str, AlignedInput]
+) -> EvidenceRequirement:
+    """`requirement` as the planner states it: one `held` pins to a compiled pin,
+    and still pinned there, reads its stated pin and source fields again; any
+    other pin is the planner's own. A declared whole restated on its compile
+    with no `whole_of` is no whole: the planner pins that compile directly,
+    as any plain requirement can."""
+    entry = held.get(requirement.id)
+    if (
+        entry is None
+        or not isinstance(requirement, DatasetRequirement)
+        or requirement.source_spec_id != entry.spec_id
+        or (entry.whole_axis is not None and requirement.whole_of is None)
+    ):
+        return requirement
+    return requirement.model_copy(
+        update={
+            "source_spec_id": entry.stated_pin,
+            "source": entry.source,
+            "source_ref": entry.source_ref,
+            "source_exclude": entry.source_exclude,
+            "source_code": entry.source_code,
+        }
+    )
 
 
 def dataset_of(identity: Mapping[str, Any]) -> dict[str, Any]:

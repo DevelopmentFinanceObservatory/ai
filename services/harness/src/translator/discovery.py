@@ -149,10 +149,13 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     Unit,
+    alignments,
     authored,
+    compiled_pin,
     dataset_of,
     discovery_time_left,
     frame_shapes,
+    held_sources,
     identity_on_record,
     inputs_of,
     load_plan,
@@ -162,6 +165,7 @@ from planner.plan import (
     save_plan,
     side_entities,
     split_of,
+    unaligned_requirement,
     windowed_pins,
     with_authored_requirements,
 )
@@ -2451,7 +2455,7 @@ async def _recorded_source(
     spec_id = requirement.source_spec_id or ""
     recorded = windowed_pins(tool_context.state).get(spec_id) or identity_on_record(
         spec_id,
-        shown=pin_sources(tool_context.state),
+        shown=held_sources(tool_context.state),
         end_open=True,
         definition_lookup=load_log(tool_context.state).recorded_definition,
     )
@@ -2494,12 +2498,16 @@ async def _recorded_source(
 def _resolve_pin_block(
     tool_context: ToolContext, *, plan: Plan, requirement: DatasetRequirement
 ) -> Mapping[str, object] | None:
-    """The spec block of the dataset `requirement` pins, when the planner was shown it; `None` otherwise.
+    """The spec block of the dataset `requirement` pins, when the planner was shown it or admission compiled it; `None` otherwise.
 
-    The pin is the planner's assertion that the dataset answers the
+    A requirement admission pinned to a compile (`planner.plan.alignments`)
+    reads the block Search answered the compile with
+    (`planner.plan.AlignedPin`), when the source of the pin it states
+    carries no blocking warning. Any other pin is the planner's
+    assertion that the dataset answers the
     requirement, so a dataset it was shown this entry
     (`planner.plan.pin_sources`) is reused when `requirement` is the only
-    dataset requirement in `plan` pinning it. With several, nothing tells
+    dataset requirement in `plan` pinning it as its own. With several, nothing tells
     which one the search that returned it was about. `None` too when the
     search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
     since one means the search dropped part of the ask and answered a
@@ -2510,13 +2518,26 @@ def _resolve_pin_block(
     pin = requirement.source_spec_id
     if pin is None:
         return None
-    source = pin_sources(tool_context.state).get(pin)
+    shown = pin_sources(tool_context.state)
+    held = alignments(tool_context.state)
+    entry = held.get(requirement.id)
+    if entry is not None and unaligned_requirement(requirement, held) is not requirement:
+        compiled = compiled_pin(tool_context.state, entry)
+        origin = shown.get(entry.stated_pin or "")
+        if compiled is None or (
+            origin is not None and BLOCKING_WARNING_CODES.intersection(origin.warnings)
+        ):
+            return None
+        return compiled.block
+    source = shown.get(pin)
     if source is None or BLOCKING_WARNING_CODES.intersection(source.warnings):
         return None
     pinning = [
         item
         for item in plan.evidence_requirements
-        if isinstance(item, DatasetRequirement) and item.source_spec_id == pin
+        if isinstance(item, DatasetRequirement)
+        and item.source_spec_id == pin
+        and unaligned_requirement(item, held) is item
     ]
     if len(pinning) != 1:
         return None

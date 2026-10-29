@@ -25,6 +25,7 @@ from planner.plan import (
     PlanStatus,
     SessionState,
     UnreadablePickError,
+    alignments,
     pick_of,
     plan_revision,
     save_decision_pick,
@@ -498,6 +499,7 @@ def approve(
                 copy.spec_id: copy.windowed_from
                 for copy in windowed_pins(cast(SessionState, ctx.state)).values()
             },
+            alignments=alignments(cast(SessionState, ctx.state)),
         )
         if pick is not None:
             # A planner decision's pick changes what the plan states, so the
