@@ -507,9 +507,11 @@ ignores it and an older harness omits it.
   `choice_id` and `option_id` name the option the user picked, `code` is
   the refusal's code, and `reason` says in a reader's words why it failed.
 - `plan.approved`: `{plan_version_id, version, revision?, title, summary?, steps[], choices[]}`. Each step is `{label, gives_answer?}`;
-  each choice is `{question, chosen, changed_from?}`, where `question` is
-  the choice's short name (for example "Basis"), `chosen` the option label
-  and `changed_from` the label it held before the user switched it. The
+  each choice is `{choice_id, question, chosen, changed_from?}`, where
+  `choice_id` is the id the plan card's choice carries (`"decision/<slot>"`
+  for a planner decision), `question` is the choice's short name (for
+  example "Basis"), `chosen` the option label and `changed_from` the label
+  it held before the user switched it. The
   harness sends it once, on the `approve` answer to
   `/api/studio/interrupt`, before the first frame of the resumed run. The
   client attaches it to the message that stream produces and keeps it in
@@ -654,3 +656,6 @@ Fixture values that are samples:
    with a reason the client shows as a quiet note;
    `plan.proposed` and `plan.approved` gain `caveats`, and `changed_from`
    names the label before the turn's first switch.
+1. `plan.approved.choices[]` gains `choice_id`, the id the plan card's
+   choice carries, so a client tells a planner decision
+   (`"decision/<slot>"`) from a scope choice.

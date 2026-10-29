@@ -729,7 +729,8 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
     """Title, summary, step labels, caveats and, for each scope choice, its
     short name and the option it holds; a choice holding another label than
     before the turn's first switch of it says what it held, one switched
-    back says nothing, and a planner decision is no choice."""
+    back says nothing, and a decision without a choice id is no choice. Each
+    choice carries its `choice_id`, `decision/<slot>` for a planner decision."""
 
     def scope(choice_id: str, question: str, held: str) -> PlanDecision:
         return PlanDecision(
@@ -763,6 +764,7 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
         decisions=[
             scope("c_basis", "Basis", "gross disbursements"),
             scope("c_region", "Region", "Africa's countries only"),
+            scope("decision/prices", "Prices", "constant 2023 USD"),
             PlanDecision(
                 id="d_plan", question="Chart", chosen="line", reason="r", resolved_by="default"
             ),
@@ -774,7 +776,11 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
     frame = plan_approved(
         card,
         seq=9,
-        baseline={"c_basis": "gross disbursements", "c_region": "Africa incl. regional buckets"},
+        baseline={
+            "c_basis": "gross disbursements",
+            "c_region": "Africa incl. regional buckets",
+            "decision/prices": "current USD",
+        },
     )
 
     assert frame.model_dump(mode="json", exclude_none=True) == {
@@ -787,11 +793,18 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
         "summary": "Gross aid to Kenya, 2020 to 2024.",
         "steps": [{"label": "Fetch aid"}, {"label": "Sum it", "gives_answer": True}],
         "choices": [
-            {"question": "Basis", "chosen": "gross disbursements"},
+            {"choice_id": "c_basis", "question": "Basis", "chosen": "gross disbursements"},
             {
+                "choice_id": "c_region",
                 "question": "Region",
                 "chosen": "Africa's countries only",
                 "changed_from": "Africa incl. regional buckets",
+            },
+            {
+                "choice_id": "decision/prices",
+                "question": "Prices",
+                "chosen": "constant 2023 USD",
+                "changed_from": "current USD",
             },
         ],
         "caveats": [caveat],

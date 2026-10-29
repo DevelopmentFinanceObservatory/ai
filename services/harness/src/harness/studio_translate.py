@@ -1157,6 +1157,7 @@ def plan_approved(
     labels = held_labels(card)
     choices = [
         PlanApprovedChoice(
+            choice_id=decision.choice_id,
             question=decision.question,
             chosen=labels[decision.choice_id],
             changed_from=held

@@ -20,10 +20,12 @@
   ],
   "choices": [
     {
+      "choice_id": "req_1:basis",
       "question": "Basis",
       "chosen": "Gross disbursements"
     },
     {
+      "choice_id": "decision/prices",
       "question": "Prices",
       "chosen": "Constant 2023 USD",
       "changed_from": "Current USD"

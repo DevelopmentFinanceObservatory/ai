@@ -5241,7 +5241,12 @@ async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_
         )
 
     assert _frame(approved, "plan.approved")["choices"] == [
-        {"question": "Sector", "chosen": "population (CRS 130)", "changed_from": "health (CRS 120)"}
+        {
+            "choice_id": _CHOICE_ID,
+            "question": "Sector",
+            "chosen": "population (CRS 130)",
+            "changed_from": "health (CRS 120)",
+        }
     ]
 
 
