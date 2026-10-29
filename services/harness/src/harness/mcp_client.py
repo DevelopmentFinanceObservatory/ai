@@ -115,10 +115,8 @@ from compiler.surface import (
 )
 from data_mcp.mint_admission import (
     BACKGROUND_ADMISSION,
-    BACKGROUND_DECLINED,
-    BACKGROUND_OUTCOME_KEY,
-    CONSTRAINT_ID_KEY,
     MINT_ADMISSION_META_KEY,
+    background_outcome,
 )
 from data_mcp.mint_recovery import DatasetVersions, recover_mint_record
 from data_mcp.search_result import SEARCH_CONTEXT_META_KEY, SEARCH_ENVELOPE_META_KEY
@@ -762,10 +760,9 @@ class McpExecutor:
 
     async def get_data_in_background(self, args: dict[str, Any]) -> str:
         """One `get_data` call with `args`, its mint marked background, and the
-        outcome as a word: data-mcp's `"minted"`, `"queued"` or `"posted"`
-        (`data_mcp.mint_admission.background_result`), `"declined"` when apis
-        had no room for it, or another refusal's code (`"refused"` when it
-        names none). data-mcp answers `"posted"` as soon as the mint POST is
+        outcome as a word (`data_mcp.mint_admission.background_outcome`):
+        data-mcp's `"minted"`, `"queued"` or `"posted"`, `"declined"` when apis
+        had no room for it, or another refusal's code. data-mcp answers `"posted"` as soon as the mint POST is
         written out, so apis' own answer, a decline included, mostly arrives
         after this returns; data-mcp logs it (`background mint answered`).
 
@@ -789,13 +786,7 @@ class McpExecutor:
             )
         finally:
             await self._get_data_clients.release(client)
-        if not result.is_error:
-            return str((result.structured_content or {}).get(BACKGROUND_OUTCOME_KEY, "ok"))
-        refused = result.structured_content or {}
-        fix = refused.get("fix")
-        if isinstance(fix, dict) and fix.get(CONSTRAINT_ID_KEY) == BACKGROUND_DECLINED:
-            return "declined"
-        return refusal_code(refused) or "refused"
+        return background_outcome(result.structured_content)
 
     async def _admitted_write(self, args: dict[str, Any]) -> AdmittedWrite:
         """The arguments to send for a `write_component` call, under the rules

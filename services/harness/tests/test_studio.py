@@ -875,7 +875,7 @@ async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_pos
     """The card's frames all reach the stream, which stays open until the
     card's early call is done and closes right after."""
     sends = _HeldSends()
-    early = EarlyMints(send=sends, settle_s=30.0)
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=30.0)
     app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
     async with _client(app) as client:
         streaming = asyncio.ensure_future(
@@ -892,11 +892,39 @@ async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_pos
     assert _events(frames)[-1] == "plan.proposed"
 
 
+async def test_the_stream_that_waits_on_early_mints_flushes_telemetry_after_they_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last flush of the card's response comes after its early call ended,
+    so the call's spans are exported while the request still has CPU."""
+    sends = _HeldSends()
+    ended: list[bool] = []
+
+    async def flush() -> None:
+        ended.append(sends.release.is_set())
+
+    monkeypatch.setattr(studio_module, "flush_telemetry", flush)
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=30.0)
+    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
+    async with _client(app) as client:
+        streaming = asyncio.ensure_future(
+            _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        )
+        for _ in range(500):
+            if ended:
+                break
+            await asyncio.sleep(0.01)
+        sends.release.set()
+        await asyncio.wait_for(streaming, timeout=10)
+
+    assert ended[-1] is True
+
+
 async def test_an_approval_posted_while_the_cards_stream_waits_on_early_mints_is_taken() -> None:
     """The card's stream releases the conversation before it waits on the early
     calls, so an approval posted while it still waits runs at once."""
     sends = _HeldSends()
-    early = EarlyMints(send=sends, settle_s=30.0)
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=30.0)
     app = _app(
         *_plan("q with forks", *_charts_the_plan()),
         tool_surface=ScriptedSurface(),
@@ -937,7 +965,7 @@ async def test_the_stream_waits_no_longer_than_the_bound_for_early_mints(
     """A call still pending at the bound is logged and left running. The
     stream carries the same frames as a stream with no early mints."""
     sends = _HeldSends()
-    early = EarlyMints(send=sends, settle_s=0.2)
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.2)
     app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
     try:
         with caplog.at_level("INFO", logger="harness.early_mint"):

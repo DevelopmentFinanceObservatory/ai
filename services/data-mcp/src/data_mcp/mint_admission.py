@@ -1,7 +1,8 @@
 """How apis admits a `get_data` call's mint: at once, or only when it has room.
 
-A `get_data` call whose request `_meta` carries `MINT_ADMISSION_META_KEY`
-set to `BACKGROUND_ADMISSION` mints in the background: its mint POST carries
+A `get_data` call from the harness whose request `_meta` carries
+`MINT_ADMISSION_META_KEY` set to `BACKGROUND_ADMISSION` mints in the
+background (`requested_admission`): its mint POST carries
 `MINT_ADMISSION_HEADER: background`, and apis admits it only while it holds
 spare work capacity. Otherwise it answers 503 `service_unavailable` with
 `constraint_id` `BACKGROUND_DECLINED`, which this service's refusal carries
@@ -12,22 +13,32 @@ open in a task of its own until apis answers, since apis runs the mint on CPU
 that Cloud Run allocates only while the request is open. It never polls and
 reads no frame. Its tool-call span carries `BACKGROUND_MINT_SPAN_ATTRIBUTE`.
 The harness sends it for a card's mints before the user approves the card
-(`harness.early_mint`). Every other call, an outside client's included,
-mints in the foreground.
+(`harness.early_mint`).
+
+A background call answers before its mint ends and leaves the POST open in a
+task that outlives the request, so only the harness may ask for one: a call
+that names a conversation caller (`common.caller.conversation_caller`) and
+arrives outside the combined server, whose outside calls all run under
+`EXTERNAL_CALL_BUDGET`. Every other call that carries the marker, an outside
+client's included, mints in the foreground, holding its connection for the
+mint as any call does.
 
 The marker rides `_meta`, outside the tool's arguments, so no input schema,
-tool description or capability pin carries it. Any caller may send it, since
-it can only make apis decline a mint sooner.
+tool description or capability pin carries it.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Final, Literal
+from collections.abc import Mapping
+from typing import Any, Final, Literal
 
+from common.caller import CONVERSATION_CALLER_PREFIX, current_caller
+from common.refusal import refusal_code
 from fastmcp.server.dependencies import fastmcp_request_ctx
 from fastmcp.tools import ToolResult
 
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, current_call_budget
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal
 
@@ -59,11 +70,18 @@ type Admission = Literal["background"] | None
 
 def requested_admission() -> Admission:
     """`"background"` when the current request's `_meta` asks for a background
-    mint, `None` for any other value, no value, or no MCP request in flight."""
+    mint and the harness sent it: a conversation caller, outside the combined
+    server's `EXTERNAL_CALL_BUDGET`. `None` for any other value, no value, any
+    other caller, or no MCP request in flight."""
     request_context = fastmcp_request_ctx.get()
     meta = request_context.meta if request_context is not None else None
     asked = meta.get(MINT_ADMISSION_META_KEY) if meta else None
-    return BACKGROUND_ADMISSION if asked == BACKGROUND_ADMISSION else None
+    if asked != BACKGROUND_ADMISSION or current_call_budget() is EXTERNAL_CALL_BUDGET:
+        return None
+    caller = current_caller()
+    if caller is None or not caller.startswith(CONVERSATION_CALLER_PREFIX):
+        return None
+    return BACKGROUND_ADMISSION
 
 
 def admission_headers(admission: Admission) -> dict[str, str]:
@@ -87,3 +105,17 @@ def background_result(
         content=f"Background mint of {spec_id}: {outcome}.",
         structured_content={"spec_id": spec_id, BACKGROUND_OUTCOME_KEY: outcome},
     )
+
+
+def background_outcome(structured: Mapping[str, Any] | None) -> str:
+    """A background call's answer as one word, from its structured content:
+    its `BACKGROUND_OUTCOME_KEY` (`"minted"`, `"queued"` or `"posted"`),
+    `"declined"` when apis had no room for it, the refusal's code otherwise, or
+    `"answered"` for an answer that is none of these."""
+    body = structured or {}
+    if outcome := body.get(BACKGROUND_OUTCOME_KEY):
+        return str(outcome)
+    fix = body.get("fix")
+    if isinstance(fix, Mapping) and fix.get(CONSTRAINT_ID_KEY) == BACKGROUND_DECLINED:
+        return "declined"
+    return refusal_code(body) or "answered"

@@ -18,6 +18,7 @@ shared upstream client lives in `data_mcp.client_holder`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import logging
@@ -86,12 +87,10 @@ from data_mcp.manifest import (
     strip_manifest,
 )
 from data_mcp.mint_admission import (
-    BACKGROUND_DECLINED,
     BACKGROUND_MINT_SPAN_ATTRIBUTE,
-    BACKGROUND_OUTCOME_KEY,
-    CONSTRAINT_ID_KEY,
     Admission,
     admission_headers,
+    background_outcome,
     background_result,
     declined_in_background,
     requested_admission,
@@ -211,6 +210,10 @@ _deadline_clock: Clock = time.monotonic
 # The mints this process holds apis mint slots for on behalf of outside callers,
 # on `_deadline_clock`'s time. Tests replace it with an empty one.
 _mint_ledger = MintLedger()
+
+# Each background mint POST still open, under its request key (`_post_mint`), and
+# the event set when it ends. Per process.
+_open_background_posts: dict[str, asyncio.Event] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -1164,7 +1167,63 @@ async def _post_mint(
     admission: Admission = None,
     on_sent: Callable[[], None] | None = None,
 ) -> httpx2.Response | ToolRefusal:
-    """POST one mint request inside what `deadline` leaves it.
+    """POST one mint request inside what `deadline` leaves it (`_send_mint`), after
+    any background POST of the same request this process still holds open.
+
+    apis runs two identical synchronous mints in flight at once as two mints, so a
+    foreground POST whose request body matches an open background POST's waits for
+    that POST to end, for as long as its own mint deadline leaves at most, and then
+    posts, finding the frame the background mint built. The harness posts a card's
+    mints in the background before the user approves it (`harness.early_mint`), and
+    the run then asks for the same frames in the foreground.
+
+    The open background POSTs are held per process, in `_open_background_posts`,
+    from before the POST is sent until it ends, answered, failed or cancelled. The
+    wait therefore holds where the harness reaches data-mcp in-process, as it does
+    over its loopback mount, and two processes can still mint the same request
+    twice.
+    """
+    request_key = json.dumps(request_body, sort_keys=True)
+    send = functools.partial(
+        _send_mint,
+        client,
+        request_body,
+        request_key=request_key,
+        spec_id=spec_id,
+        settings=settings,
+        deadline=deadline,
+        admission=admission,
+        on_sent=on_sent,
+    )
+    if admission is not None:
+        ended = _open_background_posts[request_key] = asyncio.Event()
+        try:
+            return await send()
+        finally:
+            ended.set()
+            if _open_background_posts.get(request_key) is ended:
+                del _open_background_posts[request_key]
+    if (open_post := _open_background_posts.get(request_key)) is not None:
+        budget = current_call_budget()
+        waitable_s = deadline.reserving(budget.post_mint_reserve_s).remaining()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(open_post.wait(), timeout=max(waitable_s, 0.0))
+    return await send()
+
+
+async def _send_mint(
+    client: UpstreamClient,
+    request_body: Mapping[str, Any],
+    *,
+    request_key: str,
+    spec_id: str,
+    settings: Settings,
+    deadline: CallDeadline,
+    admission: Admission,
+    on_sent: Callable[[], None] | None,
+) -> httpx2.Response | ToolRefusal:
+    """POST one mint request inside what `deadline` leaves it. `request_key` is
+    `request_body` as the ledger keys it.
 
     A `"background"` `admission` sends `MINT_ADMISSION_HEADER` on the POST
     (`data_mcp.mint_admission`), so apis admits the mint only while it has room.
@@ -1206,7 +1265,7 @@ async def _post_mint(
     held: HeldMint | None = None
     if not budget.waits_out_sync_mint:
         admitted = _mint_ledger.admit(
-            request_key=json.dumps(request_body, sort_keys=True),
+            request_key=request_key,
             spec_id=spec_id,
             now=started_at,
             answer_by=mint_deadline.expires_at,
@@ -2026,7 +2085,9 @@ async def get_data(
         dropped_roles=dropped_roles,
         settings=settings,
         deadline=deadline,
-        on_poll=_report_progress(ctx),
+        # A background mint never polls, and its task outlives the request,
+        # so it holds no reference to the request's `ctx`.
+        on_poll=_report_progress(ctx) if admission is None else None,
         admission=admission,
     )
     # A background mint answers once its POST is out. The POST stays open in a task.
@@ -2081,7 +2142,7 @@ def _background_mint_done(
     elif (exc := task.exception()) is not None:
         outcome = f"error:{type(exc).__name__}"
     else:
-        outcome = _background_outcome(task.result().structured_content or {})
+        outcome = background_outcome(task.result().structured_content)
     logger.info(
         "background mint answered: spec_id=%s caller=%s outcome=%s elapsed_s=%.2f",
         spec_id,
@@ -2089,17 +2150,6 @@ def _background_mint_done(
         outcome,
         time.monotonic() - started,
     )
-
-
-def _background_outcome(structured: Mapping[str, Any]) -> str:
-    """A background mint's answer as one word: data-mcp's outcome, `declined` for
-    apis' decline, or the refusal's code."""
-    if outcome := structured.get(BACKGROUND_OUTCOME_KEY):
-        return str(outcome)
-    fix = structured.get("fix")
-    if isinstance(fix, Mapping) and fix.get(CONSTRAINT_ID_KEY) == BACKGROUND_DECLINED:
-        return "declined"
-    return str(structured.get("code"))
 
 
 async def aclose_background_mints() -> None:

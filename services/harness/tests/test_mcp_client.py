@@ -23,7 +23,7 @@ from typing import Any
 import httpx2
 import pytest
 from common.auth import apply_gate
-from common.caller import conversation_caller
+from common.caller import conversation_caller, supplied_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
 from compiler.surface import ProgressReport
@@ -1670,9 +1670,12 @@ async def test_a_background_get_data_marks_its_mint_post_and_is_sent_once(
     )
     executor = McpExecutor(settings=Settings(), sleep=_no_sleep)
     try:
-        background = await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
-        assert posts == ["background"]
-        await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
+        # The in-memory client sends no headers, so the conversation caller the
+        # harness names in `x-dfo-caller` is supplied.
+        with supplied_caller(conversation_caller("principal/conversation")):
+            background = await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
+            assert posts == ["background"]
+            await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
     finally:
         await executor.aclose()
         client_holder.set_client(None)

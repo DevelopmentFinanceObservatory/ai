@@ -957,13 +957,15 @@ class StudioRunner:
         The wait starts once `stream` has ended, so the conversation lock and
         the segment are released and an answer to the card is taken at once.
         It sends nothing and only keeps the response, and so the request's
-        CPU, open. A client that leaves first ends it.
+        CPU, open. A client that leaves first ends it. `stream` flushed the
+        telemetry as it ended, so a wait that ran flushes again, exporting
+        the spans of the calls it waited for.
         """
         async with aclosing(stream):
             async for chunk in stream:
                 yield chunk
-        if self.early_mints is not None:
-            await self.early_mints.settle()
+        if self.early_mints is not None and await self.early_mints.settle():
+            await flush_telemetry()
 
     async def _heartbeat(
         self,

@@ -426,10 +426,11 @@ def create_app(
         dataset_versions=live_refresh.dataset_versions,
     )
     # Each card's retrievals, sent before approval through the executor's
-    # own `get_data` clients.
+    # own `get_data` clients, as many at once as a run's steps.
     early_mints = (
         EarlyMints(
             send=executor.get_data_in_background,
+            max_concurrent=resolved_settings.executor_max_concurrent_steps,
             settle_s=resolved_settings.early_mint_wait_s,
         )
         if resolved_settings.early_mint

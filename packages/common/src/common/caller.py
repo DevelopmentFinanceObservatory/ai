@@ -35,6 +35,10 @@ MAX_CALLER_CHARS = 256
 # 1.5e-21 (n^2 / 2^129).
 _CONVERSATION_DIGEST_CHARS = 32
 
+# The kind prefix of the caller the harness sends for a conversation
+# (`conversation_caller`).
+CONVERSATION_CALLER_PREFIX = "conversation:"
+
 # What the frame store records as `writer` for a frame written with no caller.
 ANONYMOUS_WRITER = "anonymous"
 
@@ -83,7 +87,7 @@ def conversation_caller(conversation: str) -> str:
     valid header value.
     """
     digest = hashlib.sha256(conversation.encode()).hexdigest()
-    return f"conversation:{digest[:_CONVERSATION_DIGEST_CHARS]}"
+    return f"{CONVERSATION_CALLER_PREFIX}{digest[:_CONVERSATION_DIGEST_CHARS]}"
 
 
 @contextmanager

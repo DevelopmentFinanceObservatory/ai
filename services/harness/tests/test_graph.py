@@ -4483,7 +4483,7 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
         planner=seam,
         tool_surface=surface,
         executor=ScriptedExecutor(),
-        early_mints=EarlyMints(send=sends, settle_s=3.0),
+        early_mints=EarlyMints(send=sends, max_concurrent=4, settle_s=3.0),
     )
 
     await _start(runner)
@@ -4535,7 +4535,7 @@ async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_a
 
     sends = _EarlySends(outcome)
     with caplog.at_level("INFO", logger="harness.early_mint"):
-        offered = await card(EarlyMints(send=sends, settle_s=3.0))
+        offered = await card(EarlyMints(send=sends, max_concurrent=4, settle_s=3.0))
 
     assert offered == await card(None)
     assert offered[2] == APPROVE_INTERRUPT
@@ -4546,27 +4546,60 @@ async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_a
     assert "elapsed_s=" in line
 
 
-async def test_a_call_unsent_at_one_stream_end_is_logged_once(
+async def test_a_call_unsent_at_one_stream_end_logs_one_line_with_its_own_elapsed_time(
     real_schemas: list[ToolSchema], caplog: pytest.LogCaptureFixture
 ) -> None:
-    sends = _EarlySends(hold=asyncio.Event())
-    early = EarlyMints(send=sends, settle_s=0.01)
+    """A call still pending when the stream ends is logged unsent then, with
+    the seconds since its card was offered, and logs nothing when it ends."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    now = [100.0]
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.01, clock=lambda: now[0])
     early.offer(_seam_plan(schemas=real_schemas))
 
     with caplog.at_level("INFO", logger="harness.early_mint"):
+        now[0] = 102.5
         await early.settle()
         await early.settle()
-    await early.aclose()
+        now[0] = 109.0
+        hold.set()
+        await asyncio.gather(*early._tasks)
 
-    unsent = [r for r in caplog.records if "outcome=unsent_at_stream_end" in r.getMessage()]
-    assert len(unsent) == 1
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert "outcome=unsent_at_stream_end" in line
+    assert "elapsed_s=2.50" in line
+
+
+async def test_a_cards_early_calls_go_out_no_more_than_the_cap_at_once(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A card with more retrievals than the cap sends the cap's worth, and the
+    rest as those end."""
+    plan = _seam_plan(schemas=real_schemas)
+    assert plan.workflow is not None
+    (retrieval,) = [step for step in plan.workflow.steps if step.tool == _GET_DATA]
+    wide = plan.model_copy(
+        update={"workflow": plan.workflow.model_copy(update={"steps": (retrieval,) * 3})}
+    )
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=2, settle_s=3.0)
+
+    early.offer(wide)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(sends.sent) == 2
+
+    hold.set()
+    await asyncio.gather(*early._tasks)
+    assert len(sends.sent) == 3
 
 
 async def test_closing_early_mints_cancels_the_calls_still_running(
     real_schemas: list[ToolSchema],
 ) -> None:
     sends = _EarlySends(hold=asyncio.Event())
-    early = EarlyMints(send=sends, settle_s=3.0)
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=3.0)
     early.offer(_seam_plan(schemas=real_schemas))
     await asyncio.sleep(0)
     assert len(sends.sent) == 1
