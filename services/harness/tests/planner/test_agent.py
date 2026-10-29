@@ -10645,17 +10645,26 @@ def test_two_sides_never_read_one_series(
     ] == caveated
 
 
-def _own_part_with_source(block: dict[str, Any]) -> dict[str, Any]:
+def _own_part_with_source(
+    block: dict[str, Any], *, years: tuple[int, int] | None = None
+) -> dict[str, Any]:
     """`block`, a part compiled onto one provider row, as Search answers that row read
     in words with its source named ("multilateral ODA from OECD DAC1"): a part of its
-    own, whose base identity binds the row's code and DAC1's provenance facet, under
-    the spec_id that identity hashes to. The compile of total ODA onto the row
-    leaves the facet to the read, which picks DAC1, so the two read one series."""
+    own, whose base identity binds the row's code and DAC1's provenance facet, and,
+    where `years` are given, was searched over those years, under the spec_id that
+    identity hashes to. The compile of total ODA onto the row leaves the facet to
+    the read, which picks DAC1, so the two read one series."""
     scope = block["resolved"]["scope_choices"]
     identity = {
         **scope["compiled"]["identity"],
         "facets": {"provenance": {"state": "value", "ref": "provenance/OECDDAC1"}},
     }
+    if years is not None:
+        identity["requested_window"] = {
+            "kind": "range",
+            "start_year": years[0],
+            "end_year": years[1],
+        }
     spec_id = spec_id_for(canonicalize(identity))
     text = json.dumps(block)
     for held in (scope["base"]["spec_id"], block["spec_id"]):
@@ -10667,15 +10676,27 @@ def _own_part_with_source(block: dict[str, Any]) -> dict[str, Any]:
     return own
 
 
+@pytest.mark.parametrize(
+    "years",
+    [
+        pytest.param(None, id="searched-over-the-years-read"),
+        # The numerator searched over wider years than both inputs read, as a
+        # follow-up's search can be: the pin's years are its search's, so they do not
+        # make it another series.
+        pytest.param((2015, 2019), id="searched-over-other-years"),
+    ],
+)
 def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
-    decision: DecisionFactory,
+    decision: DecisionFactory, years: tuple[int, int] | None
 ) -> None:
     """ "What share of US ODA went to multilateral organisations?": Search answers
     multilateral ODA as a part of its own, and the total counted on its multilateral
     row compiles to that part's series under another spec_id. The compile is held,
     so the share would divide one series by itself and answer 100%. The total keeps
     its own row, and the share states that its inputs count different spending."""
-    numerator = _searched_in_words(_own_part_with_source(_SUM_BLOCKS["dac_countries_multilateral"]))
+    numerator = _searched_in_words(
+        _own_part_with_source(_SUM_BLOCKS["dac_countries_multilateral"], years=years)
+    )
     compile_block = _SUM_BLOCKS["dac_countries_multilateral"]
     ctx = _FakeToolContext()
     _show_blocks(ctx, numerator, _US_TOTAL)

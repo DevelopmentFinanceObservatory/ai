@@ -47,7 +47,6 @@ from planner.plan import (
 )
 from planner.records import (
     AmbiguousSourceReading,
-    EntityIn,
     PlaceLevel,
     ResolvedSourceMention,
     StatVarReading,
@@ -138,8 +137,8 @@ class AlignedBasis(StrictModel):
 
 
 class RoleNarrowing(StrictModel):
-    """What a filter keeps of the entities on one `role` of a source's rows,
-    in a decision option's words (`plan_display.narrowing_words`)."""
+    """The level of place a filter keeps on one `role` of a source's rows,
+    in a decision option's words (`plan_display.place_level_words`)."""
 
     role: str
     words: str
@@ -179,10 +178,11 @@ class PlanSource(StrictModel):
     out when alignment moved none onto it. `aligned_basis` is how the source
     counts those inputs, which `basis_line` states, since the turn holds no
     reading of a compile; left out when alignment moved none onto it or its
-    block carries no scope choices. `narrowed` is what each filter reading
-    the source's rows keeps on a role (`RoleNarrowing`), so the basis line
-    states a stated scope entry Search dropped on that role's axis as read
-    through the filter (`basis_line`); left out when no filter narrows a role.
+    block carries no scope choices. `narrowed` is the level of place each filter
+    reading the source's rows keeps on a role (`RoleNarrowing`), so the basis
+    line states a stated scope entry Search dropped on that role's axis as
+    read through the filter (`basis_line`); left out when no filter keeps a
+    level on a role.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -2037,9 +2037,11 @@ def _sources(
 
 
 def _narrowed(plan: Plan, spec_id: str) -> tuple[RoleNarrowing, ...]:
-    """What each filter of compiled `plan` reading the rows retrieved from
-    `spec_id`, directly or through other steps, keeps on a role, the first
-    filter's words for each role."""
+    """The level each filter of compiled `plan` reading the rows retrieved
+    from `spec_id`, directly or through other steps, keeps on a role, the
+    first filter's words for each role. A level keeps a class of party
+    ("only donor countries"), which can stand in for a class the user stated;
+    a list of names (`EntityIn`) applies no class, so it is not one."""
     assert plan.workflow is not None
     retrieved = {b.requirement_id for b in plan.workflow.evidence_bindings if b.spec_id == spec_id}
     kept: dict[str, str] = {}
@@ -2049,12 +2051,11 @@ def _narrowed(plan: Plan, spec_id: str) -> tuple[RoleNarrowing, ...]:
         ):
             continue
         for predicate in requirement.predicates:
-            if (
-                isinstance(predicate, PlaceLevel | EntityIn)
-                and predicate.role is not None
-                and (words := plan_display.narrowing_words(predicate)) is not None
-            ):
-                kept.setdefault(predicate.role, words)
+            if isinstance(predicate, PlaceLevel) and predicate.role is not None:
+                kept.setdefault(
+                    predicate.role,
+                    plan_display.place_level_words(predicate.level, role=predicate.role),
+                )
     return tuple(RoleNarrowing(role=role, words=words) for role, words in kept.items())
 
 

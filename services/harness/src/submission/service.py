@@ -161,6 +161,7 @@ from planner.plan import (
     check_wholes_span_their_totals,
     content_digest,
     cut_user_text,
+    dataset_of,
     dataset_roots,
     exact_codes,
     fix_disagreements,
@@ -4406,8 +4407,11 @@ class _Origin:
 @dataclass(frozen=True)
 class _Series:
     """The series a pin compiles to: `core`, every field of its compiled identity
-    (`CompiledScope.identity`) but the facets, as canonical JSON, and `facets`, the
-    value of each facet its read takes, by axis.
+    (`CompiledScope.identity`) but the facets and the years (`dataset_of`), as
+    canonical JSON, and `facets`, the value of each facet its read takes, by axis.
+    A pin's years are those of the search that found it, which alignment runs
+    before re-windowing (`_window_pins`), so the years read are compared apart
+    (`_Reads.period`).
 
     A facet's value is the one Search resolved for the read (`resolved.facets`),
     bound or the fallback the data picks, else the one the identity binds. So
@@ -4434,7 +4438,7 @@ class _Series:
             for slot in identity.get("slots") or ()
         ]
         core = {
-            **{key: value for key, value in identity.items() if key != "facets"},
+            **{key: value for key, value in dataset_of(identity).items() if key != "facets"},
             "slots": sorted(slots, key=rfc8785.dumps),
             "entities": {
                 role: sorted(refs) for role, refs in (identity.get("entities") or {}).items()

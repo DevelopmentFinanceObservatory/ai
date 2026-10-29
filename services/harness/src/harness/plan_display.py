@@ -22,8 +22,8 @@ description, and marks the one step whose result answers (`answer_step`);
 sentence what the answer counts, for whom, when and from which source;
 `card_choice_text`, `card_decision_text` and `CHOICE_NAMES` give a
 decision's words, and `FIXED_VALUE_WORDS` the words for an option the
-planner wrote as a value a decision fixes, and `narrowing_words` the same
-words for what a filter keeps on a role; `choice_id` gives a scope
+planner wrote as a value a decision fixes, and `place_level_words` the same
+words for the level of place a filter keeps on a role; `choice_id` gives a scope
 choice's row the id every switch keeps; and `switchable_decision`,
 `decision_choice_id` and `decision_option_id` give a planner decision the
 card offers to switch its row's id and its options' ids.
@@ -1030,21 +1030,6 @@ def _place_level_built(level: PlaceType) -> Callable[[Plan, Decision], str | Non
         return place_level_words(level, role=role) if role is not None else None
 
     return words
-
-
-def narrowing_words(predicate: Predicate) -> str | None:
-    """What `predicate` keeps of the entities on its role, in a decision
-    option's words: a `PlaceLevel`'s level ("only donor countries") or an
-    `EntityIn`'s names ("only France and Germany", counted past
-    `_NAMED_SHOWN`). `None` for a predicate on no role or on values or years."""
-    if isinstance(predicate, PlaceLevel) and predicate.role is not None:
-        return place_level_words(predicate.level, role=predicate.role)
-    if not isinstance(predicate, EntityIn) or predicate.role is None:
-        return None
-    names = tuple(dict.fromkeys(predicate.names))
-    if len(names) <= _NAMED_SHOWN:
-        return f"only {_joined(names)}"
-    return f"only {len(names)} named {pluralize(singular(predicate.role))}"
 
 
 # The card's words for a price basis, which a unit and a decision fixing
