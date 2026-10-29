@@ -649,7 +649,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         return blocked
     if pick is not None:
         held = _picked_decision(
-            pick, _decisions_after(previous, settled, removed=removed_decisions), proposer
+            pick,
+            _decisions_after(previous, settled, removed=removed_decisions),
+            proposer,
+            previous=previous,
         )
         if not isinstance(held, Decision):
             return held
@@ -6560,21 +6563,23 @@ def _released_by_pick(
 ) -> frozenset[str]:
     """The user's decisions of `previous` that a pick on the plan card lets the patch drop.
 
-    The pick speaks for its own slot, and for each other user decision only
-    where the plan it asks for (`requirements`) neither cites it nor states
-    any of the requirements that cited it: a shape change took the
-    decision's requirements away with it. A user decision the new plan
-    still cites, or a surviving requirement still rests on, stands as the
-    user made it (`_user_decision_refused`).
+    The pick speaks for its own slot, and for another user decision only
+    where the pick changed everything that decision rested on: every
+    requirement of `previous` citing it also cited the picked decision, and
+    the plan it asks for (`requirements`) neither cites it nor keeps any of
+    those requirements. A user decision the new plan still cites, or that a
+    requirement the pick did not change cited, stands as the user made it
+    (`_user_decision_refused`), however that requirement is renamed.
     """
+    slot = pick[0]
     kept = {requirement.id for requirement in requirements}
-    cited = {slot for requirement in requirements for slot in requirement.decision_ids}
-    released = {pick[0]}
+    cited = {cited for requirement in requirements for cited in requirement.decision_ids}
+    released = {slot}
     for decision in previous.decisions:
         if decision.resolved_by is not ResolvedBy.USER or decision.slot in cited:
             continue
-        citing = [r.id for r in previous.evidence_requirements if decision.slot in r.decision_ids]
-        if not any(requirement_id in kept for requirement_id in citing):
+        citing = [r for r in previous.evidence_requirements if decision.slot in r.decision_ids]
+        if all(slot in r.decision_ids and r.id not in kept for r in citing):
             released.add(decision.slot)
     return frozenset(released)
 
@@ -6937,23 +6942,46 @@ def _measure_fixed(
 
 
 def _picked_decision(
-    pick: tuple[str, str], decisions: Sequence[Decision], proposer: Proposer
+    pick: tuple[str, str],
+    decisions: Sequence[Decision],
+    proposer: Proposer,
+    *,
+    previous: Plan | None,
 ) -> Decision | dict[str, object]:
     """The decision of `decisions` holding the user's `pick` on the plan card, as theirs, or the refusal.
 
     `pick` is the `(slot, chosen)` the planner's entry replans to hold
     (`planner.plan.decision_pick`). The plan holds it when it states a
-    decision under that slot whose `chosen` is the picked label, whatever
-    the requirements citing it fix, since the pick may change the plan's
-    shape. That decision is recorded `resolved_by=user`. Any other plan is
-    refused with `USER_PICK_NOT_HELD`, whose `action` calls `proposer` to
-    restate the decision.
+    decision under that slot whose `chosen` is the picked label and whose
+    `fixes`, read off the requirements citing it (`settle_decisions`),
+    differ from what the decision fixed in `previous` under another option:
+    a relabelled decision over the same requirements would mark the picked
+    option active while the plan still reads the old one. The fixes may
+    differ in any field, since the pick may change the plan's shape. That
+    decision is recorded `resolved_by=user`. Any other plan is refused with
+    `USER_PICK_NOT_HELD`, whose `action` calls `proposer` to restate the
+    decision.
     """
     slot, chosen = pick
     stated = next((decision for decision in decisions if decision.slot == slot), None)
-    if stated is not None and stated.chosen == chosen:
+    before = (
+        next((decision for decision in previous.decisions if decision.slot == slot), None)
+        if previous is not None
+        else None
+    )
+    moved = (
+        before is None
+        or before.chosen == chosen
+        or (stated is not None and stated.fixes is not None and stated.fixes != before.fixes)
+    )
+    if stated is not None and stated.chosen == chosen and moved:
         return stated.model_copy(update={"resolved_by": ResolvedBy.USER})
-    states = f"states {stated.chosen!r} for it" if stated is not None else "drops that decision"
+    if stated is None:
+        states = "drops that decision"
+    elif stated.chosen != chosen:
+        states = f"states {stated.chosen!r} for it"
+    else:
+        states = "states it, but the requirements citing it fix what they fixed before"
     return problem(
         ProblemCode.USER_PICK_NOT_HELD,
         f"The user picked {chosen!r} for decision {slot!r} on the plan card, and this plan "

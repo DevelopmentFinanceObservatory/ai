@@ -33,8 +33,10 @@ from harness.plan_display import (
     card_title,
     choice_id,
     chosen_scope_decision,
+    decision_choice_id,
     listed_together,
     operation_rows,
+    pinned_choice_id,
     plan_words,
     requirement_rows,
     share_wholes,
@@ -4556,6 +4558,23 @@ def test_only_a_planner_decision_settling_fields_switches_on_the_card(
     assert switchable_decision(decision) is switchable
 
 
+def test_a_planner_decisions_row_id_never_names_a_scope_choice() -> None:
+    """A requirement may be called `decision`, and a planner decision's slot
+    may be a scope axis: the scope choice of that requirement on that axis
+    and the planner decision's row still take different ids."""
+    dumped = scripted_plan("kenya life expectancy", spec_id=None).model_dump()
+    for requirement in dumped["evidence_requirements"]:
+        if requirement["id"] == "life_expectancy":
+            requirement.update(id="decision", source_spec_id=_SPEC_A)
+        if requirement.get("input_id") == "life_expectancy":
+            requirement["input_id"] = "decision"
+    plan = Plan.model_validate(dumped | {"translation": None, "workflow": None})
+
+    assert decision_choice_id(_planner_decision(slot="sector")) != pinned_choice_id(
+        plan, {_SPEC_A}, "sector"
+    )
+
+
 def _fixing_measure(plan: Plan) -> Plan:
     """`plan` (the scripted Kenya life expectancy plan) with its measure
     decision fixing the measure its dataset reads."""
@@ -4572,7 +4591,7 @@ def _fixing_measure(plan: Plan) -> Plan:
 
 
 def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it() -> None:
-    """The row `decision:measure`'s second option is the decision's second
+    """The row `decision/measure`'s second option is the decision's second
     option. A row or option the card does not offer picks nothing."""
     unfixed = scripted_plan("kenya life expectancy", spec_id=None)
     plan = _fixing_measure(unfixed)
@@ -4581,10 +4600,10 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
     picks = [
         decision_pick(plan, choice_id=choice, option_id=option)
         for choice, option in [
-            ("decision:measure", "option_2"),
-            ("decision:measure", "option_1"),
-            ("decision:measure", "option_3"),
-            ("decision:other", "option_2"),
+            ("decision/measure", "option_2"),
+            ("decision/measure", "option_1"),
+            ("decision/measure", "option_3"),
+            ("decision/other", "option_2"),
             ("measure", "option_2"),
         ]
     ]
@@ -4596,4 +4615,4 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
         None,
         None,
     ]
-    assert decision_pick(unfixed, choice_id="decision:measure", option_id="option_2") is None
+    assert decision_pick(unfixed, choice_id="decision/measure", option_id="option_2") is None

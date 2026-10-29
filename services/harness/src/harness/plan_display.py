@@ -1290,7 +1290,11 @@ def choice_id(plan: Plan, decision: Decision) -> str:
 
 
 # The prefix of the id a planner decision's row takes (`decision_choice_id`).
-DECISION_CHOICE_PREFIX = "decision:"
+# A slot holds no `/` or `:`, so that id holds no `:`, while every scope
+# choice's id does (`"<requirement id>:<axis>"`, `pinned_choice_id`, or
+# Search's `"<spec id>:<axis>"`): the two never meet, whatever a
+# requirement is called.
+DECISION_CHOICE_PREFIX = "decision/"
 
 
 def switchable_decision(decision: Decision) -> bool:
@@ -1313,7 +1317,7 @@ def switchable_decision(decision: Decision) -> bool:
 
 def decision_choice_id(decision: Decision) -> str:
     """The id the plan card gives the row of planner decision `decision`:
-    `"decision:<slot>"`."""
+    `"decision/<slot>"`."""
     return f"{DECISION_CHOICE_PREFIX}{decision.slot}"
 
 

@@ -413,7 +413,7 @@ def test_a_planner_decision_settling_fields_is_a_row_the_card_can_switch() -> No
     rows = {row.id: row for row in frame.decisions}
     switched, plain = rows["measure"], rows["rounding"]
     assert (switched.choice_id, switched.active_option_id, switched.chosen) == (
-        "decision:measure",
+        "decision/measure",
         "option_2",
         "healthy life expectancy",
     )
@@ -428,9 +428,9 @@ def test_a_planner_decision_settling_fields_is_a_row_the_card_can_switch() -> No
     assert plain.choice_id is plain.options is plain.active_option_id is None
     assert PlanAction.SWITCH in frame.actions
     choices = translator._conversation.pending[frame.interrupt_id].choices
-    assert set(choices) == {"decision:measure"}
-    assert choices["decision:measure"].active == "option_2"
-    assert {k: o.label for k, o in choices["decision:measure"].options.items()} == {
+    assert set(choices) == {"decision/measure"}
+    assert choices["decision/measure"].active == "option_2"
+    assert {k: o.label for k, o in choices["decision/measure"].options.items()} == {
         "option_1": "life expectancy at birth",
         "option_2": "healthy life expectancy",
     }

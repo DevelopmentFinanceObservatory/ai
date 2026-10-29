@@ -2,7 +2,7 @@
 
 The card offers the options of a planner decision it can switch
 (`harness.plan_display.switchable_decision`) under the row id
-`"decision:<slot>"`. A `switch` naming such a row resumes the paused
+`"decision/<slot>"`. A `switch` naming such a row resumes the paused
 `approve` node, which replans with the pick held: `decision_pick` reads the
 pick off the plan the card showed, as the planner states it.
 """

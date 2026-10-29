@@ -3,9 +3,10 @@
 The planner seam records the pick for the entry (`planner.plan.
 DECISION_PICK_STATE_KEY`). `propose_plan` then refuses a plan whose decision
 under the pick's slot states another option (`submission.service.
-_picked_decision`), and records that decision as the user's, whatever the
-requirements citing it fix. The pick lets go of another user decision
-only when the new plan drops it with every requirement that cited it
+_picked_decision`) or whose requirements citing it fix what they fixed
+under the old option, and records that decision as the user's. The pick
+lets go of another user decision only when every requirement that cited it
+also cited the picked decision and the new plan drops them all
 (`submission.service._released_by_pick`).
 """
 
@@ -178,6 +179,11 @@ def test_a_pick_that_changes_the_plans_shape_is_admitted_as_the_users(
         pytest.param({"decisions": [DONOR_SCOPE]}, "the DAC total", id="restated"),
         pytest.param({"decisions": []}, "the DAC total", id="carried"),
         pytest.param({"removed_decisions": ["donor_scope"]}, None, id="removed"),
+        pytest.param(
+            {"decisions": [DONOR_SCOPE.model_copy(update={"chosen": "the top 10 donors"})]},
+            "the top 10 donors",
+            id="relabelled-over-the-same-requirements",
+        ),
     ],
 )
 def test_a_plan_that_does_not_state_the_pick_is_refused(
@@ -258,4 +264,44 @@ def test_a_pick_releases_no_user_decision_the_new_plan_still_rests_on(
 
     assert result["outcome"] == Outcome.REFUSED.value, result
     assert result["code"] == code.value
+    assert result["detail"]["slot"] == "year"
+
+
+def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
+    decision: Callable[..., Decision],
+) -> None:
+    """The user's year rests on a requirement that does not cite the picked
+    decision. A replan that renames that requirement and drops the year from
+    it is refused, though no requirement that cited the year survives by id."""
+    ctx = _context()
+    gross = _dac_total().model_copy(
+        update={"id": "gross", "decision_ids": ("measure", "year"), "measure": "gross ODA"}
+    )
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), DONOR_SCOPE, USER_YEAR]),
+        evidence_requirements=[
+            _dac_total().model_copy(update={"decision_ids": ("measure", "donor_scope")}),
+            gross,
+        ],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.session.events = [response_event("propose_plan", first)]
+    save_decision_pick(ctx.state, ("donor_scope", "the top 10 donors"))
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=[
+            *_ranked_donors(),
+            gross.model_copy(update={"id": "gross_renamed", "decision_ids": ("measure",)}),
+        ],
+        removed_evidence_requirements=["dac", "gross"],
+        amends_version=first["version"],
+    )
+
+    assert result["outcome"] == Outcome.REFUSED.value, result
+    assert result["code"] == ProblemCode.USER_DECISION_DROPPED.value
     assert result["detail"]["slot"] == "year"

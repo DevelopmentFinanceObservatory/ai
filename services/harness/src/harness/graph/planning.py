@@ -50,6 +50,7 @@ from harness.graph.state import (
     state_json,
 )
 from harness.graph.switch import SwitchFailedError
+from harness.sentences import SeamCode
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +128,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         (`_pick_snapshot`) and clears the pick, as it does when the run
         raises. A planner-side ask keeps the replan's state for its resume,
         which restores from the same snapshot, and the studio arms the
-        switch's Stop on the stream resuming it (`PICK_REPLAN_KEY`). A
-        drafted plan carries an empty `moved`.
+        switch's Stop on the stream resuming it (`PICK_REPLAN_KEY`).
 
         `planner(...)` is awaited directly here, with no
         `asyncio.ensure_future` wrapper of its own: ADK's own docstring
@@ -308,8 +308,6 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
                 **planner_plan.model_dump(mode="json"),
                 "summary": drafted["summary"],
                 "revision": plan_revision(planner_plan),
-                # A pick's replan moves no other choice of the card.
-                **({"moved": []} if pick is not None else {}),
                 **({"refusal_note": UNREADABLE_PLAN_NOTE} if unreadable else {}),
                 # The draft's version counts from 1 again, on a line of its
                 # own: no earlier card of the turn is a version of this plan.
@@ -354,14 +352,17 @@ def _end_pick_replan(ctx: Context, before: dict[str, Any]) -> None:
 
 def _pick_refused(refused: dict[str, Any], pick: DecisionPick) -> SwitchFailedError:
     """The `SwitchFailedError` for a pick's replan that the planner seam
-    refused: it takes the refusal's code and its sentence for the user
-    (`reason`), and is retryable unless no other plan for the same ask can
-    succeed (`final`), since another replan may draft one."""
+    refused: it takes the refusal's code, or the seam's `PLAN_NOT_READY` for
+    one stating none, and its sentence for the user (`reason`). It is
+    retryable under the codes a scope switch's revision is
+    (`harness.graph.switch._RETRYABLE_REVISION_CODES`): a later pick of the
+    same option escapes only a refusal for time or an unreachable service."""
+    code = str(refused.get("code") or SeamCode.PLAN_NOT_READY)
     return SwitchFailedError(
         str(refused.get("reason") or refused.get("text") or "")
         or f"The plan could not be redrafted to use {pick.chosen}.",
-        code=str(refused.get("code") or switch_module.SCOPE_CHOICE_NOT_APPLIED),
-        retryable=not refused.get("final"),
+        code=code,
+        retryable=code in switch_module._RETRYABLE_REVISION_CODES,
     )
 
 

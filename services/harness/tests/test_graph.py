@@ -109,6 +109,7 @@ from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
+from harness.sentences import SeamCode
 from harness.settings import Settings
 from harness.studio_translate import _node_name
 from harness.tool_contracts import HarnessCode, reading_facts
@@ -1771,7 +1772,7 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
 # A planner decision the card offers to switch (`plan_display.switchable_decision`):
 # `_seam_plan`'s window, fixing the period, and the switch to its other option.
 _PICKED_WINDOW = DecisionPick(slot="window", chosen="2018-2024")
-_PICK_SWITCH = {"choice_id": "decision:window", "option_id": "option_2"}
+_PICK_SWITCH = {"choice_id": "decision/window", "option_id": "option_2"}
 # A drafting key the replan writes, which a replan that does not land puts back.
 _DRAFTING_KEY = "planner:replan_scratch"
 
@@ -1831,22 +1832,38 @@ async def test_a_planner_decisions_pick_replans_with_the_pick_held(
     assert seam.calls[1]["prior_plan"] == plan.model_dump(mode="json")
     offered = _output_of(events, "planner")
     assert offered["revision"] == plan_revision(replanned)
-    assert offered["moved"] == []
+    assert "moved" not in offered
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     assert _session_state(runner)[_DRAFTING_KEY] == "draft"
 
 
+@pytest.mark.parametrize(
+    ("code", "final", "reported", "retryable"),
+    [
+        ("budget_exhausted", False, "budget_exhausted", False),
+        (None, False, SeamCode.PLAN_NOT_READY.value, False),
+        (SeamCode.DISCOVERY_UNAVAILABLE.value, True, SeamCode.DISCOVERY_UNAVAILABLE.value, True),
+    ],
+    ids=["coded", "uncoded", "service-unreachable"],
+)
 async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_state_back(
     real_schemas: list[ToolSchema],
+    code: str | None,
+    final: bool,
+    reported: str,
+    retryable: bool,
 ) -> None:
     """The planner refuses the replan: the card offers the plan on record
-    again with the switch node's `switch_failed`, carrying the refusal's code
-    and the sentence for the user, and the drafting state is put back."""
+    again with the switch node's `switch_failed`, carrying the refusal's code,
+    or the seam's `plan_not_ready` for a refusal stating none, and the
+    sentence for the user, and the drafting state is put back. The same pick
+    can succeed again only where a scope switch's revision could, whatever
+    the refusal's `final` says."""
     plan = _pickable_plan(schemas=real_schemas)
     refused = {
         "text": "The draft budget is spent.",
-        "final": False,
-        "code": "budget_exhausted",
+        "final": final,
+        "code": code,
         "reason": "This request has used its budget of 4 plan drafts.",
     }
     seam = _ReplanSeam(
@@ -1861,9 +1878,9 @@ async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
     assert offered["revision"] == plan_revision(plan)
     assert offered["switch_failed"] == {
         **_PICK_SWITCH,
-        "code": "budget_exhausted",
+        "code": reported,
         "reason": refused["reason"],
-        "retryable": True,
+        "retryable": retryable,
     }
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     assert _session_state(runner).get(_DRAFTING_KEY) is None

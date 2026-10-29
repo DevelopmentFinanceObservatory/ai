@@ -4719,7 +4719,7 @@ async def test_a_switch_the_card_cannot_take_is_refused_with_its_constraint() ->
 # A planner decision a plan card shows as a switchable row
 # (`harness.plan_display.switchable_decision`): the DAC total, with the top
 # 10 donors to switch to.
-_DECISION_ID = "decision:donor_scope"
+_DECISION_ID = "decision/donor_scope"
 _SHOWN_DECISION = _PendingChoice(
     active="option_1",
     options={
