@@ -440,6 +440,27 @@ def test_a_mint_record_encodes_to_the_same_bytes_whatever_order_its_members_were
     assert decode_mint_record(encode_mint_record(one)) == one
 
 
+def test_a_mint_record_keeps_a_groupby_by_sorted_whatever_order_it_was_sent_or_stored_in() -> None:
+    """apis records `groupby.by` sorted, so a recipe's normal form built from a mint record
+    names one breakdown as apis does."""
+    ref = _ref()
+    dataset = FrameRef(spec_id=ref.spec_id, content_version="cv_" + "d" * 32)
+
+    def summed(by: list[str]) -> MintRecord:
+        groupby = {"by": by, "op": "sum", "levels": {"crsPurpose": 0}}
+        return MintRecord(frame=ref, dataset=dataset, options={"groupby": groupby})
+
+    caller_order = summed(["time_period", "crsPurpose"])
+    stored = encode_mint_record(summed(["crsPurpose", "time_period"])).replace(
+        b'["crsPurpose","time_period"]', b'["time_period","crsPurpose"]', 1
+    )
+
+    assert b'"by":["time_period","crsPurpose"]' in stored
+    assert caller_order == summed(["crsPurpose", "time_period"])
+    assert caller_order.options["groupby"]["by"] == ["crsPurpose", "time_period"]
+    assert decode_mint_record(stored) == caller_order
+
+
 def test_a_stored_mint_record_with_a_member_this_process_never_declared_still_decodes() -> None:
     record = _mint_record(_ref())
     stored = encode_mint_record(record).replace(b'{"dataset"', b'{"added_later":1,"dataset"', 1)

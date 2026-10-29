@@ -2482,6 +2482,30 @@ def test_the_default_columns_keep_the_mints_own_pair() -> None:
     assert frame_ref_for(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION) == _FRAME_REF
 
 
+# apis' `tests/datasets_api/test_analysis_roots.py` pins the same pair for the same
+# rendering, so the two producers of a root frame's pair cannot drift apart.
+_SHARED_PAIR = "cv_bb722d06259f357e6961a081f1c1f141"
+
+
+@pytest.mark.parametrize("by", [["origin", "time_period"], ["time_period", "origin"]])
+def test_a_frame_cut_of_party_totals_is_named_by_the_cut_and_its_groupby_in_any_order(
+    by: list[str],
+) -> None:
+    ref = frame_ref_for(
+        spec_id="spec_" + "a" * 32,
+        content_version="cv_" + "1" * 32,
+        columns=("party_kind",),
+        groupby={"by": by, "op": "sum"},
+        without_party_totals=True,
+    )
+    bare = frame_ref_for(
+        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, without_party_totals=True
+    )
+
+    assert ref.content_version == _SHARED_PAIR
+    assert bare.content_version.startswith("cv_") and bare != _FRAME_REF
+
+
 def test_extra_columns_name_a_frame_of_their_own() -> None:
     """The `content_version` is recomputed from the form `frame_ref_for` documents,
     since a change to the derivation would orphan every stored typed frame."""
@@ -2549,7 +2573,8 @@ def test_a_groupby_names_a_frame_apart_from_the_plain_and_the_typed_pair() -> No
         + hashlib.sha256(
             b'{"columns":[],"content_version":"'
             + _CONTENT_VERSION.encode()
-            + b'","groupby":{"by":["time_period","crsPurpose"],"op":"sum"}}'
+            # `by` sorted, whatever order the mint sent.
+            + b'","groupby":{"by":["crsPurpose","time_period"],"op":"sum"}}'
         ).hexdigest()[:32]
     )
     assert len({ref.content_version for ref in (_FRAME_REF, summed, summed_typed, typed)}) == 4

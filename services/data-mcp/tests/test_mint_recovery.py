@@ -192,6 +192,38 @@ async def _holding(
             _DEFAULT_OPTIONS
             | {"columns": ["party_kind"], "groupby": _GROUPBY, "without_party_totals": True},
         ),
+        (
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_CUT,
+                columns=("party_kind",),
+                without_party_totals=True,
+            ),
+            _CUT,
+            _DEFAULT_OPTIONS | {"columns": ["party_kind"], "without_party_totals": True},
+        ),
+        (
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_CUT_SUMMED,
+                columns=("party_kind",),
+                groupby=_GROUPBY,
+                without_party_totals=True,
+            ),
+            _CUT_SUMMED,
+            _DEFAULT_OPTIONS
+            | {"columns": ["party_kind"], "groupby": _GROUPBY, "without_party_totals": True},
+        ),
+        (
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_OLDER,
+                columns=("party_kind",),
+                without_party_totals=True,
+            ),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": ["party_kind"], "without_party_totals": True},
+        ),
     ],
     ids=[
         "default-columns",
@@ -208,8 +240,11 @@ async def _holding(
         "flow-party-kinds-under-the-earlier-token",
         "flow-party-types-and-kinds",
         "the-one-flow-party-type-a-table-serves-and-the-kind-without-class-and-whole",
+        "flow-party-kinds-of-a-cut-version-before-its-pair-named-the-cut",
+        "flow-party-kinds-of-a-sum-of-a-cut-version-before-its-pair-named-the-cut",
         "flow-party-kinds-of-a-cut-version",
         "flow-party-kinds-of-a-sum-of-a-cut-version",
+        "flow-party-kinds-of-a-cut-that-left-nothing-out",
     ],
 )
 async def test_a_root_is_recovered_from_the_version_that_reproduces_its_pair(
@@ -293,9 +328,13 @@ async def test_a_root_nothing_reproduces_fails_with_its_pair_and_reason(
 _KEPT_SUM = _DEFAULT_OPTIONS | {"groupby": _GROUPBY}
 
 
-@pytest.mark.parametrize("without_party_totals", [False, True], ids=["kept", "totals-left-out"])
+@pytest.mark.parametrize(
+    ("without_party_totals", "named_cut"),
+    [(False, False), (True, True), (True, False)],
+    ids=["kept", "totals-left-out", "totals-left-out-before-its-pair-named-the-cut"],
+)
 async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
-    without_party_totals: bool,
+    without_party_totals: bool, named_cut: bool
 ) -> None:
     """apis lists the version as unsummed, so only the options the held frame's
     trace keeps reproduce the pair that names the groupby."""
@@ -307,6 +346,7 @@ async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
         content_version=_OLDER,
         columns=("party_kind",) if without_party_totals else (),
         groupby=_GROUPBY,
+        without_party_totals=named_cut,
     )
     store = await _holding(ref, "dcid:A", options=kept_sum)
 

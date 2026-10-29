@@ -2565,7 +2565,10 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     cut = FrameRef(spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT)
     assert answer.presented == cut
     assert answer.store == frame_ref_for(
-        spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT, columns=KIND_COLUMNS
+        spec_id=KENYA_DONORS_SPEC,
+        content_version=KENYA_DONORS_CUT,
+        columns=KIND_COLUMNS,
+        without_party_totals=True,
     )
     # The frame the answer is described and drawn by is the cut version's.
     assert platform.described == [cut.model_dump()]

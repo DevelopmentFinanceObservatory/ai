@@ -307,9 +307,10 @@ class Breakdown(BaseModel):
     def groupby(self) -> dict[str, Any]:
         """The `options.groupby` apis sums this breakdown with: keep the year and the
         code axis, roll each code up to its ancestor at `level`, and sum away every other
-        summable code axis and `stat_var`."""
+        summable code axis and `stat_var`. `by` is sorted, as apis records it, so a recipe
+        built from the mint record has the normal form apis writes for it."""
         return {
-            "by": ["time_period", self.code_system],
+            "by": sorted(["time_period", self.code_system]),
             "op": "sum",
             "levels": {self.code_system: self.level},
         }

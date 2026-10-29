@@ -36,7 +36,7 @@ _OTHER_SPEC = "spec_" + "7" * 32
 _OTHER_FRAME = {"spec_id": _OTHER_SPEC, "content_version": "cv_" + "8" * 32}
 _ADDRESS_CALLER = "ip:" + "a" * 32
 _SUM = {"by": ["time_period"], "op": "sum"}
-_BREAKDOWN = {"by": ["time_period", "crsPurpose"], "op": "sum", "levels": {"crsPurpose": 1}}
+_BREAKDOWN = {"by": ["crsPurpose", "time_period"], "op": "sum", "levels": {"crsPurpose": 1}}
 
 type Handler = Callable[[httpx2.Request], httpx2.Response]
 

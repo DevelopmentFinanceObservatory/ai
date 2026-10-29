@@ -1464,7 +1464,7 @@
               }
             },
             "content_version": "ocv_73e91d9746688d37f20e29b9332514e7",
-            "output_digest": "out_5aac9dcc11c9a30755414ab47a6b0e64",
+            "output_digest": "out_4834487b81364ec90aca5ef2e4f00c32",
             "roots": [
               {
                 "spec_id": "spec_ffffffffffffffffffffffffffffffff",
@@ -1512,7 +1512,7 @@
         ]
       },
       "frame_content_version": "cv_111cbf47bdeed15f839d4164567fc970",
-      "output_digest": "out_5aac9dcc11c9a30755414ab47a6b0e64",
+      "output_digest": "out_4834487b81364ec90aca5ef2e4f00c32",
       "summary": {
         "verb": "growth",
         "spec_id": "ops_e740a435611623d10e6eea1885d377b3",
@@ -6530,8 +6530,8 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7348,8 +7348,8 @@
       "status": 422,
       "detail": "unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7563,8 +7563,8 @@
       "status": 422,
       "detail": "unit='converted to current prices, euros' is not one of the units this frame declares: ['CurrencyUSD']. Retry with one of these instead.",
       "code": "unit_heterogeneous",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -8344,8 +8344,8 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; include 'stat_var' in group_by, or narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -13369,8 +13369,8 @@
       "status": 422,
       "detail": "unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -14406,8 +14406,8 @@
       "status": 422,
       "detail": "The financingProvider parties in this frame cannot be pooled or ranked: the frame carries no 'financingProvider_party_kind' column, so its parties cannot be told apart from the group totals that hold them. Retrieve the data again with get_data and place_types=true, which adds 'financingProvider_party_kind', and retry with that frame_ref, or filter the frame to a single financingProvider party.",
       "code": "place_levels_mixed",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -14428,13 +14428,13 @@
             "parts": [],
             "sentence": "Computed by DFO: aggregate.",
             "spec": {
-              "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
+              "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
               "recipe": {
                 "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
                 "replay_key": "rpk_1ad72ac81b0b9d784258189cee807a07"
               }
             },
-            "content_version": "ocv_6d390830a20cf1c31279811d27fa3824",
+            "content_version": "ocv_c80101200b4ef695284779fb3ddddec1",
             "output_digest": "out_bc56af86d0d38d2a0166533520d4a1d2",
             "roots": [
               {
@@ -14465,8 +14465,8 @@
       "output_digest": "out_bc56af86d0d38d2a0166533520d4a1d2",
       "summary": {
         "verb": "aggregate",
-        "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
-        "content_version": "ocv_6d390830a20cf1c31279811d27fa3824",
+        "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
+        "content_version": "ocv_c80101200b4ef695284779fb3ddddec1",
         "frame_content_version": "cv_74e079db3e2ae7d874a37893b1c2780f",
         "rows": 24,
         "role_keys": [],
@@ -15113,8 +15113,8 @@
       "status": 404,
       "detail": "the frame spec_00000000000000000000000000000000, cv_00000000000000000000000000000000 cannot be read: not held. Run the analysis with latest=True to read its dataset's current version",
       "code": "snapshot_not_found",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -16552,7 +16552,7 @@
               }
             },
             "content_version": "ocv_f747e4743ff2a010600246fe3ca345a8",
-            "output_digest": "out_3cc112b316e2e03efd220117e996356f",
+            "output_digest": "out_a3d52523399c8217d27df62eec2448d8",
             "roots": [
               {
                 "spec_id": "spec_77777777777777777777777777777777",
@@ -16587,7 +16587,7 @@
         ]
       },
       "frame_content_version": "cv_0d258e118145d4ccf9c7494db0000f26",
-      "output_digest": "out_3cc112b316e2e03efd220117e996356f",
+      "output_digest": "out_a3d52523399c8217d27df62eec2448d8",
       "summary": {
         "verb": "rank",
         "spec_id": "ops_4bb5aec15e9ab700de4c9236b155b92c",
@@ -17354,8 +17354,8 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -17989,7 +17989,7 @@
               }
             },
             "content_version": "ocv_b5600428c1897a6df4af5aa2531e117f",
-            "output_digest": "out_3cc112b316e2e03efd220117e996356f",
+            "output_digest": "out_a3d52523399c8217d27df62eec2448d8",
             "roots": [
               {
                 "spec_id": "spec_77777777777777777777777777777777",
@@ -18024,7 +18024,7 @@
         ]
       },
       "frame_content_version": "cv_0d258e118145d4ccf9c7494db0000f26",
-      "output_digest": "out_3cc112b316e2e03efd220117e996356f",
+      "output_digest": "out_a3d52523399c8217d27df62eec2448d8",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_c941b6042772a3b485e9d5afb7bcea86",
@@ -18172,8 +18172,8 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -18205,7 +18205,7 @@
               }
             },
             "content_version": "ocv_8cb7b595a61e5110e745581578206534",
-            "output_digest": "out_a8bbed572a22251158e89fce6e018912",
+            "output_digest": "out_9fd956445975b466ab5f28b194c2b5e3",
             "roots": [
               {
                 "spec_id": "spec_ffffffffffffffffffffffffffffffff",
@@ -18240,7 +18240,7 @@
         ]
       },
       "frame_content_version": "cv_12782827c45abb7f3e4657d3cac4182f",
-      "output_digest": "out_a8bbed572a22251158e89fce6e018912",
+      "output_digest": "out_9fd956445975b466ab5f28b194c2b5e3",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_65782abf8c48b0ebdfd17fe1acdbfae4",
@@ -19802,7 +19802,7 @@
               }
             },
             "content_version": "ocv_60d220ba02766352c08b1a179ed6afce",
-            "output_digest": "out_6cefb01e779c3678047c4cead0d71b05",
+            "output_digest": "out_8de91e7242139c0915134eceb44fa078",
             "roots": [
               {
                 "spec_id": "spec_ffffffffffffffffffffffffffffffff",
@@ -19837,7 +19837,7 @@
         ]
       },
       "frame_content_version": "cv_3f56f9f6d955f788d06d294ab3f6107d",
-      "output_digest": "out_6cefb01e779c3678047c4cead0d71b05",
+      "output_digest": "out_8de91e7242139c0915134eceb44fa078",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_0fb33aaa239a0d344f776fdd26ff1a78",
@@ -20408,7 +20408,7 @@
               }
             },
             "content_version": "ocv_b8ed741922633af54a54a4b53f9c735b",
-            "output_digest": "out_115a8604335b227614ed1cb822d99825",
+            "output_digest": "out_9ed29482325da597b158e295ebf7261d",
             "roots": [
               {
                 "spec_id": "spec_ea7f40469f100662594861ead9a8d67d",
@@ -20434,7 +20434,7 @@
         ]
       },
       "frame_content_version": "cv_f90721be6352fb0cca25b7fc0c676548",
-      "output_digest": "out_115a8604335b227614ed1cb822d99825",
+      "output_digest": "out_9ed29482325da597b158e295ebf7261d",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_8c5ab42052ce53b1d56c086f2d59787f",
@@ -20666,7 +20666,7 @@
               }
             },
             "content_version": "ocv_571e4b90b6781e9688d96cb25c76d008",
-            "output_digest": "out_115a8604335b227614ed1cb822d99825",
+            "output_digest": "out_9ed29482325da597b158e295ebf7261d",
             "roots": [
               {
                 "spec_id": "spec_864ccdf4739871aa7da5c1f9dcaee5e2",
@@ -20692,7 +20692,7 @@
         ]
       },
       "frame_content_version": "cv_24c0c0926430f29fb86ee01ed6c110ea",
-      "output_digest": "out_115a8604335b227614ed1cb822d99825",
+      "output_digest": "out_9ed29482325da597b158e295ebf7261d",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_27559cac9a5c13e7609ddd85f53e9cfd",
@@ -20930,8 +20930,8 @@
       "status": 422,
       "detail": "numerator_unit or denominator_unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -20981,7 +20981,7 @@
               }
             },
             "content_version": "ocv_462d24e998b318720fea08cc42866557",
-            "output_digest": "out_115a8604335b227614ed1cb822d99825",
+            "output_digest": "out_9ed29482325da597b158e295ebf7261d",
             "roots": [
               {
                 "spec_id": "spec_b21aa574bceeb5005ee87e79b5b7aba0",
@@ -21007,7 +21007,7 @@
         ]
       },
       "frame_content_version": "cv_c96ab90e4de9d59e952935c23ea51829",
-      "output_digest": "out_115a8604335b227614ed1cb822d99825",
+      "output_digest": "out_9ed29482325da597b158e295ebf7261d",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_7488b96321f78c68a6813aa98ba30a2a",
@@ -21251,7 +21251,7 @@
               }
             },
             "content_version": "ocv_7bb4679b2d8436f430af9f992a171363",
-            "output_digest": "out_2d279fe1f582234cc193f2956ac22884",
+            "output_digest": "out_99a438dc7eeb52d82e2f8258f4d7aaa3",
             "roots": [
               {
                 "spec_id": "spec_dddddddddddddddddddddddddddddddd",
@@ -21286,7 +21286,7 @@
         ]
       },
       "frame_content_version": "cv_884fbcbda008bb81aa8f37035f442c5e",
-      "output_digest": "out_2d279fe1f582234cc193f2956ac22884",
+      "output_digest": "out_99a438dc7eeb52d82e2f8258f4d7aaa3",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_149f00b1104db99ee7857bcb7d874d79",
@@ -21442,7 +21442,7 @@
               }
             },
             "content_version": "ocv_d6ff589c31538128527c988c051b415d",
-            "output_digest": "out_554292f7d1bf5e0ebcc5140a4f86c88f",
+            "output_digest": "out_a508f01bb1daa3624fcaf50a33317ab3",
             "roots": [
               {
                 "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -21477,7 +21477,7 @@
         ]
       },
       "frame_content_version": "cv_c7d5cbe23c0c82b2fc2087ee7b7468a2",
-      "output_digest": "out_554292f7d1bf5e0ebcc5140a4f86c88f",
+      "output_digest": "out_a508f01bb1daa3624fcaf50a33317ab3",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_52d8cc2f3248873a6a2bc5f82dc680b9",
@@ -21598,8 +21598,8 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -26893,7 +26893,7 @@
               }
             },
             "content_version": "ocv_957b0b86abfe6935068b34e494c3b87c",
-            "output_digest": "out_b4a3bddb34444852efadc0f411197191",
+            "output_digest": "out_0e37fd67b06c2a5354d4284fbdf13090",
             "roots": [
               {
                 "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -26928,7 +26928,7 @@
         ]
       },
       "frame_content_version": "cv_9b94cfc92844bbf1d13cab0b09238c5e",
-      "output_digest": "out_b4a3bddb34444852efadc0f411197191",
+      "output_digest": "out_0e37fd67b06c2a5354d4284fbdf13090",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_ef527290cba735ff2ad03884a7330d22",
@@ -27237,8 +27237,8 @@
       "status": 422,
       "detail": "left_entity names column(s) this frame has no grain for: ['financingProvider']. Available: ['financingProvider', 'financingRecipient', 'stat_var_crsCooperationModality', 'stat_var_crsPurpose', 'stat_var_crsTypeOfFinance', 'stat_var_crsTypeOfFlow'].",
       "code": "role_ambiguous",
-      "trace_id": "48843f86c54d4525a4f27ce7cee595d9",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "5504f99f8c0846de84aeb9f536e796b2",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -27276,7 +27276,7 @@
               }
             },
             "content_version": "ocv_b64366079a9d733655badfb322cb6fc7",
-            "output_digest": "out_50aa3f180923369b5523a035027fdf56",
+            "output_digest": "out_7f0377dd5390d61046210ab07013e300",
             "roots": [
               {
                 "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -27302,7 +27302,7 @@
         ]
       },
       "frame_content_version": "cv_eba2f1c1012b8b603c028ef8498163a7",
-      "output_digest": "out_50aa3f180923369b5523a035027fdf56",
+      "output_digest": "out_7f0377dd5390d61046210ab07013e300",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_71bb3b7236e755949936d55e7850a1de",
@@ -39509,103 +39509,6 @@
     },
     "retry_after": null
   },
-  "GET /api/datasets/derived/ops_0245e8e443c50f53889b72e6cd20870f/ocv_6d390830a20cf1c31279811d27fa3824/file?format=parquet&bundle=false": {
-    "status": 200,
-    "content": "UEFSMRUEFRgVHEwVAhUAEgAADCwIAAAAZGNpZDpPZGEVABUSFRYsFTAVEBUGFQYcNgAoCGRjaWQ6T2RhGAhkY2lkOk9kYRERAAAACSACAAAAMAEBMAAVBBWAAxXYAUwVMBUAEgAAwAEcBAAAADIwMDANCAAxDQgAMg0IADMNCAA0DQgANQ0IADYNCAA3DQgAOA0IADkJCAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMg1QADINUCQyMgQAAAAyMDIzFQAVLhUyLBUwFRAVBhUGHDYAKAQyMDIzGAQyMDAwEREAAAAXWAIAAAAwAQUHIIhBijkoqcWaezDKSau9FQQVEBUUTBUCFQASAAAIHAAAAAAAAENAFQAVEhUWLBUwFRAVBhUGHBgIAAAAAAAAQ0AYCAAAAAAAAENAFgAoCAAAAAAAAENAGAgAAAAAAABDQBERAAAACSACAAAAMAEBMAAVBBUOFRJMFQIVABIAAAcYAwAAAHVzZBUAFRIVFiwVMBUQFQYVBhw2ACgDdXNkGAN1c2QREQAAAAkgAgAAADABATAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQZjDUAGAZzY2hlbWEVDgAVDCUCGAhzdGF0X3ZhciUATBwAAAAVDCUCGAt0aW1lX3BlcmlvZCUATBwAAAAVCiUCGAV2YWx1ZQAVDCUCGAR1bml0JQBMHAAAABUMJQIYEW1lYXN1cmVtZW50TWV0aG9kJQBMHAAAABUMJQIYCnByb3ZlbmFuY2UlAEwcAAAAFQwlAhgGc3RhdHVzJQBMHAAAABYwGRwZfCYAHBUMGTUABhAZGAhzdGF0X3ZhchUCFjAWnAEWpAEmQCYIHDYAKAhkY2lkOk9kYRgIZGNpZDpPZGEREQAZLBUEFQAVAgAVABUQFQIAPBaAAxkGGSYAMAAAACYAHBUMGTUABhAZGAt0aW1lX3BlcmlvZBUCFjAWlAQW8AImpAMmrAEcNgAoBDIwMjMYBDIwMDAREQAZLBUEFQAVAgAVABUQFQIAPBbAARkGGSYAMAAAACYAHBUKGTUABhAZGAV2YWx1ZRUCFjAWvAEWxAEmzAQmnAQcGAgAAAAAAABDQBgIAAAAAAAAQ0AWACgIAAAAAAAAQ0AYCAAAAAAAAENAEREAGSwVBBUAFQIAFQAVEBUCADwpBhkmADAAAAAmABwVDBk1AAYQGRgEdW5pdBUCFjAWfhaGASaOBibgBRw2ACgDdXNkGAN1c2QREQAZLBUEFQAVAgAVABUQFQIAPBaQARkGGSYAMAAAACYAHBUMGTUABhAZGBFtZWFzdXJlbWVudE1ldGhvZBUCFjAWVBZaJoQHJuYGHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFjAWVBZaJt4HJsAHHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgGc3RhdHVzFQIWMBZUFlomuAgmmggcNjAAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYwAAAAABbmCRYwJggW7AgAGRwYDEFSUk9XOnNjaGVtYRisBC8vLy8vNWdCQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFjQUFBQTRBUUFBK0FBQUFNUUFBQUNZQUFBQVlBQUFBREFBQUFBRUFBQUE5UDcvL3dBQUFRVVFBQUFBR0FBQUFBUUFBQUFBQUFBQUJnQUFBSE4wWVhSMWN3QUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQW9BQUFCd2NtOTJaVzVoYm1ObEFBQU0vLy8vU1AvLy93QUFBUVVRQUFBQUpBQUFBQVFBQUFBQUFBQUFFUUFBQUcxbFlYTjFjbVZ0Wlc1MFRXVjBhRzlrQUFBQVFQLy8vM3ovLy84QUFBRUZFQUFBQUJnQUFBQUVBQUFBQUFBQUFBUUFBQUIxYm1sMEFBQUFBR2ovLy8ray8vLy9BQUFCQXhBQUFBQWNBQUFBQkFBQUFBQUFBQUFGQUFBQWRtRnNkV1VBQmdBSUFBWUFCZ0FBQUFBQUFnRFUvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBTEFBQUFkR2x0WlY5d1pYSnBiMlFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBl8HAAAHAAAHAAAHAAAHAAAHAAAHAAAAGgFAABQQVIx",
-    "retry_after": null
-  },
-  "GET /api/datasets/derived/ops_0245e8e443c50f53889b72e6cd20870f/ocv_6d390830a20cf1c31279811d27fa3824?": {
-    "status": 200,
-    "body": {
-      "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
-      "content_version": "ocv_6d390830a20cf1c31279811d27fa3824",
-      "retention": {
-        "pinned": false,
-        "held_until": "2026-11-27T00:00:00Z"
-      },
-      "citation": {
-        "text": "",
-        "sources": []
-      },
-      "recipe": {
-        "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
-        "replay_key": "rpk_1ad72ac81b0b9d784258189cee807a07",
-        "execution_identity": "0.9.0|1.1.0|0.2.0",
-        "tree": {
-          "frame": {
-            "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
-            "content_version": "ocv_6d390830a20cf1c31279811d27fa3824"
-          },
-          "op_spec": {
-            "frame_ref": {
-              "content_version": "cv_7e3cead718eecfe77e80489cbcde4f01",
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-            },
-            "identity_version": "ops1",
-            "parameters": {
-              "aggregation": "sum",
-              "group_by": [
-                "time_period"
-              ],
-              "unit": null
-            },
-            "verb": "aggregate"
-          },
-          "inputs": {
-            "frame_ref": {
-              "frame": {
-                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-                "content_version": "cv_7e3cead718eecfe77e80489cbcde4f01"
-              },
-              "root": 0
-            }
-          }
-        },
-        "roots": [
-          {
-            "schema_version": 1,
-            "frame": {
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-              "content_version": "cv_7e3cead718eecfe77e80489cbcde4f01"
-            },
-            "dataset": {
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-              "content_version": "cv_e738086b65591a27b80040bddb156e65"
-            },
-            "options": {
-              "format": "parquet",
-              "bundle": false,
-              "layout": "frame",
-              "columns": [
-                "party_class",
-                "party_kind",
-                "party_whole"
-              ],
-              "without_party_totals": true
-            },
-            "scope": {}
-          }
-        ]
-      },
-      "roots": [
-        {
-          "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-          "content_version": "cv_e738086b65591a27b80040bddb156e65",
-          "rendering": {
-            "format": "parquet",
-            "bundle": false,
-            "layout": "frame",
-            "without_party_totals": true
-          }
-        }
-      ],
-      "resolved_periods": [],
-      "anchor": null,
-      "left_out": [],
-      "left_out_complete": true
-    },
-    "retry_after": null
-  },
   "GET /api/datasets/derived/ops_0645acbb90d6608ceffc276b01151065/ocv_775803d44d02fac6f0b384058edddacf/file?format=parquet&bundle=false": {
     "status": 200,
     "content": "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TUFBTFQrLy8vdy92Ly9BQUFCQlJBQUFBQWNBQUFBQkFBQUFBQUFBQUFLQUFBQWNISnZkbVZ1WVc1alpRQUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFDUUFBQUFFQUFBQUFBQUFBQkVBQUFCdFpXRnpkWEpsYldWdWRFMWxkR2h2WkFBQUFCVC8vLzlRLy8vL0FBQUJCUkFBQUFBWUFBQUFCQUFBQUFBQUFBQUVBQUFBZFc1cGRBQUFBQUE4Ly8vL2VQLy8vd0FBQVFNUUFBQUFIQUFBQUFRQUFBQUFBQUFBQlFBQUFIWmhiSFZsQUFZQUNBQUdBQVlBQUFBQUFBSUFxUC8vL3dBQUFRVVFBQUFBSEFBQUFBUUFBQUFBQUFBQUN3QUFBSFJwYldWZmNHVnlhVzlrQUpqLy8vL1UvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBSUFBQUFjbVZ3YjNKMFpYSUFBQUFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBmMHAAAHAAAHAAAHAAAHAAAHAAAHAAAHAAAAGsGAABQQVIx",
@@ -42883,6 +42786,103 @@
             "format": "parquet",
             "bundle": false,
             "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_e2c4963c63b92c53b50ae66efadc7b62/ocv_c80101200b4ef695284779fb3ddddec1/file?format=parquet&bundle=false": {
+    "status": 200,
+    "content": "UEFSMRUEFRgVHEwVAhUAEgAADCwIAAAAZGNpZDpPZGEVABUSFRYsFTAVEBUGFQYcNgAoCGRjaWQ6T2RhGAhkY2lkOk9kYRERAAAACSACAAAAMAEBMAAVBBWAAxXYAUwVMBUAEgAAwAEcBAAAADIwMDANCAAxDQgAMg0IADMNCAA0DQgANQ0IADYNCAA3DQgAOA0IADkJCAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMg1QADINUCQyMgQAAAAyMDIzFQAVLhUyLBUwFRAVBhUGHDYAKAQyMDIzGAQyMDAwEREAAAAXWAIAAAAwAQUHIIhBijkoqcWaezDKSau9FQQVEBUUTBUCFQASAAAIHAAAAAAAAENAFQAVEhUWLBUwFRAVBhUGHBgIAAAAAAAAQ0AYCAAAAAAAAENAFgAoCAAAAAAAAENAGAgAAAAAAABDQBERAAAACSACAAAAMAEBMAAVBBUOFRJMFQIVABIAAAcYAwAAAHVzZBUAFRIVFiwVMBUQFQYVBhw2ACgDdXNkGAN1c2QREQAAAAkgAgAAADABATAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQZjDUAGAZzY2hlbWEVDgAVDCUCGAhzdGF0X3ZhciUATBwAAAAVDCUCGAt0aW1lX3BlcmlvZCUATBwAAAAVCiUCGAV2YWx1ZQAVDCUCGAR1bml0JQBMHAAAABUMJQIYEW1lYXN1cmVtZW50TWV0aG9kJQBMHAAAABUMJQIYCnByb3ZlbmFuY2UlAEwcAAAAFQwlAhgGc3RhdHVzJQBMHAAAABYwGRwZfCYAHBUMGTUABhAZGAhzdGF0X3ZhchUCFjAWnAEWpAEmQCYIHDYAKAhkY2lkOk9kYRgIZGNpZDpPZGEREQAZLBUEFQAVAgAVABUQFQIAPBaAAxkGGSYAMAAAACYAHBUMGTUABhAZGAt0aW1lX3BlcmlvZBUCFjAWlAQW8AImpAMmrAEcNgAoBDIwMjMYBDIwMDAREQAZLBUEFQAVAgAVABUQFQIAPBbAARkGGSYAMAAAACYAHBUKGTUABhAZGAV2YWx1ZRUCFjAWvAEWxAEmzAQmnAQcGAgAAAAAAABDQBgIAAAAAAAAQ0AWACgIAAAAAAAAQ0AYCAAAAAAAAENAEREAGSwVBBUAFQIAFQAVEBUCADwpBhkmADAAAAAmABwVDBk1AAYQGRgEdW5pdBUCFjAWfhaGASaOBibgBRw2ACgDdXNkGAN1c2QREQAZLBUEFQAVAgAVABUQFQIAPBaQARkGGSYAMAAAACYAHBUMGTUABhAZGBFtZWFzdXJlbWVudE1ldGhvZBUCFjAWVBZaJoQHJuYGHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFjAWVBZaJt4HJsAHHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgGc3RhdHVzFQIWMBZUFlomuAgmmggcNjAAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYwAAAAABbmCRYwJggW7AgAGRwYDEFSUk9XOnNjaGVtYRisBC8vLy8vNWdCQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFjQUFBQTRBUUFBK0FBQUFNUUFBQUNZQUFBQVlBQUFBREFBQUFBRUFBQUE5UDcvL3dBQUFRVVFBQUFBR0FBQUFBUUFBQUFBQUFBQUJnQUFBSE4wWVhSMWN3QUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQW9BQUFCd2NtOTJaVzVoYm1ObEFBQU0vLy8vU1AvLy93QUFBUVVRQUFBQUpBQUFBQVFBQUFBQUFBQUFFUUFBQUcxbFlYTjFjbVZ0Wlc1MFRXVjBhRzlrQUFBQVFQLy8vM3ovLy84QUFBRUZFQUFBQUJnQUFBQUVBQUFBQUFBQUFBUUFBQUIxYm1sMEFBQUFBR2ovLy8ray8vLy9BQUFCQXhBQUFBQWNBQUFBQkFBQUFBQUFBQUFGQUFBQWRtRnNkV1VBQmdBSUFBWUFCZ0FBQUFBQUFnRFUvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBTEFBQUFkR2x0WlY5d1pYSnBiMlFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBl8HAAAHAAAHAAAHAAAHAAAHAAAHAAAAGgFAABQQVIx",
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_e2c4963c63b92c53b50ae66efadc7b62/ocv_c80101200b4ef695284779fb3ddddec1?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
+      "content_version": "ocv_c80101200b4ef695284779fb3ddddec1",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
+        "replay_key": "rpk_1ad72ac81b0b9d784258189cee807a07",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_e2c4963c63b92c53b50ae66efadc7b62",
+            "content_version": "ocv_c80101200b4ef695284779fb3ddddec1"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_448c256b1daf26100b7bb76aae1ca94d",
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "aggregation": "sum",
+              "group_by": [
+                "time_period"
+              ],
+              "unit": null
+            },
+            "verb": "aggregate"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "content_version": "cv_448c256b1daf26100b7bb76aae1ca94d"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_448c256b1daf26100b7bb76aae1ca94d"
+            },
+            "dataset": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_e738086b65591a27b80040bddb156e65"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "columns": [
+                "party_class",
+                "party_kind",
+                "party_whole"
+              ],
+              "without_party_totals": true
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "content_version": "cv_e738086b65591a27b80040bddb156e65",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame",
+            "without_party_totals": true
           }
         }
       ],

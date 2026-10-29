@@ -98,7 +98,7 @@ def _round(apis: Path, scratch: Path, suite: _Suite) -> int:
         check=True,
     )
     answers = json.loads(replies.read_text())
-    suite.fixture.write_text(json.dumps(dict(sorted(answers.items())), indent=1) + "\n")
+    suite.fixture.write_text(json.dumps(dict(sorted(answers.items())), indent=2) + "\n")
     return len(new)
 
 

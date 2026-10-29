@@ -5,14 +5,15 @@ an analysis-mcp verb's own `frame_ref` resolution.
 
 The frame held under an apis service pair `{spec_id, content_version}` is that
 version's canonical frame, the one its `content_version` names. A mint with no
-`options.columns` and no `options.groupby` registers it under the mint's own pair:
+`options.columns`, no `options.groupby` and no `options.without_party_totals`
+registers it under the mint's own pair:
 the bytes are the version's `CANONICAL_FRAME_RENDERING` artifact, which the
 snapshot route lists, and the frame is registered only when
 `mint_content_version(frame_sha256=frame_sha256(frame))` is that
 `content_version`. Every other mint registers the artifact of its own rendering
-under a pair `frame_ref_for` derives from its columns and groupby, unchecked
-against the token, since a selection or a sum is a different frame. A mint with
-`options.without_party_totals` names apis' version of the frame without group
+under a pair `frame_ref_for` derives from its columns, groupby and cut, unchecked
+against the token, since a selection, a sum or a cut is a different frame. A mint
+with `options.without_party_totals` names apis' version of the frame without group
 totals, so the pair it registers under holds the rows apis serves for it.
 
 Each mint that reads or parses the frame also writes its mint record
@@ -299,8 +300,9 @@ async def materialise_and_register(
     """Fetch, parse, and register the frame `manifest` names, or report why it couldn't.
 
     `options` is the mint request's `options`. The frame registers under the
-    reference `frame_ref_for` gives the manifest's pair, `options.columns` and
-    `options.groupby`. With neither, that is the manifest's own pair, and the bytes
+    reference `frame_ref_for` gives the manifest's pair, `options.columns`,
+    `options.groupby` and `options.without_party_totals`. With none of them, that is
+    the manifest's own pair, and the bytes
     are the version's canonical frame, found on the snapshot route
     (`_locate_canonical_frame`) and checked against the pair's `content_version`
     before the write (`_parse_and_register`). Otherwise the bytes are the artifact
@@ -861,10 +863,12 @@ def frame_ref_for(
     content_version: str,
     columns: tuple[str, ...] = (),
     groupby: Mapping[str, Any] | None = None,
+    without_party_totals: bool = False,
     enrichment_stamp: str | None = None,
 ) -> FrameRef:
     """The frame reference of the frame a mint names as `{spec_id, content_version}`,
-    minted with `options.columns` set to `columns` and `options.groupby` to `groupby`.
+    minted with `options.columns` set to `columns`, `options.groupby` to `groupby` and
+    `options.without_party_totals` to `without_party_totals`.
 
     apis keeps one `content_version` for every rendering of a materialisation,
     so a frame minted with extra columns (`get_data(place_types=True)`), a sum that
@@ -873,7 +877,8 @@ def frame_ref_for(
     pair and holds the version's canonical frame. Any other names its options in its
     `content_version`: `cv_` and the first 32 hex digits of the SHA-256 of the
     RFC 8785 form of `{"columns": [...], "content_version": ...}`, with `columns`
-    sorted and a `"groupby"` member holding `groupby` when it is set. Two renderings
+    sorted, a `"groupby"` member holding `groupby` with its `by` sorted when it is set,
+    and `"without_party_totals": true` when the cut is asked for. Two renderings
     of one pair are then two frames, and the store's insert-only entry for one is
     never served for the other. A groupby sum apis mints as a version of its own
     is still named by its groupby, since data-mcp cannot tell it from a sum that
@@ -888,20 +893,24 @@ def frame_ref_for(
     would serve the frame holding the old kinds for as long as it keeps the entry.
     With no stamp, or with columns that ask for no kinds, the ref is the unsalted one.
 
-    `options.without_party_totals` takes no part: apis mints a frame without
-    party totals a version of its own, so `content_version` already names it, and a
-    cut that leaves nothing out serves its base's frame under its base's version.
+    `options.without_party_totals` names the frame although apis mints a frame without
+    party totals a version of its own: a cut that leaves nothing out serves its base's
+    frame under its base's version, and a recipe replaying the frame read with the cut
+    replays the cut, so the frame is named apart from the one read without it. apis'
+    `analysis_roots.frame_ref_for` names root frames the same way.
 
     Raises:
         pydantic.ValidationError: When `spec_id` and `content_version` do not fit
             `FrameRef`'s pair shape.
     """
     ref = FrameRef(spec_id=spec_id, content_version=content_version)
-    if not columns and groupby is None:
+    if not columns and groupby is None and not without_party_totals:
         return ref
     preimage: dict[str, Any] = {"columns": sorted(columns), "content_version": content_version}
     if groupby is not None:
-        preimage["groupby"] = dict(groupby)
+        preimage["groupby"] = {**groupby, "by": sorted(groupby["by"])}
+    if without_party_totals:
+        preimage[WITHOUT_PARTY_TOTALS] = True
     if enrichment_stamp is not None and requests_kinds(columns):
         preimage["enrichment_stamp"] = enrichment_stamp
     rendering = rfc8785.dumps(preimage)
@@ -923,6 +932,7 @@ def _ref_or_refusal(
             content_version=manifest.content_version,
             columns=tuple(options.get("columns") or ()),
             groupby=options.get("groupby"),
+            without_party_totals=options.get(WITHOUT_PARTY_TOTALS) is True,
             enrichment_stamp=stamp,
         )
     except ValidationError as exc:

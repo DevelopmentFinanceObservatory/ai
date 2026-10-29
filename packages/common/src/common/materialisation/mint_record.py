@@ -18,8 +18,10 @@ A record holds:
   that version's canonical frame.
 - `dataset`: the pair apis names the materialisation by, which every
   rendering of it shares.
-- `options`: the mint request's `options` as `get_data` sent them. A mint sent
-  with them again registers the same rendering under the same derivation.
+- `options`: the mint request's `options` as `get_data` sent them, with
+  `groupby.by` sorted as apis records it, so a recipe's normal form names one
+  breakdown one way in both services. A mint sent with them again registers the
+  same rendering under the same derivation, since `frame_ref_for` sorts `by` too.
 - `scope`: the mint request's `scope` as `get_data` sent it. `dataset.spec_id`
   is the identity apis served after applying it, and each scope member
   replaces a whole member of the identity, so sending the same scope with
@@ -60,7 +62,7 @@ import json
 from typing import Any, Literal
 
 import rfc8785
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from common.materialisation.frame_ref import FrameRef
 
@@ -97,6 +99,14 @@ class MintRecord(BaseModel):
     scope: dict[str, Any] = Field(default_factory=dict)
     stat_var_count: int | None = Field(default=None, ge=0)
     enrichment_stamp: str | None = Field(default=None, exclude_if=lambda stamp: stamp is None)
+
+    @field_validator("options")
+    @classmethod
+    def _sorted_groupby(cls, options: dict[str, Any]) -> dict[str, Any]:
+        groupby = options.get("groupby")
+        if not isinstance(groupby, dict) or not isinstance(groupby.get("by"), list):
+            return options
+        return {**options, "groupby": {**groupby, "by": sorted(groupby["by"])}}
 
 
 class _LenientMintRecord(MintRecord):

@@ -27,7 +27,7 @@ from runner_replay import ReplayedRunner, frame_digest
 
 _AXIS = "reporter"
 _SUM = {"by": ["time_period"], "op": "sum"}
-_BREAKDOWN = {"by": ["time_period", _AXIS], "op": "sum", "levels": {_AXIS: 1}}
+_BREAKDOWN = {"by": [_AXIS, "time_period"], "op": "sum", "levels": {_AXIS: 1}}
 _OPTIONS = {"format": "parquet", "bundle": False, "layout": "frame"}
 
 type Roots = dict[str, dict[str, str]]

@@ -9,9 +9,10 @@ over one set of stores, so a derived root finds the recipe of the call that
 returned it. A refusal or a pending root is the analysis door's own body.
 
 A root's frame is recorded under its pair and the columns it is read with, and a
-root read with columns or a groupby is the read `analysis_roots` makes: the
-recorded frame, and a mint record naming the frame pair those columns and that
-groupby give (`analysis_roots.frame_ref_for`, with no enrichment stamp). The
+root read with columns, a groupby or the party-totals cut is the read
+`analysis_roots` makes: the recorded frame, and a mint record naming the frame
+pair those columns, that groupby and that cut give (`analysis_roots.frame_ref_for`,
+with no enrichment stamp). The
 recorded frame of a groupby root is the dataset version apis summed, which a
 mint record names as the root's dataset, so it is read as recorded.
 
@@ -100,16 +101,18 @@ class _RenderedRoots(FakeRootSource):
             else None
         )
         dataset = resolved.dataset
-        if not columns and groupby is None:
+        options = resolved.record["options"]
+        cut = options.get("without_party_totals") is True
+        if not columns and groupby is None and not cut:
             return resolved
         frame = frame_ref_for(
             spec_id=dataset.spec_id,
             content_version=dataset.content_version,
             columns=columns,
             groupby=groupby,
+            without_party_totals=cut,
             enrichment_stamp=None,
         )
-        options = resolved.record["options"]
         record = {**resolved.record, "frame": frame.model_dump()}
         return replace(
             resolved,

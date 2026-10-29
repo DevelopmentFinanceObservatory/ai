@@ -40,8 +40,12 @@ Recoverable:
   party roles. apis mints such a frame a version of its own, with the version it
   was cut from as `base_content_version`, and its versions route says so beside any
   `groupby` (`DatasetVersion.without_party_totals`). A cut that left nothing out
-  shares its base's version, which lists as plain, and is recovered without the
-  option, which names the same rows while no total is left out.
+  shares its base's version, which lists as plain. Its pair names the cut
+  (`frame_ref_for`), so each candidate above is also tried with the cut, and a match
+  recovers with the option. A frame registered before the pair named the cut is held
+  under the pair without it and recovers with the option its version records, or
+  without it on a plain version, which names the same rows while no total is left
+  out.
 - `scope`, as empty: the dataset's `spec_id` is the identity after any scope was
   applied, so minting it with no scope names the same dataset.
 - `stat_var_count`, read off the frame the store holds under the pair.
@@ -199,14 +203,15 @@ async def recover_mint_record(
     versions = await dataset_versions(spec_id=ref.spec_id)
     for version in versions:
         groupbys = (None,) if version.groupby is None else (None, version.groupby)
-        for groupby, columns, stamp in product(
-            groupbys, RECOVERABLE_COLUMNS, _listed_or_none(version)
+        for groupby, cut, columns, stamp in product(
+            groupbys, (False, True), RECOVERABLE_COLUMNS, _listed_or_none(version)
         ):
             candidate = frame_ref_for(
                 spec_id=ref.spec_id,
                 content_version=version.content_version,
                 columns=columns,
                 groupby=groupby,
+                without_party_totals=cut,
                 enrichment_stamp=stamp,
             )
             if candidate != ref:
@@ -217,8 +222,8 @@ async def recover_mint_record(
                     raise MintRecordUnrecoverableError(ref, reason="groupby_unrecorded")
                 if version.groupby is not None:
                     options["groupby"] = dict(version.groupby)
-                if version.without_party_totals:
-                    options[WITHOUT_PARTY_TOTALS] = True
+            if cut or version.without_party_totals:
+                options[WITHOUT_PARTY_TOTALS] = True
             if columns:
                 options["columns"] = list(columns)
             stat_var_count = await _held_stat_var_count(store, ref)
@@ -232,6 +237,13 @@ async def recover_mint_record(
                 enrichment_stamp=recorded_stamp(columns, stamp),
             )
     return await _recover_from_trace(ref, versions=versions, store=store)
+
+
+def _named_cuts(options: Mapping[str, Any]) -> tuple[bool, ...]:
+    """Whether a frame minted with `options` may be named by its party-totals cut: by the cut
+    it asks for, and without it, the pair of a frame registered before `frame_ref_for` named
+    the cut."""
+    return tuple(dict.fromkeys((options.get(WITHOUT_PARTY_TOTALS) is True, False)))
 
 
 def _listed_or_none(version: DatasetVersion) -> tuple[str | None, ...]:
@@ -257,12 +269,13 @@ async def _recover_from_trace(
             if trace.enrichment_stamp is not None
             else _listed_or_none(version)
         )
-        for stamp in stamps:
+        for stamp, cut in product(stamps, _named_cuts(options)):
             candidate = frame_ref_for(
                 spec_id=ref.spec_id,
                 content_version=version.content_version,
                 columns=tuple(options.get("columns") or ()),
                 groupby=options.get("groupby"),
+                without_party_totals=cut,
                 enrichment_stamp=stamp,
             )
             if candidate == ref:

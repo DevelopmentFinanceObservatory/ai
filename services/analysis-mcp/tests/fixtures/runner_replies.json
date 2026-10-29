@@ -1698,8 +1698,8 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1724,8 +1724,8 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1748,8 +1748,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1808,8 +1808,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2053,7 +2053,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"reporter\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"rank\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"reporter\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"rank\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -2064,13 +2064,13 @@
             "parts": [],
             "sentence": "Computed by DFO: rank.",
             "spec": {
-              "spec_id": "ops_66f71c491fefed05da0d54f6d92f0c85",
+              "spec_id": "ops_5c9d0c80cf0e0b3fa750b1b8858f4667",
               "recipe": {
-                "normal_form_hash": "rnf_944207d2dbfff042b9d68c0969cae531",
-                "replay_key": "rpk_142ebecb2767e0759dd6fd4ad4a28b96"
+                "normal_form_hash": "rnf_e5350e9cd4a17dfa61a8e5b68520408d",
+                "replay_key": "rpk_ff6d3cc52ec9572a9d3ef230d67d0a2b"
               }
             },
-            "content_version": "ocv_f6aba49087aba446b2ac0a8762c5908f",
+            "content_version": "ocv_9ac36cad072c0d7e6529c7d8cfe77462",
             "output_digest": "out_c7cc785f74cad084e859ae2b38546eea",
             "roots": [
               {
@@ -2082,8 +2082,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -2110,8 +2110,8 @@
       "output_digest": "out_c7cc785f74cad084e859ae2b38546eea",
       "summary": {
         "verb": "rank",
-        "spec_id": "ops_66f71c491fefed05da0d54f6d92f0c85",
-        "content_version": "ocv_f6aba49087aba446b2ac0a8762c5908f",
+        "spec_id": "ops_5c9d0c80cf0e0b3fa750b1b8858f4667",
+        "content_version": "ocv_9ac36cad072c0d7e6529c7d8cfe77462",
         "frame_content_version": "cv_a9d07eb8a06005831df7c805d299bb29",
         "rows": 2,
         "role_keys": [
@@ -2643,8 +2643,8 @@
       "status": 422,
       "detail": "unit='converted to current prices, pounds sterling' is not one of the units this frame declares: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2904,8 +2904,8 @@
       "status": 422,
       "detail": "unit='dcid:USDollar per dcid:SquareKilometer' is not one of the units this frame declares: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2968,8 +2968,8 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2994,8 +2994,8 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3018,8 +3018,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3078,8 +3078,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3325,7 +3325,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"aggregate\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -3336,13 +3336,13 @@
             "parts": [],
             "sentence": "Computed by DFO: aggregate.",
             "spec": {
-              "spec_id": "ops_a2ed9dea09ad8076845eb96aa0615f3b",
+              "spec_id": "ops_bf28259c8b5a093fca98cbc2b083a698",
               "recipe": {
-                "normal_form_hash": "rnf_201e00b288bbd3e04177e96983122b24",
-                "replay_key": "rpk_1e25cdf57a0216aa515d54e182eafc85"
+                "normal_form_hash": "rnf_fe1c2b09cd9f1f97a9ef47164d3eef60",
+                "replay_key": "rpk_558f6307ec588b83af0a7d56f0be4769"
               }
             },
-            "content_version": "ocv_e5ce40f93eeb7d640587ad39b1fb1062",
+            "content_version": "ocv_8c0d4cb67009b7a11bb5c7ca1c6b66a3",
             "output_digest": "out_629abc5f83291d89bfcbe491ad452a5a",
             "roots": [
               {
@@ -3354,8 +3354,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -3382,8 +3382,8 @@
       "output_digest": "out_629abc5f83291d89bfcbe491ad452a5a",
       "summary": {
         "verb": "aggregate",
-        "spec_id": "ops_a2ed9dea09ad8076845eb96aa0615f3b",
-        "content_version": "ocv_e5ce40f93eeb7d640587ad39b1fb1062",
+        "spec_id": "ops_bf28259c8b5a093fca98cbc2b083a698",
+        "content_version": "ocv_8c0d4cb67009b7a11bb5c7ca1c6b66a3",
         "frame_content_version": "cv_cbc0b29d9af2b696140d6d0a15383c9f",
         "rows": 1,
         "role_keys": [],
@@ -3754,8 +3754,8 @@
       "status": 422,
       "detail": "rank_by names column(s) this frame has no grain for: ['reporter']. Available: ['reporter'].",
       "code": "role_ambiguous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -4580,8 +4580,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -4640,8 +4640,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -5162,7 +5162,7 @@
               }
             },
             "content_version": "ocv_edcc9fafc41d8cc31bbd245aa6e8db64",
-            "output_digest": "out_48777e6b1fa4a00c4c9a70a91da34d6e",
+            "output_digest": "out_6965c239d1dc53fa5e8f98b222d90f93",
             "roots": [
               {
                 "spec_id": "spec_9d2079074f862093b2144eee5b5700a9",
@@ -5197,7 +5197,7 @@
         ]
       },
       "frame_content_version": "cv_585190e4f1798f0740a3cc777ce2a6b0",
-      "output_digest": "out_48777e6b1fa4a00c4c9a70a91da34d6e",
+      "output_digest": "out_6965c239d1dc53fa5e8f98b222d90f93",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_c1ebb45c3984eb0f20a267928c54f561",
@@ -5343,7 +5343,7 @@
               }
             },
             "content_version": "ocv_448a2ffa1b1def7bce27d525ed1b37a3",
-            "output_digest": "out_45672c75e18a30d367105282ea8a6946",
+            "output_digest": "out_ca0705382c4409aa83a275efe849cf5f",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -5369,7 +5369,7 @@
         ]
       },
       "frame_content_version": "cv_d417f0f635a4d74904b2db77df832b2e",
-      "output_digest": "out_45672c75e18a30d367105282ea8a6946",
+      "output_digest": "out_ca0705382c4409aa83a275efe849cf5f",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_13688280809626c7b15344cf664c318e",
@@ -5672,7 +5672,7 @@
               }
             },
             "content_version": "ocv_8a28c06b56639485bc4e00efc46decad",
-            "output_digest": "out_45672c75e18a30d367105282ea8a6946",
+            "output_digest": "out_ca0705382c4409aa83a275efe849cf5f",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -5698,7 +5698,7 @@
         ]
       },
       "frame_content_version": "cv_f691812529360532c4533078b164b4a1",
-      "output_digest": "out_45672c75e18a30d367105282ea8a6946",
+      "output_digest": "out_ca0705382c4409aa83a275efe849cf5f",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_06565272cb2cd4f43138a15996bef69b",
@@ -5993,7 +5993,7 @@
               }
             },
             "content_version": "ocv_d8c5e6e95524a5a860e49ee3e44d51b7",
-            "output_digest": "out_9ca34075253887b39c14fa51c0005db8",
+            "output_digest": "out_d677668592a1cfaef5939e83f13fda84",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -6019,7 +6019,7 @@
         ]
       },
       "frame_content_version": "cv_3575d560c9407f46d1699d08e3e25258",
-      "output_digest": "out_9ca34075253887b39c14fa51c0005db8",
+      "output_digest": "out_d677668592a1cfaef5939e83f13fda84",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_af5f53f6c3193ad91352b701b1dd7c50",
@@ -6323,7 +6323,7 @@
               }
             },
             "content_version": "ocv_4b3f850cb3c035a102cead8363acfa41",
-            "output_digest": "out_a3e57c22773a30a467b0b9c95e2557c0",
+            "output_digest": "out_fbebaa247eb50136b118c85816befa10",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -6349,7 +6349,7 @@
         ]
       },
       "frame_content_version": "cv_68d93d671cefc9d596b1636eec5f3ac6",
-      "output_digest": "out_a3e57c22773a30a467b0b9c95e2557c0",
+      "output_digest": "out_fbebaa247eb50136b118c85816befa10",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_9cabb8af99da6e36fc8c5593f6eea110",
@@ -6637,8 +6637,8 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6664,8 +6664,8 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'dcid:USDollar per Count_Person', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6689,8 +6689,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6749,8 +6749,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6809,7 +6809,7 @@
               }
             },
             "content_version": "ocv_26a7d0e448a2a93fae238f3931569ce9",
-            "output_digest": "out_f7f36225b522b8629594d19445144222",
+            "output_digest": "out_0f5029384b7d9569e19cf0c19ba7610e",
             "roots": [
               {
                 "spec_id": "spec_2cbdc368aba869090220b0fb5f8e960f",
@@ -6844,7 +6844,7 @@
         ]
       },
       "frame_content_version": "cv_a5ebc3acebb4c3559281a29da7a9fd35",
-      "output_digest": "out_f7f36225b522b8629594d19445144222",
+      "output_digest": "out_0f5029384b7d9569e19cf0c19ba7610e",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_09c6c1bc7e8fb8c3183118c64d3c3ef8",
@@ -7060,7 +7060,7 @@
               }
             },
             "content_version": "ocv_6e1bfaeb0e965bbf44df3862d1a56996",
-            "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
+            "output_digest": "out_3d7b238271a1bf311f5ec6480ddeb616",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -7086,7 +7086,7 @@
         ]
       },
       "frame_content_version": "cv_f51fb2daa9646dce85739365170544a5",
-      "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
+      "output_digest": "out_3d7b238271a1bf311f5ec6480ddeb616",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_e60e8ff75bb984732284089e42a32ad1",
@@ -7344,7 +7344,7 @@
               }
             },
             "content_version": "ocv_4421b4efd53660ed05c9b787382e692a",
-            "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
+            "output_digest": "out_3d7b238271a1bf311f5ec6480ddeb616",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -7370,7 +7370,7 @@
         ]
       },
       "frame_content_version": "cv_9d982ba237b77ba58f500b06968a6d19",
-      "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
+      "output_digest": "out_3d7b238271a1bf311f5ec6480ddeb616",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_b5ef33fb6e799236c7986050f04dcba7",
@@ -7614,8 +7614,8 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7641,8 +7641,8 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7666,8 +7666,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7726,8 +7726,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7768,7 +7768,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{\"reporter\":\"dcid:KEN\"}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"quotient_of\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{\"reporter\":\"dcid:KEN\"}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"quotient_of\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -7779,14 +7779,14 @@
             "parts": [],
             "sentence": "Computed by DFO: quotient_of.",
             "spec": {
-              "spec_id": "ops_42f9d034601da188403cc6ce2c0fc579",
+              "spec_id": "ops_3816f1337b19a03af721072207d9646a",
               "recipe": {
-                "normal_form_hash": "rnf_a1bc1f8574690fed50a822bff85034e4",
-                "replay_key": "rpk_c8a85171a68ca0d12277326beb34c148"
+                "normal_form_hash": "rnf_16fb6a0478fc9b394c36a928df4683c4",
+                "replay_key": "rpk_9df130e9f5f7322df36aae3f9013bf64"
               }
             },
-            "content_version": "ocv_c0b0c31d6621be4c6b231ab2f0487cad",
-            "output_digest": "out_e72e1c46e82318a69bb54cf16b2fb23c",
+            "content_version": "ocv_4a313b974ca156af3d7e85ed492eaab0",
+            "output_digest": "out_5cfaa515477276d00ec843dc92c6b502",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -7797,8 +7797,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -7826,7 +7826,7 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:b93e681ac461ddb38afae2b6a5557d237c393c090734a288df12dc0c88071c52",
+              "digest": "sha256:6a05417f9d29c504b43ae79ea1cebdf738afa16440ef36768b9dc57c62a54ba0",
               "rendering": {
                 "format": "parquet",
                 "bundle": false,
@@ -7836,13 +7836,13 @@
           }
         ]
       },
-      "frame_content_version": "cv_d9a699439b31ef69915c1682a1b58895",
-      "output_digest": "out_e72e1c46e82318a69bb54cf16b2fb23c",
+      "frame_content_version": "cv_8f7d3107ef2342322fcaa027481dbb7c",
+      "output_digest": "out_5cfaa515477276d00ec843dc92c6b502",
       "summary": {
         "verb": "quotient_of",
-        "spec_id": "ops_42f9d034601da188403cc6ce2c0fc579",
-        "content_version": "ocv_c0b0c31d6621be4c6b231ab2f0487cad",
-        "frame_content_version": "cv_d9a699439b31ef69915c1682a1b58895",
+        "spec_id": "ops_3816f1337b19a03af721072207d9646a",
+        "content_version": "ocv_4a313b974ca156af3d7e85ed492eaab0",
+        "frame_content_version": "cv_8f7d3107ef2342322fcaa027481dbb7c",
         "rows": 2,
         "role_keys": [],
         "stat_var_count": 1,
@@ -7886,7 +7886,7 @@
         },
         "derived": null,
         "result": {
-          "stat_var": "dcid:ops_42f9d034601da188403cc6ce2c0fc579",
+          "stat_var": "dcid:ops_3816f1337b19a03af721072207d9646a",
           "numerator_stat_var": "dcid:Grants",
           "denominator_stat_var": "dcid:GrantsAndLoans",
           "numerator_resolved_unit": "dcid:USDollar",
@@ -7998,7 +7998,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{\"reporter\":\"dcid:KEN\"}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"share_of\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{\"reporter\":\"dcid:KEN\"}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"share_of\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -8009,14 +8009,14 @@
             "parts": [],
             "sentence": "Computed by DFO: share_of.",
             "spec": {
-              "spec_id": "ops_ea5ff8e494daf4aa31c611cd2fe412ad",
+              "spec_id": "ops_eae0e09c993cb737c16375d565e19428",
               "recipe": {
-                "normal_form_hash": "rnf_555e0f9b296e697bf0ad1a253b8c1b53",
-                "replay_key": "rpk_f7a4039e5cdfbe4becbe40fe7f2b0edd"
+                "normal_form_hash": "rnf_3cd541b1fe7d1d0d9d41aa61a1205e30",
+                "replay_key": "rpk_d03f0f286fb869dd6b5609c14d38fd8a"
               }
             },
-            "content_version": "ocv_b93314f259233168803a415b08fc8fec",
-            "output_digest": "out_dd6ee9690d95366adc3975a4b49518f6",
+            "content_version": "ocv_a2caf3361763d52135ebdc6dbcd83510",
+            "output_digest": "out_f29ddb53a86e556188b1f949159224b9",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -8027,8 +8027,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -8056,7 +8056,7 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:257f162ebf67647d2b0bc9571962b98c592e19aff8eba891c644bd8343cdbd63",
+              "digest": "sha256:6ee0c8fe6c99a7480451afab7939b7bd952c48963032fd5948ea23851ab4bcb4",
               "rendering": {
                 "format": "parquet",
                 "bundle": false,
@@ -8066,13 +8066,13 @@
           }
         ]
       },
-      "frame_content_version": "cv_8408b1b2dcc3773c83f49d5bcf0c3ee8",
-      "output_digest": "out_dd6ee9690d95366adc3975a4b49518f6",
+      "frame_content_version": "cv_e45ffc2d33e350d8d9f6344e50fcedde",
+      "output_digest": "out_f29ddb53a86e556188b1f949159224b9",
       "summary": {
         "verb": "share_of",
-        "spec_id": "ops_ea5ff8e494daf4aa31c611cd2fe412ad",
-        "content_version": "ocv_b93314f259233168803a415b08fc8fec",
-        "frame_content_version": "cv_8408b1b2dcc3773c83f49d5bcf0c3ee8",
+        "spec_id": "ops_eae0e09c993cb737c16375d565e19428",
+        "content_version": "ocv_a2caf3361763d52135ebdc6dbcd83510",
+        "frame_content_version": "cv_e45ffc2d33e350d8d9f6344e50fcedde",
         "rows": 2,
         "role_keys": [],
         "stat_var_count": 1,
@@ -8118,7 +8118,7 @@
           "dimensionless": true
         },
         "result": {
-          "stat_var": "dcid:ops_ea5ff8e494daf4aa31c611cd2fe412ad",
+          "stat_var": "dcid:ops_eae0e09c993cb737c16375d565e19428",
           "numerator_stat_var": "dcid:Grants",
           "denominator_stat_var": "dcid:GrantsAndLoans",
           "numerator_resolved_unit": "dcid:USDollar",
@@ -8241,7 +8241,7 @@
               }
             },
             "content_version": "ocv_0b2be31d3c2969b80a42941a8c7268ef",
-            "output_digest": "out_9c3f4a6845860a6ae834406d21de656c",
+            "output_digest": "out_da46ecf3052e80ba67049c178254dc6c",
             "roots": [
               {
                 "spec_id": "spec_c5658274af6e81f55075c50ebed00964",
@@ -8276,7 +8276,7 @@
         ]
       },
       "frame_content_version": "cv_5c5bd1a1c64508a96290dfc479bb4a5d",
-      "output_digest": "out_9c3f4a6845860a6ae834406d21de656c",
+      "output_digest": "out_da46ecf3052e80ba67049c178254dc6c",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_c5533abdd4455c4653a4d9a49468fd51",
@@ -8463,7 +8463,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"join_keys\":[\"reporter\"],\"right_keys\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_c2338a62aa994e624f673541c3847001\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_c2338a62aa994e624f673541c3847001\"}},\"verb\":\"join\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"join_keys\":[\"reporter\"],\"right_keys\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_c2338a62aa994e624f673541c3847001\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_c2338a62aa994e624f673541c3847001\"}},\"verb\":\"join\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -8474,13 +8474,13 @@
             "parts": [],
             "sentence": "Computed by DFO: join.",
             "spec": {
-              "spec_id": "ops_3893f9232e62d73cd6b87f4a30d6a6c0",
+              "spec_id": "ops_d7976d9245839ea43eef967747614729",
               "recipe": {
-                "normal_form_hash": "rnf_85b044d692fa0419dc29ccebba53cced",
-                "replay_key": "rpk_0527bc95c1093f7953ac0995c6794256"
+                "normal_form_hash": "rnf_ab414a5d06e0e011edf20592a8e521c3",
+                "replay_key": "rpk_b868abde921401f159ddf07e80abd1ad"
               }
             },
-            "content_version": "ocv_bb564652e7a8e65b23f617bffa279b79",
+            "content_version": "ocv_a07c8e9ae884fdbeb14dd2a85e4321fb",
             "output_digest": "out_51ad35f5dda02f0d7ab3d37f4ce9041e",
             "roots": [
               {
@@ -8492,8 +8492,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -8511,8 +8511,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -8539,8 +8539,8 @@
       "output_digest": "out_51ad35f5dda02f0d7ab3d37f4ce9041e",
       "summary": {
         "verb": "join",
-        "spec_id": "ops_3893f9232e62d73cd6b87f4a30d6a6c0",
-        "content_version": "ocv_bb564652e7a8e65b23f617bffa279b79",
+        "spec_id": "ops_d7976d9245839ea43eef967747614729",
+        "content_version": "ocv_a07c8e9ae884fdbeb14dd2a85e4321fb",
         "frame_content_version": "cv_238f1fe623f9c224cbe91dc916901309",
         "rows": 8,
         "role_keys": [
@@ -8560,7 +8560,7 @@
           ],
           "left_unit": null,
           "right_frame_ref": {
-            "content_version": "cv_97bce805fd846725eee1524214e2b9f7",
+            "content_version": "cv_7583dc8dc6aac64000fce2d6c44a50c1",
             "spec_id": "spec_c2338a62aa994e624f673541c3847001"
           },
           "right_unit": null
@@ -9732,8 +9732,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -9985,8 +9985,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10045,7 +10045,7 @@
               }
             },
             "content_version": "ocv_ce8a3ada71747203a7752f89a7ba62b9",
-            "output_digest": "out_e9f35e09993f15f69fe437f98ef02b23",
+            "output_digest": "out_bd1e70245b985266854247b84db46cad",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10071,7 +10071,7 @@
         ]
       },
       "frame_content_version": "cv_b4b8666761f1d3c2a12e77af97b2150b",
-      "output_digest": "out_e9f35e09993f15f69fe437f98ef02b23",
+      "output_digest": "out_bd1e70245b985266854247b84db46cad",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_d6dac6aab37195ab1754ea3fbbc1c480",
@@ -10349,7 +10349,7 @@
               }
             },
             "content_version": "ocv_364ee72ae95134ea31cb7d91f6af4ec6",
-            "output_digest": "out_13f6c14cbbf3000aa945ddaa86080e02",
+            "output_digest": "out_242ebd3eb79cd825501f0937d0761b4a",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10375,7 +10375,7 @@
         ]
       },
       "frame_content_version": "cv_bf12965bf66117519644636cfc4aac36",
-      "output_digest": "out_13f6c14cbbf3000aa945ddaa86080e02",
+      "output_digest": "out_242ebd3eb79cd825501f0937d0761b4a",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_4424dec4c9ad7c20f6a8937256352ef0",
@@ -10644,7 +10644,7 @@
               }
             },
             "content_version": "ocv_85e6ef9b4638c95d152ced5bbebf6279",
-            "output_digest": "out_84abf1f4d740f46bd789edf25ee88137",
+            "output_digest": "out_bb927b7e0cdc60df9519a331792ccce1",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10670,7 +10670,7 @@
         ]
       },
       "frame_content_version": "cv_628e6f3710a0f79c3eb4f07681f11055",
-      "output_digest": "out_84abf1f4d740f46bd789edf25ee88137",
+      "output_digest": "out_bb927b7e0cdc60df9519a331792ccce1",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_eb036dd5fd8af90adf6a43bccb83d61d",
@@ -10944,7 +10944,7 @@
               }
             },
             "content_version": "ocv_9c497da0899eba1ff39c89b61bfab491",
-            "output_digest": "out_c97ab7260d3d2bb6729374c9efc5e7d3",
+            "output_digest": "out_4162b61a82ca601d846034b04dbe84f8",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10970,7 +10970,7 @@
         ]
       },
       "frame_content_version": "cv_24279cd66d9b7eed171a91d3464a7162",
-      "output_digest": "out_c97ab7260d3d2bb6729374c9efc5e7d3",
+      "output_digest": "out_4162b61a82ca601d846034b04dbe84f8",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_f9fe681a723572b738d95314e735c3c6",
@@ -11236,7 +11236,7 @@
               }
             },
             "content_version": "ocv_2d2805885ce7c5534f5250ea5b378532",
-            "output_digest": "out_e3bcf5eba05bc17888286a36af5c6cea",
+            "output_digest": "out_2bb7c651e6f284d5d1d7fa184760f555",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -11262,7 +11262,7 @@
         ]
       },
       "frame_content_version": "cv_dea80cff95e533818f81dbda06a34bcc",
-      "output_digest": "out_e3bcf5eba05bc17888286a36af5c6cea",
+      "output_digest": "out_2bb7c651e6f284d5d1d7fa184760f555",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_32938d5df216225f2964862c974b723f",
@@ -11542,8 +11542,8 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -11579,7 +11579,7 @@
               }
             },
             "content_version": "ocv_e8448333daab1ba715f86bc39729181f",
-            "output_digest": "out_3ced42c69a60b47c3e6e2b699de9bb36",
+            "output_digest": "out_dce5e04d6b4fe79aaffcf717733e7999",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -11605,7 +11605,7 @@
         ]
       },
       "frame_content_version": "cv_43618241a4d91808d12eb0c3e90b669c",
-      "output_digest": "out_3ced42c69a60b47c3e6e2b699de9bb36",
+      "output_digest": "out_dce5e04d6b4fe79aaffcf717733e7999",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_62463e899f543a8cb032581ced66e215",
@@ -11877,8 +11877,8 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -11902,8 +11902,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -11962,8 +11962,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -12022,8 +12022,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -12072,8 +12072,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "2139147756d94e08bfcb6362bb992847",
-      "capability_version": "dset_b69728663b3d0bb6",
+      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
+      "capability_version": "dset_9ab17ec0e311a676",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -12114,7 +12114,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{\"reporter\":\"dcid:KEN\"},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"},\"other\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"compare\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{\"reporter\":\"dcid:KEN\"},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"},\"other\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"compare\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -12125,14 +12125,14 @@
             "parts": [],
             "sentence": "Computed by DFO: compare.",
             "spec": {
-              "spec_id": "ops_64d68b0c01697e8b342ac1b184dd1293",
+              "spec_id": "ops_b6815bb00f347fb0663b706fefb3afcc",
               "recipe": {
-                "normal_form_hash": "rnf_628fa145bd8fe602fccd90fa21dd773a",
-                "replay_key": "rpk_6e9ec4d966c11e4b931d0b97391c8395"
+                "normal_form_hash": "rnf_f89fa3704613b937b6008a20f523682f",
+                "replay_key": "rpk_32e4f1aa3a3c753fc2593fb30d407b8b"
               }
             },
-            "content_version": "ocv_d6175590ff6997bed57c657edb22d119",
-            "output_digest": "out_965597ba941d25bedbfccf4a6d2805fd",
+            "content_version": "ocv_775dfc7f60ad0c41540acf7b68c0ad2d",
+            "output_digest": "out_e24e634c4917fb37ea4330fa7d06f4f7",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -12143,8 +12143,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -12172,7 +12172,7 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:4cb8e1ec777c699b1ff38d590bb0f68277d32ef27163b7b9f8942a46765054c0",
+              "digest": "sha256:dc83e0cc43fb5024cfb4f66fa76211d0fc54c37c5e6e503df8a5701e196ddf5d",
               "rendering": {
                 "format": "parquet",
                 "bundle": false,
@@ -12182,13 +12182,13 @@
           }
         ]
       },
-      "frame_content_version": "cv_5cffc301418f7852be4042bfd0df5663",
-      "output_digest": "out_965597ba941d25bedbfccf4a6d2805fd",
+      "frame_content_version": "cv_6bc4bd75f21498cc1c88708bea08d072",
+      "output_digest": "out_e24e634c4917fb37ea4330fa7d06f4f7",
       "summary": {
         "verb": "compare",
-        "spec_id": "ops_64d68b0c01697e8b342ac1b184dd1293",
-        "content_version": "ocv_d6175590ff6997bed57c657edb22d119",
-        "frame_content_version": "cv_5cffc301418f7852be4042bfd0df5663",
+        "spec_id": "ops_b6815bb00f347fb0663b706fefb3afcc",
+        "content_version": "ocv_775dfc7f60ad0c41540acf7b68c0ad2d",
+        "frame_content_version": "cv_6bc4bd75f21498cc1c88708bea08d072",
         "rows": 2,
         "role_keys": [],
         "stat_var_count": 1,
@@ -12230,7 +12230,7 @@
         },
         "derived": null,
         "result": {
-          "stat_var": "dcid:ops_64d68b0c01697e8b342ac1b184dd1293",
+          "stat_var": "dcid:ops_b6815bb00f347fb0663b706fefb3afcc",
           "left_stat_vars": [
             "dcid:Grants"
           ],
@@ -12324,7 +12324,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{\"reporter\":\"dcid:KEN\"},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"sum_of\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{\"reporter\":\"dcid:KEN\"},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"sum_of\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -12335,14 +12335,14 @@
             "parts": [],
             "sentence": "Computed by DFO: sum_of.",
             "spec": {
-              "spec_id": "ops_24e83b1897a1e90df18e2910010b5d11",
+              "spec_id": "ops_80c99f59dd644c26e884efde38e57d91",
               "recipe": {
-                "normal_form_hash": "rnf_55e153c50386110affce6762eed04311",
-                "replay_key": "rpk_b8529d8583b6fb079c417151a619f92d"
+                "normal_form_hash": "rnf_99039f0e1f7aca01d9e676b0eef6bc0e",
+                "replay_key": "rpk_d66c55bb13917fb3d2f11ee1057eb3b4"
               }
             },
-            "content_version": "ocv_3dcb22b0c2566a6d3066a28ac3a7d6f3",
-            "output_digest": "out_ce4bb74ea1ca074f1dec91217a8857f7",
+            "content_version": "ocv_a9c91eec7a73a7556c54232153352c26",
+            "output_digest": "out_9564a48174f70909f4b9668a76cc9f9a",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -12353,8 +12353,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -12382,7 +12382,7 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:9a6bd52708086aa37060d4f1c7d5dfdc0b96a4c75e3fe3823f1a34b5b89cdd19",
+              "digest": "sha256:bd1eb43b3e4432d1421bc371d700f96ec98d7609c50d8695a2d59df114447389",
               "rendering": {
                 "format": "parquet",
                 "bundle": false,
@@ -12392,13 +12392,13 @@
           }
         ]
       },
-      "frame_content_version": "cv_442cef47f45c7c3127083d5a825e38d9",
-      "output_digest": "out_ce4bb74ea1ca074f1dec91217a8857f7",
+      "frame_content_version": "cv_8239403767e58cc048bee6f791d624a5",
+      "output_digest": "out_9564a48174f70909f4b9668a76cc9f9a",
       "summary": {
         "verb": "sum_of",
-        "spec_id": "ops_24e83b1897a1e90df18e2910010b5d11",
-        "content_version": "ocv_3dcb22b0c2566a6d3066a28ac3a7d6f3",
-        "frame_content_version": "cv_442cef47f45c7c3127083d5a825e38d9",
+        "spec_id": "ops_80c99f59dd644c26e884efde38e57d91",
+        "content_version": "ocv_a9c91eec7a73a7556c54232153352c26",
+        "frame_content_version": "cv_8239403767e58cc048bee6f791d624a5",
         "rows": 2,
         "role_keys": [],
         "stat_var_count": 1,
@@ -12440,7 +12440,7 @@
         },
         "derived": null,
         "result": {
-          "stat_var": "dcid:ops_24e83b1897a1e90df18e2910010b5d11",
+          "stat_var": "dcid:ops_80c99f59dd644c26e884efde38e57d91",
           "left_stat_vars": [
             "dcid:Grants"
           ],
@@ -12549,7 +12549,7 @@
               }
             },
             "content_version": "ocv_4ee805e30c6a28371b19edfd049d7997",
-            "output_digest": "out_e1fca00e33bb536cfc6e6fe90c06611a",
+            "output_digest": "out_a1bd8db52ab74a90bed51c52c1531d0a",
             "roots": [
               {
                 "spec_id": "spec_2cbdc368aba869090220b0fb5f8e960f",
@@ -12584,7 +12584,7 @@
         ]
       },
       "frame_content_version": "cv_bfe60d67153eda7188ee49879763ab51",
-      "output_digest": "out_e1fca00e33bb536cfc6e6fe90c06611a",
+      "output_digest": "out_a1bd8db52ab74a90bed51c52c1531d0a",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_8c33e77b1a0805f26ee8d59342c7d602",
@@ -12787,7 +12787,7 @@
               }
             },
             "content_version": "ocv_7d2a1f5ca4aab51c25e32b0cd209db77",
-            "output_digest": "out_8d7baa952001c2885a2b94bc30681fc5",
+            "output_digest": "out_7770ae421714a582695d22104bcc90b4",
             "roots": [
               {
                 "spec_id": "spec_b8c81cf2974ae113a88758e07383c100",
@@ -12822,7 +12822,7 @@
         ]
       },
       "frame_content_version": "cv_0a1cf22879c61190f1df8752b7840f94",
-      "output_digest": "out_8d7baa952001c2885a2b94bc30681fc5",
+      "output_digest": "out_7770ae421714a582695d22104bcc90b4",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_d6da044b747a07a11663d8d1900039fd",
@@ -13100,7 +13100,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"value\":20}]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"filter\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"value\":20}]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"filter\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -13111,13 +13111,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter.",
             "spec": {
-              "spec_id": "ops_94a6b07daa67cb374ad0d2868715a6ac",
+              "spec_id": "ops_0e16ba31f3859f42f38ce47b49829418",
               "recipe": {
-                "normal_form_hash": "rnf_bb028f516d418ff1401b1b1523cf5271",
-                "replay_key": "rpk_6f566b71e1ede03579a8ae80a0608719"
+                "normal_form_hash": "rnf_512f5ba7ce4a040cf1c9cc34d608c4e9",
+                "replay_key": "rpk_8e9ad8799b010a979f0208fd0b01747a"
               }
             },
-            "content_version": "ocv_1b629569fb8a054d490126a943a2216d",
+            "content_version": "ocv_9aa6f93492ccfbac9b63c4ba4678e5ce",
             "output_digest": "out_58d2ef4daa11cdd2c841f7b9f3850ca7",
             "roots": [
               {
@@ -13129,8 +13129,8 @@
                   "layout": "frame",
                   "groupby": {
                     "by": [
-                      "time_period",
-                      "reporter"
+                      "reporter",
+                      "time_period"
                     ],
                     "op": "sum",
                     "levels": {
@@ -13157,8 +13157,8 @@
       "output_digest": "out_58d2ef4daa11cdd2c841f7b9f3850ca7",
       "summary": {
         "verb": "filter",
-        "spec_id": "ops_94a6b07daa67cb374ad0d2868715a6ac",
-        "content_version": "ocv_1b629569fb8a054d490126a943a2216d",
+        "spec_id": "ops_0e16ba31f3859f42f38ce47b49829418",
+        "content_version": "ocv_9aa6f93492ccfbac9b63c4ba4678e5ce",
         "frame_content_version": "cv_773db7bf376540ce2b2a01b68b261904",
         "rows": 2,
         "role_keys": [
