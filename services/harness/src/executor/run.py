@@ -1480,8 +1480,10 @@ class _Run:
         A group `held` names by its key (`_group_key`) reads as the held
         result instead, renamed to the group's steps, and the entities its
         retrievals left out are taken from it; a retrieval runs only for a
-        group `held` does not name. The surface is listed and checked
-        (`_surface_as_compiled`) only when some group is read.
+        group `held` does not name. A held group resting on a retrieval that
+        ran for another group and stopped reads as that stop. The surface is
+        listed and checked (`_surface_as_compiled`) only when some group is
+        read.
         """
         keys = {group.steps: self._group_key(group) for group in self.anchor_groups}
         standing = {
@@ -1523,13 +1525,13 @@ class _Run:
                 if any(read_group.steps == group.steps for read_group in read):
                     continue
                 planned = planned_anchor(group, self.steps_by_id)
-                if (anchor := standing.get(group.steps)) is not None:
+                stop = next((stops[step] for step in group.roots if step in stops), None)
+                if stop is None and (anchor := standing.get(group.steps)) is not None:
                     result = anchor.result.model_copy(
                         update={"steps": group.steps, "roots": group.roots}
                     )
                     read.append(AnchorRead(group.steps, planned, result, anchor))
                     continue
-                stop = next((stops[step] for step in group.roots if step in stops), None)
                 result = stop or await self._resolved_or_stop(group, first, schemas)
                 kept = (
                     HeldAnchor(

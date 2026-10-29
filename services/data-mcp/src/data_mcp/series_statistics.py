@@ -392,8 +392,9 @@ async def fetch_series_statistics_table(
             as 410 `artifact_expired`, or its redirect target did.
         httpx2.TransportError: the GET itself failed, or no dfo-apis ID token
             could be minted for it.
-        TimeoutError: `deadline` passed before the link lookup and the GET
-            finished, or the fetch ran past `_FLIGHT_TIMEOUT_S`.
+        TimeoutError: `deadline` passed before the fetch started, which it
+            then does not, or before the link lookup and the GET finished, or
+            the fetch ran past `_FLIGHT_TIMEOUT_S`.
     """
     # Imported here, not at module level: `data_mcp.artifact_resource` imports
     # `data_mcp.get_data_tool`, which imports `frame_materialisation`, which
@@ -428,6 +429,9 @@ async def fetch_series_statistics_table(
         _TABLES.put(key, table)
         return table
 
+    # A caller with no time left starts no fetch it could not wait for.
+    if deadline is not None and deadline.remaining() <= 0:
+        raise TimeoutError("the call's deadline passed before the statistics fetch started")
     # A miss joins the fetch in flight for its table through its own link, which
     # `_FLIGHT_TIMEOUT_S` bounds, and waits for it until its own deadline. Shielded,
     # so a caller giving up leaves the fetch to the others.

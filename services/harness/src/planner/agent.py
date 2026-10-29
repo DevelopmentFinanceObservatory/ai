@@ -46,7 +46,7 @@ import asyncio
 import copy
 import functools
 import logging
-from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
@@ -1703,11 +1703,20 @@ async def run_together[T](calls: Iterable[Awaitable[T]]) -> list[T]:
     try:
         return list(await asyncio.gather(*tasks))
     finally:
-        running = [task for task in tasks if not task.done()]
-        for task in running:
-            task.cancel()
-        if running:
-            await asyncio.wait(running)
+        await _cancel_and_drain(tasks)
+
+
+async def _cancel_and_drain(tasks: Sequence[asyncio.Future[Any]]) -> None:
+    """Cancel each of `tasks` still running, wait for every one, and retrieve each
+    exception, so none is reported as never retrieved."""
+    running = [task for task in tasks if not task.done()]
+    for task in running:
+        task.cancel()
+    if running:
+        await asyncio.wait(running)
+    for task in tasks:
+        if not task.cancelled():
+            task.exception()
 
 
 def _opened(scope: PartScope, axis: str) -> tuple[dict[str, Any], list[ScopeChoice]]:
@@ -2124,30 +2133,19 @@ async def _held_in_order(
 
     Each read is applied once it and every read before it are made, so a
     refusal is answered without waiting for the reads after it, which are
-    cancelled. The first read to raise cancels the rest, as `run_together`
-    does. Every read takes `state` before its first wait, so none reads what
-    another wrote.
+    cancelled. A read that raises raises once every read before it is
+    applied without a refusal, and cancels the reads after it. Every read
+    takes `state` before its first wait, so none reads what another wrote.
     """
     tasks = [asyncio.ensure_future(read) for read in reads]
     try:
-        applied = 0
-        while applied < len(tasks):
-            await asyncio.wait(tasks[applied:], return_when=asyncio.FIRST_COMPLETED)
-            for task in tasks[applied:]:
-                if task.done():
-                    task.result()
-            while applied < len(tasks) and tasks[applied].done():
-                refused = tasks[applied].result()(state)
-                applied += 1
-                if refused is not None:
-                    return refused
+        for task in tasks:
+            refused = (await task)(state)
+            if refused is not None:
+                return refused
         return None
     finally:
-        running = [task for task in tasks if not task.done()]
-        for task in running:
-            task.cancel()
-        if running:
-            await asyncio.wait(running)
+        await _cancel_and_drain(tasks)
 
 
 def _alignment_key(

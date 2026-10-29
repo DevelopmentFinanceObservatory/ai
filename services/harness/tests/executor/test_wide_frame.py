@@ -93,7 +93,7 @@ from planner.workflow import OpenAxis, OpenEntityAxis, ResolvedEntity, SelectedS
 from pydantic import JsonValue
 from translator.tool import restated_to_the_data
 
-from .conftest import ScriptedSurface, ok
+from .conftest import ScriptedSurface, ok, refusal
 
 SPEC_CRS = "spec_" + "e" * 32
 SPEC_CRS_HEALTH = "spec_" + "f" * 32
@@ -2864,20 +2864,13 @@ TANZANIA = ResolvedEntity(role="destination", ref="country/TZA", label="Tanzania
 _LATEST_ODA = {KENYA: 2021, UGANDA: 2024, TANZANIA: 2022}
 
 
-@pytest.mark.parametrize("with_kenya", [True, False], ids=["beside-kenya", "alone"])
-async def test_an_answer_states_the_short_series_of_its_own_newest_year(
-    plan_for: PlanFactory,
-    retrieved: Retrieved,
-    surface_for: Callable[..., FrameSurface],
-    with_kenya: bool,
-) -> None:
-    # One retrieval of Germany's ODA to Kenya, Uganda and Tanzania, open to
-    # the newest year, under the latest year for Uganda and Tanzania and,
-    # beside it, the latest year for Kenya. Kenya's newest year is 2021, and
-    # Uganda and Tanzania's 2024, which Tanzania's series falls short of.
-    # Each answer states the series of its own newest year: the Kenya branch
-    # neither ends Uganda and Tanzania's window at 2021 nor puts Kenya's
-    # series in it.
+async def _latest_oda_branches(
+    plan_for: PlanFactory, retrieved: Retrieved, *, with_kenya: bool
+) -> tuple[Callable[..., Plan], dict[str, dict[str, Any]], DatasetRequirement]:
+    """One retrieval of Germany's ODA to Kenya, Uganda and Tanzania, open to the
+    newest year, under the latest year for Uganda and Tanzania and, `with_kenya`,
+    beside it the latest year for Kenya: the plan factory, `get_data`'s answer by
+    spec_id, and the retrieval's requirement."""
     recipients = tuple(_LATEST_ODA)
     source = _source(entities=(GERMANY, *recipients)).model_copy(
         update={"coverage_window": Period(start=2000, end=2024)}
@@ -2950,6 +2943,24 @@ async def test_an_answer_states_the_short_series_of_its_own_newest_year(
             ],
         )
     }
+    return planned, results, oda
+
+
+@pytest.mark.parametrize("with_kenya", [True, False], ids=["beside-kenya", "alone"])
+async def test_an_answer_states_the_short_series_of_its_own_newest_year(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    with_kenya: bool,
+) -> None:
+    # One retrieval of Germany's ODA to Kenya, Uganda and Tanzania, open to
+    # the newest year, under the latest year for Uganda and Tanzania and,
+    # beside it, the latest year for Kenya. Kenya's newest year is 2021, and
+    # Uganda and Tanzania's 2024, which Tanzania's series falls short of.
+    # Each answer states the series of its own newest year: the Kenya branch
+    # neither ends Uganda and Tanzania's window at 2021 nor puts Kenya's
+    # series in it.
+    planned, results, oda = await _latest_oda_branches(plan_for, retrieved, with_kenya=with_kenya)
     draft = planned()
     assert draft.workflow is not None
     read = await read_anchors(
@@ -2970,3 +2981,37 @@ async def test_an_answer_states_the_short_series_of_its_own_newest_year(
     ]
     if with_kenya:
         assert answer_notes(None, outcome, plan=plan, terminals=["kenya_op"]) == []
+
+
+async def test_a_held_group_reads_as_the_stop_of_a_retrieval_it_shares_with_a_group_read_again(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+) -> None:
+    # The Kenya and the Uganda and Tanzania groups rest on one retrieval. Read
+    # again with only the Kenya group held, the retrieval runs for the other
+    # group and is refused, so the held group reads as that stop too.
+    planned, results, oda = await _latest_oda_branches(plan_for, retrieved, with_kenya=True)
+    draft = planned()
+    assert draft.workflow is not None
+    first = await read_anchors(
+        draft.workflow,
+        revision=plan_revision(draft),
+        requirements=[oda],
+        surface=surface_for(get_data=_get_data_answers(draft, results)),
+    )
+    assert isinstance(first, tuple), first
+    kenya, _ = first
+    assert kenya.held is not None
+
+    again = await read_anchors(
+        draft.workflow,
+        revision=plan_revision(draft),
+        requirements=[oda],
+        surface=surface_for(get_data=[refusal("no_data_at_source", "do_not_retry")]),
+        held=[kenya.held],
+    )
+
+    assert isinstance(again, tuple), again
+    assert [type(read.result) for read in again] == [Refused, Refused]
+    assert [read.held for read in again] == [None, None]

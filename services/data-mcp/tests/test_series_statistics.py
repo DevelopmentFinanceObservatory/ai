@@ -854,6 +854,31 @@ async def test_fetch_series_statistics_raises_timeout_when_the_get_outruns_its_d
             )
 
 
+async def test_fetch_series_statistics_past_its_deadline_starts_no_fetch() -> None:
+    artifact = _manifest(rendering={"statistics": "series"}).artifacts[0]
+
+    async def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(1.0)
+        return httpx2.Response(200, json=_snapshot_payload())
+
+    def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        raise AssertionError("no GET is expected once the deadline has passed")
+
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        with pytest.raises(TimeoutError):
+            await fetch_series_statistics(
+                subject_id=_SPEC_ID,
+                content_version=_CONTENT_VERSION,
+                artifact=artifact,
+                expected_series=1,
+                continuing=None,
+                transport=httpx2.MockTransport(get_handler),
+                deadline=CallDeadline.after(-1.0),
+            )
+        assert series_statistics._TABLES._flights == {}
+
+
 # fetch_series_statistics_table -- the checked Arrow table
 
 

@@ -63,6 +63,7 @@ from typing import Any, TypedDict, cast
 
 from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
+from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
 from planner.agent import run_together
 from planner.plan import (
@@ -352,7 +353,7 @@ async def _switched_plan(
             pin,
             reading,
             scope,
-            _posted_scope(scope, choice=choice, option_id=option_id),
+            switch_entries(scope, choice=choice, option_id=option_id),
             _groups(reading, specs.get(pin) or _source_block(sources.get(pin), pin), pin=pin),
         )
         for pin, reading, scope, choice in targets
@@ -363,11 +364,11 @@ async def _switched_plan(
             pin=pin,
             reading=reading,
             scope=scope,
-            posted=posted,
+            entries=entries,
             groups=groups,
             label=label,
         )
-        for pin, reading, scope, posted, groups in posts
+        for pin, reading, scope, entries, groups in posts
     )
     moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
@@ -574,27 +575,19 @@ def _groups(
     return tuple(groups)
 
 
-def _posted_scope(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> PartScope:
-    """The scope a switch of `choice` to `option_id` asks Search for: `scope`
-    with the switch's entries (`switch_entries`)."""
-    return scope.model_copy(
-        update={"entries": tuple(switch_entries(scope, choice=choice, option_id=option_id))}
-    )
-
-
 async def _resubmit(
     surface: ToolSurface,
     *,
     pin: str,
     reading: SearchReading,
     scope: PartScope,
-    posted: PartScope,
+    entries: Sequence[ScopeEntry],
     groups: Sequence[ResolvedGroup],
     label: str,
 ) -> _Switched:
-    """Post `posted`'s base identity with its entries through data-mcp's `resolve_definition`.
+    """Post `scope`'s base identity with `entries` through data-mcp's `resolve_definition`.
 
-    `posted` is `scope`, the reading's, switched (`_posted_scope`). The same
+    `scope` is the reading's, and `entries` the switch's (`switch_entries`). The same
     resubmit a compile on another basis posts
     (`planner.agent.compile_on_basis`), through
     `translator.discovery.resolve_definition`: the part's entity groups
@@ -608,12 +601,10 @@ async def _resubmit(
     try:
         part = await resolve_definition(
             surface,
-            spec_id=posted.base.spec_id,
-            identity=posted.base.identity,
+            spec_id=scope.base.spec_id,
+            identity=scope.base.identity,
             groups=groups,
-            scope_entries=[
-                entry.model_dump(mode="json", exclude_none=True) for entry in posted.entries
-            ],
+            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
         )
     except DefinitionNotResolvedError as exc:
         logger.info("plan switch not compiled: pin=%s code=%s: %s", pin, exc.code, exc)
@@ -780,7 +771,7 @@ async def apply_stored_choice(
             pin=pin,
             reading=reading,
             scope=reading.scope,
-            posted=_posted_scope(reading.scope, choice=choice, option_id=option_id),
+            entries=switch_entries(reading.scope, choice=choice, option_id=option_id),
             groups=_groups(
                 reading,
                 (ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),

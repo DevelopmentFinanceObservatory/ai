@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import gc
 import inspect
 import json
 import logging
@@ -5156,6 +5157,36 @@ async def test_a_compile_after_a_refused_one_records_nothing() -> None:
     assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
     assert surface.tools == ["resolve_definition"]
     assert load_unsupported(ctx.state) == frozenset()
+
+
+async def test_a_refused_read_is_answered_before_a_later_one_that_crashed() -> None:
+    """Two reads run at once. The second crashes before the first is refused, and the
+    first's refusal is answered, as when the reads run one after another, with the
+    crash retrieved and none reported unretrieved."""
+    crashed = asyncio.Event()
+    refusal = {"code": ProblemCode.SURFACE_UNAVAILABLE.value}
+
+    async def refused() -> Callable[[Any], dict[str, object] | None]:
+        await crashed.wait()
+        return lambda _: refusal
+
+    async def crashing() -> Callable[[Any], dict[str, object] | None]:
+        crashed.set()
+        raise RuntimeError("the second read crashed")
+
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _, context: unretrieved.append(context))
+    try:
+        result = await planner_agent._held_in_order(
+            [refused(), crashing()], state=_FakeToolContext().state
+        )
+        gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+
+    assert result == refusal
+    assert unretrieved == []
 
 
 class _FirstResolveUnavailable(BasisCompiles):
