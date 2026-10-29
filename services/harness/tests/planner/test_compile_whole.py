@@ -10,12 +10,28 @@ from typing import Any, cast
 
 import pytest
 from compiler.surface import ToolSurface
+from harness.scope_choices import mark_planner_axes, planner_axes
 from planner import agent as planner_agent
-from planner.plan import PinSource, SessionState, save_pin_sources
+from planner.plan import (
+    AlignedPin,
+    PinSource,
+    SessionState,
+    aligned_pins,
+    pin_sources,
+    save_aligned_pin,
+    save_pin_sources,
+)
 from planner.tool_results import ProblemCode
 from submission.service import Realignment
 
-from ..basis_alignment import TOTAL, BasisCompiles, WholeCompiles, basis_block, us_2023_block
+from ..basis_alignment import (
+    TOTAL,
+    TOTAL_GROSS,
+    BasisCompiles,
+    WholeCompiles,
+    basis_block,
+    us_2023_block,
+)
 
 _WHOLE = "whole"
 
@@ -122,3 +138,88 @@ async def test_a_basis_compile_whose_sets_cannot_be_read_is_refused_unposted(
     assert refused is not None
     assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value
     assert cast(dict[str, Any], refused["detail"])["basis"]["requirement_id"] == "total"
+
+
+@pytest.mark.parametrize("settled", [True, False], ids=["settled", "candidate"])
+@pytest.mark.parametrize("whole", [False, True], ids=["basis", "whole"])
+async def test_a_compile_answered_with_a_shown_spec_id_replaces_it_unless_settled(
+    whole: bool, settled: bool
+) -> None:
+    """Search answers a compile, the US donor total on gross or US health aid over
+    every sector, with a spec_id the planner was shown. A settled source stands as
+    shown, since a pin of the plan's may rest on it; one only offered as a candidate
+    gives way to the compile, so admission reads the aligned input's pin from it."""
+    state = cast(SessionState, {})
+    if whole:
+        surface: Any = WholeCompiles()
+        origin = us_2023_block("health")
+        compiled = us_2023_block("whole")["spec_id"]
+        realignment = Realignment(origin["spec_id"], (), _WHOLE, _WHOLE, whole_axis="sector")
+    else:
+        surface = BasisCompiles()
+        origin = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
+        compiled = TOTAL_GROSS
+        realignment = Realignment(TOTAL, ("measure_basis:gross",), "total", "share")
+    shown = PinSource(
+        block=basis_block(compiled, narrow=False, active="measure_basis:net"), settled=settled
+    )
+    save_pin_sources(
+        state, {origin["spec_id"]: PinSource(block=origin, settled=True), compiled: shown}
+    )
+
+    refused = await planner_agent.compile_on_basis(
+        cast(ToolSurface, surface), realignment, state=state
+    )
+
+    assert refused is None
+    (held,) = aligned_pins(state)
+    assert held.spec_id == compiled
+    (part,) = held.digest["part_digests"]
+    assert pin_sources(state)[compiled].block == (shown.block if settled else part["spec_block"])
+
+
+async def test_a_whole_of_an_aligned_part_reads_the_part_from_its_compile() -> None:
+    """US health aid, moved by alignment onto a spec_id the planner was shown as a
+    search's answer, is declared the part of its total over every sector. The whole is
+    compiled from the part's compile, which marks the provider scope as the planner's,
+    so the whole marks it too; the shown source marks no axis."""
+    state = cast(SessionState, {})
+    part = us_2023_block("health")
+    origin = us_2023_block("health_inclusive")
+    save_pin_sources(
+        state,
+        {
+            part["spec_id"]: PinSource(block=part, settled=True),
+            origin["spec_id"]: PinSource(block=origin, settled=True),
+        },
+    )
+    digest: dict[str, Any] = {"part_digests": [{"spec_block": part}]}
+    mark_planner_axes(digest, {"provider"})
+    save_aligned_pin(
+        state,
+        AlignedPin(
+            origin=origin["spec_id"],
+            option_ids=("provider:bilateral",),
+            spec_id=part["spec_id"],
+            digest=digest,
+            records_origin=True,
+        ),
+    )
+
+    refused = await planner_agent.compile_whole(
+        cast(ToolSurface, WholeCompiles()),
+        Realignment(
+            part["spec_id"],
+            (),
+            _WHOLE,
+            _WHOLE,
+            whole_axis="sector",
+            part_origin=origin["spec_id"],
+        ),
+        state=state,
+    )
+
+    assert refused is None
+    whole = next(pin for pin in aligned_pins(state) if pin.whole_axis == "sector")
+    (answered,) = whole.digest["part_digests"]
+    assert planner_axes(answered["spec_block"]) == {"provider"}

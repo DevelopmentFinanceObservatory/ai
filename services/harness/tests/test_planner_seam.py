@@ -5103,6 +5103,33 @@ def test_a_declared_whole_with_no_block_is_named_by_its_axis_with_no_warning(
     assert (named, caplog.records) == ("all donors", [])
 
 
+@pytest.mark.parametrize("settled", [True, False], ids=["settled", "candidate"])
+def test_a_compiled_pin_shown_by_a_search_reads_its_compile_unless_settled(
+    settled: bool,
+) -> None:
+    """A compile Search answered with a spec_id the planner was shown. A settled
+    source keeps its block, since a pin of the plan's may rest on it; one only
+    offered as a candidate gives way to the compile's block."""
+    shown = {"spec_id": TOTAL, "resolved": {"concept_label": "shown"}}
+    compiled = {"spec_id": TOTAL, "resolved": {"concept_label": "compiled"}}
+    state: dict[str, Any] = {}
+    save_pin_sources(cast(SessionState, state), {TOTAL: PinSource(block=shown, settled=settled)})
+    save_aligned_pin(
+        cast(SessionState, state),
+        AlignedPin(
+            origin=HEALTH,
+            option_ids=("measure_basis:gross",),
+            spec_id=TOTAL,
+            digest={"part_digests": [{"spec_block": compiled}]},
+            records_origin=True,
+        ),
+    )
+
+    blocks = planner_seam._spec_blocks(cast(SessionState, state))
+
+    assert blocks[TOTAL] == (shown if settled else compiled)
+
+
 _WINDOWED_HEALTH = "spec_" + "e" * 32
 
 

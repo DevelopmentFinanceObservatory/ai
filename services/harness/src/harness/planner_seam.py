@@ -147,6 +147,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    stands_as_shown,
     windowed_pins,
 )
 from planner.records import Severity
@@ -1431,21 +1432,24 @@ def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) 
 def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
     """Every spec block `state` holds a pin's source in, by spec_id: those of
     the datasets the planner was shown (`pin_sources`), then this turn's
-    searches (`ORCHESTRATOR_SPECS_KEY`), each in place of an earlier one for its
-    spec_id, then the pins compiled for a calculation's inputs (`aligned_pins`)
-    under a spec_id neither holds. A compile Search answered with a spec_id the
-    planner was shown, as a pin the plan holds for its own reasons, leaves that
-    pin's block as shown."""
+    searches (`ORCHESTRATOR_SPECS_KEY`), then the pins compiled for a
+    calculation's inputs (`aligned_pins`), each later one in place of an
+    earlier one for its spec_id. A compile Search answered with the spec_id of
+    a settled source the planner was shown leaves that source's block as shown
+    (`planner.plan.stands_as_shown`), as `planner.agent.compile_on_basis` does."""
+    shown = pin_sources(state)
     blocks: dict[str, Mapping[str, Any]] = {
         spec_id: block
-        for spec_id, shown in pin_sources(state).items()
-        if (block := shown.spec_block(spec_id)) is not None
+        for spec_id, source in shown.items()
+        if (block := source.spec_block(spec_id)) is not None
     }
     blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     for pin in aligned_pins(state):
         (part,) = pin.digest["part_digests"]
-        if (block := part.get("spec_block")) is not None:
-            blocks.setdefault(pin.spec_id, block)
+        if (block := part.get("spec_block")) is not None and not stands_as_shown(
+            shown, pin.spec_id
+        ):
+            blocks[pin.spec_id] = block
     return blocks
 
 

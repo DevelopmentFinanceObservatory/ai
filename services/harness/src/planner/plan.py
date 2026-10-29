@@ -6186,6 +6186,13 @@ class AlignedPin(StrictModel):
     the part pinned to `origin` with its choice on `whole_axis` left open
     and every other choice on the part's options, and moves no option
     (`option_ids` empty, `submission.service.Realignment.whole_axis`).
+
+    `records_origin` is set on every pin `planner.agent.compile_on_basis` and
+    `planner.agent.compile_whole` hold: the requirement alignment moves onto it
+    records its origin itself (`DatasetRequirement.aligned_from`). A stored pin
+    without it was held beside a plan whose requirements record no origin, and
+    `submission.service._with_inferred_origins` reads the origins of that plan's
+    inputs off such pins alone.
     """
 
     origin: str
@@ -6193,6 +6200,7 @@ class AlignedPin(StrictModel):
     spec_id: str
     digest: dict[str, Any]
     whole_axis: str | None = None
+    records_origin: bool = False
 
     @property
     def key(self) -> tuple[str, tuple[str, ...], str | None]:
@@ -6218,27 +6226,47 @@ def aligned_source(
 
     An input alignment moved (`DatasetRequirement.aligned_from`) reads the pin compiled
     from that origin, and a declared whole of `plan` (`DatasetRequirement.whole_of`)
-    the one compiled from its part's pin with its axis left open. Either is the
-    source of the pin it was compiled from, as shown (`pin_sources`), holding the
-    compile's block. A compile Search answered with a spec_id the planner was shown
-    leaves that spec_id's source as shown (`planner.agent.compile_on_basis`), so a
-    requirement compiled onto it reads the compile's block, planner axes and warnings
-    here. `None` for any other requirement, or where no such pin or block is held.
+    the one compiled from its part's pin with its axis left open (`compiled_source`).
+    A whole takes its part's source, read the same way: the part's own compile where
+    alignment moved the part, so its warnings, provenance and `settled` are the
+    compile's, else the part's pin as shown. A compile Search answered with the spec_id of a settled source the planner was
+    shown leaves that source as shown (`stands_as_shown`), so a requirement compiled
+    onto it reads the compile's block, planner axes and warnings here. `None` for any
+    other requirement, or where no such pin or block is held.
     """
     pin = requirement.source_spec_id
     whole = requirement.whole_of
     part = plan.requirement(whole.part) if whole is not None else None
-    if requirement.aligned_from is not None:
-        origin, axis = requirement.aligned_from, None
-    elif whole is not None and isinstance(part, DatasetRequirement) and part.source_spec_id:
-        origin, axis = part.source_spec_id, whole.axis
-    else:
+    if pin is None:
         return None
+    if requirement.aligned_from is not None:
+        return compiled_source(state, origin=requirement.aligned_from, spec_id=pin)
+    if whole is not None and isinstance(part, DatasetRequirement) and part.source_spec_id:
+        compiled = compiled_source(
+            state, origin=part.source_spec_id, spec_id=pin, whole_axis=whole.axis
+        )
+        part_source = aligned_source(state, part, plan=plan)
+        if compiled is None or part_source is None:
+            return compiled
+        return part_source.model_copy(update={"block": compiled.block})
+    return None
+
+
+def compiled_source(
+    state: SessionState, *, origin: str, spec_id: str, whole_axis: str | None = None
+) -> PinSource | None:
+    """The source of the pin compiled from `origin` that Search answered as `spec_id`,
+    leaving `whole_axis` open when set, read off the latest such `AlignedPin`.
+
+    It is the source of `origin` as shown (`pin_sources`) holding the compile's block.
+    `None` where no such pin, or no block for it, is held.
+    """
     held = next(
         (
             aligned
             for aligned in reversed(aligned_pins(state))
-            if (aligned.origin, aligned.spec_id, aligned.whole_axis) == (origin, pin, axis)
+            if (aligned.origin, aligned.spec_id, aligned.whole_axis)
+            == (origin, spec_id, whole_axis)
         ),
         None,
     )
@@ -6250,6 +6278,24 @@ def aligned_source(
         return None
     shown = pin_sources(state).get(origin) or PinSource()
     return shown.model_copy(update={"block": block, "earlier_turn": False})
+
+
+def stands_as_shown(sources: Mapping[str, PinSource], spec_id: str) -> bool:
+    """Whether the source the planner was shown as `spec_id` stands as shown when a
+    compile Search answers with that spec_id (`planner.agent.compile_on_basis`,
+    `planner.agent.compile_whole`).
+
+    It stands when it is settled (`PinSource.settled`): a source a search settled on, a
+    candidate or nearest series the orchestrator fetched, another count only a fetch
+    settled (`PinSource.other_count_of`), or a pin a switch or a search for an
+    unpinned input made. A planner or user pin rests on it, and its source and
+    measure decision stay theirs, while the requirement moved onto the compile reads
+    it through `aligned_source`. A spec_id only offered as a candidate, or not shown,
+    holds no pin of its own, and the compile takes its place, so admission reads the
+    aligned input's pin from the compile (`submission.service.measure_choices`).
+    """
+    shown = sources.get(spec_id)
+    return shown is not None and shown.settled
 
 
 def dataset_of(identity: Mapping[str, Any]) -> dict[str, Any]:

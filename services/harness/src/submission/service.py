@@ -3775,6 +3775,9 @@ class Realignment(NamedTuple):
     (`DatasetRequirement.whole_of`): `spec_id` is its part's pin, compiled
     with its choice on `whole_axis` left open, `option_ids` is empty, and
     `requirement_id` and `step_id` both name the whole (`_declared_wholes`).
+    Where alignment moved the part onto that pin, `part_origin` is the pin it was
+    compiled from (`DatasetRequirement.aligned_from`), which
+    `planner.agent.compile_whole` reads the part's source through.
     """
 
     spec_id: str
@@ -3782,12 +3785,15 @@ class Realignment(NamedTuple):
     requirement_id: str
     step_id: str
     whole_axis: str | None = None
+    part_origin: str | None = None
 
     def detail(self) -> dict[str, object]:
-        """This realignment as a refusal's detail states it, `whole_axis` only when set."""
+        """This realignment as a refusal's detail states it, `whole_axis` and
+        `part_origin` only when set."""
         detail: dict[str, object] = {**self._asdict(), "option_ids": list(self.option_ids)}
-        if self.whole_axis is None:
-            del detail["whole_axis"]
+        for key in ("whole_axis", "part_origin"):
+            if detail[key] is None:
+                del detail[key]
         return detail
 
 
@@ -3803,6 +3809,7 @@ def realignments_wanted(result: Mapping[str, object]) -> list[Realignment]:
             requirement_id=entry["requirement_id"],
             step_id=entry["step_id"],
             whole_axis=entry.get("whole_axis"),
+            part_origin=entry.get("part_origin"),
         )
         for entry in detail.get("realign") or ()
     ]
@@ -4388,6 +4395,7 @@ def _aligned_bases(
         wholes = _declared_wholes(
             declared,
             realigned=realigned,
+            inputs=inputs,
             shown=shown,
             compiled=[pin for pin in aligned if pin.whole_axis is not None],
         )
@@ -4416,20 +4424,23 @@ def _aligned_from(read: _Input | None, pin: str) -> str | None:
 
 
 def _with_inferred_origins(previous: Plan, aligned: Sequence[AlignedPin]) -> Plan:
-    """`previous` with each input alignment moved before requirements recorded it
-    (`DatasetRequirement.aligned_from`) given the origin it was moved from.
+    """`previous` with each aligned input held beside a pin that does not record its
+    origin (`AlignedPin.records_origin` unset) given the origin it was moved from
+    (`DatasetRequirement.aligned_from`).
 
-    A plan stored before then holds an aligned input on its compiled pin alone, and
-    records no origin on any requirement. An input pinning the spec_id of exactly one
-    origin's compile (`AlignedPin`, not a declared whole's) records that origin,
+    Such a pin is stored beside a plan that holds an aligned input on its compiled pin
+    alone and records no origin on any requirement. An input pinning the spec_id of
+    exactly one such origin's compile (not a declared whole's) records that origin,
     where no other requirement of `previous` pins that spec_id, since one that does
     may hold it as its own, and none pins the origin, which an input pinned to the
-    compile directly beside its origin's own requirement would. The stored plan keeps
-    its form and revision; only the plan this call admits records the origin.
+    compile directly beside its origin's own requirement would. A pin that records
+    its origin is never read here, so an input restated with another meaning, which
+    records none, keeps none. The stored plan keeps its form and revision; only the
+    plan this call admits records the origin.
     """
     origins: dict[str, set[str]] = {}
     for pin in aligned:
-        if pin.whole_axis is None:
+        if pin.whole_axis is None and not pin.records_origin:
             origins.setdefault(pin.spec_id, set()).add(pin.origin)
     datasets = [r for r in previous.evidence_requirements if isinstance(r, DatasetRequirement)]
     if not origins or any(dataset.aligned_from is not None for dataset in datasets):
@@ -4462,7 +4473,7 @@ def _with_aligned_origins(
 ) -> list[EvidenceRequirement]:
     """This call's requirements, each dataset requirement's `aligned_from` the one the
     plan `previous` records for it where the requirement restates that one unchanged
-    apart from it and its citations (`_asked_content`), else unset.
+    apart from the fields admission writes (`_asked_content`), else unset.
 
     Alignment alone writes `aligned_from` (`_aligned_bases`). The planner's schema
     leaves it out, so a value the planner sends is dropped, and a requirement it
@@ -4494,11 +4505,22 @@ def _with_aligned_origins(
     return restated
 
 
+# The fields of a dataset requirement admission writes or rewrites after
+# `_with_aligned_origins` reads it: the decisions it cites (`settle_decisions`,
+# `_without_citations`), the stated source a chosen pin gives way to
+# (`_stated_source_given_way`), and what alignment's repin clears and records
+# (`planner.plan.repinned`).
+_ADMISSION_WRITTEN = frozenset(
+    {"decision_ids", "source", "source_ref", "source_exclude", "source_code", "aligned_from"}
+)
+
+
 def _asked_content(requirement: DatasetRequirement) -> dict[str, Any]:
     """What `requirement` asks for, compared across a revision by `_with_aligned_origins`:
-    every field but the origin alignment records and the decisions it cites, which
-    admission adds to (`settle_decisions`) and the planner restates without."""
-    return requirement.model_dump(exclude={"aligned_from", "decision_ids"})
+    every field the planner states and admission leaves as stated, so a restatement
+    differing from the stored requirement only where admission wrote it reads as
+    unchanged (`_ADMISSION_WRITTEN`)."""
+    return requirement.model_dump(exclude=set(_ADMISSION_WRITTEN))
 
 
 class _InputGroup(NamedTuple):
@@ -5439,6 +5461,7 @@ def _declared_wholes(
     declared: Sequence[tuple[DatasetRequirement, DatasetRequirement, str]],
     *,
     realigned: Mapping[str, str],
+    inputs: Mapping[str, _Input],
     shown: Mapping[str, PinSource],
     compiled: Sequence[AlignedPin],
 ) -> dict[str, str]:
@@ -5447,7 +5470,9 @@ def _declared_wholes(
     A declared whole is its part's final pin, the one alignment moved the
     part to (`realigned`) else its own, with the declared axis left open
     (`whole_axis_held`, `planner.agent.compile_whole`) and every other choice
-    held. `compiled` holds the wholes compiled so far
+    held. A part alignment moved names the pin it was compiled from, as read
+    (`inputs`), so its compile is read as the part (`Realignment.part_origin`).
+    `compiled` holds the wholes compiled so far
     (`AlignedPin.key`), so wholes declaring one part and axis share one
     compile.
 
@@ -5487,7 +5512,15 @@ def _declared_wholes(
             wholes[whole.id] = held.spec_id
         else:
             wanted.setdefault(
-                (pin, axis), Realignment(pin, (), whole.id, whole.id, whole_axis=axis)
+                (pin, axis),
+                Realignment(
+                    pin,
+                    (),
+                    whole.id,
+                    whole.id,
+                    whole_axis=axis,
+                    part_origin=_aligned_from(inputs.get(part.id), pin),
+                ),
             )
     if wanted:
         raise _Unservable(_bases_unaligned(list(wanted.values()), {}))
