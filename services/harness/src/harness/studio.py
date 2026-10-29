@@ -50,7 +50,6 @@ from google.adk.errors import StaleSessionError
 from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events import Event
 from google.adk.runners import Runner
-from google.adk.sessions.base_session_service import GetSessionConfig
 from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
@@ -74,7 +73,6 @@ from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    PICK_REPLAN_KEY,
 )
 from harness.graph.switch import SWITCH_STOP
 from harness.provenance import ProvenanceStore
@@ -878,20 +876,6 @@ class StudioRunner:
         closes it."""
         await self.recorder.aclose()
 
-    async def _resumes_a_pick_replan(
-        self, *, principal: str, conversation: ConversationState
-    ) -> bool:
-        """Whether the turn is paused inside a planner replan for a pick on
-        the plan card (`harness.graph.state.PICK_REPLAN_KEY`): a question
-        the planner asked while replanning, whose answer resumes the replan."""
-        session = await self.runner.session_service.get_session(
-            app_name=self.runner.app_name,
-            user_id=principal,
-            session_id=conversation.session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        return session is not None and bool(session.state.get(PICK_REPLAN_KEY))
-
     async def _ensure_session(
         self, *, user_id: str, session_id: str, state: dict[str, Any] | None = None
     ) -> None:
@@ -1561,14 +1545,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # A stream that runs a plan-card switch arms the switch's Stop:
             # one that answers the switch, and one that answers a question
             # the planner asked while replanning for a pick on the card.
-            # Read before the segment is claimed, so a failed read leaves
-            # nothing claimed and the answer can be sent again.
-            switching = body.decision is InterruptDecision.SWITCH or (
-                pending.kind == "elicitation"
-                and await studio._resumes_a_pick_replan(
-                    principal=principal, conversation=conversation
-                )
-            )
+            switching = body.decision is InterruptDecision.SWITCH or pending.pick_replan
             requested_answer: dict[str, Any] = {
                 "decision": body.decision.value,
                 "payload": body.payload,

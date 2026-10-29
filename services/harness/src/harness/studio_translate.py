@@ -1339,6 +1339,10 @@ class _Translator:
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
         self.paused = False
+        # Whether the planner's latest entry replans for a pick on the plan
+        # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
+        # resumes a stoppable replan.
+        self._pick_replan = False
         # The running status line, as (wire id, label, monotonic start).
         self._status: tuple[str, str, float] | None = None
         self._streamed_text = False
@@ -1413,6 +1417,7 @@ class _Translator:
             # replan's, and may reuse the requirement ids the choice ids are
             # built from, so no earlier card's labels describe its choices.
             self._conversation.turn_choice_baseline = {}
+            self._pick_replan = bool(started.get("pick"))
             label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
         output = event.output if isinstance(event.output, dict) else None
@@ -1955,9 +1960,11 @@ class _Translator:
                 for question in asked
             ]
             skippable = not several
+            pick_replan = False
         else:
             questions = [_planner_question(args)]
             skippable = True
+            pick_replan = self._pick_replan
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
@@ -1978,6 +1985,7 @@ class _Translator:
                 for question in questions
             ),
             skippable=skippable,
+            pick_replan=pick_replan,
         )
         return [frame]
 

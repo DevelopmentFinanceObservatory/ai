@@ -48,7 +48,8 @@ STEP_PROGRESS_KEY = "step_progress"
 
 # The `custom_metadata` key the `planner` node's first event travels under,
 # as it starts a draft: `{"revising": bool}`, true when the draft revises a
-# plan already on record. Read by `harness.studio_translate._Translator`.
+# plan already on record, with `"pick": True` added when it replans for a
+# pick on the plan card. Read by `harness.studio_translate._Translator`.
 PLANNER_STARTED_KEY = "planner_started"
 
 # The orchestrator's session state (`create_root_workflow`'s
@@ -98,10 +99,9 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
-# entry starts and cleared when it ends. Set only while such a replan runs or
-# is paused on a planner-side ask, so the studio arms the switch's Stop on
-# the stream that resumes that ask. Outside the drafting prefixes the restore
-# resets (`harness.graph.switch._DRAFTING_PREFIXES`).
+# replan pauses on a planner-side ask and cleared when the entry ends, so it
+# is set only while such a replan is paused. Outside the drafting prefixes
+# the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
 PICK_REPLAN_KEY = "switch:pick_replan"
 # The `custom_metadata` key an orchestrator node's own status line travels
 # under ("Reading your question"), read by `studio_translate._Translator`.

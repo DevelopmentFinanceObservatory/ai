@@ -125,10 +125,13 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         A stop or a refusal routes `"pending_refusal"` with the unchanged
         plan and the `switch_failed` the switch node offers
         (`switch_failed_offer`). It puts back the state from before the pick
-        (`_pick_snapshot`) and clears the pick, as it does when the run
-        raises. A planner-side ask keeps the replan's state for its resume,
-        which restores from the same snapshot, and the studio arms the
-        switch's Stop on the stream resuming it (`PICK_REPLAN_KEY`).
+        (`_pick_snapshot`), as it does when the run raises. Every end of the
+        entry but a planner-side ask clears the pick, so no later entry or
+        revision of the plan holds it. An ask keeps the replan's state for
+        its resume and records the snapshot under `PICK_REPLAN_KEY`, which
+        the resume restores from. The start event says the entry is a pick's
+        (`PLANNER_STARTED_KEY`), so the studio arms the switch's Stop on the
+        stream answering an ask the replan raises.
 
         `planner(...)` is awaited directly here, with no
         `asyncio.ensure_future` wrapper of its own: ADK's own docstring
@@ -204,9 +207,16 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         if unreadable:
             refusal = amendment = None
             is_first_draft = True
-        yield Event(custom_metadata={PLANNER_STARTED_KEY: {"revising": not is_first_draft}})
-
         pick = _pick(payload) if existing is not None else None
+        yield Event(
+            custom_metadata={
+                PLANNER_STARTED_KEY: {
+                    "revising": not is_first_draft,
+                    **({"pick": True} if pick is not None else {}),
+                }
+            }
+        )
+
         # The state before the pick, which a pick's replan that is stopped,
         # refused or raises puts back.
         before = _pick_snapshot(ctx) if pick is not None else None
@@ -237,21 +247,24 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             # A planner-side ask paused the draft mid-turn, and ADK has
             # already streamed the ask, so the reports queued so far are
             # dropped with it: relayed now they would follow the ask. A
-            # pick's replan keeps its state for the resume.
+            # pick's replan keeps its state for the resume, and records what
+            # to put back should the resumed replan not land.
+            if before is not None:
+                ctx.state[PICK_REPLAN_KEY] = before
             raise
         except SwitchFailedError as exc:
             # Only a pick's replan, stopped by the user (`SWITCH_STOP`).
             failed, drafted = exc, {}
         except BaseException:
             if before is not None:
-                _end_pick_replan(ctx, before)
+                _end_pick_entry(ctx, before=before)
             raise
         while not progress.empty():
             yield Event(custom_metadata={"progress": progress.get_nowait()})
         refused = drafted.get("refused") if isinstance(drafted, dict) else None
         if pick is not None and (failed is not None or refused is not None):
             assert existing is not None and before is not None
-            _end_pick_replan(ctx, before)
+            _end_pick_entry(ctx, before=before)
             switch = payload.get("switch") or {}
             yield Event(
                 output=switch_module.switch_failed_offer(
@@ -302,7 +315,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         planner_plan = PlannerPlan.model_validate(drafted["plan"])
         ctx.state["plan"] = planner_plan.model_dump_json()
         if pick is not None:
-            ctx.state[PICK_REPLAN_KEY] = None
+            _end_pick_entry(ctx)
         yield Event(
             output={
                 **planner_plan.model_dump(mode="json"),
@@ -329,23 +342,23 @@ def _pick(payload: dict[str, Any]) -> DecisionPick | None:
 def _pick_snapshot(ctx: Context) -> dict[str, Any]:
     """The state a pick's replan puts back when it does not land.
 
-    A fresh entry records the state as it stands under `PICK_REPLAN_KEY`.
-    The resume of a planner-side ask reads that record back, since the
-    first leg has written drafting state and readings since.
+    A fresh entry takes it as the state stands. The resume of a planner-side
+    ask reads back the copy the pause recorded under `PICK_REPLAN_KEY`,
+    since the first leg has written drafting state and readings since.
     """
     held = ctx.state.get(PICK_REPLAN_KEY)
     if ctx.resume_inputs and isinstance(held, dict):
         return held
-    snapshot = switch_module._restorable_state(ctx)
-    ctx.state[PICK_REPLAN_KEY] = snapshot
-    return snapshot
+    return switch_module._restorable_state(ctx)
 
 
-def _end_pick_replan(ctx: Context, before: dict[str, Any]) -> None:
-    """End a pick's replan that did not land: put the state back as `before`
-    holds it, clear the pick so a later revision of the plan on record holds
-    none, and clear the snapshot."""
-    switch_module._restore(ctx, before)
+def _end_pick_entry(ctx: Context, *, before: dict[str, Any] | None = None) -> None:
+    """End a pick's planner entry other than by a planner-side ask: put the
+    state back as `before` holds it, for a replan that did not land, clear
+    the pick so no later entry or revision of the plan holds it, and clear
+    the snapshot a pause recorded."""
+    if before is not None:
+        switch_module._restore(ctx, before)
     save_decision_pick(cast(SessionState, ctx.state), None)
     ctx.state[PICK_REPLAN_KEY] = None
 

@@ -6567,9 +6567,10 @@ def _released_by_pick(
     where the pick changed everything that decision rested on: every
     requirement of `previous` citing it also cited the picked decision, and
     the plan it asks for (`requirements`) neither cites it nor keeps any of
-    those requirements. A user decision the new plan still cites, or that a
-    requirement the pick did not change cited, stands as the user made it
-    (`_user_decision_refused`), however that requirement is renamed.
+    those requirements. A user decision the new plan still cites, that a
+    requirement the pick did not change cited, or that no requirement cited,
+    stands as the user made it (`_user_decision_refused`), however that
+    requirement is renamed.
     """
     slot = pick[0]
     kept = {requirement.id for requirement in requirements}
@@ -6579,7 +6580,7 @@ def _released_by_pick(
         if decision.resolved_by is not ResolvedBy.USER or decision.slot in cited:
             continue
         citing = [r for r in previous.evidence_requirements if decision.slot in r.decision_ids]
-        if all(slot in r.decision_ids and r.id not in kept for r in citing):
+        if citing and all(slot in r.decision_ids and r.id not in kept for r in citing):
             released.add(decision.slot)
     return frozenset(released)
 
@@ -6980,6 +6981,8 @@ def _picked_decision(
         states = "drops that decision"
     elif stated.chosen != chosen:
         states = f"states {stated.chosen!r} for it"
+    elif stated.fixes is None:
+        states = "states it, but the requirements citing it fix none of what it names"
     else:
         states = "states it, but the requirements citing it fix what they fixed before"
     return problem(

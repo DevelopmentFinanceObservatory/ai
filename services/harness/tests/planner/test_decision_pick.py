@@ -27,6 +27,7 @@ from planner.plan import (
     DecisionFixes,
     Entity,
     Period,
+    Plan,
     RankRequirement,
     ResolvedBy,
     Unit,
@@ -35,6 +36,7 @@ from planner.plan import (
 )
 from planner.records import RankAmong, RankDirection, Reduction
 from planner.tool_results import Outcome, ProblemCode
+from submission.service import _released_by_pick
 
 from ..decision_drafts import drafts
 from ..session_events import response_event
@@ -217,6 +219,28 @@ def test_a_plan_that_does_not_state_the_pick_is_refused(
     assert recorded is not None and recorded.version == first["version"]
 
 
+def test_a_restated_pick_its_requirements_fix_nothing_of_is_refused_saying_so(
+    decision: Callable[..., Decision],
+) -> None:
+    """The plan states the picked option, cited only by the DAC total, which
+    states neither a rank's limit nor what it ranks among: the decision fixes
+    nothing, and the refusal says the requirements citing it fix none of
+    what it names."""
+    ctx = _context()
+    first = _recorded_dac_total(ctx, decision)
+    save_decision_pick(ctx.state, ("donor_scope", "the top 10 donors"))
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=[_dac_total()],
+        amends_version=first["version"],
+    )
+
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value, result
+    assert "fix none of what it names" in result["message"]
+
+
 def _year_kept(period: Period) -> list[Any]:
     """`_ranked_donors` with the donors read over `period` under the user's year decision."""
     aid, top = _ranked_donors()
@@ -305,3 +329,18 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
     assert result["outcome"] == Outcome.REFUSED.value, result
     assert result["code"] == ProblemCode.USER_DECISION_DROPPED.value
     assert result["detail"]["slot"] == "year"
+
+
+def test_a_pick_releases_no_user_decision_no_requirement_cited() -> None:
+    """A user decision no requirement of the plan on record cites rests on
+    nothing the pick changed, so the pick does not let it go."""
+    previous = Plan.model_construct(
+        decisions=(DONOR_SCOPE, USER_YEAR),
+        evidence_requirements=(
+            _dac_total().model_copy(update={"decision_ids": ("measure", "donor_scope")}),
+        ),
+    )
+
+    released = _released_by_pick(previous, _ranked_donors(), ("donor_scope", "the top 10 donors"))
+
+    assert released == {"donor_scope"}

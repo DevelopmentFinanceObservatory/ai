@@ -72,6 +72,7 @@ from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    PICK_REPLAN_KEY,
     frame_id_for,
 )
 from harness.mcp_client import McpExecutor
@@ -4304,36 +4305,6 @@ async def test_a_skipped_ask_resumes_and_hands_the_skip_back() -> None:
     assert "The user skipped the question." in request_text(_model(app).requests[-1])
 
 
-async def test_an_answer_whose_session_read_fails_leaves_the_pause_free_to_answer_again(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The route reads the turn's session to tell whether the answer resumes a
-    planner replan for a pick (`StudioRunner._resumes_a_pick_replan`) before
-    it claims a segment, so a read that fails claims nothing, and the same
-    answer sent again resumes the turn."""
-    reads = 0
-
-    async def _failing_once(*_args: Any, **_kwargs: Any) -> bool:
-        nonlocal reads
-        reads += 1
-        if reads == 1:
-            raise ConnectionError("session store unreachable")
-        return False
-
-    monkeypatch.setattr(studio_module.StudioRunner, "_resumes_a_pick_replan", _failing_once)
-    app = _app(*_ask(), _text("Ask me something else."))
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
-        skip = _interrupt_body(_frame(first, "elicitation.request")["interrupt_id"], "skip")
-        with pytest.raises(ConnectionError):
-            await client.post("/api/studio/interrupt", json=skip, headers=AUTH)
-
-        again = await _stream(client, "/api/studio/interrupt", skip)
-
-    assert reads == 2
-    assert _events(again)[-1] == "done"
-
-
 async def test_a_free_text_answer_resumes_in_the_users_own_words() -> None:
     app = _app(*_ask(), _text("The OECD reading it is."))
     async with _client(app) as client:
@@ -4797,13 +4768,17 @@ class _AskingPickPlanner(ScriptedPlannerModel):
         raise AssertionError("a stopped replan is cancelled")
 
 
-async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffers_the_plan() -> (
-    None
-):
+@pytest.mark.parametrize("record", ["kept", "cleared"])
+async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffers_the_plan(
+    record: str,
+) -> None:
     """The user picks another option for a planner decision, and the planner
     asks a question while it replans. The stream that answers it runs the
     replan, so a Stop there is a switch's Stop: the stream ends on the same
-    plan re-offered with `switch_cancelled`, and the turn stays paused on it."""
+    plan re-offered with `switch_cancelled`, and the turn stays paused on it.
+    The question's pending entry says so (`pick_replan`): with the replan's
+    record cleared from the turn's session, the answer still arms the Stop,
+    so the route reads no session to learn it."""
     planner = _AskingPickPlanner()
     app = _app(*_plan(), planner=planner)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
@@ -4823,6 +4798,17 @@ async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffe
         )
         elicitation = _frame(asked, "elicitation.request")
         conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        assert conversation.pending[elicitation["interrupt_id"]].pick_replan
+        if record == "cleared":
+            runner = app.state.studio.runner
+            session = await runner.session_service.get_session(
+                app_name=runner.app_name, user_id=PRINCIPAL, session_id=conversation.session_id
+            )
+            assert session is not None and session.state.get(PICK_REPLAN_KEY)
+            await runner.session_service.append_event(
+                session,
+                Event(author="test", actions=EventActions(state_delta={PICK_REPLAN_KEY: None})),
+            )
         resumed = asyncio.ensure_future(
             _stream(
                 client,

@@ -448,11 +448,6 @@ class _RevisionSession(ToolContextSession):
         elected = super().elected_spec_ids()
         return elected | {new for new, old in self.inherits.items() if old in elected}
 
-    def decision_pick(self) -> tuple[str, str] | None:
-        """None: a revision answers a scope switch, so it holds no pick
-        whatever the session holds."""
-        return None
-
 
 class PlannerSeam:
     """`harness.graph.seams.PlannerModel`, implemented by `src/planner` and the translation it runs."""

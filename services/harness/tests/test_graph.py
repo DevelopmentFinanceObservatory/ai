@@ -1791,17 +1791,24 @@ def _pickable_plan(
 
 class _ReplanSeam(_Seam):
     """A `PlannerModel` that drafts its first plan outright and, on every
-    later call, writes `_DRAFTING_KEY`, waits for `release` when given one,
+    later call, writes `_DRAFTING_KEY` and the pick it is handed, as
+    `PlannerSeam` records it, notes the snapshot the state holds under
+    `PICK_REPLAN_KEY` (`held_snapshot`), waits for `release` when given one,
     and then answers its next scripted result."""
 
     def __init__(self, plans: list[dict[str, Any]], release: asyncio.Event | None = None) -> None:
         super().__init__(plans)
         self.release = release
         self.replanning = asyncio.Event()
+        self.held_snapshot: Any = None
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         if self.calls:
-            kwargs["ctx"].state[_DRAFTING_KEY] = "draft"
+            ctx = kwargs["ctx"]
+            self.held_snapshot = ctx.state.get(PICK_REPLAN_KEY)
+            ctx.state[_DRAFTING_KEY] = "draft"
+            if (pick := kwargs.get("pick")) is not None:
+                save_decision_pick(ctx.state, (pick.slot, pick.chosen))
             self.replanning.set()
             if self.release is not None:
                 await self.release.wait()
@@ -1834,7 +1841,12 @@ async def test_a_planner_decisions_pick_replans_with_the_pick_held(
     assert offered["revision"] == plan_revision(replanned)
     assert "moved" not in offered
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    assert _session_state(runner)[_DRAFTING_KEY] == "draft"
+    state = _session_state(runner)
+    assert state[_DRAFTING_KEY] == "draft"
+    # The pick belongs to its entry, and only a pause records the snapshot.
+    assert decision_pick(cast(SessionState, state)) is None
+    assert seam.held_snapshot is None
+    assert state.get(PICK_REPLAN_KEY) is None
 
 
 @pytest.mark.parametrize(
@@ -4209,6 +4221,26 @@ async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
     assert stopped.value.code == SWITCH_CANCELLED
 
 
+async def test_a_revision_that_paused_in_the_same_wait_as_the_stop_stays_paused() -> None:
+    """The revision pauses on a question to the user as the Stop lands. ADK
+    has streamed the question, so the pause stands and no `switch_failed`
+    follows it."""
+    stop = asyncio.Event()
+    stop.set()
+
+    async def revision() -> dict[str, Any]:
+        raise NodeInterruptedError()
+
+    token = SWITCH_STOP.set(stop)
+    try:
+        with pytest.raises(NodeInterruptedError):
+            await asyncio.wait_for(
+                switch_module._unless_stopped(cast(Any, None), revision()), timeout=5
+            )
+    finally:
+        SWITCH_STOP.reset(token)
+
+
 @_UNWIND_ERRORS
 async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cancelled(
     error: type[BaseException],
@@ -4324,10 +4356,9 @@ async def _switch_off_a_stated_source(
     translation resolves the copy, which Search answers over those years.
 
     `before_switch` is what happened on the card before the switch:
-    `"held_pick"` leaves a pick on the card in state, as a planner entry
-    records it, and `"refused_pick_replan"` switches the window decision,
-    which then fixes the period, and the planner's replan asks a question
-    and is refused once answered (`_RefusingPickSeam`)."""
+    `"refused_pick_replan"` switches the window decision, which then fixes
+    the period, and the planner's replan asks a question and is refused once
+    answered (`_RefusingPickSeam`)."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -4397,10 +4428,6 @@ async def _switch_off_a_stated_source(
         {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-    if before_switch == "held_pick":
-        save_decision_pick(
-            cast(SessionState, _session_state(runner)), ("window", "a label the plan lacks")
-        )
     if before_switch == "refused_pick_replan":
         paused = await _resume(
             runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH}
@@ -4420,7 +4447,7 @@ async def _switch_off_a_stated_source(
     return _SwitchedOff(runner, events, seam, new_pin, copy_pin)
 
 
-@pytest.mark.parametrize("before_switch", [None, "held_pick", "refused_pick_replan"])
+@pytest.mark.parametrize("before_switch", [None, "refused_pick_replan"])
 async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
     real_schemas: list[ToolSchema], before_switch: str | None
 ) -> None:
@@ -4429,9 +4456,8 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     with no search, the plan compiles, and its run accepts what the new
     dataset returns. The translation resolves the copy admission made over the
     plan's years, and searches nothing. A pick on the card belongs to its
-    planner entry, so the revision holds none, whether a pick is left in
-    state or a replan for one was refused after a question the planner
-    asked."""
+    planner entry, so the revision holds none after a replan for one was
+    refused following a question the planner asked."""
     runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(
         real_schemas, before_switch=before_switch
     )
