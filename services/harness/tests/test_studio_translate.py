@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -82,7 +81,7 @@ from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
-from .test_plan_display import _fixing_measure, _recorded_plan
+from .test_plan_display import _fixing_measure, _recorded_payload, _recorded_plan
 from .test_planner_seam import ScriptedPlannerLlm, _seam
 from .test_turn_records import (
     _EXAMPLE_LINE,
@@ -581,6 +580,43 @@ def test_a_caveat_reaches_the_card_only_as_a_caveat() -> None:
     assert cited and cited <= rows
 
 
+def test_a_planner_decisions_options_one_label_would_read_alike_reach_the_card_apart() -> None:
+    """The US health share with a planner decision whose two alternatives open
+    with one sector option id: each, and the chosen one, reads that option's
+    label with the planner's words after it, since the label alone would read
+    alike; the alternative no other reads alike with reads as written."""
+    plan = _us_health_share()
+    sector = "health incl. population and reproductive health (CRS 120 + 130)"
+    which = Decision(
+        slot="health_sector_side",
+        description="Which side the health sectors count on.",
+        options=(
+            "sector:120+130 health for the numerator",
+            "sector:120+130 health for the total",
+            "every sector",
+        ),
+        chosen="sector:120+130 health for the total",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="The user asked for the health share.",
+    )
+    plan = _us_health_share(
+        decisions=[*plan.decisions, which],
+        evidence_requirements=[
+            r.model_copy(update={"decision_ids": (*r.decision_ids, which.slot)})
+            if r.id == "health_share"
+            else r
+            for r in plan.evidence_requirements
+        ],
+    )
+
+    row = next(row for row in _card_of(plan).decisions if row.id == which.slot)
+
+    assert (row.alternatives, row.chosen) == (
+        [f"{sector} health for the numerator", f"{sector} health for the total", "every sector"],
+        f"{sector} health for the total",
+    )
+
+
 def test_two_choices_on_one_axis_each_name_the_input_they_govern() -> None:
     """The US health share with the total's basis choice offering other options
     than the health figures' one, as after a switch of the health figures to a
@@ -609,10 +645,36 @@ def test_two_choices_on_one_axis_each_name_the_input_they_govern() -> None:
     card = _card_of(plan)
 
     assert sorted(row.question for row in card.decisions if row.choice_id is not None) == [
-        "Basis: health incl. population and reproductive health",
+        "Basis: health",
         "Basis: official development assistance",
         "Sector",
     ]
+
+
+def test_a_reason_opening_with_an_option_id_reads_its_own_decisions_label() -> None:
+    """The US health share whose two basis choices offer one option id under
+    different labels, the total's reason opening with that id. The total's row
+    reads the label its own decision gives that id."""
+    plan = _us_health_share()
+    total_basis = "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca"
+    reason = " because the user asked for net flows"
+
+    def relabelled(decision: Decision) -> Decision:
+        return decision.model_copy(
+            update={
+                "options": tuple(f"total's {label}" for label in decision.options),
+                "chosen": f"total's {decision.chosen}",
+                "rationale": f"measure_basis:net{reason}",
+            }
+        )
+
+    plan = _us_health_share(
+        decisions=[relabelled(d) if d.slot == total_basis else d for d in plan.decisions]
+    )
+
+    reasons = {row.id: row.reason for row in _card_of(plan).decisions}
+
+    assert reasons[total_basis] == f"total's net disbursements, current USD{reason}"
 
 
 def test_an_approved_plan_states_the_card_the_user_saw() -> None:
@@ -2028,8 +2090,7 @@ def test_a_recorded_plan_after_a_switch_reaches_the_card_in_the_users_words() ->
     ask and summed up in one sentence, its step labels name no basis, one
     step gives the answer, each scope choice goes by its short name, a
     default gives no reason, and the planner's slug reads as words."""
-    recorded = Path(__file__).parent / "fixtures" / "plan_card_recorded.json"
-    payload = json.loads(recorded.read_text())["long_switched_to_net"]
+    payload = _recorded_payload("long_switched_to_net")
 
     frame = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})[-1]
 
@@ -2037,16 +2098,12 @@ def test_a_recorded_plan_after_a_switch_reaches_the_card_in_the_users_words() ->
     assert frame.title == "Health share of US ODA in 2023"
     assert frame.summary is not None
     assert frame.summary.startswith("Net disbursements, current USD, in 2023")
-    health = "health incl. population and reproductive health"
     assert [(step.label, step.gives_answer) for step in frame.steps] == [
-        (f"Fetch {health} for United States", False),
-        (f"Total {health}", False),
+        ("Fetch health for United States", False),
+        ("Total health", False),
         ("Fetch official development assistance for United States", False),
         ("Total official development assistance", False),
-        (
-            "Health incl. population and reproductive health as a share of official development assistance",
-            True,
-        ),
+        ("Health as a share of official development assistance", True),
     ]
     assert [(row.question, row.chosen, row.reason) for row in frame.decisions or ()] == [
         (

@@ -49,6 +49,7 @@ from executor.outcomes import (
     RefusalKind,
     Refused,
     StopCause,
+    failed_step,
     stop_cause,
 )
 from executor.run import (
@@ -1106,10 +1107,15 @@ async def test_a_retrieval_missing_one_of_two_named_entities_leaves_it_out_and_r
         assert isinstance(outcome, Refused), outcome
         assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
         findings = outcome.issues
+        # The approved source resolves Kenya, so the user named it right.
+        failed = failed_step(outcome)
+        assert failed["code"] == "entity_no_series"
+        assert "resolves no entity" not in failed["message"]
+        assert "remedy" not in failed
     assert [
         (issue.required, issue.severity.value)
         for issue in findings
-        if issue.code.value == "entity_missing"
+        if issue.code.value == "entity_no_series"
     ] == [("Kenya", "warning" if accepted else "error")]
 
 
@@ -1125,7 +1131,7 @@ async def test_a_retrieval_missing_a_required_entity_is_not_evidence(
     assert isinstance(outcome, Refused)
     assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
     assert outcome.requirement_id == "annual_debt_service"
-    assert "entity_missing" in [issue.code.value for issue in outcome.issues]
+    assert "entity_no_series" in [issue.code.value for issue in outcome.issues]
     # The verb never ran: evidence is checked before anything depends on it.
     assert [name for name, _ in surface.calls] == ["get_data"]
 

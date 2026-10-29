@@ -545,6 +545,30 @@ def named_refs(entities: Sequence[Entity], source: SelectedSource | RetrievalEvi
     return {one.ref for entity in entities for one in named_members(entity, source)}
 
 
+def named_on_open_axes(
+    requirement: DatasetRequirement, source: SelectedSource | RetrievalEvidence
+) -> tuple[Entity, ...]:
+    """The entities `requirement` names on a side of a flow `source` leaves open, that `source` does not resolve.
+
+    An entity whose role names a side of a flow one of the source's open
+    axes holds, and that names nothing the source holds (`named_members`),
+    is a name Search never bound: an open side binds no party, so the
+    run-time check, which resolves each name through the approved source,
+    can never find it. "United States" as a donor on a source holding every
+    donor open is one. An entity with no role, or with a role naming no side
+    of a flow, and a source whose open axes were never read, give none.
+    """
+    open_sides = {flow_side(axis.column) for axis in source.open_entity_axes or ()}
+    return tuple(
+        entity
+        for entity in requirement.entities
+        if entity.role is not None
+        and (side := flow_side(entity.role)) is not None
+        and side in open_sides
+        and not named_members(entity, source)
+    )
+
+
 def _role_fits(role: str | None, column: str) -> bool:
     """Whether the requirement's `role` phrase, `None` when unstated, allows the role `column`."""
     if role is None or role.casefold() == column.casefold():
@@ -1023,31 +1047,68 @@ def _named_entity_issues(
 
     A name the approved source resolves and the retrieval holds no series
     for, such as a donor whose reporting stopped before the requirement's
-    period, is left out (`_left_out_severity`): the run answers for the
-    entities that remain and the answer names it.
+    period, is `entity_no_series`, and left out (`_left_out_severity`) where
+    the run can answer for the entities that remain, which the answer names.
     """
     if not evidence.entities:
-        return [
-            EvidenceIssue(
-                code=EvidenceIssueCode.ENTITY_UNVERIFIED,
-                severity=_coverage_severity(requirement),
-                requirement_id=requirement.id,
-                detail="the source resolves no entities, so none of the required ones can be confirmed",
-                required=[entity.name for entity in requirement.entities],
+        unbound = named_on_open_axes(requirement, evidence)
+        unverified = [entity for entity in requirement.entities if entity not in unbound]
+        issues = [_unbound_issue(requirement, entity, evidence) for entity in unbound]
+        if unverified:
+            issues.append(
+                EvidenceIssue(
+                    code=EvidenceIssueCode.ENTITY_UNVERIFIED,
+                    severity=_coverage_severity(requirement),
+                    requirement_id=requirement.id,
+                    detail="the source resolves no entities, so none of the required ones can be confirmed",
+                    required=[entity.name for entity in unverified],
+                )
             )
-        ]
+        return issues
     issues, missing = _entity_findings(requirement, evidence, approved)
     return [*issues, *(issue for _, issue in missing)]
+
+
+def _unbound_issue(
+    requirement: DatasetRequirement, entity: Entity, evidence: RetrievalEvidence
+) -> EvidenceIssue:
+    """The `entity_missing` error for `entity`, named on a side the source leaves open (`named_on_open_axes`)."""
+    columns = sorted(
+        axis.column
+        for axis in evidence.open_entity_axes or ()
+        if flow_side(axis.column) == flow_side(entity.role or "")
+    )
+    return EvidenceIssue(
+        code=EvidenceIssueCode.ENTITY_MISSING,
+        severity=Severity.ERROR,
+        requirement_id=requirement.id,
+        detail=(
+            f"source {evidence.spec_id} leaves {', '.join(map(repr, columns))} open and binds no "
+            f"entity named {entity.name!r}, so the run cannot find it; a source found with "
+            "the name bound serves it"
+        ),
+        found=columns,
+        required=entity.name,
+    )
 
 
 def _entity_findings(
     requirement: DatasetRequirement,
     evidence: RetrievalEvidence,
     approved: SelectedSource | None,
-) -> tuple[list[EvidenceIssue], list[tuple[Entity, EvidenceIssue]]]:
+) -> tuple[list[EvidenceIssue], list[tuple[ResolvedEntity | None, EvidenceIssue]]]:
     """`_named_entity_issues` over a source that resolves entities: the
-    findings on the entities it meets, and each entity it misses with its
-    `entity_missing` finding."""
+    findings on the entities it meets, and for each entity it misses the
+    approved source's entity for it (`resolve_name`), `None` where there is
+    none, with its finding.
+
+    A missing name the approved source never resolved, and every missing
+    name at compile time and at discovery (`approved` is `None`), is
+    `entity_missing`: the source knows no such entity. A missing name the
+    approved source resolved is `entity_no_series`: the name is right and
+    the retrieval holds no series for it, at the severity
+    `_left_out_severity` gives.
+    """
     labels = [entity.label for entity in evidence.entities]
     issues: list[EvidenceIssue] = []
     missing: list[Entity] = []
@@ -1093,21 +1154,26 @@ def _entity_findings(
             continue
         issues.extend(_role_issues(requirement, entity, resolved))
     present = [entity for entity in requirement.entities if entity not in missing]
-    gaps: list[tuple[Entity, EvidenceIssue]] = []
+    gaps: list[tuple[ResolvedEntity | None, EvidenceIssue]] = []
     for entity in missing:
-        severity = _left_out_severity(requirement, entity, present, approved)
+        resolved = None
+        if approved is not None and (resolved := resolve_name(entity, approved)) is not None:
+            code = EvidenceIssueCode.ENTITY_NO_SERIES
+            severity = _left_out_severity(requirement, resolved, present, approved)
+            detail = f"the retrieval holds no series for {entity.name!r}" + (
+                ", so it is left out" if severity is Severity.WARNING else ""
+            )
+        else:
+            code, severity = EvidenceIssueCode.ENTITY_MISSING, Severity.ERROR
+            detail = f"the source resolves no entity named {entity.name!r}"
         gaps.append(
             (
-                entity,
+                resolved,
                 EvidenceIssue(
-                    code=EvidenceIssueCode.ENTITY_MISSING,
+                    code=code,
                     severity=severity,
                     requirement_id=requirement.id,
-                    detail=(
-                        f"the source resolves no entity named {entity.name!r}"
-                        if severity is Severity.ERROR
-                        else f"the retrieval holds no series for {entity.name!r}, so it is left out"
-                    ),
+                    detail=detail,
                     found=labels,
                     required=entity.name,
                 ),
@@ -1118,25 +1184,20 @@ def _entity_findings(
 
 def _left_out_severity(
     requirement: DatasetRequirement,
-    entity: Entity,
+    resolved: ResolvedEntity,
     present: Sequence[Entity],
-    approved: SelectedSource | None,
+    approved: SelectedSource,
 ) -> Severity:
-    """How a run-time retrieval holding no series for `entity` bears on `requirement`.
+    """How a run-time retrieval holding no series for `resolved`, an entity
+    `requirement` names as the approved source resolved it, bears on `requirement`.
 
     A `WARNING`, so the run answers for the rest, when `requirement` reports
-    gaps rather than failing on them, the approved source resolved `entity`,
-    and another entity it names that is `present` sits on the same column of
-    the approved source (`_approved_column`). An `ERROR` otherwise: a name
-    the approved source never resolved is not a gap in the data, and a
-    column with no named entity left has nothing to answer for. `approved`
-    is `None` at compile time and at discovery, where a source lacking a
-    name is always an `ERROR`.
+    gaps rather than failing on them and another entity it names that is
+    `present` sits on `resolved`'s column of the approved source
+    (`_approved_column`). An `ERROR` otherwise: a column with no named
+    entity left has nothing to answer for.
     """
-    if approved is None or requirement.coverage.on_missing == "fail":
-        return Severity.ERROR
-    resolved = resolve_name(entity, approved)
-    if resolved is None:
+    if requirement.coverage.on_missing == "fail":
         return Severity.ERROR
     if any(_approved_column(other, approved) == resolved.role for other in present):
         return Severity.WARNING
@@ -1159,18 +1220,17 @@ def left_out_entities(
 ) -> dict[ResolvedEntity, EvidenceIssue]:
     """Each entity `requirement` names that a run-time check of `evidence`
     left out (`_left_out_severity`), as the approved source resolved it,
-    with its finding. Each finding is paired with the entity it was made
-    for, so two entities written alike each answer for their own."""
+    with its `entity_no_series` warning. Each finding is paired with the
+    entity it was made for, so two entities written alike each answer for
+    their own."""
     if not requirement.entities or not evidence.entities:
         return {}
     _, missing = _entity_findings(requirement, evidence, approved)
-    left_out: dict[ResolvedEntity, EvidenceIssue] = {}
-    for entity, issue in missing:
-        if issue.severity is Severity.ERROR:
-            continue
-        if (resolved := resolve_name(entity, approved)) is not None:
-            left_out[resolved] = issue
-    return left_out
+    return {
+        resolved: issue
+        for resolved, issue in missing
+        if resolved is not None and issue.severity is Severity.WARNING
+    }
 
 
 def _role_issues(

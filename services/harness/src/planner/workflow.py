@@ -75,7 +75,11 @@ class ResolvedGroup(StrictModel):
     `search` names the set it bound, keyed by the role column it fills
     (`resolved.entity_groups`). `label` is the set's name, and `ref` its own
     graph node, `None` when the graph holds none (a resolver group such as
-    "G7"). `total` is the party the dataset publishes as the set's own total
+    "G7"). `group_id` is the membership registry's id for a set the graph holds
+    no node for ("groups/OECD.DAC.Region.Asia"), `None` when `ref` is set or
+    the set is no registry group; a resubmit posts it so Search restores the
+    set and the total its dataset publishes for it (`compiler.sources.wire_groups`).
+    `total` is the party the dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
     when the role binds the set's members, one entity each. `whole_of` names
     the classes of party (`common.place_type.PartyClass`) the bound total holds
@@ -84,6 +88,17 @@ class ResolvedGroup(StrictModel):
     `side_classes` names the classes of party, totals aside, the source publishes
     on the side such a set is read on, so a reading can say what the population
     leaves out; empty for any other set and on a search answer without it.
+    `members` are the parties a bound total holds where Search lists them
+    (DAC countries' total lists the DAC members); empty where it lists none.
+    For a set read as its members, `left_out` labels the residuals the set's
+    published total counts that the members leave out ("Africa, unallocated
+    by country (DAC)"). It is empty where Search names none, as for a set whose
+    members leave nothing out of its total and for one with no published total.
+    `sum_differs` says the source publishes its own figure for the set, which
+    can differ from the members' sum, and is false where Search does not say
+    so. `holds_multilaterals` says, for a donor set read
+    as a published total or a whole population, whether that population holds a
+    multilateral organisation; `None` where Search states nothing.
     A requirement's `Entity` naming the label, case-folded, on the set's side
     of the flow is met by the source under either reading
     (`compiler.evidence.resolve_group`), except that one asking for the members
@@ -95,6 +110,9 @@ class ResolvedGroup(StrictModel):
     ref: str | None = None
     # Left out of every dump while unset, so a source saved without it keeps
     # its serialised form.
+    group_id: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda group_id: group_id is None
+    )
     total: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda total: total is None
     )
@@ -103,6 +121,18 @@ class ResolvedGroup(StrictModel):
     )
     side_classes: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
         default=(), exclude_if=lambda classes: not classes
+    )
+    members: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda members: not members
+    )
+    left_out: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda labels: not labels
+    )
+    sum_differs: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda differs: not differs
+    )
+    holds_multilaterals: Annotated[bool | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda holds: holds is None
     )
 
     @property
@@ -233,6 +263,16 @@ class SelectedSource(StrictModel):
     `measure_label` is `resolved.shape.label`, the name `search` gives what
     the definition measures; `None` when the envelope states none.
 
+    `concept_label` is `resolved.concept_label`, what the series count in a
+    reader's words with no basis, codes, provider scope or dataset ("health"
+    for CRS 120 and 130, "official development assistance" for DAC1), and
+    `published_tables` is `resolved.published_tables`, the tables the figures
+    are published in, a composite's joined ("OECD Creditor Reporting System
+    (CRS) and ONE Imputed Multilateral Sectors"). Each is `None` when the
+    envelope states none, as from a Search that predates them or on a source
+    recorded before them; the plan card then names the source by the labels
+    Search composed (`harness.plan_display.concept_name`).
+
     `elected_measure` is the measure partition `search` elected among those
     the definition's family holds, with the others it offers in its place
     (`ElectedMeasure`); `None` when the envelope states no
@@ -356,6 +396,14 @@ class SelectedSource(StrictModel):
     confidence: str | None = None
     has_data: bool | None
     measure_label: Annotated[str | None, HASHED_WHEN_SET] = None
+    # Left out of every dump while unset, so a source saved without them keeps
+    # its serialised form.
+    concept_label: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda label: label is None
+    )
+    published_tables: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda tables: tables is None
+    )
     # Left out of every dump while unset, so a source saved without it keeps
     # its serialised form.
     elected_measure: Annotated[ElectedMeasure | None, HASHED_WHEN_SET] = Field(

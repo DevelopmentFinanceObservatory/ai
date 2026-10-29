@@ -56,6 +56,7 @@ from planner.plan import (
     DecisionFixes,
     DecisionScope,
     Decline,
+    DifferenceCaveat,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -78,6 +79,7 @@ from planner.plan import (
     UnsupportedOperation,
     UnsupportedPlanError,
     WholeIsItsMemberError,
+    WholeOf,
     _build_shapes,
     authored_text,
     cut_user_text,
@@ -94,6 +96,7 @@ from planner.plan import (
     scope_choice_slot,
     settle_decisions,
     split_of,
+    whole_of_fault,
     windowed_pin,
 )
 from planner.proof import mismatches
@@ -5001,6 +5004,25 @@ def test_the_decision_cap_leaves_out_the_decisions_qualifying_the_answer(
         Plan.model_validate(record)
 
 
+def test_every_requirement_carries_a_caveat_for_each_axis_its_inputs_differ_on() -> None:
+    """A plan at `MAX_PLAN_DECISIONS` whose every requirement cites one decision
+    qualifying the answer per difference axis (`DifferenceCaveat`), as
+    `submission.service._difference_decisions` writes for a calculation whose inputs
+    differ on both, validates."""
+    record = plan_record()
+    for requirement in record["evidence_requirements"]:
+        for caveat in get_args(DifferenceCaveat):
+            slot = f"{caveat}_{requirement['id']}"
+            record["decisions"].append({**record["decisions"][0], "slot": slot, "caveat": caveat})
+            requirement["decision_ids"].append(slot)
+
+    plan = Plan.model_validate(record)
+
+    assert sum(decision.caveat is not None for decision in plan.decisions) == len(
+        get_args(DifferenceCaveat)
+    ) * len(plan.evidence_requirements)
+
+
 def test_the_size_limit_leaves_out_the_scope_decisions_code_writes() -> None:
     """A plan at the size limit whose first decision becomes a scope
     decision serialises past the limit and is recorded; the same decision
@@ -5477,6 +5499,16 @@ _ON_THE_NEWEST = RollingWindow(window_start=_OFFSET[0], window_end=_OFFSET[0])
             ],
             "excess",
             id="a-following-first-year-against-a-fixed-cap-on-the-other-side",
+        ),
+        # Two steps refused alike: the refusal names the first step the plan
+        # states, whatever the ids sort to.
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5), _lte(2024)),
+                _years("earlier", _DATASET, _gte(2019, -5), _lte(2024)),
+            ],
+            "recent",
+            id="the-first-of-two-refused-steps-the-plan-states",
         ),
     ],
 )
@@ -7127,3 +7159,35 @@ def test_an_ask_across_years_names_a_listed_ask_once(
 ) -> None:
     with pytest.raises(ValidationError, match="across years"):
         _creditor_plan(decision, ("creditor",), across_years=numbers)
+
+
+@pytest.mark.parametrize(
+    ("part_entities", "asks_for_roles"),
+    [
+        pytest.param([Entity(name="United States", role=None)], True, id="part-entity-has-no-role"),
+        pytest.param(
+            [Entity(name="Kenya", role="recipient")], False, id="part-names-only-the-other-side"
+        ),
+    ],
+)
+def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
+    part_entities: list[Entity], asks_for_roles: bool
+) -> None:
+    period = Period(start=2023, end=2023)
+    part = DatasetRequirement(
+        id="part", decision_ids=["measure"], measure="aid", entities=part_entities, period=period
+    )
+    whole = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure="total aid",
+        entities=part_entities,
+        across=("donor",),
+        period=period,
+        whole_of=WholeOf(part="part", axis="donor"),
+    )
+
+    reason = whole_of_fault(whole, {"part": part, "whole": whole})
+
+    assert reason is not None
+    assert ("state each entity's role" in reason) is asks_for_roles

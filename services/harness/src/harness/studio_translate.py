@@ -1192,7 +1192,7 @@ def _caveats(plan: PlannerPlan) -> list[str]:
     (`plan_display.card_decision_text`), each sentence once."""
     return list(
         dict.fromkeys(
-            plan_display.card_decision_text(decision.rationale, plan)
+            plan_display.card_decision_text(decision.rationale, plan, decision=decision)
             for decision in plan.decisions
             if decision.caveat is not None
         )
@@ -1801,6 +1801,7 @@ class _Translator:
             questions = plan_display.card_questions(plan)
             by_slot = {decision.slot: decision for decision in plan.decisions}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
+            option_named = functools.partial(plan_display.card_choice_text, plan=plan)
             revision = payload.get("revision")
             steps = [
                 PlanStep(
@@ -1863,23 +1864,32 @@ class _Translator:
                 PlanDecision(
                     id=decision.get("slot", f"d{index + 1}"),
                     question=questions[decision.get("slot", "")],
-                    chosen=named(decision.get("chosen", "")),
+                    chosen=option_named(decision.get("chosen", ""), decision=held, options=offered),
                     alternatives=(
-                        [named(option) for option in decision["options"]]
+                        [
+                            option_named(option, decision=held, options=offered)
+                            for option in decision["options"]
+                        ]
                         if decision.get("options") is not None
                         else None
                     ),
                     # A reason saying only that Search's default holds says nothing.
                     reason=""
-                    if _search_default(by_slot.get(decision.get("slot", "")))
-                    else named(decision.get("rationale", "")),
+                    if _search_default(held)
+                    else named(decision.get("rationale", ""), decision=held),
                     resolved_by=_RESOLVED_BY_TO_WIRE.get(
                         decision.get("resolved_by", ""), "default"
                     ),
-                    **_choice_members(by_slot.get(decision.get("slot", "")), plan, named),
+                    **_choice_members(
+                        held,
+                        plan,
+                        functools.partial(option_named, decision=held, options=offered),
+                    ),
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in questions
+                for held in [by_slot.get(decision["slot"])]
+                for offered in [decision.get("options") or ()]
             ]
             choices = _switchable(decisions)
             card = PlanProposed(
