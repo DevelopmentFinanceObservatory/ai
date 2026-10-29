@@ -280,6 +280,22 @@ def _row_budget_refusal(exc: RowBudgetExhausted) -> Refusal:
     )
 
 
+def _frame_ref_incomplete(spec_id: str) -> Refusal:
+    """The refusal for a `frame_ref` that names `spec_id` without its
+    `content_version`. The server does not fetch a frame by its spec_id."""
+    return Refusal(
+        error="frame_ref_incomplete",
+        retry=RetryMode.CORRECT_AND_RETRY,
+        detail=(
+            f"frame_ref names {spec_id} without its content_version, and this server "
+            "cannot fetch a frame by its spec_id alone. Call get_data with this spec_id "
+            "and pass the frame_ref it returns."
+        ),
+        fix="Pass frame_ref as the spec_id and content_version pair get_data returned.",
+        pointer="/frame_ref/content_version",
+    )
+
+
 def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Refusal:
     """Return valid frame path segments, or a local refusal before routing.
 
@@ -296,6 +312,8 @@ def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Ref
             detail="frame_ref.spec_id must be a valid id a previous frame reference returned.",
             pointer="/frame_ref/spec_id",
         )
+    if content_version is None:
+        return _frame_ref_incomplete(spec_id)
     if not isinstance(content_version, str) or not _CONTENT_VERSION_PATTERN.fullmatch(
         content_version
     ):
@@ -476,8 +494,18 @@ class PlatformAssembler:
         (`_card_write_headers`).
         """
         write_token = _new_write_token()
+        # A create's intent is complete, so a frame_ref naming a spec_id
+        # without its content_version cannot be drawn. A revise's patch
+        # merges into the stored frame_ref, so it goes to the platform as is.
+        frame_ref = intent.get("frame_ref")
+        if (
+            isinstance(frame_ref, Mapping)
+            and isinstance(spec_id := frame_ref.get("spec_id"), str)
+            and frame_ref.get("content_version") is None
+        ):
+            return _frame_ref_incomplete(spec_id)
         # Publish before create: `create_component` never validates
-        # `intent["frame_ref"]` locally at all (see `_presentable`'s own
+        # `intent["frame_ref"]` locally beyond that (see `_presentable`'s own
         # docstring), so this is the only chance to publish an analysis-mcp
         # result before the platform's own `ops_unsupported` refusal would
         # otherwise answer for it.

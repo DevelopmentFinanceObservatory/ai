@@ -343,9 +343,15 @@ async def test_create_component_posts_intent_and_write_token_no_composition_id()
     assert _CREATE_TOKEN_PATTERN.fullmatch(body["write_token"])
 
 
-async def test_revise_component_patches_the_component_id() -> None:
+@pytest.mark.parametrize(
+    "patch",
+    [{"title": "New"}, {"frame_ref": {"spec_id": "spec_2"}}],
+    ids=["title", "bare-spec-id"],
+)
+async def test_revise_component_patches_the_component_id(patch: dict[str, Any]) -> None:
+    """A patch goes to the platform unchanged, a frame_ref naming only a
+    spec_id among them: the platform merges it into the stored frame_ref."""
     requests, handler = _counting_handler(httpx2.Response(200, json=WRITE_BODY | {"revision": 2}))
-    patch = {"title": "New"}
 
     async with _assembler(handler) as assembler:
         reply = await assembler.revise_component(
@@ -2339,15 +2345,26 @@ async def test_pointer_passes_through_unrepaired() -> None:
 # --- local refusal: malformed route segments ---------------------------------
 
 
-async def test_frame_ref_missing_content_version_refuses_locally_without_a_call() -> None:
+async def test_a_bare_spec_id_refuses_frame_ref_incomplete_without_a_call() -> None:
+    """A frame_ref with no content_version, to describe_frame or in a
+    create's intent, refuses before any request: the server does not fetch a
+    frame by its spec_id."""
     calls, handler = _counting_handler(httpx2.Response(200, json={}))
+    intent = {"type": "line_chart", "frame_ref": {"spec_id": "spec_1"}, "select": {}}
 
     async with _assembler(handler) as assembler:
-        reply = await assembler.get_frame_view(frame_ref={"spec_id": "spec_1"})
+        replies = [
+            await assembler.get_frame_view(frame_ref={"spec_id": "spec_1"}),
+            await assembler.create_component(intent=intent, caller=Caller.EXTERNAL),
+        ]
 
-    assert isinstance(reply, Refusal)
-    assert reply.error == "request_invalid"
-    assert reply.retry == RetryMode.DO_NOT_RETRY
+    for reply in replies:
+        assert isinstance(reply, Refusal)
+        assert reply.error == "frame_ref_incomplete"
+        assert reply.retry == RetryMode.CORRECT_AND_RETRY
+        assert reply.pointer == "/frame_ref/content_version"
+        assert reply.fix is not None
+        assert "get_data" in reply.fix
     assert calls == []
 
 

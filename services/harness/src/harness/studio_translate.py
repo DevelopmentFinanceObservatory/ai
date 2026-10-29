@@ -560,9 +560,9 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
         "outcome": "refusal",
         "refusal": {
             "code": refusal_code(body) or HarnessCode.UNSPECIFIED.value,
-            "retry_mode": str(body.get("retry_mode") or body.get("retry") or "do_not_retry"),
+            "retry_mode": str(body.get("retry_mode") or "do_not_retry"),
             "fix": body.get("fix") if isinstance(body.get("fix"), dict) else None,
-            "message": str(body.get("message") or body.get("detail") or result.text),
+            "message": str(body.get("message") or result.text),
         },
     }
 
