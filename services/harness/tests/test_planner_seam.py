@@ -105,6 +105,7 @@ from planner.plan import (
     AskBreakdown,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
     FullHistory,
     GrowthRequirement,
@@ -2123,8 +2124,10 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
 _PICKED = DecisionPick(
     slot="donor_scope",
     chosen="the top 10 donors",
+    origin_fixes=DecisionFixes(entities=(Entity(name="DAC countries", role="donor"),)),
     replaced_readings=("0" * 64,),
-    cited=("donor_scope",),
+    cited_by_every=("donor_scope",),
+    cited_by_any=(),
     kept_requirements={},
     kept_decisions={},
 )
@@ -2162,7 +2165,9 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
         "requirement, with its id, its content and its citations, and every other decision "
         "exactly as the plan card has them. Keep the id of any replaced requirement that "
         "another requirement reads. Cite that decision, and every decision of the user's "
-        "that the replaced requirements cited, from each requirement you add.\n" in asked
+        "that all the replaced requirements cited, from each requirement you add, and cite "
+        "any other decision of the user's a replaced requirement cited from at least one of "
+        "them.\n" in asked
     )
     assert "The user asks for this change" not in asked
     assert refused is not None and amended is not None

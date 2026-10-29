@@ -142,6 +142,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     SumOfRequirement,
+    UnreadablePickError,
     UnsupportedOperation,
     UnsupportedPlanError,
     WholeIsItsMemberError,
@@ -183,9 +184,11 @@ from planner.plan import (
     pin_sources,
     predicate_key,
     reached,
+    read_fixes,
     repinned,
     requirement_digest,
     requirement_readings,
+    requirement_roots,
     requirements_over,
     roles_not_kept,
     scope_choice_slot,
@@ -514,7 +517,15 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     # pick on the plan card is no word of the user's: its entry holds the
     # rest of the card as the planner wrote it, whatever the session records
     # (`_outside_pick`), before admission derives anything of its own.
-    pick = view.decision_pick()
+    try:
+        pick = view.decision_pick()
+    except UnreadablePickError:
+        return problem(
+            ProblemCode.USER_PICK_NOT_HELD,
+            "The option the user picked on the plan card cannot be read, so no plan can be "
+            "recorded for it in this entry; the user has to pick it again.",
+            outcome=Outcome.REFUSED,
+        )
     user_spoke = pick is None and (previous is None or view.user_spoke_since(previous.version))
     blocked = (
         _across_years_unread(
@@ -630,10 +641,15 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             requirements_after,
             removed=removed_decisions,
             user_spoke=user_spoke,
+            picked=pick is not None,
         ),
     ]
     decisions_after = _decisions_after(previous, settled, removed=removed_decisions)
-    held = _picked_decision(pick, decisions_after, proposer) if pick is not None else None
+    held = (
+        _picked_decision(pick, decisions_after, requirements_after, proposer)
+        if pick is not None
+        else None
+    )
     if isinstance(held, dict):
         return held
     blocked = (
@@ -6526,6 +6542,7 @@ def _uncited_carried_decisions(
     *,
     removed: Collection[str],
     user_spoke: bool,
+    picked: bool = False,
 ) -> list[str]:
     """The slot of each decision `previous` records that no requirement of the patched plan cites.
 
@@ -6537,8 +6554,11 @@ def _uncited_carried_decisions(
     a decision the call states is the model's to cite. A user's decision is
     swept only once the user has spoken since `previous` (`user_spoke`),
     since the patch then acts on their new words; before that
-    `_user_decision_refused`, or `_picked_decision` for a pick on the plan
-    card, refuses the patch instead.
+    `_user_decision_refused`, or `_outside_pick` for a pick on the plan
+    card, refuses the patch instead. A replan for a pick (`picked`) also
+    sweeps a user's decision code wrote (`is_code_written`), such as the
+    scope Search read off their words for a pin the replan no longer reads:
+    it went with the requirements the pick replaced.
 
     Args:
         previous: The plan this call amends, or `None`.
@@ -6546,6 +6566,7 @@ def _uncited_carried_decisions(
         requirements: Every requirement the patched plan states.
         removed: The slots this call removes.
         user_spoke: Whether the user has spoken since `previous` was recorded.
+        picked: Whether this call replans for a pick on the plan card.
     """
     if previous is None:
         return []
@@ -6556,7 +6577,11 @@ def _uncited_carried_decisions(
         for decision in previous.decisions
         if decision.slot not in restated
         and decision.slot not in cited
-        and (user_spoke or decision.resolved_by is ResolvedBy.PLANNER_DEFAULT)
+        and (
+            user_spoke
+            or decision.resolved_by is ResolvedBy.PLANNER_DEFAULT
+            or (picked and is_code_written(decision))
+        )
     ]
 
 
@@ -6931,10 +6956,14 @@ def _outside_pick(
     - every decision `pick.kept_decisions` names is stated unchanged, cited,
       and contradicted by no requirement citing it;
     - at least one requirement replaces the card's that cited the picked
-      decision (C), and they do not read everything C read
-      (`requirement_readings`): a member of C may survive unchanged, as the
-      donors a ranking reads do when only its limit moves, but not all of C;
-    - every replacing requirement cites each decision of `pick.cited`.
+      decision (C), and the figures they end in (`requirement_roots`) do
+      not read everything C's did (`requirement_readings`): a member of C
+      may survive unchanged, as the donors a ranking reads do when only its
+      limit moves, or as the numerator of a share that replaces it, but C
+      may not end where it ended;
+    - every replacing requirement cites each decision of
+      `pick.cited_by_every`, and some replacing requirement each of
+      `pick.cited_by_any`.
 
     The refusal is `_pick_not_held`, naming the requirement or decision the
     replan broke.
@@ -6966,25 +6995,42 @@ def _outside_pick(
     if not replacing:
         return refused("replaces the requirements that cited it with none", None)
     readings = requirement_readings(requirements)
-    surviving = [r.id for r in replacing if readings[r.id] in pick.replaced_readings]
+    surviving = [
+        r.id for r in requirement_roots(replacing) if readings[r.id] in pick.replaced_readings
+    ]
     if {readings[requirement_id] for requirement_id in surviving} >= set(pick.replaced_readings):
-        states = f"keeps in {', '.join(map(repr, surviving))} what the requirements citing it read"
+        states = f"ends in {', '.join(map(repr, surviving))}, as the requirements citing it did"
         return refused(f"{states} on the card", surviving[0])
-    for requirement in replacing:
-        if uncited := next((s for s in pick.cited if s not in requirement.decision_ids), None):
-            states = f"leaves decision {uncited!r} uncited on {requirement.id!r}"
-            return refused(states, requirement.id)
-    return None
+    cited = {slot for requirement in replacing for slot in requirement.decision_ids}
+    uncited = next(
+        (
+            (slot, requirement.id)
+            for requirement in replacing
+            for slot in pick.cited_by_every
+            if slot not in requirement.decision_ids
+        ),
+        None,
+    ) or next(((slot, None) for slot in pick.cited_by_any if slot not in cited), None)
+    if uncited is None:
+        return None
+    slot, requirement_id = uncited
+    where = f"on {requirement_id!r}" if requirement_id else "on every requirement it adds"
+    return refused(f"leaves decision {slot!r} uncited {where}", requirement_id or slot)
 
 
 def _picked_decision(
-    pick: DecisionPick, decisions: Sequence[Decision], proposer: Proposer
+    pick: DecisionPick,
+    decisions: Sequence[Decision],
+    requirements: Sequence[EvidenceRequirement],
+    proposer: Proposer,
 ) -> Decision | dict[str, object]:
     """The decision of `decisions` holding the user's `pick` on the plan card, as theirs, or the refusal.
 
     The plan holds it when it states a decision under the pick's slot whose
     `chosen` is the picked label and whose `fixes`, read off the
-    requirements citing it (`settle_decisions`), are set. That decision is
+    requirements citing it (`settle_decisions`), are set, and whose citing
+    `requirements` no longer read what the card's decision fixed
+    (`_fixes_kept`). That decision is
     recorded `resolved_by=user`. Any other plan is refused (`_pick_not_held`).
     What the rest of the plan may change is `_outside_pick`'s.
     """
@@ -6995,9 +7041,26 @@ def _picked_decision(
         states = f"states {stated.chosen!r} for it"
     elif stated.fixes is None:
         states = "states it, but the requirements citing it fix none of what it names"
+    elif _fixes_kept(pick, requirements):
+        states = "states it, but the requirements citing it fix what the card's option fixed"
     else:
         return stated.model_copy(update={"resolved_by": ResolvedBy.USER})
     return _pick_not_held(pick, states, None, proposer, stated=stated)
+
+
+def _fixes_kept(pick: DecisionPick, requirements: Sequence[EvidenceRequirement]) -> bool:
+    """Whether the requirements citing the pick's slot still settle some field
+    the card's decision fixed (`pick.origin_fixes`), each to the card's value
+    (`read_fixes`): the picked option then changes nothing the card's showed,
+    whatever fields the decision lists."""
+    origin = pick.origin_fixes
+    read = read_fixes(
+        requirements, slot=pick.slot, fields=[name for name, value in origin if value is not None]
+    )
+    if read is None:
+        return False
+    settled = {name for name, value in read if value is not None}
+    return not any(change.field in settled for change in fixes_changes(origin, read))
 
 
 def _pick_not_held(
@@ -7017,14 +7080,19 @@ def _pick_not_held(
     when it is the picked decision or the replacement as a whole.
     """
     slot, chosen = pick.slot, pick.chosen
-    cites = ", ".join(repr(cited) for cited in pick.cited)
+    every = ", ".join(repr(cited) for cited in pick.cited_by_every)
+    some = (
+        f", and between them {', '.join(repr(cited) for cited in pick.cited_by_any)}"
+        if pick.cited_by_any
+        else ""
+    )
     return problem(
         ProblemCode.USER_PICK_NOT_HELD,
         f"The user picked {chosen!r} for decision {slot!r} on the plan card, and this plan "
         f"{states}. A replan for that pick may change two things only: decision {slot!r}, "
         f"restated with `chosen` {chosen!r}, and the evidence requirements that cited it on "
-        "the card, replaced by requirements that state what that option asks for, read "
-        f"something other than those did, and each cite {cites}. Keep every other "
+        "the card, replaced by requirements that state what that option asks for, end in "
+        f"something other than those did, and each cite {every}{some}. Keep every other "
         "requirement and decision exactly as the card had them, ids and citations included.",
         outcome=Outcome.REFUSED,
         action=proposer.action(needs=("decisions", "evidence_requirements")),

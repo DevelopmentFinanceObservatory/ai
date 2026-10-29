@@ -24,6 +24,7 @@ from planner.plan import (
     ASKS_STATE_KEY,
     PlanStatus,
     SessionState,
+    UnreadablePickError,
     pick_of,
     plan_revision,
     save_decision_pick,
@@ -208,7 +209,26 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         if unreadable:
             refusal = amendment = None
             is_first_draft = True
-        pick = _pick(payload) if existing is not None else None
+        try:
+            pick = _pick(payload) if existing is not None else None
+        except SwitchFailedError as exc:
+            # No replan runs for a pick this release cannot read: the state
+            # goes back as it stood before the pick, and the card offers
+            # the plan unchanged.
+            assert existing is not None
+            held = ctx.state.get(PICK_REPLAN_KEY)
+            _end_pick_entry(ctx, before=held if isinstance(held, dict) else None)
+            switch = payload.get("switch") or {}
+            yield Event(
+                output=switch_module.switch_failed_offer(
+                    existing,
+                    choice_id=str(switch.get("choice_id")),
+                    option_id=str(switch.get("option_id")),
+                    error=exc,
+                ),
+                route="pending_refusal",
+            )
+            return
         yield Event(
             custom_metadata={
                 PLANNER_STARTED_KEY: {
@@ -335,8 +355,21 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
 
 def _pick(payload: dict[str, Any]) -> DecisionPick | None:
     """The planner decision's option the user picked on the plan card, which
-    `approve`'s `"amend"` route carries under `pick`, or `None`."""
-    return pick_of(payload.get("pick"))
+    `approve`'s `"amend"` route carries under `pick`, or `None`.
+
+    Raises:
+        SwitchFailedError: If the payload carries a pick this release cannot
+            read, as one an earlier release wrote before a deploy. The user
+            picks it again.
+    """
+    try:
+        return pick_of(payload.get("pick"))
+    except UnreadablePickError as exc:
+        raise SwitchFailedError(
+            "That choice could not be applied. Make it again.",
+            code=switch_module.SCOPE_CHOICE_NOT_APPLIED,
+            retryable=True,
+        ) from exc
 
 
 def _pick_snapshot(ctx: Context) -> dict[str, Any]:

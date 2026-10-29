@@ -95,6 +95,7 @@ from translator.discovery import (
     resolving_once,
 )
 
+from harness.decision_pick import picks_the_chosen_option
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
@@ -340,6 +341,10 @@ async def _switched_plan(
     Raises:
         SwitchFailedError: If the switch cannot be applied, with the note to show.
     """
+    if picks_the_chosen_option(plan, choice_id=choice_id, option_id=option_id):
+        raise SwitchFailedError(
+            "That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
     clicked = chosen_scope_decision(plan, choice_id)
     if clicked is None or clicked.scope is None:
         raise SwitchFailedError(

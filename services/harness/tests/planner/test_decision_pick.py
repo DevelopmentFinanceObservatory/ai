@@ -32,6 +32,7 @@ from harness.studio_state import _turn_identities
 from planner.agent import build_planner_tools
 from planner.plan import (
     ASKS_STATE_KEY,
+    DECISION_PICK_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
     DatasetRequirement,
@@ -40,7 +41,9 @@ from planner.plan import (
     Entity,
     Period,
     RankRequirement,
+    RequirementSide,
     ResolvedBy,
+    ShareOfRequirement,
     Unit,
     current_recorded_identity,
     load_plan,
@@ -51,6 +54,7 @@ from planner.records import GroupBy, RankAmong, RankDirection, Reduction
 from planner.tool_results import Outcome, ProblemCode
 from translator.mechanical import build_translation
 
+from ..basis_alignment import HEALTH, TOTAL, provider_block
 from ..decision_drafts import drafts
 from ..session_events import response_event
 from .test_agent import (
@@ -1077,7 +1081,7 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
             to_origin={copy.spec_id: copy.windowed_from},
         )
         assert pick is not None
-        assert pick.cited == ("shape", "year")
+        assert pick.cited_by_every == ("shape", "year")
         save_decision_pick(ctx.state, pick)
 
         result = propose(
@@ -1118,3 +1122,314 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
         discovered={"aid": source},
     )
     assert compiled.workflow is not None, compiled.issues
+
+
+@pytest.mark.parametrize(
+    "pin", [pytest.param(TOTAL, id="onto-another-pin"), pytest.param(HEALTH, id="same-pin")]
+)
+def test_a_pick_asks_no_citation_of_a_scope_choice_admission_writes(pin: str) -> None:
+    """US health aid is read as bilateral aid only, a scope the user's words
+    set, so admission cites the user's scope choices from it. Picking the
+    later years moves it to 2020-2024 on its own pin or on the US total's,
+    citing only what the planner writes: admission carries or drops the
+    scope choices with the pin, so the replan is admitted."""
+    measure = Decision(
+        slot="measure",
+        description="What to measure.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    years = Decision(
+        slot="part",
+        description="Which years.",
+        options=["2015-2024", "2020-2024"],
+        chosen="2015-2024",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(period=Period(start=2015, end=2024)),
+    )
+
+    def us_aid(requirement_id: str, spec_id: str, start: int) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=("measure", "part"),
+            measure="US aid to health" if spec_id == HEALTH else "US total net ODA",
+            entities=(Entity(name="United States", role="donor"),),
+            period=Period(start=start, end=2024),
+            source_spec_id=spec_id,
+        )
+
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit"),
+        provider_block(TOTAL, narrow=False, active="provider:inclusive"),
+    )
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([measure, years]),
+        evidence_requirements=[us_aid("health", HEALTH, 2015)],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    shown = load_plan(ctx.state)
+    assert shown is not None
+    assert any(d.scope is not None and d.resolved_by is ResolvedBy.USER for d in shown.decisions)
+    pick = decision_pick(
+        shown, choice_id="decision/part", option_id=decision_option_id("2020-2024"), to_origin={}
+    )
+    assert pick is not None
+    assert pick.cited_by_every == ("part",)
+    save_decision_pick(ctx.state, pick)
+
+    result = propose(
+        amends_version=card["version"],
+        decisions=drafts(
+            [
+                years.model_copy(
+                    update={
+                        "chosen": "2020-2024",
+                        "fixes": DecisionFixes(period=Period(start=2020, end=2024)),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[us_aid("recent", pin, 2020)],
+        removed_evidence_requirements=["health"],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+@pytest.mark.parametrize(
+    "top",
+    [
+        pytest.param({"reduction": Reduction.MEAN}, id="ten-by-the-mean"),
+        pytest.param({"direction": RankDirection.LOWEST_FIRST}, id="ten-lowest-first"),
+    ],
+)
+def test_a_pick_whose_decision_settles_to_the_cards_value_is_refused(
+    decision: Callable[..., Decision], top: dict[str, Any]
+) -> None:
+    """The user picks the top 5 donors, and the replan ranks 10 another way.
+    The picked decision settles to the limit the card's option fixed, so the
+    plan would rank 10 donors under the label of 5: refused."""
+    ctx = _context()
+    first = _propose_plan(
+        ctx,
+        question="who gives Kenya the most aid",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), RANKING, USER_YEAR]),
+        evidence_requirements=_year_kept(YEAR),
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    card = load_plan(ctx.state)
+    assert card is not None
+    pick = decision_pick(
+        card,
+        choice_id="decision/donor_scope",
+        option_id=decision_option_id("the top 5 donors"),
+        to_origin={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    aid, ranked = _year_kept(YEAR)
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts(
+            [
+                RANKING.model_copy(
+                    update={
+                        "chosen": "the top 5 donors",
+                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[aid, ranked.model_copy(update=top)],
+        amends_version=first["version"],
+    )
+
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value, result
+    assert "fix what the card's option fixed" in result["message"]
+
+
+def _two_years() -> tuple[Decision, Decision, list[DatasetRequirement]]:
+    """A planner prices decision over the DAC total for the user's 2023 and
+    for their base year 2015, each total citing its own year."""
+    prices = Decision(
+        slot="prices",
+        description="Which prices the figures are in.",
+        options=["current prices", "constant prices"],
+        chosen="current prices",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="Current prices are the default.",
+        fixes=DecisionFixes(unit=USD),
+    )
+    base = USER_YEAR.model_copy(
+        update={
+            "slot": "base",
+            "options": ["2015", "2010"],
+            "chosen": "2015",
+            "fixes": DecisionFixes(period=Period(start=2015, end=2015)),
+        }
+    )
+    latest = _dac_total().model_copy(update={"decision_ids": ("measure", "year", "prices")})
+    earliest = latest.model_copy(
+        update={
+            "id": "dac15",
+            "period": Period(start=2015, end=2015),
+            "decision_ids": ("measure", "base", "prices"),
+        }
+    )
+    return prices, base, [latest, earliest]
+
+
+@pytest.mark.parametrize(
+    ("cites_base", "outcome"),
+    [
+        pytest.param(True, Outcome.OK, id="each-its-own-year"),
+        pytest.param(False, Outcome.REFUSED, id="base-year-dropped"),
+    ],
+)
+def test_a_pick_over_figures_citing_different_user_years_keeps_each_year_cited(
+    decision: Callable[..., Decision], cites_base: bool, outcome: Outcome
+) -> None:
+    """The user fixed 2023 and a 2015 base, each cited by one total. Picking
+    constant prices restates both totals: each citing its own year is
+    admitted, and one dropping the base year from every total is refused,
+    naming the base year."""
+    prices, base, totals = _two_years()
+    ctx = _context()
+    first = _propose_plan(
+        ctx,
+        question="how has aid to Kenya grown since 2015",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), prices, USER_YEAR, base]),
+        evidence_requirements=totals,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    card = load_plan(ctx.state)
+    assert card is not None
+    pick = decision_pick(
+        card,
+        choice_id="decision/prices",
+        option_id=decision_option_id("constant prices"),
+        to_origin={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    constant = Unit(currency="USD", prices="constant", base_year=2022)
+    latest, earliest = (t.model_copy(update={"unit": constant}) for t in totals)
+    if not cites_base:
+        earliest = earliest.model_copy(update={"decision_ids": ("measure", "prices")})
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([prices.model_copy(update={"chosen": "constant prices"})]),
+        evidence_requirements=[latest, earliest],
+        amends_version=first["version"],
+    )
+
+    assert result["outcome"] == outcome.value, result
+    if outcome is Outcome.REFUSED:
+        assert result["detail"]["kept"] == "base"
+
+
+def test_a_pick_may_keep_what_it_replaces_as_the_input_of_a_new_figure(
+    decision: Callable[..., Decision],
+) -> None:
+    """ "The DAC total" becomes "as a share of all aid to Kenya": the DAC
+    total stays, unchanged, as the share's numerator, and the picked option
+    fixes the measure both totals read. The plan no longer ends in the DAC
+    total, so the replan is admitted."""
+    shown_as = DONOR_SCOPE.model_copy(
+        update={"options": ["the DAC total", "as a share of all aid to Kenya"]}
+    )
+    ctx = _context()
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), shown_as, USER_YEAR]),
+        evidence_requirements=[_dac_total()],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    card = load_plan(ctx.state)
+    assert card is not None
+    pick = decision_pick(
+        card,
+        choice_id="decision/donor_scope",
+        option_id=decision_option_id("as a share of all aid to Kenya"),
+        to_origin={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    every_donor = _dac_total().model_copy(
+        update={
+            "id": "all",
+            "entities": (Entity(name="Kenya", role="recipient"),),
+            "source_spec_id": EVERY_DONOR,
+        }
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=("measure", "donor_scope", "year"),
+        numerator=RequirementSide(input_id="dac"),
+        denominator=RequirementSide(input_id="all"),
+    )
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts(
+            [
+                shown_as.model_copy(
+                    update={
+                        "chosen": "as a share of all aid to Kenya",
+                        "fixes": DecisionFixes(measure="net ODA"),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[every_donor, share],
+        amends_version=first["version"],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+def test_a_pick_this_release_cannot_read_is_refused_and_nothing_is_recorded(
+    decision: Callable[..., Decision],
+) -> None:
+    """The entry holds a pick an earlier release wrote, which states no fixes.
+    Read as no pick it would let the replan change anything, so the replan
+    is refused and the plan stays as the card showed it."""
+    ctx = _context()
+    first = _recorded_dac_total(ctx, decision)
+    ctx.state[DECISION_PICK_STATE_KEY] = {
+        "slot": "donor_scope",
+        "chosen": "the top 10 donors",
+        "origin_reading": "0" * 64,
+        "cited": ["donor_scope"],
+        "kept_requirements": {},
+        "kept_decisions": {},
+    }
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=_year_kept(YEAR),
+        removed_evidence_requirements=["dac"],
+        amends_version=first["version"],
+    )
+
+    assert result["outcome"] == Outcome.REFUSED.value, result
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.version == first["version"]

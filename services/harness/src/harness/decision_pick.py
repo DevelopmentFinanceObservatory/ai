@@ -49,3 +49,11 @@ def decision_pick(
     if option is None or option == decision.chosen:
         return None
     return DecisionPick.on_card(unwindowed(authored(plan), to_origin), slot=slot, chosen=option)
+
+
+def picks_the_chosen_option(plan: Plan, *, choice_id: str, option_id: str) -> bool:
+    """Whether `choice_id` names a planner decision of `plan` and `option_id` the option it has chosen."""
+    if not is_decision_choice(choice_id):
+        return False
+    slot = choice_id.removeprefix(DECISION_CHOICE_PREFIX)
+    return any(d.slot == slot and decision_option_id(d.chosen) == option_id for d in plan.decisions)

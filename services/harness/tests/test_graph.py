@@ -119,6 +119,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
+    DECISION_PICK_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     Coverage,
@@ -1859,7 +1860,7 @@ async def test_a_switch_to_the_option_a_planner_decision_has_offers_the_plan_unc
 ) -> None:
     """A switch of a planner decision's row to the option it already has
     does not apply: the planner is not called again, and the card offers the
-    plan on record with `switch_failed`, as for an option it does not offer."""
+    plan on record with `switch_failed`, saying the choice is already on it."""
     plan = _pickable_plan(schemas=real_schemas)
     seam = _ReplanSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
@@ -1872,7 +1873,52 @@ async def test_a_switch_to_the_option_a_planner_decision_has_offers_the_plan_unc
     offered = _output_of(events, "switch")
     assert offered["revision"] == plan_revision(plan)
     assert offered["switch_failed"]["choice_id"] == "decision/window"
+    assert offered["switch_failed"]["reason"] == "That choice is already on the plan."
     assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
+
+
+# A pick dump an earlier release wrote: it reads what the card's requirements
+# read as one digest and names the decisions to cite, and states no fixes.
+_OLD_SHAPE_PICK = {
+    "slot": "window",
+    "chosen": "2018-2024",
+    "origin_reading": "0" * 64,
+    "cited": ["window"],
+    "kept_requirements": {},
+    "kept_decisions": {},
+}
+
+
+async def test_a_pick_this_release_cannot_read_offers_the_plan_unchanged(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The approve payload carries a pick in an earlier release's shape, as
+    one written before a deploy. No replan runs: the card offers the plan on
+    record with `switch_failed`, asking the user to make the choice again,
+    and no pick is left in state."""
+    plan = _pickable_plan(schemas=real_schemas)
+    seam = _ReplanSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    monkeypatch.setattr(
+        "harness.graph.planning.decision_pick",
+        lambda *_, **__: SimpleNamespace(model_dump=lambda **_: _OLD_SHAPE_PICK),
+    )
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    assert len(seam.calls) == 1
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"] == {
+        **_PICK_SWITCH,
+        "code": SCOPE_CHOICE_NOT_APPLIED,
+        "reason": "That choice could not be applied. Make it again.",
+        "retryable": True,
+    }
+    state = _session_state(runner)
+    assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert state.get(DECISION_PICK_STATE_KEY) is None
 
 
 @pytest.mark.parametrize(

@@ -1457,8 +1457,9 @@ class PlannerSeam:
                 "requirement, with its id, its content and its citations, and every other "
                 "decision exactly as the plan card has them. Keep the id of any replaced "
                 "requirement that another requirement reads. Cite that decision, and every "
-                "decision of the user's that the replaced requirements cited, from each "
-                "requirement you add.\n"
+                "decision of the user's that all the replaced requirements cited, from each "
+                "requirement you add, and cite any other decision of the user's a replaced "
+                "requirement cited from at least one of them.\n"
             )
         if not fresh:
             return ask

@@ -4136,23 +4136,27 @@ def settle_decisions(
         requirements: Every requirement the plan states once the call lands,
             carried forward or new.
     """
-    decisions: list[Decision] = []
-    for draft in drafts:
-        citing = [
-            requirement for requirement in requirements if draft.slot in requirement.decision_ids
-        ]
-        fixed: dict[str, Any] = {}
-        for field in dict.fromkeys(draft.fixes or ()):
-            stated = [_stated(r, field) for r in citing if field in type(r).model_fields]
-            if stated and stated[0] is not None and all(_same(stated[0], v) for v in stated):
-                fixed[field] = stated[0]
-        decisions.append(
-            Decision(
-                **draft.model_dump(exclude={"fixes"}),
-                fixes=DecisionFixes(**fixed) if fixed else None,
-            )
+    return [
+        Decision(
+            **draft.model_dump(exclude={"fixes"}),
+            fixes=read_fixes(requirements, slot=draft.slot, fields=draft.fixes or ()),
         )
-    return decisions
+        for draft in drafts
+    ]
+
+
+def read_fixes(
+    requirements: Sequence[EvidenceRequirement], *, slot: str, fields: Iterable[str]
+) -> DecisionFixes | None:
+    """The value of each of `fields` that the requirements citing `slot` and
+    declaring it all state, or `None` when no field settles (`settle_decisions`)."""
+    citing = [requirement for requirement in requirements if slot in requirement.decision_ids]
+    fixed: dict[str, Any] = {}
+    for field in dict.fromkeys(fields):
+        stated = [_stated(r, field) for r in citing if field in type(r).model_fields]
+        if stated and stated[0] is not None and all(_same(stated[0], v) for v in stated):
+            fixed[field] = stated[0]
+    return DecisionFixes(**fixed) if fixed else None
 
 
 class PlanStatus(TitlelessEnum):
@@ -6300,28 +6304,36 @@ class DecisionPick(StrictModel):
     decision under `slot`, exactly as the decision's `options` states it,
     with the scope the replan for it may change.
 
-    Call C the card's requirements citing `slot`. The replan replaces them:
-    `replaced_readings` holds what each read (`requirement_readings`), and
-    `cited` the decisions every replacing requirement cites, `slot` and each
-    decision of the user's a member of C cited. Everything else on the card
-    stands as the planner wrote it: `kept_requirements` holds each other
-    requirement's `requirement_digest` by id, and `kept_decisions` the
-    `content_digest` of each decision but `slot` and those code writes
-    (`is_code_written`) that the user made or a kept requirement cites, by
+    `origin_fixes` is what that decision fixed on the card, which the picked
+    option must change. Call C the card's requirements citing `slot`. The
+    replan replaces them: `replaced_readings` holds what each root of C
+    read (`requirement_roots`, `requirement_readings`), `cited_by_every`
+    the decisions every replacing requirement cites, `slot` and each
+    decision of the user's every member of C cited, and `cited_by_any` each
+    other decision of the user's some member of C cited, which some
+    replacing requirement cites. Decisions code writes (`is_code_written`)
+    are left out of both: admission derives their citations. Everything
+    else on the card stands as the planner wrote it: `kept_requirements`
+    holds each other requirement's `requirement_digest` by id, and
+    `kept_decisions` the `content_digest` of each decision but `slot` and
+    those code writes that the user made or a kept requirement cites, by
     slot. Every proposal of the replan is held against them
-    (`submission.service._outside_pick`). Built by `on_card`.
+    (`submission.service._outside_pick`, `_picked_decision`). Built by
+    `on_card`.
     """
 
     slot: str
     chosen: str
+    origin_fixes: DecisionFixes
     replaced_readings: tuple[str, ...]
-    cited: tuple[str, ...]
+    cited_by_every: tuple[str, ...]
+    cited_by_any: tuple[str, ...]
     kept_requirements: dict[str, str]
     kept_decisions: dict[str, str]
 
     @classmethod
     def on_card(cls, card: Plan, *, slot: str, chosen: str) -> DecisionPick:
-        """The pick of `chosen` for the decision under `slot` on `card`.
+        """The pick of `chosen` for the decision under `slot` on `card`, which fixes something.
 
         `card` is the plan as the model wrote it (`authored`), with every
         windowed copy's pin moved back to the pin it copies, as admission
@@ -6331,16 +6343,25 @@ class DecisionPick(StrictModel):
         replaced = [r for r in requirements if slot in r.decision_ids]
         kept = [r for r in requirements if slot not in r.decision_ids]
         readings = requirement_readings(requirements)
-        users = {d.slot for d in card.decisions if d.resolved_by is ResolvedBy.USER}
-        cited_by_kept = {cited for requirement in kept for cited in requirement.decision_ids}
         code_written = {d.slot for d in card.decisions if is_code_written(d)}
+        users = {
+            d.slot
+            for d in card.decisions
+            if d.resolved_by is ResolvedBy.USER and d.slot not in code_written
+        }
+        cited_by_kept = {cited for requirement in kept for cited in requirement.decision_ids}
+        every = users.intersection(*(r.decision_ids for r in replaced))
+        some = {cited for requirement in replaced for cited in requirement.decision_ids}
+        origin = next(d for d in card.decisions if d.slot == slot)
+        if origin.fixes is None:
+            raise ValueError(f"decision {slot!r} fixes nothing, so no option of it can be picked")
         return cls(
             slot=slot,
             chosen=chosen,
-            replaced_readings=tuple(sorted({readings[r.id] for r in replaced})),
-            cited=tuple(
-                sorted({slot} | (users & {cited for r in replaced for cited in r.decision_ids}))
-            ),
+            origin_fixes=origin.fixes,
+            replaced_readings=tuple(sorted({readings[r.id] for r in requirement_roots(replaced)})),
+            cited_by_every=tuple(sorted({slot} | every)),
+            cited_by_any=tuple(sorted((users & some) - every)),
             kept_requirements={
                 r.id: requirement_digest(r, code_written=code_written) for r in kept
             },
@@ -6352,6 +6373,12 @@ class DecisionPick(StrictModel):
                 and (d.slot in users or d.slot in cited_by_kept)
             },
         )
+
+
+def requirement_roots(requirements: Sequence[EvidenceRequirement]) -> list[EvidenceRequirement]:
+    """Each of `requirements` that no other of them reads (`inputs_of`): the figures they end in."""
+    read = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
+    return [requirement for requirement in requirements if requirement.id not in read]
 
 
 def is_code_written(decision: Decision) -> bool:
@@ -6411,21 +6438,35 @@ def _digest(content: dict[str, Any] | list[str]) -> str:
     return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
+class UnreadablePickError(ValueError):
+    """A pick stored in a shape this release does not read, such as one an
+    earlier release wrote mid-entry. Read as no pick, it would let the
+    replan change the plan unchecked, so every reader refuses it."""
+
+
 def decision_pick(state: SessionState) -> DecisionPick | None:
     """The pick on the plan card that the planner's current entry holds
-    (`DECISION_PICK_STATE_KEY`), or `None`."""
+    (`DECISION_PICK_STATE_KEY`), or `None`.
+
+    Raises:
+        UnreadablePickError: If the slot holds a pick this release cannot read.
+    """
     return pick_of(state.get(DECISION_PICK_STATE_KEY))
 
 
 def pick_of(raw: object) -> DecisionPick | None:
-    """The `DecisionPick` a pick stored as its JSON dump states, or `None`
-    for anything else."""
-    if not isinstance(raw, dict):
+    """The `DecisionPick` a pick stored as its JSON dump states, or `None` when none is stored.
+
+    Raises:
+        UnreadablePickError: If `raw` is something other than `None` or a
+            dump of a `DecisionPick` this release reads.
+    """
+    if raw is None:
         return None
     try:
         return DecisionPick.model_validate(raw)
-    except ValidationError:
-        return None
+    except ValidationError as exc:
+        raise UnreadablePickError("the pick on the plan card cannot be read") from exc
 
 
 def save_decision_pick(state: SessionState, pick: DecisionPick | None) -> None:
