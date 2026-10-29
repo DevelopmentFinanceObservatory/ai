@@ -1207,18 +1207,24 @@ def test_a_pick_asks_no_citation_of_a_scope_choice_admission_writes(pin: str) ->
 
 
 @pytest.mark.parametrize(
-    "top",
+    ("top", "listed"),
     [
-        pytest.param({"reduction": Reduction.MEAN}, id="ten-by-the-mean"),
-        pytest.param({"direction": RankDirection.LOWEST_FIRST}, id="ten-lowest-first"),
+        pytest.param({"reduction": Reduction.MEAN}, {}, id="ten-by-the-mean"),
+        pytest.param({"direction": RankDirection.LOWEST_FIRST}, {}, id="ten-lowest-first"),
+        pytest.param(
+            {"direction": RankDirection.LOWEST_FIRST},
+            {"direction": RankDirection.LOWEST_FIRST},
+            id="ten-lowest-first-listing-the-direction",
+        ),
     ],
 )
 def test_a_pick_whose_decision_settles_to_the_cards_value_is_refused(
-    decision: Callable[..., Decision], top: dict[str, Any]
+    decision: Callable[..., Decision], top: dict[str, Any], listed: dict[str, Any]
 ) -> None:
     """The user picks the top 5 donors, and the replan ranks 10 another way.
-    The picked decision settles to the limit the card's option fixed, so the
-    plan would rank 10 donors under the label of 5: refused."""
+    The requirements citing the decision still settle the limit and the
+    population the card's option fixed, so the plan would rank 10 donors
+    under the label of 5: refused, whatever other field the decision lists."""
     ctx = _context()
     first = _propose_plan(
         ctx,
@@ -1247,7 +1253,7 @@ def test_a_pick_whose_decision_settles_to_the_cards_value_is_refused(
                 RANKING.model_copy(
                     update={
                         "chosen": "the top 5 donors",
-                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION),
+                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION, **listed),
                     }
                 )
             ]
@@ -1342,15 +1348,27 @@ def test_a_pick_over_figures_citing_different_user_years_keeps_each_year_cited(
         assert result["detail"]["kept"] == "base"
 
 
+@pytest.mark.parametrize(
+    ("card_fixes", "picked_fixes"),
+    [
+        pytest.param(DONOR_SCOPE.fixes, DecisionFixes(measure="net ODA"), id="entities"),
+        pytest.param(
+            DecisionFixes(entities=DONOR_SCOPE.fixes.entities, unit=USD),
+            DecisionFixes(measure="net ODA", unit=USD),
+            id="entities-and-the-unit-both-options-share",
+        ),
+    ],
+)
 def test_a_pick_may_keep_what_it_replaces_as_the_input_of_a_new_figure(
-    decision: Callable[..., Decision],
+    decision: Callable[..., Decision], card_fixes: DecisionFixes, picked_fixes: DecisionFixes
 ) -> None:
     """ "The DAC total" becomes "as a share of all aid to Kenya": the DAC
     total stays, unchanged, as the share's numerator, and the picked option
     fixes the measure both totals read. The plan no longer ends in the DAC
-    total, so the replan is admitted."""
+    total, and the entities the card's option fixed no longer settle, so the
+    replan is admitted, though the unit both options fix stays as it was."""
     shown_as = DONOR_SCOPE.model_copy(
-        update={"options": ["the DAC total", "as a share of all aid to Kenya"]}
+        update={"options": ["the DAC total", "as a share of all aid to Kenya"], "fixes": card_fixes}
     )
     ctx = _context()
     first = _propose_plan(
@@ -1390,10 +1408,7 @@ def test_a_pick_may_keep_what_it_replaces_as_the_input_of_a_new_figure(
         decisions=drafts(
             [
                 shown_as.model_copy(
-                    update={
-                        "chosen": "as a share of all aid to Kenya",
-                        "fixes": DecisionFixes(measure="net ODA"),
-                    }
+                    update={"chosen": "as a share of all aid to Kenya", "fixes": picked_fixes}
                 )
             ]
         ),

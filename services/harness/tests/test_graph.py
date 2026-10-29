@@ -1921,6 +1921,52 @@ async def test_a_pick_this_release_cannot_read_offers_the_plan_unchanged(
     assert state.get(DECISION_PICK_STATE_KEY) is None
 
 
+class _StaleSnapshotSeam(_ReplanSeam):
+    """`_ReplanSeam` whose first draft leaves `PICK_REPLAN_KEY` holding a
+    snapshot, as a pick replan paused on an ask the user never answered does."""
+
+    def __init__(self, plans: list[dict[str, Any]], stale: dict[str, Any]) -> None:
+        super().__init__(plans)
+        self.stale = stale
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.calls:
+            kwargs["ctx"].state[PICK_REPLAN_KEY] = self.stale
+        return await super().__call__(**kwargs)
+
+
+async def test_a_pick_this_release_cannot_read_puts_back_no_stale_snapshot(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A snapshot an earlier, unanswered pick replan left under
+    `PICK_REPLAN_KEY` belongs to no resume. A fresh entry whose pick cannot
+    be read leaves the plan and the drafting state as they stand, so the
+    state on record matches the card it offers."""
+    plan = _pickable_plan(schemas=real_schemas)
+    stale = {
+        "plan": _pickable_plan(
+            schemas=real_schemas, chosen="2018-2024", version=2
+        ).model_dump_json(),
+        _DRAFTING_KEY: "stale",
+    }
+    seam = _StaleSnapshotSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}], stale)
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    assert _session_state(runner)[PICK_REPLAN_KEY] == stale
+    monkeypatch.setattr(
+        "harness.graph.planning.decision_pick",
+        lambda *_, **__: SimpleNamespace(model_dump=lambda **_: _OLD_SHAPE_PICK),
+    )
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    assert _output_of(events, "planner")["switch_failed"]["code"] == SCOPE_CHOICE_NOT_APPLIED
+    state = _session_state(runner)
+    assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert state.get(_DRAFTING_KEY) != "stale"
+    assert state.get(PICK_REPLAN_KEY) is None
+
+
 @pytest.mark.parametrize(
     ("code", "final", "reported", "retryable"),
     [

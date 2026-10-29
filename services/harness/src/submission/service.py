@@ -7049,18 +7049,21 @@ def _picked_decision(
 
 
 def _fixes_kept(pick: DecisionPick, requirements: Sequence[EvidenceRequirement]) -> bool:
-    """Whether the requirements citing the pick's slot still settle some field
-    the card's decision fixed (`pick.origin_fixes`), each to the card's value
-    (`read_fixes`): the picked option then changes nothing the card's showed,
-    whatever fields the decision lists."""
+    """Whether the requirements citing the pick's slot still settle every field
+    the card's decision fixed (`pick.origin_fixes`) to the card's value
+    (`read_fixes`): the picked option then changes nothing the card's showed.
+
+    Only the card's fields are read, so a field the picked decision lists
+    beside them changes nothing here. A card field the citing requirements
+    no longer agree on has changed, as the entities do when a share replaces
+    a total, and a field both options fix alike, such as the unit beside
+    them, does not hold the pick back.
+    """
     origin = pick.origin_fixes
     read = read_fixes(
         requirements, slot=pick.slot, fields=[name for name, value in origin if value is not None]
     )
-    if read is None:
-        return False
-    settled = {name for name, value in read if value is not None}
-    return not any(change.field in settled for change in fixes_changes(origin, read))
+    return not fixes_changes(origin, read)
 
 
 def _pick_not_held(

@@ -216,8 +216,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             # goes back as it stood before the pick, and the card offers
             # the plan unchanged.
             assert existing is not None
-            held = ctx.state.get(PICK_REPLAN_KEY)
-            _end_pick_entry(ctx, before=held if isinstance(held, dict) else None)
+            _end_pick_entry(ctx, before=_pick_snapshot(ctx))
             switch = payload.get("switch") or {}
             yield Event(
                 output=switch_module.switch_failed_offer(
