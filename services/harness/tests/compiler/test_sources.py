@@ -1048,6 +1048,16 @@ def test_a_resubmit_posts_without_a_set_stating_no_label(africa: object) -> None
     assert wire_groups(readable_wire_groups(block) or ()) == {"origin": {"label": "G7"}}
 
 
+@pytest.mark.parametrize("key", ["ref", "group_id"])
+def test_a_resubmit_posts_a_set_without_an_empty_ref_or_group_id(key: str) -> None:
+    # The source reading the block reads an empty ref or group_id as absent, so the
+    # resubmit posts the set with its label alone.
+    block = _spec(entities=_ENTITIES, entity_groups={"destination": {"label": "Africa", key: ""}})
+
+    assert source_from_spec_block(block).groups[0].label == "Africa"
+    assert wire_groups(readable_wire_groups(block) or ()) == {"destination": {"label": "Africa"}}
+
+
 # "ODA to Ethiopia from all donors" binds the OECD's official-donors total; the
 # union "all donors including private" binds that total and the private one.
 _WHOLE_ENTITIES = [

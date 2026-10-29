@@ -1048,18 +1048,14 @@ def block_concept_label(block: Mapping[str, object] | None) -> str | None:
     return _text(_mapping(_mapping(block).get("resolved")).get("concept_label"))
 
 
-def block_groups(
-    block: Mapping[str, object], *, leaving_out: str | None = None
-) -> tuple[ResolvedGroup, ...]:
-    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`),
-    skipping the set on the role column `leaving_out`, which is not read.
+def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
+    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`).
 
     Raises:
         ValueError: When a set it reads is not readable, as one naming a class
             of party outside `PartyClass`.
     """
-    groups = _mapping(_mapping(block.get("resolved")).get("entity_groups"))
-    return _groups({role: group for role, group in groups.items() if role != leaving_out})
+    return _groups(_mapping(_mapping(block.get("resolved")).get("entity_groups")))
 
 
 def block_group(block: Mapping[str, object], role: str) -> ResolvedGroup | None:
@@ -1135,17 +1131,16 @@ def readable_wire_groups(
 
 
 def _optional_text(group: Mapping[str, object], key: str, *, role: str) -> str | None:
-    """`group[key]`, `None` where it is absent or null, `group` the set on `role`.
+    """`group[key]`, `None` where it is absent, null or empty, as `_groups` reads it,
+    `group` the set on `role`.
 
     Raises:
-        ValueError: When it is anything but non-empty text.
+        ValueError: When it is anything but text.
     """
     value = group.get(key)
-    if value is None:
-        return None
-    if (text := _text(value)) is None:
+    if value is not None and not isinstance(value, str):
         raise ValueError(f"the set on {role!r} states a {key} that is not text: {value!r}")
-    return text
+    return _text(value)
 
 
 def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | None:
