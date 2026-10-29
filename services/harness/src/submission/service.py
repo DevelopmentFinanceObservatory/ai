@@ -236,6 +236,7 @@ from pydantic_core import to_jsonable_python
 from translator.discovery import (
     load_log,
     requirement_open_roles,
+    requirement_parties,
     requirement_revision,
     search_part,
 )
@@ -395,13 +396,14 @@ class Admission:
     on record, or `None` when neither this plan nor the session holds any,
     so nothing is written. `alignments` is every requirement the plan pins
     to a compile in place of the pin it states (`planner.plan.AlignedInput`),
-    to replace those on record, `None` likewise.
+    to replace those on record: they belong to this plan, so a fresh plan
+    holding none writes none.
     """
 
     plan: Plan
     rounds: int
     windowed_pins: tuple[WindowedPin, ...] | None
-    alignments: tuple[AlignedInput, ...] | None
+    alignments: tuple[AlignedInput, ...]
 
 
 def submit(
@@ -873,7 +875,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         plan=plan,
         rounds=rounds,
         windowed_pins=tuple(copies) if copies or held_copies else None,
-        alignments=tuple(entries.values()) if entries or held_alignments else None,
+        alignments=tuple(entries.values()),
     )
 
 
@@ -4126,13 +4128,14 @@ class Unpinned(StrictModel):
 
 def _unpinned(requirement: DatasetRequirement, step_id: str) -> Unpinned:
     """The search for `requirement`, an unpinned input of `step_id`."""
+    asked_roles, open_roles = requirement_parties(requirement)
     return Unpinned(
         requirement_id=requirement.id,
         step_id=step_id,
         requirement_key=requirement_revision(requirement),
         part=search_part(requirement, requirement.measure),
-        asked_roles=tuple(entity.role for entity in requirement.entities if entity.role),
-        open_roles=tuple(requirement_open_roles(requirement)),
+        asked_roles=asked_roles,
+        open_roles=open_roles,
     )
 
 

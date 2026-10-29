@@ -6504,6 +6504,13 @@ def save_plan(state: SessionState, plan: Plan) -> None:
     state[PLAN_STATE_KEY] = plan.model_dump_json()
 
 
+def clear_plan(state: SessionState) -> None:
+    """Clear the plan session `state` holds, with the alignments that belong to it
+    (`ALIGNMENTS_STATE_KEY`), so the next plan reads none of them."""
+    state[PLAN_STATE_KEY] = None
+    state[ALIGNMENTS_STATE_KEY] = None
+
+
 def load_plan_rounds(state: SessionState) -> int:
     """Return how many plans the planner has proposed in its current entry; 0 when none."""
     raw = state.get(PLAN_ROUNDS_STATE_KEY)

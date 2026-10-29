@@ -21,6 +21,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
+import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import compile_plan
 from compiler.surface import McpSurface, ToolCallResult, ToolSurface
@@ -31,6 +32,7 @@ from harness.plan_display import choice_id, shown_decisions
 from harness.scope_choices import planner_axes
 from planner.plan import (
     ASKS_STATE_KEY,
+    PLAN_STATE_KEY,
     AnswerMode,
     AskAnswer,
     DatasetRequirement,
@@ -493,16 +495,22 @@ async def test_an_amendment_dropping_the_comparison_reads_the_average_on_its_own
     ] == [(f"scope_measure_basis_{_NET}", "measure_basis:net")]
 
 
+@pytest.mark.parametrize("fresh", ["replan", "first-draft"])
 async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
-    decision: DecisionFactory,
+    decision: DecisionFactory, fresh: str
 ) -> None:
     """The replaced plan moved its `second` onto the gross pin. A new plan whose own
-    `second` pins gross directly reads gross: the old plan's alignment of an input with
-    that id says nothing of the new plan's pin."""
+    `second` pins gross directly reads gross, through its amendments too: the old
+    plan's alignment of an input with that id says nothing of the new plan's pin.
+    The new plan is a replan, or the first draft of a later `plan` call of the turn,
+    which finds the plan state cleared (`harness.planner_seam`)."""
     ctx = _FakeToolContext()
     await _gross_compared_with_net_average(ctx, decision)
+    if fresh == "first-draft":
+        ctx.state[PLAN_STATE_KEY] = None
+    propose = _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func
 
-    result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+    result = await propose(
         question="What was US gross ODA in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -518,11 +526,21 @@ async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
                 source_spec_id=_GROSS["spec_id"],
             ),
         ],
-        starts_new_plan=True,
+        starts_new_plan=fresh == "replan",
+        tool_context=ctx,
+    )
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [("second", _GROSS["spec_id"])]
+
+    amended = await propose(
+        answered=[AskAnswer(ask=0, outputs=("two",))],
+        evidence_requirements=[_reduced("two", "second", Reduction.MEAN)],
+        removed_evidence_requirements=["one"],
+        amends_version=result["version"],
         tool_context=ctx,
     )
 
-    assert result["outcome"] == Outcome.OK.value, result
+    assert amended["outcome"] == Outcome.OK.value, amended
     assert _pins(ctx) == [("second", _GROSS["spec_id"])]
 
 

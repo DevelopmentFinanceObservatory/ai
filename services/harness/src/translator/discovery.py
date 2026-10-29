@@ -1420,6 +1420,13 @@ def requirement_open_roles(requirement: DatasetRequirement) -> list[str]:
     ]
 
 
+def requirement_parties(requirement: DatasetRequirement) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The flow parties a `search` for `requirement` names, its entities' roles,
+    and those it holds open (`requirement_open_roles`)."""
+    asked = tuple(entity.role for entity in requirement.entities if entity.role)
+    return asked, tuple(requirement_open_roles(requirement))
+
+
 def _dropped_phrases(
     requirement: DatasetRequirement, part: Mapping[str, object], blocked_by: Sequence[str]
 ) -> dict[str, list[str]]:
