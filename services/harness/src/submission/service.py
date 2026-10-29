@@ -236,6 +236,7 @@ from pydantic_core import to_jsonable_python
 from translator.discovery import (
     load_log,
     requirement_open_roles,
+    requirement_parties,
     requirement_revision,
     search_part,
 )
@@ -4127,13 +4128,14 @@ class Unpinned(StrictModel):
 
 def _unpinned(requirement: DatasetRequirement, step_id: str) -> Unpinned:
     """The search for `requirement`, an unpinned input of `step_id`."""
+    asked_roles, open_roles = requirement_parties(requirement)
     return Unpinned(
         requirement_id=requirement.id,
         step_id=step_id,
         requirement_key=requirement_revision(requirement),
         part=search_part(requirement, requirement.measure),
-        asked_roles=tuple(entity.role for entity in requirement.entities if entity.role),
-        open_roles=tuple(requirement_open_roles(requirement)),
+        asked_roles=asked_roles,
+        open_roles=open_roles,
     )
 
 
