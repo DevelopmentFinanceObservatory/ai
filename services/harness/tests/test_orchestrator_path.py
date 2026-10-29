@@ -247,7 +247,8 @@ _GROSS, _NET = "spec_" + "a" * 32, "spec_" + "c" * 32
             [
                 "1. How should aid be counted? The user left this to you. Go on with "
                 "gross disbursements.",
-                "2. In which prices? The user chose: Constant 2023 US dollars",
+                "2. In which prices? The user chose: Constant 2023 US dollars, which no search "
+                "listed. Search once for that part in constant prices.",
                 _SETTLED,
             ],
         ),
@@ -289,8 +290,8 @@ async def test_several_questions_pause_together_and_each_answer_is_handed_back(
                 {
                     "question": "In which prices?",
                     "options": [
-                        {"label": "Current US dollars"},
-                        {"label": "Constant 2023 US dollars"},
+                        {"label": "Current US dollars", "prices": "current"},
+                        {"label": "Constant 2023 US dollars", "prices": "constant"},
                     ],
                 },
             ],
@@ -315,8 +316,8 @@ async def test_several_questions_pause_together_and_each_answer_is_handed_back(
             "id": "q2",
             "question": "In which prices?",
             "candidates": [
-                {"spec_id": "o1", "label": "Current US dollars"},
-                {"spec_id": "o2", "label": "Constant 2023 US dollars"},
+                {"spec_id": "o1", "label": "Current US dollars", "prices": "current"},
+                {"spec_id": "o2", "label": "Constant 2023 US dollars", "prices": "constant"},
             ],
         },
     ]

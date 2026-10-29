@@ -78,6 +78,7 @@ from harness.scope_choices import (
 from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
+from submission.prices_choice import PricesChoice
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
@@ -748,16 +749,76 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
       `candidates`, whose ids are scoped to that question. A `payload` with
       `candidates` and no `questions` holds the one question `q1`.
     """
+    return {
+        question_id: _candidate_ids(candidates)
+        for question_id, candidates in _question_candidates(args).items()
+    }
+
+
+def _question_candidates(args: dict[str, Any]) -> dict[str, Any]:
+    """The raw candidates list of each question an `adk_request_input` call's
+    `args` offers, by question id, read as `_offered_candidates` reads them."""
     candidates = args.get("candidates")
     payload = args.get("payload")
     payload = payload if isinstance(payload, dict) else {}
     if not candidates and payload.get("questions"):
         return {
-            str(question["id"]): _candidate_ids(question.get("candidates"))
+            str(question["id"]): question.get("candidates")
             for question in payload["questions"]
             if isinstance(question, dict) and question.get("id")
         }
-    return {"q1": _candidate_ids(candidates or payload.get("candidates"))}
+    return {"q1": candidates or payload.get("candidates")}
+
+
+def _prices_chosen(tool_context: ToolContext) -> PricesChoice | None:
+    """The prices the user picked answering an `adk_request_input` call, read
+    off this session's event history; `None` once they say anything after it.
+
+    A prices option carries its `prices` on its candidate
+    (`harness.graph.state.ask_candidates`), so a pick of it states the
+    prices whether or not the option carries a spec_id. Each response pairs
+    with the nearest preceding call sharing its `id`, as `_elected_spec_ids`
+    pairs them. A later answer (`_is_answer`) picking no prices, an
+    amendment of the approval card (`_is_amendment`) or a message the user
+    typed (`_user_message`) releases the pick, as it releases every user
+    decision (`_user_spoke_since_recorded`). A Studio turn is one session,
+    so a pick holds for the turn it was made in.
+    """
+    offered: dict[str, dict[str, Any]] = {}
+    chosen: PricesChoice | None = None
+    for event in tool_context.session.events:
+        if not (event.content and event.content.parts):
+            continue
+        if _user_message(event):
+            chosen = None
+            continue
+        for part in event.content.parts:
+            call = part.function_call
+            if (
+                call is not None
+                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+                and call.id is not None
+            ):
+                offered[call.id] = _question_candidates(call.args or {})
+                continue
+            response = part.function_response
+            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
+                continue
+            body = response.response or {}
+            if not (_is_answer(body) or _is_amendment(body)):
+                continue
+            questions = offered.get(response.id or "", {})
+            picks = [
+                choice
+                for question_id, answer in _answers(body.get("result")).items()
+                if isinstance(answer, dict) and answer.get("kind") == "option"
+                for candidate in questions.get(question_id) or ()
+                if isinstance(candidate, dict)
+                and candidate.get("spec_id") == answer.get("spec_id")
+                and (choice := PricesChoice.of_candidate(candidate)) is not None
+            ]
+            chosen = picks[-1] if picks else None
+    return chosen
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:
@@ -1160,7 +1221,7 @@ class ToolContextSession:
     The state is the call's own. What the user was asked and answered is
     read off the session's event history (`_elected_spec_ids`,
     `_answers_since_referral`, `_combination_picks`,
-    `_user_spoke_since_recorded`). Recording an admitted
+    `_user_spoke_since_recorded`, `_prices_chosen`). Recording an admitted
     plan writes its windowed pins, the plan, its round count, and clears the
     referral the new proposal supersedes.
     """
@@ -1187,6 +1248,10 @@ class ToolContextSession:
     def user_spoke_since(self, version: int) -> bool:
         """`_user_spoke_since_recorded` over the call's session."""
         return _user_spoke_since_recorded(self.tool_context, version)
+
+    def prices_chosen(self) -> PricesChoice | None:
+        """`_prices_chosen` over the call's session."""
+        return _prices_chosen(self.tool_context)
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
         """Record `operation` as answered `unsupported` in this planner entry."""

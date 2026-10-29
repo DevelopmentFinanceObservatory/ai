@@ -3731,10 +3731,10 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constan
     # named no prices, so the prices are open with the offered sibling or,
     # when search offers none, constant prices.
     assert part["open_prices"] == [
-        {"label": "current prices"},
-        {"spec_id": SPEC_CONSTANT, "label": "constant prices"}
+        {"label": "current prices", "prices": "current"},
+        {"spec_id": SPEC_CONSTANT, "label": "constant prices", "prices": "constant"}
         if constant
-        else {"label": "constant prices"},
+        else {"label": "constant prices", "prices": "constant"},
     ]
 
 

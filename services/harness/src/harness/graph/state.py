@@ -123,7 +123,8 @@ def interrupt_event(request: RequestInput) -> Event:
 
 
 class AskOption(BaseModel):
-    """One answer `ask_user` offers: its wording and, for a count or prices, its spec_id."""
+    """One answer `ask_user` offers: its wording, for a count or prices its
+    spec_id, and for prices which prices they are."""
 
     label: str = Field(description="the answer as the user reads it")
     spec_id: str | None = Field(
@@ -131,6 +132,12 @@ class AskOption(BaseModel):
         description=(
             "for a count or prices the result names, the spec_id it gives that reading; "
             "leave it out for any other answer"
+        ),
+    )
+    prices: Literal["current", "constant"] | None = Field(
+        default=None,
+        description=(
+            "for an `open_prices` entry, the entry's `prices`; leave it out for any other answer"
         ),
     )
 
@@ -186,9 +193,15 @@ class PendingPlan(BaseModel):
 def ask_candidates(options: list[AskOption]) -> list[dict[str, str]]:
     """One question's options as the clarify interrupt's candidates: a count
     under its own spec_id, so a pick returns it, and any other answer under
-    `o{n}`, its place in the question's list."""
+    `o{n}`, its place in the question's list. A prices option carries its
+    `prices`, which the planner reads off the answered interrupt
+    (`planner.agent._prices_chosen`)."""
     return [
-        {"spec_id": option.spec_id or f"o{index + 1}", "label": option.label}
+        {
+            "spec_id": option.spec_id or f"o{index + 1}",
+            "label": option.label,
+            **({"prices": option.prices} if option.prices is not None else {}),
+        }
         for index, option in enumerate(options)
     ]
 

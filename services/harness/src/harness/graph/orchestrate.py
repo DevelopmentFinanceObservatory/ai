@@ -158,7 +158,8 @@ def answer_replies(questions: list[AskQuestion], answers: dict[str, dict[str, An
     keyed by question id (`resume_answers`): a pick in the option's own words
     with its spec_id when it carries one, the user's own words, or, for a question
     the user skipped or left unanswered, the first option as the agent's to
-    go on with."""
+    go on with. A pick of constant prices no search listed, an option with
+    `prices` and no spec_id, asks for one search in those prices."""
     replies = []
     for index, question in enumerate(questions):
         answer = answers.get(f"q{index + 1}") or {"kind": "skipped"}
@@ -174,6 +175,11 @@ def answer_replies(questions: list[AskQuestion], answers: dict[str, dict[str, An
             replies.append(f"The user chose: {answer.get('spec_id')}")
         elif option.spec_id:
             replies.append(f"The user chose: {option.label} ({option.spec_id})")
+        elif option.prices == "constant":
+            replies.append(
+                f"The user chose: {option.label}, which no search listed. Search once for that "
+                "part in constant prices."
+            )
         else:
             replies.append(f"The user chose: {option.label}")
     return replies

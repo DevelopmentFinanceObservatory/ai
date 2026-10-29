@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import gc
 import inspect
 import json
@@ -11763,6 +11764,199 @@ def test_what_counts_as_the_user_speaking_after_the_plan_was_recorded(
 
     expected = Outcome.OK.value if lands else ProblemCode.USER_DECISION_CONTRADICTED.value
     assert result.get("code", result["outcome"]) == expected, result
+
+
+_CONSTANT_GROSS = "spec_" + "e" * 32
+
+
+def _constant_block() -> dict[str, Any]:
+    """The France to Kenya block in constant 2023 US dollars, under its own spec_id."""
+    block = copy.deepcopy(_FRANCE_KENYA)
+    block["spec_id"] = _CONSTANT_GROSS
+    block["definition"]["spec_id"] = _CONSTANT_GROSS
+    block["definition"]["identity"]["shape"]["measurement_qualifier"] = "RealValue"
+    block["resolved"]["facets"]["unit"] = {
+        "basis": "fallback",
+        "ref": "ConstantUSD_2023",
+        "label": "Constant 2023 US Dollar",
+        "currency": "USD",
+    }
+    return block
+
+
+def _prices_ask_events(*, constant_spec_id: str | None = None) -> list[Any]:
+    """The orchestrator's prices question through the clarify interrupt, its
+    options as `open_prices` gives them, and the user's pick of constant prices."""
+    constant = {"spec_id": constant_spec_id or "o2", "label": "constant prices"}
+    return [
+        _clarify_ask_event(
+            [
+                {"spec_id": "o1", "label": "current prices", "prices": "current"},
+                {**constant, "prices": "constant"},
+            ]
+        ),
+        _clarify_answer_event(_option(constant["spec_id"])),
+    ]
+
+
+def test_constant_prices_the_user_chose_hold_a_plan_that_states_no_unit(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user answered the prices question with constant prices no search
+    listed. A plan pinning the current-price series with no unit is refused
+    as dropping their choice, and with no base year on record the planner
+    is sent to the user. Once they answer again, the plan lands."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    ctx.session.events = _prices_ask_events()
+    dataset, derived = requirements
+    unpriced = dataset.model_copy(update={"source_spec_id": _GROSS, "unit": None})
+
+    refused = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[unpriced, derived],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
+    assert refused["detail"] == {
+        "slot": "user_prices",
+        "chosen": "constant prices",
+        "requirement_id": dataset.id,
+        "base_year": None,
+    }
+    assert refused["action"] == {"call": "adk_request_input"}
+    assert load_plan(ctx.state) is None
+
+    ctx.session.events = [
+        *ctx.session.events,
+        _clarify_ask_event([{"spec_id": "o1", "label": "Go on in current prices"}]),
+        _clarify_answer_event(_option("o1")),
+    ]
+    landed = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[unpriced, derived],
+        tool_context=ctx,
+    )
+    assert landed["outcome"] == Outcome.OK.value, landed
+
+
+def test_a_constant_unit_with_no_base_year_is_told_the_base_year_its_source_states(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user picked the constant-price series. A unit stating constant prices
+    with no base year is refused naming the base year that series states, so the
+    planner restates the unit in place of dropping it."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _constant_block())
+    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    dataset, derived = requirements
+    stated = dataset.model_dump(mode="json") | {
+        "source_spec_id": _CONSTANT_GROSS,
+        "unit": {"currency": "USD", "prices": "constant"},
+    }
+
+    refused = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[stated, derived.model_dump(mode="json")],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.INVALID_PLAN.value, refused
+    assert refused["detail"] == {
+        "requirement_id": dataset.id,
+        "base_year": 2023,
+        "unit": {"currency": "USD", "prices": "constant", "base_year": 2023},
+    }
+    assert refused["action"] == {"call": "propose_plan", "needs": ["evidence_requirements"]}
+
+
+def test_current_prices_against_the_constant_series_the_user_picked_are_refused(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user picked the constant-price series, and the plan states current
+    prices on the current-price series: refused as contradicting their choice,
+    naming the unit and base year of the series they picked."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, _constant_block())
+    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    dataset, derived = requirements
+
+    refused = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, refused
+    assert refused["detail"] == {
+        "slot": "user_prices",
+        "chosen": "constant prices",
+        "requirement_id": dataset.id,
+        "base_year": 2023,
+        "unit": {"currency": "USD", "prices": "constant", "base_year": 2023},
+    }
+    assert refused["action"] == {"call": "propose_plan", "needs": ["evidence_requirements"]}
+
+
+async def test_constant_prices_restated_with_their_base_year_land_as_the_user_s_decision(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The plan restated with the unit the refusal names is admitted. It
+    records constant prices as the user's decision, cited by the
+    requirement, and compiles against the constant-price series."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    constant = _constant_block()
+    _show_blocks(ctx, _FRANCE_KENYA, constant)
+    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    dataset, derived = requirements
+    priced = dataset.model_copy(
+        update={
+            "source_spec_id": _CONSTANT_GROSS,
+            "unit": Unit(currency="USD", prices="constant", base_year=2023),
+        }
+    )
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[priced, derived],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (prices,) = [d for d in plan.decisions if d.slot == "user_prices"]
+    assert (prices.chosen, prices.resolved_by) == ("constant prices", ResolvedBy.USER)
+    assert prices.fixes == DecisionFixes(
+        unit=Unit(currency="USD", prices="constant", base_year=2023)
+    )
+    assert "user_prices" in plan.requirement(dataset.id).decision_ids
+    schemas = await McpSurface(
+        sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
+    ).list_tools()
+    discovered = {dataset.id: source_from_spec_block(constant)}
+    compiled = compile_plan(
+        plan=plan,
+        translation=build_translation(plan, {dataset.id: _CONSTANT_GROSS}),
+        schemas={tool.name: tool for tool in schemas},
+        discovered=discovered,
+    )
+    assert compiled.workflow is not None, compiled.issues
 
 
 def test_a_user_decision_the_user_s_answer_supersedes_goes_with_it(

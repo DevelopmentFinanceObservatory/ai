@@ -1821,6 +1821,8 @@ def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> No
 _USD = {"basis": "fallback", "ref": "CurrencyUSD", "label": "US Dollar", "currency": "USD"}
 _CONSTANT_OFFER = {"spec_id": "spec_c", "label": "constant prices"}
 _SEVERAL_YEARS = {"start": 2015, "end": 2023, "source": "requested"}
+_CURRENT_OPTION = {"label": "current prices", "prices": "current"}
+_CONSTANT_OPTION = {"label": "constant prices", "prices": "constant"}
 
 
 @pytest.mark.parametrize(
@@ -1831,14 +1833,14 @@ _SEVERAL_YEARS = {"start": 2015, "end": 2023, "source": "requested"}
             _USD,
             None,
             [],
-            [{"label": "current prices"}, {"label": "constant prices"}],
+            [_CURRENT_OPTION, _CONSTANT_OPTION],
         ),
         (
             _SEVERAL_YEARS,
             _USD,
             None,
             [_CONSTANT_OFFER],
-            [{"label": "current prices"}, _CONSTANT_OFFER],
+            [_CURRENT_OPTION, {**_CONSTANT_OFFER, "prices": "constant"}],
         ),
         (
             _SEVERAL_YEARS,
@@ -1849,7 +1851,7 @@ _SEVERAL_YEARS = {"start": 2015, "end": 2023, "source": "requested"}
             },
             {"currency": "EUR", "prices": "current"},
             [],
-            [{"label": "current prices"}, {"label": "constant prices"}],
+            [_CURRENT_OPTION, _CONSTANT_OPTION],
         ),
         ({"start": 2023, "end": 2023, "source": "requested"}, _USD, None, [_CONSTANT_OFFER], []),
         (

@@ -390,6 +390,14 @@ class Entity(StrictModel):
     )
 
 
+class BaseYearUnstatedError(ValueError):
+    """A `Unit` states constant prices with no `base_year`.
+
+    Typed so `propose_plan` answers it with the base year the requirement's
+    source states, where one does (`submission.prices_choice.base_year_refusal`).
+    """
+
+
 # Stated in the frame grammar's own `currency`, `prices` and `base_year`,
 # `current` or `constant`, so a retrieved frame's unit compares to a
 # requirement field by field.
@@ -414,7 +422,7 @@ class Unit(StrictModel):
     @model_validator(mode="after")
     def _base_year_goes_with_constant_prices(self) -> Unit:
         if self.prices == "constant" and self.base_year is None:
-            raise ValueError("constant prices need a base_year")
+            raise BaseYearUnstatedError("constant prices need a base_year")
         if self.prices == "current" and self.base_year is not None:
             raise ValueError("current prices take no base_year")
         return self

@@ -938,7 +938,10 @@ def open_prices(
     The first option is the prices search read, with no spec_id. Each of
     the part's `other_prices` offers (`harness.tool_contracts.measure_choice`)
     follows with its spec_id, or constant prices with none when search
-    offers no other prices.
+    offers no other prices. Every option names its `prices`, `current` or
+    `constant`, which the option of the user's question carries
+    (`harness.graph.state.AskOption.prices`), so their pick reaches the plan
+    as the user's decision (`submission.prices_choice`).
     """
     if not isinstance(window, Mapping) or window.get("start") == window.get("end"):
         return []
@@ -955,8 +958,10 @@ def open_prices(
         current = reading.currency not in (None, "PPP") and reading.prices != "constant"
     if not current:
         return []
-    others = [dict(offer) for offer in other_prices] or [{"label": CONSTANT_PRICES}]
-    return [{"label": CURRENT_PRICES}, *others]
+    others = [{**offer, "prices": "constant"} for offer in other_prices] or [
+        {"label": CONSTANT_PRICES, "prices": "constant"}
+    ]
+    return [{"label": CURRENT_PRICES, "prices": "current"}, *others]
 
 
 def measure_choice_text(
