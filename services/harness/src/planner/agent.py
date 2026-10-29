@@ -45,11 +45,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
+import logging
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast, override
+from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
-from compiler.sources import block_groups
+from compiler.sources import block_group, party_class, readable_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -65,6 +66,9 @@ from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTIO
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
 from harness.scope_choices import (
+    PROVIDER_AXIS,
+    EntitiesBinding,
+    PartScope,
     ScopeChoice,
     mark_planner_axes,
     option_axis,
@@ -77,6 +81,7 @@ from pydantic import JsonValue
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    WHOLE_COLUMNS,
     Admission,
     AlignedPin,
     Combination,
@@ -88,6 +93,8 @@ from submission.service import (
     aligned_pins,
     axis_slot,
     basis_unservable,
+    block_parties,
+    bound_parties,
     part_scope,
     realignments_wanted,
     save_aligned_pin,
@@ -96,6 +103,7 @@ from submission.service import (
     submit,
     unpinned_wanted,
     unread_part,
+    whole_axis_held,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import (
@@ -158,6 +166,8 @@ from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
+
+logger = logging.getLogger(__name__)
 
 AGENT_NAME = "dfo_planner"
 
@@ -274,17 +284,16 @@ _PLANNING = (
     "in one unit, `quotient_of` only for one measure per unit of another, "
     'such as a per-head or per-capita figure or "divide one by the '
     'other", and `join` only across different measures.\n\n'
-    "When a share divides a sector's figure by the same party's total "
-    "across every sector, as US health aid over all US aid, state that "
-    "total as a dataset requirement with `whole_of` naming the part's "
-    "requirement and `axis='sector'`, the part's entities and `across`, and "
-    "no `source` or `source_spec_id`: it is counted from the part's own "
-    "dataset, on the same donors, measure basis and providers, and only "
-    "that share reads it. Leave "
-    "`whole_of` unset when the whole binds a sector itself, as health aid "
-    "does under malaria aid, when the share is one party's part of other "
-    "parties' total, as one donor's share of all aid to Kenya, or when the "
-    "question names another source for the total. Set "
+    "For a share of a figure in its own total over every sector, donor or "
+    "recipient, state that total as a dataset requirement with `whole_of` "
+    "naming the part and the `axis` it opens, and no `source` or "
+    "`source_spec_id`: only that share reads it. US health aid over all US "
+    "aid opens 'sector' (same entities and `across`); the US share of all "
+    "aid to Kenya opens 'donor', Kenya's share of US aid 'recipient' (the "
+    "part's entities less that party, which joins `across`). Leave it unset "
+    "for a whole that binds a sector itself (health aid under malaria aid) "
+    "or names a group (DAC donors' aid), a provider share (the multilateral "
+    "share of US aid), or a total from a named source. Set "
     "`accept_provider_difference` on a share only when the user asked for "
     'another source\'s total, as "use the DAC1 total" does, with that total '
     "pinned, and never to get past a refusal.\n\n"
@@ -307,8 +316,13 @@ _PLANNING = (
     "or how many, meet a condition is a `filter` with a `value_threshold` "
     "over one figure per member, and a `period_threshold` for the year; "
     "the members it keeps are the answer and their count.\n\n"
+    "Bilateral plus imputed multilateral aid from the CRS or DAC2a is one "
+    "dataset requirement with no `sum_of`: pin a reading whose `scope "
+    "provider` is `provider:inclusive`, or leave it unpinned with a "
+    "`measure` naming bilateral plus imputed multilateral aid.\n\n"
     "When the answer is one total of two different sources, such as "
-    "bilateral aid plus imputed multilateral aid, state a `sum_of`, "
+    "bilateral aid from another table plus imputed multilateral aid, "
+    "state a `sum_of`, "
     "naming each side's `entity` when its requirement names several on "
     "one side of the flow, such as two donors. Tables whose provenance "
     "states account `provider`, such as the OECD and ONE aid tables, add "
@@ -1408,7 +1422,7 @@ def _refusing(refused: dict[str, object]) -> SourceRead:
     return lambda _: refused
 
 
-async def compile_on_basis(
+async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
     surface: ToolSurface,
     realignment: Realignment,
     *,
@@ -1420,7 +1434,8 @@ async def compile_on_basis(
     the axis it names (`harness.scope_choices.option_axis`), as an explicit
     entry from its choice in place of the entry on that axis, the resubmit
     a switch on the plan card posts (`harness.scope_choices.switch_entries`)
-    once per option, with the part's entity groups, through data-mcp's
+    once per option, with what the resubmit posts of the part's entity groups
+    (`compiler.sources.block_wire_groups`), through data-mcp's
     `resolve_definition`, which stores the definition it answers. One
     resubmit carries every option, so an input moving on the measure basis
     and the provider scope is compiled once. The answer is shown to the
@@ -1442,7 +1457,9 @@ async def compile_on_basis(
     (`SourceRead`). It answers `None` once the pin is held, or the refusal
     the proposal answers: `SURFACE_UNAVAILABLE` when Search did not answer
     and can later, `OPERATION_UNSUPPORTED` when it refuses the options or
-    answers with no one dataset.
+    answers with no one dataset, or when what it posts of the part's entity
+    groups is not readable, since a resubmit posted without them can bind
+    another population.
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -1484,12 +1501,17 @@ async def compile_on_basis(
             )
         )
     entries = [entry.model_dump(mode="json", exclude_none=True) for entry in switched]
+    groups = readable_wire_groups(block)
+    if groups is None:
+        return unservable(
+            f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
+        )
     try:
         part = await resolve_definition(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=block_groups(block),
+            groups=groups,
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:
@@ -1525,7 +1547,7 @@ async def compile_on_basis(
     return hold
 
 
-async def compile_whole(
+async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
     surface: ToolSurface,
     realignment: Realignment,
     *,
@@ -1534,20 +1556,37 @@ async def compile_whole(
     """Compile the declared whole `realignment` names from its part, and hold it as a pin.
 
     The part is the pin `realignment.spec_id` and the axis left open
-    `realignment.whole_axis`. Posts the part's base identity with the slot
-    its choice on that axis binds (`submission.service.axis_slot`) set
-    unbound, under the spec_id that identity hashes to, the part's entity
-    groups, and one explicit entry from each of its other choices holding
-    its active option, with the concept of the part's entry on that axis.
-    Search then keeps the part's measure basis, provider scope and region,
-    which an option the whole cannot serve would otherwise leave to
-    Search's default. No model call is made. The planner is shown the answer
+    `realignment.whole_axis` (`planner.plan.WholeOf.axis`). Posts the part's
+    base identity with that axis opened, under the spec_id that identity
+    hashes to, the part's entity groups, and one explicit entry from each of
+    its other choices holding its active option, with the concept of the
+    part's entry on that axis (`_opened`). The sector is opened by
+    unbinding the slot the part's sector choice binds
+    (`submission.service.axis_slot`). A donor or recipient is opened by
+    dropping that role's column from the identity
+    (`submission.service.WHOLE_COLUMNS`), with the set named on it and the
+    choice adding entities to it, the region, so Search answers with the
+    total over every party there that holds the part, and what population
+    that is stays Search's answer. Search keeps the part's measure basis,
+    and its region on another role, which an option the whole cannot serve
+    would otherwise leave to Search's default. The provider scope of a
+    donor whole is posted as a carried entry: Search counts the whole on it
+    where the whole offers it, and otherwise drops it and counts the whole
+    on its own default, since the scope names whose spending a named donor
+    counts and Search offers the inclusive scope on no total naming no
+    donor. The part keeps its own scope, and the whole's caveat says what
+    each side counts (`submission.service._whole_shares`). A recipient
+    whole names the part's donor, so Search can count it on the part's
+    scope, and its provider scope is posted as an explicit entry that
+    Search refuses where it cannot hold it, as the other choices are.
+    No model call is made. The planner is shown the answer
     as a source of its own (the part's source holding the whole's block, as
     `compile_on_basis` holds a realigned one). The whole takes its choices
-    from its part. Each carries the part's provenance, and the block marks
-    as the planner's (`harness.scope_choices.mark_planner_axes`) the axes
-    the part's block marks, so the whole reads as settled the way the part
-    was and a later search carries what the part's carries. It is held as a
+    from its part. Each the whole holds on the part's option carries the
+    part's provenance, and the block marks as the planner's
+    (`harness.scope_choices.mark_planner_axes`) those of them the part's
+    block marks, so the whole reads as settled the way the part was and a
+    later search carries what the part's carries. It is held as a
     `submission.service.AlignedPin` from the part on that axis, which every
     whole declaring the part and the axis pins.
 
@@ -1557,10 +1596,17 @@ async def compile_whole(
     `SHARE_WHOLE_UNDERIVABLE` under a cause
     naming why: the part's pin is not among the datasets shown
     (`part_not_shown`), is shown with no block (`part_block_missing`), holds
-    scope choices this release cannot read (`scope_unreadable`), or offers no
-    choice on the axis binding one slot (`axis_not_held`); or Search refuses
+    scope choices this release cannot read (`scope_unreadable`), binds
+    nothing on the axis to leave open (`axis_not_held`), or names a set on a
+    role the whole keeps whose posted identity (`compiler.sources.block_wire_groups`)
+    is not readable, which the whole would otherwise be posted without
+    (`groups_unreadable`); or Search refuses
     the whole (as `requested_option_unavailable` where it cannot hold an
-    option the part holds), or answers with no one dataset (`whole_refused`).
+    option the part holds), or answers with no one dataset (`whole_refused`),
+    or with a donor or recipient whole that Search shows does not hold a party
+    the part names on that role (`part_outside_whole`), or bound to one total
+    that states neither its members nor a whole class of party, so nothing
+    shows it does (`whole_members_unstated`) (`_parties_outside`).
     """
     part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
 
@@ -1577,31 +1623,34 @@ async def compile_whole(
     source = pin_sources(state).get(part_pin)
     block = source.spec_block(part_pin) if source is not None else None
     scope = part_scope(part_pin, block)
-    slot = axis_slot(scope, axis) if scope is not None else None
-    if source is None or block is None or scope is None or slot is None:
+    if source is None or block is None or scope is None or not whole_axis_held(scope, axis):
         return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
-    identity = copy.deepcopy(scope.base.identity)
-    for held in identity.get("slots") or ():
-        if held.get("property") == slot:
-            held["binding"] = {"state": "unbound"}
+    column = WHOLE_COLUMNS.get(axis)
+    groups = readable_wire_groups(block, leaving_out=column)
+    if groups is None:
+        return underivable(
+            f"Search's named sets for {part_pin} are not readable", "groups_unreadable"
+        )
+    identity, choices = _opened(scope, axis)
     concepts = {entry.axis: entry.concept for entry in scope.entries}
     entries = [
         ScopeEntry(
             axis=choice.axis,
             option_id=choice.active,
-            provenance="explicit",
+            provenance="carried"
+            if axis == "donor" and choice.axis == PROVIDER_AXIS
+            else "explicit",
             concept=concepts.get(choice.axis),
             origin=ChoiceOrigin(choice_id=choice.id),
         )
-        for choice in scope.choices
-        if choice.axis != axis
+        for choice in choices
     ]
     try:
         part = await resolve_definition(
             surface,
             spec_id=spec_id_for(canonicalize(identity)),
             identity=identity,
-            groups=block_groups(block),
+            groups=groups,
             scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
         )
     except DefinitionNotResolvedError as exc:
@@ -1615,10 +1664,20 @@ async def compile_whole(
     spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
     if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
         return underivable(f"Search holds no one dataset counting every {axis} of {part_pin}")
+    held = (
+        _parties_outside(scope, spec, column, part_block=block)
+        if column is not None
+        else _Containment()
+    )
+    if held.outside or held.unshown:
+        return underivable(*_uncontained(part_pin, axis, held))
+    answered = _answered_options(spec_id, spec)
     inherited: dict[str, str] = {
-        choice.axis: choice.provenance for choice in scope.choices if choice.axis != axis
+        choice.axis: choice.provenance
+        for choice in choices
+        if answered.get(choice.axis) == choice.active
     }
-    digest = resolver_digest({"parts": [_with_provenance(part, inherited)]})
+    digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
     whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
 
@@ -1644,23 +1703,246 @@ async def run_together[T](calls: Iterable[Awaitable[T]]) -> list[T]:
     try:
         return list(await asyncio.gather(*tasks))
     finally:
-        running = [task for task in tasks if not task.done()]
-        for task in running:
-            task.cancel()
-        if running:
-            await asyncio.wait(running)
+        await _cancel_and_drain(tasks)
 
 
-def _with_provenance(part: Mapping[str, Any], provenance: Mapping[str, str]) -> dict[str, Any]:
-    """A copy of `part`, a `definite` Search part, whose scope choice on each axis of
-    `provenance` carries the provenance given for that axis (`compile_whole`)."""
+async def _cancel_and_drain(tasks: Sequence[asyncio.Future[Any]]) -> None:
+    """Cancel each of `tasks` still running, wait for every one, and retrieve each
+    exception, so none is reported as never retrieved."""
+    running = [task for task in tasks if not task.done()]
+    for task in running:
+        task.cancel()
+    if running:
+        await asyncio.wait(running)
+    for task in tasks:
+        if not task.cancelled():
+            task.exception()
+
+
+def _opened(scope: PartScope, axis: str) -> tuple[dict[str, Any], list[ScopeChoice]]:
+    """The identity and scope choices the whole of the part `scope` records over
+    every member of `axis` posts (`compile_whole`).
+
+    On the sector, the base identity with the slot the sector choice binds
+    unbound (`axis_slot`), and every choice but the sector. On a donor or
+    recipient, the base identity without that role's column
+    (`WHOLE_COLUMNS`), and every choice but one adding entities to that role,
+    the region's. The whole posts the part's groups on other roles
+    (`compiler.sources.block_wire_groups`).
+    """
+    identity = copy.deepcopy(scope.base.identity)
+    column = WHOLE_COLUMNS.get(axis)
+    if column is None:
+        slot = axis_slot(scope, axis)
+        for held in identity.get("slots") or ():
+            if held.get("property") == slot:
+                held["binding"] = {"state": "unbound"}
+        return identity, [choice for choice in scope.choices if choice.axis != axis]
+    identity["entities"] = {
+        role: refs for role, refs in (identity.get("entities") or {}).items() if role != column
+    }
+    return identity, [
+        choice
+        for choice in scope.choices
+        if not any(
+            isinstance(option.binding, EntitiesBinding) and option.binding.role == column
+            for option in choice.options
+        )
+    ]
+
+
+def _answered_options(spec_id: str, spec: Mapping[str, Any]) -> dict[str, str]:
+    """The option each scope choice of `spec`, the Search spec block of `spec_id`,
+    holds active, by axis (`compile_whole`). Empty where it records no choices this
+    release reads (`submission.service.part_scope`)."""
+    scope = part_scope(spec_id, spec)
+    return {choice.axis: choice.active for choice in scope.choices} if scope is not None else {}
+
+
+class _Containment(NamedTuple):
+    """The parties a part names on a donor or recipient whole's role that Search's
+    answer shows are outside the whole (`outside`), and those it does not show are
+    inside or outside (`unshown`) (`_parties_outside`)."""
+
+    outside: tuple[str, ...] = ()
+    unshown: tuple[str, ...] = ()
+
+
+def _uncontained(part_pin: str, axis: str, held: _Containment) -> tuple[str, str]:
+    """Why the whole over every `axis` of the part pinned `part_pin` does not contain
+    it, `held` its containment (`_parties_outside`), as a clause and its
+    `share_whole_underivable` cause: `part_outside_whole` where Search shows a
+    party the part names is outside, else `whole_members_unstated`."""
+    if held.outside:
+        return (
+            f"Search counts {part_pin}'s dataset over a {axis} total that does not hold "
+            f"{', '.join(held.outside)}, which the part names, so the total would not "
+            "contain it",
+            "part_outside_whole",
+        )
+    return (
+        f"Search counts {part_pin}'s dataset over a {axis} total that lists no members "
+        f"and no class of party holding {', '.join(held.unshown)}, which the part "
+        "names, so nothing shows the total holds it",
+        "whole_members_unstated",
+    )
+
+
+# Search's cause for an entry dropped because the part has no choice on its axis.
+_AXIS_ABSENT = "axis_absent"
+
+# The class of party a total holding a whole population can leave out and still
+# hold every party the part names: a residual names no party (`common.place_type`).
+_NOT_A_PARTY_CLASS = "residual"
+
+
+def _parties_outside(
+    scope: PartScope, spec: Mapping[str, Any], column: str, *, part_block: Mapping[str, Any]
+) -> _Containment:
+    """Whether the whole Search answered with, `spec`, holds each party the part
+    `scope` records names on the role `column` (`compile_whole`), `part_block`
+    the part's spec block.
+
+    A whole binding nothing on `column` counts every party its dataset holds
+    there, the part's own dataset, so it holds every party the part names.
+    One binding parties there holds those it binds, and of a total it binds,
+    the members Search lists for the group naming it on `column`
+    (`ResolvedGroup.members`, DAC countries' total). A total holding a whole
+    population (`ResolvedGroup.whole_of`) holds every party of its classes and
+    no other: the part's party where its ref shows it is of one
+    (`compiler.sources.party_class`, a country official), and not where its
+    ref shows another. It holds a party whose ref shows no class where its
+    classes are every class the side publishes (`ResolvedGroup.side_classes`),
+    residuals aside; where the side publishes another class, or Search states
+    no classes for the side but residuals, nothing here says which class that
+    party is, so it is unshown.
+    Any other party is outside where Search binds parties or lists a total's
+    members there, and unshown where the total it binds states neither its
+    members nor a whole class. Where Search's group on `column` is not
+    readable (`compiler.sources.block_group`), as one naming a class of party
+    outside `PartyClass`, every party it does not bind is unshown; a group on
+    another role is not read. The parties the part and the whole bind on
+    `column` are those their scope records bind
+    (`submission.service.bound_parties`), a choice's among them; where the
+    whole's record does not read, those its definition binds
+    (`submission.service.block_parties`).
+
+    A party of the part the whole neither binds nor lists is read through the
+    part's own group on `column` where it is that group's total (the G7's): the
+    whole holds it where it holds every member Search lists for the group, does
+    not where one is outside, and nothing shows it does where Search lists no
+    members, or the part's group there is not readable.
+    """
+    named = bound_parties(scope, column)
+    bound = block_parties(spec, column, scope=part_scope(str(spec.get("spec_id")), spec))
+    if not bound:
+        return _Containment()
+    try:
+        group = block_group(spec, column)
+    except ValueError:
+        return _Containment(unshown=tuple(party for party in named if party not in bound))
+    members = set(group.members) if group is not None else set()
+
+    def holds(party: str) -> bool | None:
+        """Whether the whole holds `party` as itself, `None` where nothing shows it."""
+        if party in bound or party in members:
+            return True
+        if group is not None and group.whole_of:
+            if (held := party_class(party)) is not None:
+                return held in group.whole_of
+            classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
+            return True if classes and classes <= set(group.whole_of) else None
+        if members or group is None or group.total not in bound:
+            return False
+        return None
+
+    try:
+        part_group = block_group(part_block, column)
+    except ValueError:
+        part_group, part_readable = None, False
+    else:
+        part_readable = True
+    outside: list[str] = []
+    unshown: list[str] = []
+    for party in named:
+        held = holds(party)
+        if held:
+            continue
+        if not part_readable:
+            # The party may be the total of a group nothing here reads.
+            held = None
+        elif part_group is not None and party == part_group.total:
+            each = [holds(member) for member in part_group.members]
+            if not each:
+                held = None
+            elif all(each):
+                continue
+            else:
+                held = False if False in each else None
+        (outside if held is False else unshown).append(party)
+    return _Containment(outside=tuple(outside), unshown=tuple(unshown))
+
+
+def _as_whole(
+    part: Mapping[str, Any],
+    provenance: Mapping[str, str],
+    posted: Iterable[ScopeEntry],
+    answered: Mapping[str, str],
+) -> dict[str, Any]:
+    """A copy of `part`, the `definite` Search part answering a whole, whose scope
+    choice on each axis of `provenance` carries the provenance given for that axis,
+    and whose dropped entries leave out each carried entry of `posted`, the entries
+    the whole was posted with, that changed nothing (`compile_whole`). `answered` is
+    the option the whole holds on each axis (`_answered_options`).
+
+    A carried entry the harness posted changed nothing where the whole holds its
+    option all the same, or where Search dropped it because the whole has no
+    choice on its axis (`axis_absent`), as a DAC2a total naming no donor has no
+    provider axis, so the user chose nothing there that failed to apply. One Search
+    dropped for a whole that counts another option, as DAC countries' total ODA
+    beside a part on bilateral ODA, stays, so the whole's reading says it did not
+    apply. The whole's caveat says what each side counts
+    (`submission.service._whole_shares`). Any other dropped entry stays."""
     copied = copy.deepcopy(dict(part))
     resolved = copied["spec"].get("resolved")
     scope = resolved.get("scope_choices") if isinstance(resolved, dict) else None
-    for choice in (scope or {}).get("choices") or ():
+    if not isinstance(scope, dict):
+        return copied
+    for choice in scope.get("choices") or ():
         if isinstance(choice, dict) and choice.get("axis") in provenance:
             choice["provenance"] = provenance[choice["axis"]]
+    carried = {
+        (entry.axis, entry.option_id, entry.origin.choice_id)
+        for entry in posted
+        if entry.provenance == "carried" and isinstance(entry.origin, ChoiceOrigin)
+    }
+    if carried and isinstance(scope.get("dropped_entries"), list):
+        scope["dropped_entries"] = [
+            dropped
+            for dropped in scope["dropped_entries"]
+            if not _changed_nothing(dropped, carried, answered)
+        ]
     return copied
+
+
+def _changed_nothing(
+    dropped: object, carried: Collection[tuple[str, str, str]], answered: Mapping[str, str]
+) -> bool:
+    """Whether `dropped`, one of Search's dropped entries, is a carried entry the
+    harness posted, `carried` keying each by axis, option and choice, that changed
+    nothing because the whole holds its option on its axis (`answered`) or has no
+    choice there (`_as_whole`)."""
+    if not isinstance(dropped, Mapping):
+        return False
+    entry = dropped.get("entry")
+    if not isinstance(entry, Mapping) or entry.get("provenance") != "carried":
+        return False
+    origin = entry.get("origin")
+    choice_id = origin.get("choice_id") if isinstance(origin, Mapping) else None
+    axis, option_id = entry.get("axis"), entry.get("option_id")
+    if (axis, option_id, choice_id) not in carried:
+        return False
+    return dropped.get("cause") == _AXIS_ABSENT or answered.get(str(axis)) == option_id
 
 
 async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
@@ -1794,11 +2076,11 @@ async def with_source_reads(
     is answered as it stands, and inputs sharing a pin and a set of options
     compile it once (`_alignment_key`).
 
-    The reads one refusal asks for run at once (`run_together`), so a
-    proposal waits for its slowest read. Their writes are made in the order
-    the refusal names them, up to the first read refused, whose refusal is
-    answered (`_held_in_order`), so the state is the one reading them one
-    after another leaves. A search the refused read's writes discarded keeps
+    The reads one refusal asks for run at once. Their writes are made in the
+    order the refusal names them, up to the first read refused, whose
+    refusal is answered as soon as it and every read before it are made,
+    and the reads after it are cancelled (`_held_in_order`), so the state is
+    the one reading them one after another leaves. A search the refused read's writes discarded keeps
     its answer for the invocation (`pin_by_search`), so the next proposal
     searches only for what was refused.
     """
@@ -1819,8 +2101,9 @@ async def with_source_reads(
             continue
         unpinned = unpinned_wanted(result)
         if unpinned:
-            searched = await run_together(pin_by_search(surface, item) for item in unpinned)
-            refused = _held_in_order(searched, state=state)
+            refused = await _held_in_order(
+                (pin_by_search(surface, item) for item in unpinned), state=state
+            )
             if refused is not None:
                 return refused
             continue
@@ -1835,21 +2118,34 @@ async def with_source_reads(
         compiles: dict[tuple[str, tuple[str, ...], str | None], Realignment] = {}
         for key, item in zip(keys, wanted, strict=True):
             compiles.setdefault(key, item)
-        compiled = await run_together(
-            compile_on_basis(surface, item, state=state) for item in compiles.values()
+        refused = await _held_in_order(
+            (compile_on_basis(surface, item, state=state) for item in compiles.values()),
+            state=state,
         )
-        refused = _held_in_order(compiled, state=state)
         if refused is not None:
             return refused
 
 
-def _held_in_order(reads: Iterable[SourceRead], *, state: SessionState) -> dict[str, object] | None:
-    """Apply each of `reads` to `state` in order, stopping at the first refused, and answer its refusal."""
-    for read in reads:
-        refused = read(state)
-        if refused is not None:
-            return refused
-    return None
+async def _held_in_order(
+    reads: Iterable[Awaitable[SourceRead]], *, state: SessionState
+) -> dict[str, object] | None:
+    """Run `reads` at once and apply each to `state` in order, answering the first refused.
+
+    Each read is applied once it and every read before it are made, so a
+    refusal is answered without waiting for the reads after it, which are
+    cancelled. A read that raises raises once every read before it is
+    applied without a refusal, and cancels the reads after it. Every read
+    takes `state` before its first wait, so none reads what another wrote.
+    """
+    tasks = [asyncio.ensure_future(read) for read in reads]
+    try:
+        for task in tasks:
+            refused = (await task)(state)
+            if refused is not None:
+                return refused
+        return None
+    finally:
+        await _cancel_and_drain(tasks)
 
 
 def _alignment_key(

@@ -654,20 +654,14 @@ _G7_MEMBERS = (("country/FRA", "France"), ("country/JPN", "Japan"))
             _G7_MEMBERS,
             None,
             (),
-            [
-                "The figure for G7 adds up its members' figures and leaves out amounts the data "
-                "allocates to no single country."
-            ],
+            ["The figure for G7 adds up its members' figures."],
             Reduction.SUM,
         ),
         (
             _G7_MEMBERS,
             None,
             (),
-            [
-                "The figure for G7 is computed from its members' figures and leaves out amounts "
-                "the data allocates to no single country."
-            ],
+            ["The figure for G7 is computed from its members' figures."],
             Reduction.MEAN,
         ),
         (
@@ -681,10 +675,7 @@ _G7_MEMBERS = (("country/FRA", "France"), ("country/JPN", "Japan"))
             _G7_MEMBERS,
             None,
             None,
-            [
-                "The figures for G7 are its members' figures, not a total the source publishes "
-                "for the group."
-            ],
+            ["The figures for G7 come from its members' figures."],
             Reduction.SUM,
         ),
     ],
@@ -704,6 +695,8 @@ async def test_a_retrieval_of_a_named_group_states_how_it_reads_the_group(
                 *(ResolvedEntity(role="origin", ref=ref, label=label) for ref, label in donors),
                 ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
             ),
+            # Search names no residual for the G7, which has no published total
+            # its members leave anything out of.
             "groups": (ResolvedGroup(role="origin", label="G7", total=total),),
         }
     )
@@ -1006,22 +999,28 @@ def _finding(code: EvidenceIssueCode, required: str) -> EvidenceIssue:
     ("code", "window", "stated"),
     [
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             Period(start=2015, end=2024),
             ["Uganda has no data from 2015 to 2024 and was left out."],
             id="span",
         ),
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             Period(start=2024, end=2024),
             ["Uganda has no data in 2024 and was left out."],
             id="one-year",
         ),
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             None,
             ["Uganda has no data in the years retrieved and was left out."],
             id="no-window",
+        ),
+        pytest.param(
+            EvidenceIssueCode.ENTITY_MISSING,
+            Period(start=2015, end=2024),
+            ["Uganda has no data from 2015 to 2024 and was left out."],
+            id="stored-entity-missing-warning",
         ),
         pytest.param(EvidenceIssueCode.WINDOW_SHORT, None, [], id="other-gap"),
     ],
@@ -1147,9 +1146,9 @@ async def test_a_pooled_share_states_the_year_a_recipients_series_ends(
             [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D")],
             [
                 "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
-                "and 1 other series ends before 2024."
+                "and D's series ends in 2020."
             ],
-            id="one-counted",
+            id="a-lone-fourth-is-named-not-counted",
         ),
         pytest.param(
             [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D", "E")],

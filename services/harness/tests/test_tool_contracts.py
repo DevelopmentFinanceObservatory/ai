@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+from compiler.sources import block_groups, wire_groups
 from data_mcp.digest import _dropped_cause_words
 from data_mcp.search_tool import SearchContext
 from harness.scope_choices import REASON_COPY, PartScope, ScopeEntry, ScopeReasonCode
 from harness.tool_contracts import graph_envelope, reading_facts
+from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
 
 from .basis_alignment import dac1_with_contributions
@@ -628,17 +630,70 @@ def test_a_part_summary_offers_a_count_only_when_search_lists_a_basis_sibling(
     assert ("counted_as" in summary) is bool(offered)
 
 
-def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None:
+@pytest.mark.parametrize(
+    ("group", "stored", "unreadable"),
+    [
+        # A class of party this release does not know: the set is not readable, but
+        # what a resubmit posts of it is.
+        pytest.param(
+            {"ref": None, "label": "DAC", "total": "DAC", "whole_of": ["party"]},
+            [{"role": "origin", "label": "DAC", "ref": None}],
+            False,
+            id="unknown-class",
+        ),
+        # The same class beside a registry id that is not text: what a resubmit
+        # posts of the set is not readable either.
+        pytest.param(
+            {"label": "DAC", "total": "DAC", "whole_of": ["party"], "group_id": 7},
+            [],
+            True,
+            id="group-id-not-text",
+        ),
+        # No label: the set names nothing, so the reading stores none and reads.
+        pytest.param({"ref": None, "total": "DAC"}, [], False, id="no-label"),
+    ],
+)
+def test_a_part_summary_with_an_unreadable_set_says_no_reading(
+    group: dict[str, Any], stored: list[dict[str, Any]], unreadable: bool
+) -> None:
+    """A set that is not readable, as one naming a class of party this release does
+    not know: the summary says no reading of it. The stored reading holds what a
+    resubmit posts of each set, and where that is not readable it holds no sets
+    and says they could not be read."""
     part = _definite("spec_a")
-    part["spec"]["resolved"] |= {
-        "entity_groups": {
-            "origin": {"ref": None, "label": "DAC", "total": "DAC", "whole_of": ["party"]}
-        },
-    }
+    part["spec"]["resolved"] |= {"entity_groups": {"origin": group}}
 
     (summary,) = graph_envelope({"parts": [part]})["part_digests"]
 
     assert "group_readings" not in summary
+    facts = reading_facts(part["spec"])
+    assert (facts["entity_groups"], facts["entity_groups_unreadable"]) == (stored, unreadable)
+
+
+def test_a_stored_reading_keeps_a_set_without_its_members() -> None:
+    """A resubmit posts a set by label, ref and group id, so the stored set holds
+    those alone, no member list or total, and posts the same sets as the block it
+    was read from."""
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "entity_groups": {
+            "origin": {
+                "ref": None,
+                "label": "DAC countries",
+                "total": "DAC",
+                "members": ["country/FRA", "country/DEU"],
+            }
+        },
+    }
+    block_read = block_groups(part["spec"])
+
+    stored = reading_facts(part["spec"])["entity_groups"]
+
+    assert block_read[0].members == ("country/FRA", "country/DEU")
+    assert stored == [{"role": "origin", "label": "DAC countries", "ref": None}]
+    assert wire_groups([ResolvedGroup.model_validate(group) for group in stored]) == wire_groups(
+        block_read
+    )
 
 
 @pytest.mark.parametrize(

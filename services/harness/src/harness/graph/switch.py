@@ -9,12 +9,11 @@ It posts the scope's base identity with its entries and the switch
 `resolve_definition` (`translator.discovery.resolve_definition`), which
 registers the identity they compile to. That answer is the switched pin.
 The plan pins it, and its reading and pin source state the dataset over
-the years the question asked for. Where the plan reads the pin over one
-window of its own, the same scope over that window is posted beside it
-(`_windowed_post`), the dataset admission copies the pin to
-(`submission.service._window_pins`), and Search's answer is held as the
-copy's (`translator.discovery.hold_resolved`), so translating the revised
-plan does not post the copy again. The turn keeps Search's answers
+the years the question asked for. Admission finds it on record
+(`planner.plan.definitions_on_record`), so where the plan reads it over a
+window of its own, admission copies it over that window
+(`submission.service._window_pins`) and the translation resolves the copy.
+The turn keeps Search's answers
 (`translator.discovery.resolving_once`), so a switch repeating one the
 turn made posts nothing. The
 plan is then revised by the planner seam with no model call
@@ -62,9 +61,9 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import block_groups
+from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
-from data_mcp.definition_writes import windowed_identity
+from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
 from planner.agent import run_together
 from planner.plan import (
@@ -72,7 +71,6 @@ from planner.plan import (
     Decision,
     PinSource,
     SessionState,
-    WindowedPin,
     authored,
     definitions_on_record,
     earlier_block,
@@ -83,20 +81,15 @@ from planner.plan import (
     plan_revision,
     repinned,
     save_pin_sources,
-    split_of,
-    windowed_pin,
     windowed_pins,
 )
 from planner.plan import Plan as PlannerPlan
 from planner.tool_results import ProblemCode
 from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
-from submission.service import requirement_window
 from translator.discovery import (
     RESOLVED_STATE_PREFIX,
     DefinitionNotResolvedError,
-    hold_resolved,
-    load_log,
     resolve_definition,
     resolving_once,
 )
@@ -355,39 +348,28 @@ async def _switched_plan(
         )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
-    windows = _windows(plan, to_origin=to_origin)
     posts = [
         (
             pin,
             reading,
             scope,
-            _posted_scope(scope, choice=choice, option_id=option_id),
-            _groups(reading, specs.get(pin) or _source_block(sources.get(pin), pin)),
+            switch_entries(scope, choice=choice, option_id=option_id),
+            _groups(reading, specs.get(pin) or _source_block(sources.get(pin), pin), pin=pin),
         )
         for pin, reading, scope, choice in targets
     ]
-    answered = await run_together(
-        [
-            *(
-                _resubmit(
-                    surface,
-                    pin=pin,
-                    reading=reading,
-                    scope=scope,
-                    posted=posted,
-                    groups=groups,
-                    label=label,
-                )
-                for pin, reading, scope, posted, groups in posts
-            ),
-            *(
-                _windowed_post(surface, posted, window=windows.get(pin), groups=groups)
-                for pin, _, _, posted, groups in posts
-            ),
-        ]
+    switched = await run_together(
+        _resubmit(
+            surface,
+            pin=pin,
+            reading=reading,
+            scope=scope,
+            entries=entries,
+            groups=groups,
+            label=label,
+        )
+        for pin, reading, scope, entries, groups in posts
     )
-    switched = cast(list[_Switched], answered[: len(posts)])
-    windowed = cast(list[Mapping[str, Any] | None], answered[len(posts) :])
     moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
     save_pin_sources(
@@ -416,16 +398,9 @@ async def _switched_plan(
         and (origin := to_origin.get(requirement.source_spec_id or "", requirement.source_spec_id))
         in moved_to
     ]
-    # Admission and the translation find each switched dataset on record, so
-    # admission copies it over the plan's years and the translation is served
-    # Search's answer for that copy.
+    # Admission finds each switched dataset on record, so it copies the dataset
+    # over the plan's years.
     with definitions_on_record(on_record):
-        for copy, part in _answered_copies(
-            state, switched, windowed, windows=[windows.get(pin) for pin, *_ in posts]
-        ):
-            hold_resolved(
-                state, spec_id=copy.spec_id, identity=copy.identity, groups=copy.groups, part=part
-            )
         revised = await planner.revise(
             ctx=ctx,
             prior_plan=plan.model_dump(mode="json"),
@@ -563,116 +538,41 @@ def _source_block(source: PinSource | None, pin: str) -> Mapping[str, Any] | Non
     return source.spec_block(pin) if source is not None else None
 
 
-def _groups(reading: SearchReading, block: Mapping[str, Any] | None) -> tuple[ResolvedGroup, ...]:
-    """The entity groups a switch of `reading` posts: those it was resolved with
-    (`SearchReading.entity_groups`), or `block`'s for a reading stored without them."""
-    return tuple(reading.entity_groups or (block_groups(block) if block is not None else ()))
+def _groups(
+    reading: SearchReading, block: Mapping[str, Any] | None, *, pin: str
+) -> tuple[ResolvedGroup, ...]:
+    """The entity groups a switch of `reading`, pinned as `pin`, posts beside the part,
+    as every resubmit posts them (`compiler.sources.wire_groups`), so Search names
+    them again.
 
+    They are `block`'s groups, read for what the resubmit posts alone
+    (`compiler.sources.readable_wire_groups`), where `block` is at hand and names
+    sets that read, else the groups `reading` was resolved with
+    (`SearchReading.entity_groups`) where those read, else none where `block`
+    reads and names none.
 
-def _posted_scope(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> PartScope:
-    """The scope a switch of `choice` to `option_id` asks Search for: `scope`
-    with the switch's entries (`switch_entries`) and `option_id` active on the
-    choice's axis."""
-    return scope.model_copy(
-        update={
-            "entries": tuple(switch_entries(scope, choice=choice, option_id=option_id)),
-            "choices": tuple(
-                held.model_copy(update={"active": option_id}) if held.axis == choice.axis else held
-                for held in scope.choices
-            ),
-        }
+    Raises:
+        SwitchFailedError: If neither reads: what `block`'s groups post is not
+            readable or there is no `block`, and `reading`'s were not readable when
+            it was stored (`SearchReading.entity_groups_unreadable`) or, beside a
+            block naming sets, it holds none, since the switch would post the part
+            without them.
+    """
+    groups = readable_wire_groups(block) if block is not None else None
+    # A block naming no sets says nothing of the reading's, so readable stored sets
+    # stand. A block whose sets do not read falls back only to stored sets that
+    # do: an empty stored tuple beside it would post the part without them.
+    stored_stands = not reading.entity_groups_unreadable and (
+        groups is not None or block is None or bool(reading.entity_groups)
     )
-
-
-def _windows(plan: PlannerPlan, *, to_origin: Mapping[str, str]) -> dict[str, dict[str, object]]:
-    """The window each pin of `plan` is retrieved over, by the pin Search first answered.
-
-    A pin that every dataset requirement pinning it, or a windowed copy of it
-    (`to_origin`), reads over one window has that window
-    (`submission.service.requirement_window`), the one admission would copy
-    the pin to. A pin read over several has none, and a switch of it posts
-    the base identity as Search answered it.
-    """
-    whole_history = split_of(plan).whole_history
-    read: dict[str, list[dict[str, object]]] = {}
-    for requirement in plan.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
-            continue
-        pin = to_origin.get(requirement.source_spec_id, requirement.source_spec_id)
-        window = requirement_window(requirement, whole_history=whole_history)
-        if window not in read.setdefault(pin, []):
-            read[pin].append(window)
-    return {pin: windows[0] for pin, windows in read.items() if len(windows) == 1}
-
-
-async def _windowed_post(
-    surface: ToolSurface,
-    posted: PartScope,
-    *,
-    window: Mapping[str, Any] | None,
-    groups: Sequence[ResolvedGroup],
-) -> Mapping[str, Any] | None:
-    """Search's part for `posted` with its base identity over `window`
-    (`data_mcp.definition_writes.windowed_identity`), posted beside `posted`.
-
-    `None`, and nothing posted, when no window is given or the base is over it
-    already. The post is optional, since admission copies the pin over the
-    window whatever it answered (`_answered_copies`), so any failure is logged
-    and answers `None`, and none cancels the switch's own posts (`run_together`).
-    """
-    base = posted.base
-    if window is None or base.identity.get("requested_window") == window:
-        return None
-    spec_id, identity = windowed_identity(base.identity, window)
-    try:
-        return await resolve_definition(
-            surface,
-            spec_id=spec_id,
-            identity=identity,
-            groups=groups,
-            scope_entries=[
-                entry.model_dump(mode="json", exclude_none=True) for entry in posted.entries
-            ],
+    if not groups and stored_stands:
+        groups = reading.entity_groups
+    if groups is None:
+        logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
+        raise SwitchFailedError(
+            "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
         )
-    except DefinitionNotResolvedError as exc:
-        logger.info("plan switch over the plan's window not answered: %s: %s", exc.code, exc)
-    except Exception:
-        logger.warning("plan switch over the plan's window failed", exc_info=True)
-    return None
-
-
-def _answered_copies(
-    state: SessionState,
-    switched: Sequence[_Switched],
-    windowed: Sequence[Mapping[str, Any] | None],
-    *,
-    windows: Sequence[Mapping[str, Any] | None],
-) -> list[tuple[WindowedPin, Mapping[str, Any]]]:
-    """Each copy admission makes of a switched pin (`submission.service._window_pins`)
-    that Search already answered, with that answer.
-
-    The copy is the pin's identity on record over its window
-    (`planner.plan.windowed_pin`), looked up as admission looks up a closed
-    requirement's pin, so a copy made here is one admission makes. Search's
-    answer for the scope posted over the window (`_windowed_post`) is the
-    copy's when it names the copy's spec_id, which hashes the identity.
-    """
-    shown = pin_sources(state)
-    log = load_log(state)
-    copies: list[tuple[WindowedPin, Mapping[str, Any]]] = []
-    for item, part, window in zip(switched, windowed, windows, strict=True):
-        if part is None or window is None:
-            continue
-        recorded = identity_on_record(
-            item.spec_id, shown=shown, end_open=False, definition_lookup=log.recorded_definition
-        )
-        if recorded is None:
-            continue
-        copy = windowed_pin(item.spec_id, recorded, window)
-        spec = part.get("spec") if part.get("status") == "definite" else None
-        if isinstance(spec, Mapping) and spec.get("spec_id") == copy.spec_id:
-            copies.append((copy, part))
-    return copies
+    return tuple(groups)
 
 
 async def _resubmit(
@@ -681,13 +581,13 @@ async def _resubmit(
     pin: str,
     reading: SearchReading,
     scope: PartScope,
-    posted: PartScope,
+    entries: Sequence[ScopeEntry],
     groups: Sequence[ResolvedGroup],
     label: str,
 ) -> _Switched:
-    """Post `posted`'s base identity with its entries through data-mcp's `resolve_definition`.
+    """Post `scope`'s base identity with `entries` through data-mcp's `resolve_definition`.
 
-    `posted` is `scope`, the reading's, switched (`_posted_scope`). The same
+    `scope` is the reading's, and `entries` the switch's (`switch_entries`). The same
     resubmit a compile on another basis posts
     (`planner.agent.compile_on_basis`), through
     `translator.discovery.resolve_definition`: the part's entity groups
@@ -701,12 +601,10 @@ async def _resubmit(
     try:
         part = await resolve_definition(
             surface,
-            spec_id=posted.base.spec_id,
-            identity=posted.base.identity,
+            spec_id=scope.base.spec_id,
+            identity=scope.base.identity,
             groups=groups,
-            scope_entries=[
-                entry.model_dump(mode="json", exclude_none=True) for entry in posted.entries
-            ],
+            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
         )
     except DefinitionNotResolvedError as exc:
         logger.info("plan switch not compiled: pin=%s code=%s: %s", pin, exc.code, exc)
@@ -873,10 +771,11 @@ async def apply_stored_choice(
             pin=pin,
             reading=reading,
             scope=reading.scope,
-            posted=_posted_scope(reading.scope, choice=choice, option_id=option_id),
+            entries=switch_entries(reading.scope, choice=choice, option_id=option_id),
             groups=_groups(
                 reading,
                 (ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
+                pin=pin,
             ),
             label=label,
         )

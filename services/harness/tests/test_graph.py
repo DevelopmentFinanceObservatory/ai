@@ -25,7 +25,6 @@ import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
 from compiler.evidence import check_evidence, evidence_from_source
-from compiler.sources import block_groups, wire_groups
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -38,11 +37,13 @@ from compiler.surface import (
 from data_mcp.definition_store import InMemoryDefinitionStore
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from executor.classify import ToolFailure
 from executor.completion import FramePublished
 from executor.ledger import InMemoryRunLedger
 from executor.outcomes import (
+    ISSUE_REMEDIES,
     Accepted,
     EvidenceRecord,
     MethodChoiceNeeded,
@@ -2751,6 +2752,36 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "message": "the source states no provenance",
     }
 
+    # A stop with every donor named missing. The failed step carries what the
+    # user can do about it, since the code alone says only that the names could
+    # not be resolved.
+    refused_names_missing = Refused(
+        revision="rev1",
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail="requirement 'donor_oda' is not met by what 'get_data' returned",
+        step_id="donor_oda",
+        requirement_id="donor_oda",
+        issues=tuple(
+            EvidenceIssue(
+                code=EvidenceIssueCode.ENTITY_MISSING,
+                severity=Severity.ERROR,
+                requirement_id="donor_oda",
+                detail=f"the source resolves no entity named {name!r}",
+                required=name,
+            )
+            for name in ("United States", "Germany")
+        ),
+    )
+    names_missing = _failed_step(refused_names_missing)
+    assert names_missing.pop("remedy") == ISSUE_REMEDIES[EvidenceIssueCode.ENTITY_MISSING]
+    assert names_missing == {
+        "step_id": "donor_oda",
+        "tool": None,
+        "code": "entity_missing",
+        "message": "the source resolves no entity named 'United States'; the source "
+        "resolves no entity named 'Germany'",
+    }
+
 
 _GET_DATA = ToolId(server="data-mcp", name="get_data")
 
@@ -3169,21 +3200,6 @@ def _hashed_scope() -> dict[str, Any]:
 _PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
 
 
-def _posted(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The spec_id and identity a plan card switch of `scope` posts beside the
-    part, which are its base identity over the window the plan reads
-    (`_PLAN_WINDOW`) in place of the whole span its search answered."""
-    spec_id, identity = windowed_identity(scope["base"]["identity"], _PLAN_WINDOW)
-    return spec_id, dict(identity)
-
-
-def _switch_posts(search: SearchStub, scope: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    """The entries a plan card switch of `scope` posted: the part's, over the years
-    its search answered, then the same scope over the years the plan reads (`_posted`)."""
-    entries = [entry for body in search.posted for entry in body["input"]["entries"]]
-    return tuple(sorted(entries, key=lambda entry: entry["variable_text"] != scope["id"]))
-
-
 def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """The spec_id and envelope Search answers for `scope` switched to CRS
     120 and 130: grant equivalents become the basis, since gross is out of
@@ -3346,12 +3362,15 @@ async def _switch_runner(
     option_id: str = "sector:120+130",
     aligned: bool = False,
     entity_groups: dict[str, Any] | None = None,
+    stored_unreadable: bool = False,
+    stored_groups: list[dict[str, Any]] | None = None,
     seam_type: type[_RevisingSeam] = _RevisingSeam,
     earlier_whole: AlignedPin | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
-    `aligned`) beside its block naming `entity_groups` when given, held as the
+    `aligned`, as one whose sets were not readable when `stored_unreadable`, and
+    as one resolved with `stored_groups` when given) beside its block naming `entity_groups` when given, held as the
     whole `earlier_whole` an earlier plan compiled from its part when given,
     then answered with a switch to `option_id`, by default its sector to CRS
     120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
@@ -3377,6 +3396,8 @@ async def _switch_runner(
             "spec_id": pin,
             "scope": scope,
             "planner_axes": ["measure_basis"] if aligned else [],
+            "entity_groups": stored_groups or [],
+            "entity_groups_unreadable": stored_unreadable,
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
@@ -3439,12 +3460,9 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
     )
 
     assert len(seam.calls) == 1  # the first draft; the switch drafts nothing
-    # The part over the years its search answered, and beside it the same scope
-    # over the years the plan reads.
-    entry, over_window = _switch_posts(search, scope)
+    (posted,) = search.posted
+    (entry,) = posted["input"]["entries"]
     assert (entry["variable_text"], entry["identity"]) == (scope["id"], scope["base"]["identity"])
-    assert (over_window["variable_text"], over_window["identity"]) == _posted(scope)
-    assert over_window["scope_entries"] == entry["scope_entries"]
     assert entry["scope_entries"] == [
         scope["entries"][1],
         {
@@ -3548,32 +3566,110 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
         earlier_whole=whole,
     )
 
-    assert len(search.posted) == 2  # the part, and the part over the plan's years
+    assert len(search.posted) == 1
     assert len(seam.revisions) == 1
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered
     assert offered["revision"] == plan_revision(revised)
 
 
+_AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
+# Africa as a set naming a class of party outside `common.place_type.PartyClass`: the
+# set does not read, but what a resubmit posts of it does.
+_AFRICA_UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
+# Africa as a set stating a registry id that is not text, so what a resubmit posts of
+# it does not read.
+_AFRICA_UNPOSTABLE = {"label": "Africa", "ref": "africa", "group_id": 7}
+
+
+_AFRICA_POSTED = {"destination": {"label": "Africa", "ref": "africa"}}
+
+
+@pytest.mark.parametrize(
+    ("group", "stored_unreadable", "stored_groups", "posted"),
+    [
+        pytest.param(_AFRICA_TOTAL, False, None, _AFRICA_POSTED, id="block-reads-stored-readable"),
+        pytest.param(_AFRICA_TOTAL, True, None, _AFRICA_POSTED, id="block-reads-stored-unreadable"),
+        pytest.param(
+            _AFRICA_UNKNOWN_CLASS,
+            True,
+            None,
+            _AFRICA_POSTED,
+            id="block-of-an-unknown-class-stored-unreadable",
+        ),
+        pytest.param(
+            _AFRICA_UNPOSTABLE,
+            False,
+            [{"role": "destination", **_AFRICA_TOTAL}],
+            _AFRICA_POSTED,
+            id="block-unreadable-stored-readable",
+        ),
+        # The block names no sets and the reading was stored with the G7 on its
+        # donors: the stored set is posted, since the block's none says nothing of it.
+        pytest.param(
+            None,
+            False,
+            [{"role": "origin", "label": "G7"}],
+            {"origin": {"label": "G7"}},
+            id="block-names-none-stored-readable",
+        ),
+    ],
+)
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
+    group: dict[str, Any] | None,
+    stored_unreadable: bool,
+    stored_groups: list[dict[str, Any]] | None,
+    posted: dict[str, Any],
 ) -> None:
     """The part's block names Africa as the set its recipients were asked for,
     with the total party Search states for it. The switch posts the set as a
     compile on another basis does (`compiler.sources.wire_groups`): its label
-    and ref, and no total, which Search recomputes."""
+    and ref, and no total, which Search recomputes. It reads the block again,
+    so a reading stored when an earlier release could not read the set switches
+    once this release can. A set naming a class of party this release does not
+    know is posted by its label and ref, all the resubmit sends of it. Where what
+    the block's set posts does not read, as a set stating a registry id that is
+    not text, or where the block names no sets, it posts the
+    readable sets the reading was stored with."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
-    await _switch_runner(real_schemas, search, entity_groups=groups)
-
-    entry, _ = _switch_posts(search, scope)
-    assert entry["entity_groups"] == wire_groups(
-        block_groups({"resolved": {"entity_groups": groups}})
+    await _switch_runner(
+        real_schemas,
+        search,
+        entity_groups={"destination": group} if group is not None else {},
+        stored_unreadable=stored_unreadable,
+        stored_groups=stored_groups,
     )
-    assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
+
+    (sent,) = search.posted
+    (entry,) = sent["input"]["entries"]
+    assert entry.get("entity_groups") == posted
+
+
+async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The part's block names a set on its recipients with a registry id that is not
+    text, so what the switch would post of it cannot be read. Posting the part without it would let
+    Search count another population, so the switch posts nothing and offers the
+    plan unchanged under `switch_failed`, which asking again cannot get past."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    runner, _, plan, _, events = await _switch_runner(
+        real_schemas, search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
+    )
+
+    assert search.posted == []
+    offered = _output_of(events, "switch")
+    assert offered["revision"] == plan_revision(plan)
+    failed = offered["switch_failed"]
+    assert (failed["code"], failed["retryable"]) == (SCOPE_CHOICE_NOT_APPLIED, False)
+    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
 
 
 @pytest.mark.parametrize(
@@ -3901,8 +3997,10 @@ _INCLUSIVE_PROVENANCE = {
 class _RecordedFixtures(FixtureSurface):
     """A `FixtureSurface` recording each call's tool and arguments in `calls`."""
 
-    def __init__(self, *, schemas: list[ToolSchema]) -> None:
-        super().__init__(schemas=schemas)
+    def __init__(
+        self, *, schemas: list[ToolSchema], responses: Mapping[str, ToolCallResult]
+    ) -> None:
+        super().__init__(schemas=schemas, responses=responses)
         self.calls: list[tuple[str, Mapping[str, object]]] = []
 
     @override
@@ -3916,11 +4014,18 @@ class _RecordedFixtures(FixtureSurface):
 class _TranslatingSeam(_Seam):
     """A `PlannerModel` drafting `plans` and revising through the real
     `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
-    translation's discovery and the compile, over `schemas`, with no model."""
+    translation's discovery and the compile, over `schemas`, answering
+    `responses`, with no model."""
 
-    def __init__(self, plans: list[dict[str, Any]], *, schemas: list[ToolSchema]) -> None:
+    def __init__(
+        self,
+        plans: list[dict[str, Any]],
+        *,
+        schemas: list[ToolSchema],
+        responses: Mapping[str, ToolCallResult] | None = None,
+    ) -> None:
         super().__init__(plans)
-        self.surface = _RecordedFixtures(schemas=schemas)
+        self.surface = _RecordedFixtures(schemas=schemas, responses=responses or {})
         self._seam = PlannerSeam(settings=Settings(), surface=self.surface)
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
@@ -3944,8 +4049,8 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
     numerator's source, and the user switched it to bilateral plus imputed
     multilateral, a dataset Search names otherwise and holds from 1995. The
     switch posts the identity over every year its search answered, which the
-    plan pins, and beside it the same scope over the years the plan reads,
-    Search's answer for the copy admission makes of the pin."""
+    plan pins. Admission copies the pin over the years the plan reads, and the
+    translation resolves the copy, which Search answers over those years."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -3974,9 +4079,6 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
             ],
         }
     )
-    seam = _TranslatingSeam(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
-    )
     identity = block["definition"]["identity"]
     copy_pin, copied = windowed_identity(identity, _PLAN_WINDOW)
     over_window = copy.deepcopy(envelope)
@@ -3984,7 +4086,16 @@ async def _switch_off_a_stated_source(real_schemas: list[ToolSchema]) -> _Switch
     copied_block["spec_id"] = copied_block["definition"]["spec_id"] = copy_pin
     copied_block["definition"]["identity"] = copied
     copied_block["resolved"]["coverage"]["window"]["start_year"] = 2015
-    search = SearchStub(answer={scope["id"]: envelope, _posted(scope)[0]: over_window})
+    seam = _TranslatingSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}],
+        schemas=real_schemas,
+        responses={
+            "resolve_definition": ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: over_window}
+            )
+        },
+    )
+    search = SearchStub(answer={scope["id"]: envelope})
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
         planner=seam,
@@ -4014,13 +4125,13 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     """A switch off a stated source (`_switch_off_a_stated_source`) drops the
     stated source with the pin it left, so the translation takes the new pin
     with no search, the plan compiles, and its run accepts what the new
-    dataset returns. The translation is served Search's answer for the copy
-    over the plan's years, which the switch posted, and asks Search nothing."""
+    dataset returns. The translation resolves the copy admission made over the
+    plan's years, and searches nothing."""
     runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(real_schemas)
 
-    # The switch's post over the plan's years answered the copy admission made,
-    # so the translation takes it as the source and asks Search nothing.
-    assert seam.surface.calls == []
+    assert [(tool, arguments.get("spec_id")) for tool, arguments in seam.surface.calls] == [
+        ("resolve_definition", copy_pin)
+    ]
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered, offered.get("switch_failed")
     revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
@@ -4204,20 +4315,47 @@ async def test_a_chip_compiles_through_search_fetches_what_it_compiled_and_never
     assert [step["result"]["outcome"] for step in executor.steps] == ["ok"]
 
 
-async def test_a_chip_posts_the_groups_its_reading_was_resolved_with() -> None:
+@pytest.mark.parametrize(
+    "group", [_AFRICA_TOTAL, _AFRICA_UNKNOWN_CLASS], ids=["total", "unknown-class"]
+)
+async def test_a_chip_posts_the_groups_its_reading_was_resolved_with(
+    group: dict[str, Any],
+) -> None:
     """The answer's reading came from a search whose block named Africa as the
     set its recipients were asked for, and no plan kept that block. The chip's
-    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`)."""
+    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`),
+    one naming a class of party this release does not know too, since the reading
+    stored what the resubmit posts of it."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
-    await _chip_turn(search, entity_groups=groups)
+    await _chip_turn(search, entity_groups={"destination": group})
 
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
     assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
+
+
+async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> None:
+    """The answer's reading came from a block naming a set on its recipients with a
+    registry id that is not text, and no block of it is kept, so nothing names the set. Posting the part
+    without it would let Search count another population, so the chip posts nothing
+    and its step fails as a plan card's switch over such a block does."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    runner, _, executor, _ = await _chip_turn(
+        search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
+    )
+
+    assert search.posted == []
+    (step,) = executor.steps
+    refusal = step["result"]["refusal"]
+    assert (refusal["code"], refusal["retry_mode"]) == (SCOPE_CHOICE_NOT_APPLIED, "do_not_retry")
+    assert not any(c["tool"] == "get_data" for c in executor.calls)
+    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
 
 
 async def test_a_chip_offered_on_another_reading_is_refused_stale_and_compiles_nothing() -> None:

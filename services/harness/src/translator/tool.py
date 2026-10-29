@@ -150,8 +150,18 @@ ANCHOR_READS_STATE_KEY = "translator:anchor_reads"
 
 
 def held_anchor_reads(state: SessionState) -> tuple[HeldAnchor, ...]:
-    """The groups `save_anchor_reads` kept, less any stored in a shape this release rejects."""
+    """The groups `save_anchor_reads` kept, less any stored in a shape this release rejects.
+
+    A value that is no mapping of groups holds none, and the omission is logged.
+    """
     stored = state.get(ANCHOR_READS_STATE_KEY) or {}
+    if not isinstance(stored, Mapping):
+        logger.warning(
+            "%s: left out a stored value that is no mapping, a %s",
+            ANCHOR_READS_STATE_KEY,
+            type(stored).__name__,
+        )
+        return ()
     held: list[HeldAnchor] = []
     errors: list[ValidationError] = []
     for value in stored.values():
@@ -830,13 +840,11 @@ async def read_within_entry(
     plan: Plan,
     *,
     surface: ToolSurface,
-    schemas: Mapping[str, ToolSchema] | None = None,
     held: Sequence[HeldAnchor] = (),
 ) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None:
     """`executor.run.read_anchors` over `workflow`, or `None` when the planner entry has no time for it.
 
-    `schemas` are the tools `workflow` was compiled against and `held` the
-    groups an earlier read resolved, both as `read_anchors` takes them.
+    `held` are the groups an earlier read resolved, as `read_anchors` takes them.
     Inside a planner entry the read may take the time the entry has left
     (`planner.plan.discovery_time_left`). A read that time cuts short, or
     one there is no time to start, is logged and recorded on the trace as
@@ -855,7 +863,6 @@ async def read_within_entry(
                         r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
                     ],
                     surface=surface,
-                    schemas=schemas,
                     held=held,
                 )
         except TimeoutError:
@@ -929,7 +936,6 @@ def build_translator_core(
         result: CompileResult,
         *,
         compiled: Callable[[Plan, Translation], CompileResult],
-        schemas: Mapping[str, ToolSchema],
         tool_context: ToolContext,
     ) -> tuple[Plan, Translation, CompileResult] | dict[str, object]:
         """`plan`, `translation` and `result`, its compiled workflow, with each group's rolling years stated from the newest year the data holds.
@@ -948,8 +954,9 @@ def build_translator_core(
         restatement a plan rule refuses, or one that does not compile,
         answers `_not_compiled` with `ROLLING_ANCHOR_BEHIND` issues.
 
-        The read takes `schemas`, the surface `result` was compiled against,
-        rather than listing it again. A group whose retrievals and
+        The read lists the surface itself and refuses tools changed since
+        `result` was compiled (`executor.run._Run._surface_as_compiled`). A
+        group whose retrievals and
         requirements are those of a group the session's previous read
         resolved stands on that read (`held_anchor_reads`), so a revision
         that leaves a rolling root as it was reads it once. The run reads it
@@ -963,7 +970,6 @@ def build_translator_core(
             workflow,
             plan,
             surface=surface,
-            schemas=schemas,
             held=held_anchor_reads(tool_context.state),
         )
         if isinstance(answered, tuple):
@@ -1092,7 +1098,6 @@ def build_translator_core(
             translation,
             result,
             compiled=compiled,
-            schemas=by_name,
             tool_context=tool_context,
         )
         if isinstance(stated, dict):
@@ -1409,9 +1414,11 @@ def build_translate(
         (`translator.discovery.name_pinned_groups`). Each identity is
         resolved at most once in the turn
         (`translator.discovery.resolving_once`), so a switch or an amendment
-        that leaves a pin as it was asks Search nothing for it. A Search
-        outage one identity meets is kept for the rest of the translation, so
-        the group rewrite and discovery ask for it once.
+        that leaves a pin as it was asks Search nothing for it. A retryable
+        refusal Search answers one identity with is kept for the rest of the
+        translation, so the group rewrite and discovery ask for it once. A
+        raised failure (a timeout, a transport error,
+        `ToolSurfaceUnavailableError`) is kept for nothing and is asked again.
 
         Returns:
             `{"outcome": "ok"}` once the plan compiled, with `restated` when

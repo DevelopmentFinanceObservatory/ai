@@ -494,6 +494,30 @@ def test_a_plan_that_ran_is_read_from_the_execute_nodes_result_through_the_hand_
     ]
 
 
+def test_thinking_leaves_the_reading_line_running_until_the_answer_text():
+    """Studio hides thought text, so a thought chunk, streamed or in a
+    finished call, leaves the line the model reads under running. The
+    answer's first text completes it."""
+    translator = _translator()
+    call = types.FunctionCall(id="call_1", name="make_charts", args={"charts": [{}]})
+    response = types.FunctionResponse(
+        id="call_1", name="make_charts", response={"charts": [{"title": "A"}]}
+    )
+    thought = types.Part(text="**Weighing the charts**", thought=True)
+
+    thinking = _frames(
+        translator,
+        _event(types.Part(function_call=call)),
+        _event(types.Part(function_response=response)),
+        _event(thought, partial=True),
+        _event(thought),
+    )
+    answering = _frames(translator, _event(types.Part(text="Here it is."), partial=True))
+
+    assert _steps(thinking)[-1] == ("Going over the charts", StepStatus.RUNNING)
+    assert _steps(answering) == [("Going over the charts", StepStatus.COMPLETE)]
+
+
 def test_a_plan_sent_back_for_a_replan_opens_no_reading_line():
     executed = Event(
         author="dfo_analyst_graph",

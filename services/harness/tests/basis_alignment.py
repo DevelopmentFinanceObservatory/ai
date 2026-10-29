@@ -149,6 +149,12 @@ _PROVIDER_LABELS = {
     "provider:bilateral": "bilateral aid only",
     "provider:inclusive": "bilateral plus imputed multilateral aid",
 }
+# The labels of the scopes a published DAC1 total holds, offered beside
+# `_PROVIDER_LABELS` on a block holding one active.
+_PUBLISHED_PROVIDER_LABELS = {
+    "provider:contributions": "bilateral plus core contributions to multilaterals",
+    "provider:multilateral": "core contributions to multilaterals",
+}
 
 
 def provider_block(
@@ -162,7 +168,12 @@ def provider_block(
 ) -> dict[str, Any]:
     """`basis_block` counted gross by default as `basis`, carrying a provider
     choice counted as `active` by `provenance`, its bilateral option `bilateral`,
-    as dfo-apis writes the provider axis (`ProviderBinding`)."""
+    as dfo-apis writes the provider axis (`ProviderBinding`). It offers the
+    bilateral and inclusive scopes, and `active` beside them where it is a
+    published total's (`_PUBLISHED_PROVIDER_LABELS`)."""
+    labels = {**_PROVIDER_LABELS}
+    if active in _PUBLISHED_PROVIDER_LABELS:
+        labels[active] = _PUBLISHED_PROVIDER_LABELS[active]
     block = basis_block(spec_id, narrow=narrow, active=basis)
     scope = block["resolved"]["scope_choices"]
     scope["choices"].append(
@@ -183,7 +194,7 @@ def provider_block(
                         else {"status": "available", "detail": {}}
                     ),
                 }
-                for option_id, label in _PROVIDER_LABELS.items()
+                for option_id, label in labels.items()
             ],
         }
     )
@@ -305,6 +316,30 @@ def dac1_with_contributions() -> dict[str, Any]:
                     "availability": available,
                 },
             ],
+        }
+    )
+    return block
+
+
+def dac1_multilateral() -> dict[str, Any]:
+    """`dac1_with_contributions` read as DAC1 multilateral ODA, as dfo-apis gives
+    that total: core contributions to multilaterals alone held, an option binding
+    the `dac1AidType` slot to aid type 2000 in place of a provider scope."""
+    block = dac1_with_contributions()
+    choice = block["resolved"]["scope_choices"]["choices"][-1]
+    choice["rule"] = "multilateral_total"
+    choice["active"] = "provider:multilateral"
+    choice["options"].append(
+        {
+            "option_id": "provider:multilateral",
+            "label": "core contributions to multilaterals",
+            "binding": {
+                "kind": "slot",
+                "slot": "dac1AidType",
+                "state": "value",
+                "refs": ["DAC1AidType2000"],
+            },
+            "availability": {"status": "available", "detail": {}},
         }
     )
     return block
