@@ -60,8 +60,8 @@ _FRAME_REF_DESCRIPTION = (
     "result, and is presentable like any other frame_ref."
 )
 
-# Added to `_FRAME_REF_DESCRIPTION` on each intent member's frame_ref, whose
-# content_version is optional.
+# Added to `_FRAME_REF_DESCRIPTION` on each intent member's frame_ref and on
+# describe_frame's, whose content_version is optional.
 _BARE_SPEC_ID_SENTENCE = "Leave content_version out to pass a spec_id and have the server fetch it."
 
 _DESCRIBE_COMPONENT_ID_DESCRIPTION = (
@@ -201,8 +201,8 @@ def write_component_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
 def describe_frame_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
     """The advertised `inputSchema` for `describe_frame`.
 
-    `frame_ref` is lifted verbatim from the shared `$defs`: a frame reference
-    is always complete, there is no tolerant form of one.
+    `frame_ref` is lifted from the shared `$defs` with only `spec_id`
+    required: a `spec_` id alone reads the frame's newest version.
 
     Args:
         release: The platform's release document, carrying
@@ -219,7 +219,8 @@ def describe_frame_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
             "pattern": _CONTENT_VERSION_PATTERN,
         },
     }
-    frame_ref["description"] = _FRAME_REF_DESCRIPTION
+    frame_ref["description"] = f"{_FRAME_REF_DESCRIPTION} {_BARE_SPEC_ID_SENTENCE}"
+    frame_ref["required"] = ["spec_id"]
     return {
         "type": "object",
         "properties": {

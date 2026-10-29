@@ -573,7 +573,8 @@ async def describe_frame(
 
     frame_ref is the spec_id and content_version pair a data tool's reply
     returned. Any caller holding a frame_ref can use it, whichever caller
-    minted it.
+    minted it. A spec_id alone reads the newest version, and the reply names
+    its content_version.
 
     Use it before write_component, to see a frame's dimensions and values and
     choose what to chart.

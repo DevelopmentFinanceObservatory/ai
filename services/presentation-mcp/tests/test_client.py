@@ -2345,16 +2345,16 @@ async def test_pointer_passes_through_unrepaired() -> None:
 # --- local refusal: malformed route segments ---------------------------------
 
 
-async def test_a_bare_spec_id_refuses_frame_ref_incomplete_without_a_call() -> None:
-    """A frame_ref with no content_version, to describe_frame or in a
-    create's intent, refuses before any request: the server does not fetch a
-    frame by its spec_id."""
+async def test_a_bare_ops_id_refuses_frame_ref_incomplete_without_a_call() -> None:
+    """An ops_ frame_ref with no content_version, to describe_frame or in a
+    create's intent, refuses before any request: the platform resolves only a
+    spec_ id passed alone."""
     calls, handler = _counting_handler(httpx2.Response(200, json={}))
-    intent = {"type": "line_chart", "frame_ref": {"spec_id": "spec_1"}, "select": {}}
+    intent = {"type": "line_chart", "frame_ref": {"spec_id": "ops_1"}, "select": {}}
 
     async with _assembler(handler) as assembler:
         replies = [
-            await assembler.get_frame_view(frame_ref={"spec_id": "spec_1"}),
+            await assembler.get_frame_view(frame_ref={"spec_id": "ops_1"}),
             await assembler.create_component(intent=intent, caller=Caller.EXTERNAL),
         ]
 
@@ -2363,9 +2363,54 @@ async def test_a_bare_spec_id_refuses_frame_ref_incomplete_without_a_call() -> N
         assert reply.error == "frame_ref_incomplete"
         assert reply.retry == RetryMode.CORRECT_AND_RETRY
         assert reply.pointer == "/frame_ref/content_version"
-        assert reply.fix is not None
-        assert "get_data" in reply.fix
     assert calls == []
+
+
+BARE_SPEC_ID = "spec_" + "0123456789abcdef" * 2
+
+
+async def test_get_frame_view_reads_a_bare_spec_id_from_its_newest_version() -> None:
+    """A spec_ id alone goes to the newest-version route, with no publish, and
+    the view names the content_version apis read."""
+    body = {"spec_id": BARE_SPEC_ID, "content_version": "cv_9", "dimensions": {}}
+    requests, handler = _counting_handler(httpx2.Response(200, json=body))
+
+    async with _assembler(handler) as assembler:
+        view = await assembler.get_frame_view(
+            frame_ref={"spec_id": BARE_SPEC_ID}, dimension="recipient", query="ken"
+        )
+
+    assert view == body
+    (request,) = requests
+    assert request.method == "GET"
+    assert request.url.path == f"/api/presentation/frames/{BARE_SPEC_ID}"
+    assert dict(request.url.params) == {"dimension": "recipient", "query": "ken"}
+
+
+async def test_get_frame_view_relays_a_bare_spec_ids_frame_unavailable() -> None:
+    problem = _problem_body(code="frame_unavailable", retryable=False, status=404)
+    _requests, handler = _counting_handler(httpx2.Response(404, content=problem))
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.get_frame_view(frame_ref={"spec_id": BARE_SPEC_ID})
+
+    assert isinstance(reply, Refusal)
+    assert (reply.error, reply.retry) == ("frame_unavailable", RetryMode.DO_NOT_RETRY)
+
+
+async def test_create_component_forwards_a_bare_spec_id_unchanged() -> None:
+    """The platform resolves a spec_ id passed alone and stores the pair, so
+    the create carries the intent as sent and publishes nothing first."""
+    requests, handler = _counting_handler(httpx2.Response(201, json=WRITE_BODY))
+    intent = {**INTENT, "frame_ref": {"spec_id": BARE_SPEC_ID}}
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.create_component(intent=intent, caller=Caller.EXTERNAL)
+
+    assert isinstance(reply, WriteReply)
+    (request,) = requests
+    assert request.url.path == "/api/presentation/components"
+    assert json.loads(request.content)["intent"] == intent
 
 
 @pytest.mark.parametrize("component_id", _INVALID_COMPONENT_IDS)

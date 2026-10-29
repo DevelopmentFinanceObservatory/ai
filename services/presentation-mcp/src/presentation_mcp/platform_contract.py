@@ -140,8 +140,9 @@ class Assembler(Protocol):
         """What the frame holds: dimensions, values, coverage.
 
         Reads `frame_ref["spec_id"]` and `frame_ref["content_version"]` to
-        address the platform request. `dimension` narrows the view to one
-        dimension's values. `query` filters those values.
+        address the platform request. A `spec_` id with no content_version
+        reads its newest version, which the view names. `dimension` narrows
+        the view to one dimension's values. `query` filters those values.
         """
         ...
 

@@ -54,6 +54,9 @@ tracer = trace.get_tracer(__name__)
 _COMPONENTS_ROUTE = "/api/presentation/components"
 _COMPONENT_ROUTE = "/api/presentation/components/{component_id}"
 _FRAME_ROUTE = "/api/presentation/frames/{spec_id}/{content_version}"
+# The newest version of a `spec_` frame, with its `spec_id` and
+# `content_version` beside the pair route's body.
+_SPEC_FRAME_ROUTE = "/api/presentation/frames/{spec_id}"
 _RELEASE_ROUTE = "/api/presentation/release"
 # apis' own `datasets_api` surface, not `presentation_api`. See
 # `_ensure_published_pair`'s own docstring for why this client calls it.
@@ -282,26 +285,36 @@ def _row_budget_refusal(exc: RowBudgetExhausted) -> Refusal:
 
 def _frame_ref_incomplete(spec_id: str) -> Refusal:
     """The refusal for a `frame_ref` that names `spec_id` without its
-    `content_version`. The server does not fetch a frame by its spec_id."""
+    `content_version` where `spec_id` is not a `spec_` id. The platform
+    resolves only a `spec_` id to its newest version."""
     return Refusal(
         error="frame_ref_incomplete",
         retry=RetryMode.CORRECT_AND_RETRY,
         detail=(
-            f"frame_ref names {spec_id} without its content_version, and this server "
-            "cannot fetch a frame by its spec_id alone. Call get_data with this spec_id "
-            "and pass the frame_ref it returns."
+            f"frame_ref names {spec_id} without its content_version. Only a spec_ id "
+            "can be passed alone. Pass the frame_ref the call that made this frame returned."
         ),
-        fix="Pass frame_ref as the spec_id and content_version pair get_data returned.",
+        fix=(
+            "Pass frame_ref as the spec_id and content_version pair the call that made "
+            "the frame returned."
+        ),
         pointer="/frame_ref/content_version",
     )
 
 
-def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Refusal:
+def _resolves_alone(spec_id: str) -> bool:
+    """Whether the platform resolves `spec_id` with no `content_version`: a
+    `spec_` id names a fetch, and its newest version is the one drawn."""
+    return spec_id.startswith("spec_")
+
+
+def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str | None] | Refusal:
     """Return valid frame path segments, or a local refusal before routing.
 
     `spec_id` and `content_version` are interpolated into `_FRAME_ROUTE`, so
     accepting route syntax in either field could select a different platform
-    resource after URL normalization.
+    resource after URL normalization. `content_version` is `None` for a
+    `spec_` id passed alone, which `_SPEC_FRAME_ROUTE` resolves.
     """
     spec_id = frame_ref.get("spec_id")
     content_version = frame_ref.get("content_version")
@@ -313,7 +326,7 @@ def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Ref
             pointer="/frame_ref/spec_id",
         )
     if content_version is None:
-        return _frame_ref_incomplete(spec_id)
+        return (spec_id, None) if _resolves_alone(spec_id) else _frame_ref_incomplete(spec_id)
     if not isinstance(content_version, str) or not _CONTENT_VERSION_PATTERN.fullmatch(
         content_version
     ):
@@ -494,14 +507,16 @@ class PlatformAssembler:
         (`_card_write_headers`).
         """
         write_token = _new_write_token()
-        # A create's intent is complete, so a frame_ref naming a spec_id
-        # without its content_version cannot be drawn. A revise's patch
-        # merges into the stored frame_ref, so it goes to the platform as is.
+        # A create's intent is complete. The platform resolves a `spec_` id
+        # with no content_version to its newest version and stores that pair,
+        # so only another id alone is refused. A revise's patch merges into
+        # the stored frame_ref, so it goes to the platform as is.
         frame_ref = intent.get("frame_ref")
         if (
             isinstance(frame_ref, Mapping)
             and isinstance(spec_id := frame_ref.get("spec_id"), str)
             and frame_ref.get("content_version") is None
+            and not _resolves_alone(spec_id)
         ):
             return _frame_ref_incomplete(spec_id)
         # Publish before create: `create_component` never validates
@@ -589,21 +604,22 @@ class PlatformAssembler:
         frame_ref_or_refusal = _frame_ref_or_refusal(frame_ref)
         if isinstance(frame_ref_or_refusal, Refusal):
             return frame_ref_or_refusal
-        spec_id, content_version = await self._platform_pair(*frame_ref_or_refusal)
-        publish_refusal = await self._ensure_published_pair(spec_id, content_version)
-        if publish_refusal is not None:
-            return publish_refusal
-        path = _FRAME_ROUTE.format(spec_id=spec_id, content_version=content_version)
+        spec_id, content_version = frame_ref_or_refusal
+        if content_version is None:
+            # apis resolves the newest version and names it in the body.
+            route, path = _SPEC_FRAME_ROUTE, _SPEC_FRAME_ROUTE.format(spec_id=spec_id)
+        else:
+            spec_id, content_version = await self._platform_pair(spec_id, content_version)
+            publish_refusal = await self._ensure_published_pair(spec_id, content_version)
+            if publish_refusal is not None:
+                return publish_refusal
+            route = _FRAME_ROUTE
+            path = _FRAME_ROUTE.format(spec_id=spec_id, content_version=content_version)
         params = {
             k: v for k, v in {"dimension": dimension, "query": query}.items() if v is not None
         }
         try:
-            response = await self.request(
-                "GET",
-                path,
-                route=_FRAME_ROUTE,
-                params=params or None,
-            )
+            response = await self.request("GET", path, route=route, params=params or None)
         except PlatformError as exc:
             return self._refusal(exc)
         return response.json()
