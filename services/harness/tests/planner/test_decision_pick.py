@@ -997,6 +997,79 @@ def test_the_picked_share_proposed_with_no_pick_held_is_refused() -> None:
     assert load_plan(ctx.state) is None
 
 
+def test_a_pick_both_sides_cite_leaves_no_share_of_itself_admitted() -> None:
+    """The card shares US multilateral ODA over the US total in 2019, both inputs
+    citing the year. The user picks 2018, and the replan rewrites both inputs, pinning
+    each on the US total. The pick moved only the year; the planner put the two sides
+    on one series, so the share is refused."""
+    measure = Decision(
+        slot="measure",
+        description="What the share measures.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    year = Decision(
+        slot="year",
+        description="Which year the share reads.",
+        options=["2019", "2018"],
+        chosen="2019",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(period=Period(start=2019, end=2019)),
+    )
+    cited = {"decision_ids": ("measure", "year")}
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, year]),
+        evidence_requirements=[
+            _dac_countries("first", _US_MULTILATERAL).model_copy(update=cited),
+            _dac_countries("second", _US_TOTAL).model_copy(update=cited),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    shown = load_plan(ctx.state)
+    assert shown is not None
+    pick = decision_pick(
+        shown,
+        choice_id="decision/year",
+        option_id=decision_option_id("2018"),
+        to_origin={},
+        alignments={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    in_2018 = {**cited, "period": Period(start=2018, end=2018)}
+
+    result = propose(
+        amends_version=card["version"],
+        decisions=drafts(
+            [
+                year.model_copy(
+                    update={
+                        "chosen": "2018",
+                        "fixes": DecisionFixes(period=Period(start=2018, end=2018)),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[
+            _dac_countries("first", _US_TOTAL).model_copy(update={**in_2018, "measure": "a"}),
+            _dac_countries("second", _US_TOTAL).model_copy(update={**in_2018, "measure": "b"}),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
+
+
 # A ranking decision whose options differ only in how many donors it keeps.
 RANKING = Decision(
     slot="donor_scope",

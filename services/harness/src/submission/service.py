@@ -600,7 +600,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         sources=sources,
         aligned=aligned_pins(view.state),
         searched=searched_pins(view.state),
-        picked=pick.slot if pick is not None else None,
+        pick=pick,
         view=view,
         proposer=proposer,
     )
@@ -4623,7 +4623,7 @@ def _aligned_bases(
     sources: SourceReadings,
     aligned: Sequence[AlignedPin],
     searched: Sequence[SearchedPin],
-    picked: str | None,
+    pick: DecisionPick | None,
     view: SessionView,
     proposer: Proposer,
 ) -> tuple[list[EvidenceRequirement], dict[str, AlignedPin]] | dict[str, object]:
@@ -4730,8 +4730,8 @@ def _aligned_bases(
         sources: The proposal's readings of the blocks of `shown` (`SourceReadings`).
         aligned: The pins compiled so far (`aligned_pins`).
         searched: The searches made so far for unpinned inputs (`searched_pins`).
-        picked: The slot of the decision the user picked on the plan card, which
-            this entry replans for (`DecisionPick.slot`), `None` where none is held.
+        pick: The decision the user picked on the plan card, which this entry
+            replans for, `None` where none is held.
         view: The session, where an `unsupported` answer is recorded.
         proposer: The tool a refusal's `action` names.
     """
@@ -4819,7 +4819,7 @@ def _aligned_bases(
     except _Unservable as exc:
         return exc.problem
     moved = {**wholes, **realigned}
-    itself = _share_of_itself(requirements, moved=moved, sources=sources, picked=picked)
+    itself = _share_of_itself(requirements, moved=moved, sources=sources, pick=pick)
     if itself is not None:
         return itself
     return _with_found(evidence_requirements, requirements, found, restated=moved.keys()), moved
@@ -4830,7 +4830,7 @@ def _share_of_itself(
     *,
     moved: Mapping[str, AlignedPin],
     sources: SourceReadings,
-    picked: str | None,
+    pick: DecisionPick | None,
 ) -> dict[str, object] | None:
     """The `SHARE_OF_ITSELF` problem for the first share or quotient of `requirements`
     whose two sides read one series, `None` where none does.
@@ -4844,35 +4844,44 @@ def _share_of_itself(
     pinning the DAC1 total over the same years are refused however the planner
     wrote them, as is a share alignment would have put on one series, while one
     series over other years, a part over its whole on another row, and two
-    series pass. A leaf pinning nothing, or one the plan does not state, reads
-    only itself.
+    series pass. A leaf pinning nothing reads what it searches for
+    (`requirement_revision`) as `_Reads` reads it with no source, so two
+    identical unpinned inputs, which Search settles on one series, read one. A
+    leaf the plan does not state reads only itself.
 
     A pooled share (`DenominatorScope.POOLED`) divides each member by the
     members' total, and a quotient keyed by an axis with no `denominator_axis`
     divides each by the denominator's one total, so neither divides a figure by
     itself and both are left alone.
 
-    A share whose sides meet on a pin the user picked on the plan card is left
-    alone too: one of its leaves is a dataset requirement citing the picked
-    decision (`picked`), which the replan for that pick wrote. The card shows
-    the pick, and the planner cannot undo it (`_outside_pick`), so a refusal
-    would only send it round again.
+    A share whose sides the user's pick on the plan card put on one series is
+    left alone too: every leaf of one side is a dataset requirement the replan
+    for `pick` wrote, citing its decision, and every leaf of the other is one the
+    pick keeps as the card holds it (`DecisionPick.kept_requirements`). The card
+    shows the pick, and the planner cannot undo it (`_outside_pick`), so a
+    refusal would only send it round again. Where the replan rewrote both sides,
+    as a pick of the year both inputs cite does, the planner put them on one
+    series, and the share is refused.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
 
-    def user_picked(leaf: tuple[str, str | None]) -> bool:
-        requirement = by_id.get(leaf[0])
-        return (
-            picked is not None
-            and isinstance(requirement, DatasetRequirement)
-            and picked in requirement.decision_ids
-        )
+    def picked_onto(side: _Derivation, other: _Derivation) -> bool:
+        """Whether the pick rewrote every leaf of `side` and kept every leaf of `other`."""
+        if pick is None:
+            return False
+        return all(
+            isinstance(requirement := by_id.get(requirement_id), DatasetRequirement)
+            and pick.slot in requirement.decision_ids
+            for requirement_id, _ in side.leaves
+        ) and all(requirement_id in pick.kept_requirements for requirement_id, _ in other.leaves)
 
     def reading(leaf: tuple[str, str | None]) -> object:
         requirement_id, pin = leaf
         requirement = by_id.get(requirement_id)
-        if not isinstance(requirement, DatasetRequirement) or pin is None:
+        if not isinstance(requirement, DatasetRequirement):
             return requirement_id
+        if pin is None:
+            return requirement_revision(requirement), _Reads.of(requirement, None)
         held = moved.get(requirement_id)
         spec_id, block = (
             (held.spec_id, held.block) if held is not None else (pin, sources.block(pin))
@@ -4899,7 +4908,8 @@ def _share_of_itself(
                 reading(one) == reading(other)
                 for one, other in zip(first.leaves, second.leaves, strict=True)
             )
-            and not any(user_picked(leaf) for leaf in (*first.leaves, *second.leaves))
+            and not picked_onto(first, second)
+            and not picked_onto(second, first)
         ):
             pin = next((pin for _, pin in first.leaves if pin is not None), None)
             return _share_of_itself_problem(
@@ -4913,37 +4923,38 @@ def _share_of_itself_problem(
 ) -> dict[str, object]:
     """Return the `SHARE_OF_ITSELF` problem for `step`, whose two sides read one series.
 
-    `scope` is the scope record of the numerator's first pin, whose other
-    provider scopes Search serves the message offers as the numerator's own,
-    `None` where it pins none or states none. `detail.requirement_id` names the
+    `scope` is the scope record of the numerator's first pin, `None` where it
+    pins none or states none. The planner has no tool to compile a pin onto an
+    option, so the message names the route it can take: leave the numerator
+    unpinned and name its part in Search's words, the labels of the other
+    provider scopes Search serves on that pin. `detail.requirement_id` names the
     step, for the refusal's sentence (`harness.sentences`).
     """
     numerator, denominator = step.numerator.input_id, step.denominator.input_id
     choice = (
         None if scope is None else next((c for c in scope.choices if c.axis == PROVIDER_AXIS), None)
     )
-    offered = (
+    words = (
         " or ".join(
-            f"`{option.option_id}` ({option.label})"
+            f"{option.label!r}"
             for option in choice.options
             if option.option_id != choice.active and option.availability.status != "unavailable"
         )
         if choice is not None
         else ""
     )
-    counted = (
-        f"a dataset counted on another provider scope, such as {offered}"
-        if offered
-        else "a dataset counting only that part"
+    named = (
+        f"in Search's words for it, such as {words}"
+        if words
+        else "(the provider scope, sector, donor or recipient it covers)"
     )
     return problem(
         ProblemCode.SHARE_OF_ITSELF,
         f"{step.id!r} divides {numerator!r} by {denominator!r}, and both read one series over "
         "the same years and entities, so it would answer 1 (100%) whatever the data hold. "
-        f"Pin each side on its own scope: keep {denominator!r} on the whole, and give "
-        f"{numerator!r} the part the question asks for. Pin for it {counted}; or leave its "
-        "`source_spec_id` unset and name the part in its `measure` (the provider scope, "
-        "sector, donor or recipient it covers), so Search finds that part.",
+        f"Keep {denominator!r} on the whole, and give {numerator!r} the part the question "
+        f"asks for: leave its `source_spec_id` unset and name the part in its `measure` "
+        f"{named}, so Search finds that part.",
         outcome=Outcome.INVALID_INPUT,
         detail={"requirement_id": step.id, "numerator": numerator, "denominator": denominator},
     )
@@ -5005,7 +5016,7 @@ def _derivation(
     source_of: Callable[[str], SelectedSource | None],
 ) -> _Derivation:
     """The derivation of `side` (`_Derivation`): the requirement it reads, narrowed
-    to its entity, down to every dataset requirement beneath it.
+    to its entity (`_narrowing`), down to every dataset requirement beneath it.
 
     A derived requirement is its every field but its id and decisions, each
     requirement it reads replaced by that requirement's own derivation, and
@@ -5047,8 +5058,33 @@ def _derivation(
             return [substituted(held) for held in value]
         return value
 
-    shape = rfc8785.dumps({"entity": side.entity, "reads": read(side.input_id)})
+    shape = rfc8785.dumps(
+        {"entity": _narrowing(side, requirements, source_of), "reads": read(side.input_id)}
+    )
     return _Derivation(shape, tuple(leaves))
+
+
+def _narrowing(
+    side: RequirementSide,
+    requirements: Mapping[str, EvidenceRequirement],
+    source_of: Callable[[str], SelectedSource | None],
+) -> str | None:
+    """The entity `side` narrows its input to, `None` where it narrows nothing.
+
+    A side naming an entity of a dataset requirement it reads directly, which
+    holds one series (`_one_series`), keeps every row, since that series is the
+    entity's, as a filter naming it does (`_keeps_every_row`), so it narrows
+    nothing.
+    """
+    dataset = requirements.get(side.input_id)
+    if (
+        side.entity is not None
+        and isinstance(dataset, DatasetRequirement)
+        and side.entity in {entity.name for entity in dataset.entities}
+        and _one_series(dataset, _source_of_pin(dataset, source_of))
+    ):
+        return None
+    return side.entity
 
 
 def _canonical(requirement: EvidenceRequirement) -> dict[str, JsonValue]:

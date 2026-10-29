@@ -10733,13 +10733,14 @@ def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
     assert differ & set(plan.requirement(_SHARE).decision_ids)
 
 
-def _read_over(requirement: DatasetRequirement, years: tuple[int, int]) -> DatasetRequirement:
-    """`requirement` read over `years`, its first and last."""
-    return requirement.model_copy(update={"period": Period(start=years[0], end=years[1])})
+# The one entity `_US_TOTAL`'s requirements name, the DAC countries as donors.
+_US_TOTAL_ENTITY = _named(_US_TOTAL)[0].name
+# What a requirement left unpinned searches for, the same for both inputs.
+_UNPINNED = {"source_spec_id": None, "measure": "US ODA"}
 
 
 @pytest.mark.parametrize(
-    ("blocks", "inputs", "steps", "refused"),
+    ("blocks", "updates", "steps", "refused"),
     [
         # "What share of US ODA went to multilateral organisations?": the planner pins
         # the DAC1 total on both sides, the core contributions it decided on applied to
@@ -10750,6 +10751,31 @@ def _read_over(requirement: DatasetRequirement, years: tuple[int, int]) -> Datas
             [_share("first", "second")],
             ("first", "second"),
             id="total-over-itself",
+        ),
+        # The same two inputs left unpinned: each sends Search the same words, so both
+        # settle on one series.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _US_TOTAL},
+            {"first": _UNPINNED, "second": _UNPINNED},
+            [_share("first", "second")],
+            ("first", "second"),
+            id="total-over-itself-unpinned",
+        ),
+        # The numerator narrowed to the one entity its single series holds, which
+        # keeps every row of it.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _US_TOTAL},
+            {},
+            [
+                ShareOfRequirement(
+                    id=_SHARE,
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="first", entity=_US_TOTAL_ENTITY),
+                    denominator=RequirementSide(input_id="second"),
+                )
+            ],
+            ("first", "second"),
+            id="total-at-its-only-entity-over-itself",
         ),
         # The same total per year over the total: the sum by year leaves one series as
         # it is, so the share still divides it by itself.
@@ -10766,7 +10792,10 @@ def _read_over(requirement: DatasetRequirement, years: tuple[int, int]) -> Datas
         # A growth ratio: one series over 2019-2020 divided by itself a year earlier.
         pytest.param(
             {"first": _US_TOTAL, "second": _US_TOTAL},
-            {"first": (2019, 2020), "second": (2018, 2019)},
+            {
+                "first": {"period": Period(start=2019, end=2020)},
+                "second": {"period": Period(start=2018, end=2019)},
+            },
             [
                 QuotientRequirement(
                     id=_SHARE,
@@ -10799,14 +10828,15 @@ def _read_over(requirement: DatasetRequirement, years: tuple[int, int]) -> Datas
 def test_a_share_of_one_series_over_itself_is_refused(
     decision: DecisionFactory,
     blocks: dict[str, dict[str, Any]],
-    inputs: dict[str, tuple[int, int]],
+    updates: dict[str, dict[str, Any]],
     steps: list[EvidenceRequirement],
     refused: tuple[str, str] | None,
 ) -> None:
     """A share or quotient whose sides read one series over the same years and
-    entities is refused, whatever put them there, naming both sides, so the planner
-    pins each side on its own scope. A ratio over other years, a part over its whole
-    and a ratio of two series are recorded."""
+    entities is refused, whatever put them there, naming both sides, and tells the
+    planner to search for the numerator's part in Search's words for the other
+    provider scopes its pin offers, never an option id it cannot compile. A ratio
+    over other years, a part over its whole and a ratio of two series are recorded."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, *{block["spec_id"]: block for block in blocks.values()}.values())
 
@@ -10827,9 +10857,7 @@ def test_a_share_of_one_series_over_itself_is_refused(
         ),
         evidence_requirements=[
             *(
-                _read_over(_dac_countries(rid, block), inputs[rid])
-                if rid in inputs
-                else _dac_countries(rid, block)
+                _dac_countries(rid, block).model_copy(update=updates.get(rid, {}))
                 for rid, block in blocks.items()
             ),
             *(
@@ -10854,6 +10882,16 @@ def test_a_share_of_one_series_over_itself_is_refused(
         "denominator": denominator,
     }
     assert load_plan(ctx.state) is None
+    provider = next(
+        choice
+        for choice in _US_TOTAL["resolved"]["scope_choices"]["choices"]
+        if choice["axis"] == "provider"
+    )
+    others = [o for o in provider["options"] if o["option_id"] != provider["active"]]
+    assert not [o for o in others if o["option_id"] in result["message"]]
+    # A pinned numerator's message words the other scopes its pin offers.
+    if updates.get("first", {}).get("source_spec_id", True) is not None:
+        assert [o for o in others if o["label"] in result["message"]], result["message"]
 
 
 # The US donor total under a second spec_id, on `TOTAL`'s part, counted net by default.
