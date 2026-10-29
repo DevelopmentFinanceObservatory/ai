@@ -1,4 +1,4 @@
-"""`refusal_code` reads the code from either refusal envelope."""
+"""`refusal_code` reads the code from the refusal envelope."""
 
 from __future__ import annotations
 
@@ -14,15 +14,15 @@ from common.refusal import internal_error_message, log_unexpected_error, refusal
     ("structured", "code"),
     [
         ({"code": "not_found", "retry_mode": "do_not_retry"}, "not_found"),
-        ({"error": "write_refused", "retry": "do_not_retry"}, "write_refused"),
+        ({"error": "write_refused", "retry": "do_not_retry"}, None),
         ({"type": "Column", "children": []}, None),
         ({"code": ""}, None),
         ({}, None),
         (None, None),
     ],
-    ids=["code", "presentation-error", "no-code", "empty-code", "empty", "none"],
+    ids=["code", "error-field", "no-code", "empty-code", "empty", "none"],
 )
-def test_refusal_code_reads_code_or_presentations_error(
+def test_refusal_code_reads_the_code_field(
     structured: dict[str, Any] | None, code: str | None
 ) -> None:
     assert refusal_code(structured) == code

@@ -31,14 +31,14 @@ until a deadline, and startup fails past it, or at once when the release
 answers and cannot be admitted. Local development can opt out and come up
 tool-less instead.
 
-Refusals leave as MCP error results (`isError: true`). `content` carries the
-`error`/`retry`/`detail` teaching payload, matching data-mcp and
-analysis-mcp. `describe_frame` carries the same payload in
-`structuredContent`. write_component and describe_component send it there
-too, except to a client `_view_support` answers as an MCP Apps host, which
-gets a one-line Prefab notice view in `structuredContent` instead. Every
-refusal also carries its `error` code in `_meta`
-(`common.refusal.refusal_meta`), where the harness's combined server reads it.
+Refusals leave as MCP error results (`isError: true`) in the envelope
+data-mcp and analysis-mcp answer with: `structuredContent` is `{code,
+retry_mode, message, fix}`, with `retry_after_s` when the refusal names a
+wait, and `content` is `common.refusal.refusal_text` of it. write_component
+and describe_component send a client `_view_support` answers as an MCP Apps
+host a one-line Prefab notice view in `structuredContent` instead. Every
+refusal also carries its code in `_meta` (`common.refusal.refusal_meta`),
+where the harness's combined server reads it.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ from typing import Any, Literal
 
 from common.apis_auth import apis_auth_provider
 from common.auth import BearerTokenVerifier, apply_gate
+from common.declaration import declared_schema
 from common.logging import configure_logging
 from common.materialisation import install_store_if_unset
 from common.mcp_telemetry import (
@@ -62,7 +63,12 @@ from common.mcp_telemetry import (
     LangfuseSessionMiddleware,
     LangfuseToolIoMiddleware,
 )
-from common.refusal import internal_error_message, log_unexpected_error, refusal_meta
+from common.refusal import (
+    internal_error_message,
+    log_unexpected_error,
+    refusal_meta,
+    refusal_text,
+)
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import Context, FastMCP
@@ -181,26 +187,52 @@ _chart_worker = ChartWorker(
 _health: dict[str, Any] = {"status": "starting"}
 
 
-def _reply(
-    reply: Mapping[str, Any] | WriteReply | Refusal,
-    *,
-    view: dict[str, Any] | None = None,
-) -> ToolResult:
-    """A reply as a `ToolResult` whose `content` is the payload as JSON.
+def _reply(reply: Mapping[str, Any] | Refusal) -> ToolResult:
+    """A describe_frame reply as a `ToolResult`: a refusal as
+    `_refusal_result`, and a mapping as its JSON in both `content` and
+    `structuredContent`, with `is_error` false and no `_meta`."""
+    if isinstance(reply, Refusal):
+        return _refusal_result(reply)
+    payload = dict(reply)
+    return ToolResult(content=payload, structured_content=payload)
 
-    `structuredContent` is `view` when given, and otherwise the identical
-    payload. `None` fields are dropped from dataclass replies, so absence
-    stays absent on the wire. A `Refusal` sets `is_error`, and its `_meta`
-    is `refusal_meta` of its `error`. `WriteReply` and a mapping reply
-    (`describe_frame`, `describe_component`) both leave `is_error` false
-    and carry no `_meta`.
+
+def _refusal_result(refusal: Refusal, *, view: dict[str, Any] | None = None) -> ToolResult:
+    """`refusal` as an MCP error result in the DFO refusal envelope.
+
+    `structuredContent` is the envelope, `{code, retry_mode, message, fix}`
+    and `retry_after_s` when set, or `view` when given. `content` is
+    `common.refusal.refusal_text` of it, and `_meta` is `refusal_meta` of
+    its code. `fix` is `refusal.fix` as an object: a mapping as is, display
+    text under `advice`, and `refusal.pointer` under `pointer`.
     """
-    payload = _payload(reply)
+    if refusal.fix is None:
+        fix: dict[str, Any] = {}
+    elif isinstance(refusal.fix, str):
+        fix = {"advice": refusal.fix}
+    else:
+        fix = dict(refusal.fix)
+    if refusal.pointer is not None:
+        fix["pointer"] = refusal.pointer
+    envelope: dict[str, Any] = {
+        "code": refusal.error,
+        "retry_mode": refusal.retry.value,
+        "message": refusal.detail,
+        "fix": fix,
+    }
+    if refusal.retry_after_s is not None:
+        envelope["retry_after_s"] = refusal.retry_after_s
     return ToolResult(
-        content=payload,
-        structured_content=payload if view is None else view,
-        meta=refusal_meta(code=reply.error) if isinstance(reply, Refusal) else None,
-        is_error=isinstance(reply, Refusal),
+        content=refusal_text(
+            message=refusal.detail,
+            code=refusal.error,
+            retry_mode=refusal.retry.value,
+            fix=fix,
+            retry_after_s=refusal.retry_after_s,
+        ),
+        structured_content=envelope if view is None else view,
+        meta=refusal_meta(code=refusal.error),
+        is_error=True,
     )
 
 
@@ -322,7 +354,7 @@ async def _component_reply(
     """
     app = views is not ViewSupport.UNDECLARED
     if isinstance(reply, Refusal):
-        return _reply(reply, view=_notice(app, f"The request was refused: {reply.detail}"))
+        return _refusal_result(reply, view=_notice(app, f"The request was refused: {reply.detail}"))
     payload = _payload(reply)
     write_token = payload.pop(WRITE_TOKEN_KEY, None) if isinstance(reply, WriteReply) else None
     envelope = payload.pop("resolved_payload", None)
@@ -437,8 +469,8 @@ def _notice(app: bool, text: str) -> dict[str, Any] | None:
     return notice_view(text, base_url=settings.presentation_public_url) if app else None
 
 
-def _payload(reply: Mapping[str, Any] | WriteReply | Refusal) -> dict[str, Any]:
-    if isinstance(reply, WriteReply | Refusal):
+def _payload(reply: Mapping[str, Any] | WriteReply) -> dict[str, Any]:
+    if isinstance(reply, WriteReply):
         return {k: v for k, v in asdict(reply).items() if v is not None}
     return dict(reply)
 
@@ -590,17 +622,18 @@ def _register_tools(
     """Publish the three tools from already-assembled schemas.
 
     FastMCP keeps parsing incoming arguments against the function signatures,
-    which stay permissive on purpose; only what is advertised changes.
+    which stay permissive on purpose; only what is advertised changes. Each
+    advertised schema is `common.declaration.declared_schema` of the
+    assembled one, against the tool's own description.
 
     write_component and describe_component are Prefab app tools. Their
     listing carries `_meta.ui.resourceUri`, `_RENDERER_URI`.
 
-    Schema assembly happens in the caller, before any tool is added here, so
-    a `ValueError` from a divergent release document never reaches this
-    function. What this function can still fail partway through is
-    registration itself; on any such failure it unregisters whatever of the
-    three it had already added before re-raising, so a partial failure never
-    leaves `mcp` with, say, `write_component` mounted but not the others.
+    Schema assembly happens in the caller, before any tool is added here.
+    What this function can still fail partway through is registration
+    itself; on any such failure it unregisters whatever of the three it had
+    already added before re-raising, so a partial failure never leaves `mcp`
+    with, say, `write_component` mounted but not the others.
 
     Returns:
         The registered tools' names, so the lifespan can unregister exactly
@@ -614,7 +647,9 @@ def _register_tools(
             annotations=_WRITE_ANNOTATIONS,
             meta=_APP_META,
         )
-        write_tool.parameters = write_schema
+        write_tool.parameters = declared_schema(
+            write_schema, description=write_tool.description or ""
+        )
         mcp.add_tool(write_tool)
         registered.append(write_tool.name)
 
@@ -623,7 +658,9 @@ def _register_tools(
             title="Describe a result",
             annotations=READ_ONLY_CATALOGUE,
         )
-        frame_tool.parameters = frame_schema
+        frame_tool.parameters = declared_schema(
+            frame_schema, description=frame_tool.description or ""
+        )
         mcp.add_tool(frame_tool)
         registered.append(frame_tool.name)
 
@@ -633,7 +670,9 @@ def _register_tools(
             annotations=READ_ONLY_CATALOGUE,
             meta=_APP_META,
         )
-        describe_tool.parameters = describe_schema
+        describe_tool.parameters = declared_schema(
+            describe_schema, description=describe_tool.description or ""
+        )
         mcp.add_tool(describe_tool)
         registered.append(describe_tool.name)
     except Exception:

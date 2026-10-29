@@ -44,10 +44,10 @@ the line: a read timeout says only that one call ran past its own deadline, not 
 client is broken, so the client stays cached; anything else discards it, so
 the next call reconnects instead of repeating the same failure.
 
-Refusal grammar: data refusals arrive as MCP tool errors whose
-structured content is `{code, retry_mode, fix, ...}`; presentation refusals
-arrive as SUCCESSFUL results shaped `{error, retry, detail, fix?}` (that
-service's model-facing contract). `_refusal_outcome` normalises both into
+Refusal grammar: every service refusal arrives as an MCP tool error whose
+structured content is `{code, retry_mode, message, fix, ...}`; a
+presentation refusal's `fix` can also hold display text and a JSON Pointer
+(`_presentation_refusal_outcome`). `_refusal_outcome` normalises both into
 the graph's `{"outcome": "refusal", "refusal": {code, retry_mode, fix,
 advice, message, origin}}` so the execute node branches on one grammar,
 plus the refusal's own `retry_after_s` when it names one.
@@ -1007,11 +1007,8 @@ class McpExecutor:
         body = result.structured_content or {}
         write_token = body.pop(WRITE_TOKEN_KEY, None)
         result.content = _without_write_token_text(result.content)
-        if result.is_error or ("error" in body and "retry" in body):
-            # presentation-mcp returns its refusals as successful results
-            # in its own {error, retry, detail} grammar (its model-facing
-            # contract); a transport-level error still arrives as is_error.
-            return _refusal_outcome(body, fallback_text=_result_text(result))
+        if result.is_error:
+            return _presentation_refusal_outcome(body, fallback_text=_result_text(result))
         if tool == "describe_frame":
             return await self._described_frame(args, body)
         envelope = (result.meta or {}).get(RESOLVED_PAYLOAD_META_KEY)
@@ -1176,36 +1173,56 @@ def _envelope_title(envelope: dict[str, Any]) -> str | None:
 
 
 def _refusal_outcome(
-    structured: dict[str, Any] | None, *, fallback_text: str = ""
+    structured: dict[str, Any] | None, *, fallback_text: str = "", advice: str | None = None
 ) -> dict[str, Any]:
-    """A platform refusal as the executor's `{"outcome": "refusal", ...}`.
+    """A service refusal as the executor's `{"outcome": "refusal", ...}`.
 
     `origin` is `"service"`, since an MCP service minted the refusal. The
     two refusals this module builds itself (`unknown_tool`, and
     `provenance_unavailable` after the platform accepted a write) carry
-    `"harness"`, so a consumer can tell who declined. `advice` is a
-    presentation service's display-text `fix` and the only key that holds
-    the violated constraint id.
+    `"harness"`, so a consumer can tell who declined. `advice` is display
+    text beside the fix (`_presentation_refusal_outcome`).
     """
     body = structured or {}
     fix = body.get("fix")
     refusal: dict[str, Any] = {
         "code": refusal_code(body) or HarnessCode.UNSPECIFIED.value,
-        "retry_mode": str(body.get("retry_mode") or body.get("retry") or "do_not_retry"),
+        "retry_mode": str(body.get("retry_mode") or "do_not_retry"),
         "origin": REFUSAL_ORIGIN_SERVICE,
-        # data/analysis refusals carry a machine-mergeable fix mapping;
-        # presentation's fix is display text. The graph merges only
-        # mapping fixes into retried args; a string rides along as `advice`.
+        # The graph merges a mapping fix into retried args.
         "fix": fix if isinstance(fix, dict) else None,
-        "advice": fix if isinstance(fix, str) else None,
+        "advice": advice,
         # fastmcp's own arg-validation errors carry NO structured content;
         # without the raw text the replanner redrafts blind.
-        "message": str(body.get("message") or body.get("detail") or fallback_text),
+        "message": str(body.get("message") or fallback_text),
     }
     # Read by `McpExecutor.__call__`'s retry wait, which ignores an unusable value.
     if body.get("retry_after_s") is not None:
         refusal["retry_after_s"] = body["retry_after_s"]
     return {"outcome": "refusal", "refusal": refusal}
+
+
+def _presentation_refusal_outcome(
+    structured: dict[str, Any] | None, *, fallback_text: str
+) -> dict[str, Any]:
+    """A presentation-mcp refusal as `_refusal_outcome` states it.
+
+    presentation-mcp's `fix` can hold display text under `advice`, such as
+    the values the platform would accept as `label (ref)` and the violated
+    constraint id, and a JSON Pointer under `pointer`, beside the values a
+    retry can use. The text rides along as the refusal's `advice` and the
+    pointer is dropped, so `fix` holds only mergeable values, and is `None`
+    when none are left.
+    """
+    body = structured or {}
+    fix = dict(body["fix"]) if isinstance(body.get("fix"), dict) else {}
+    advice = fix.pop("advice", None)
+    fix.pop("pointer", None)
+    return _refusal_outcome(
+        {**body, "fix": fix or None},
+        fallback_text=fallback_text,
+        advice=advice if isinstance(advice, str) else None,
+    )
 
 
 def _first_line(text: str, *, limit: int = 160) -> str | None:

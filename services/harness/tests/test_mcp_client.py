@@ -48,6 +48,7 @@ from harness.mcp_client import (
     _call_tool,
     _manifest_summary,
     _McpTimeoutError,
+    _presentation_refusal_outcome,
     _refusal_outcome,
 )
 from harness.mcp_deadlines import McpTimeoutPolicy
@@ -312,15 +313,20 @@ async def test_the_executor_refuses_an_analysis_tool_as_unknown(
 
 def test_a_platform_refusal_is_stamped_as_a_service_refusal_and_keeps_its_advice_text() -> None:
     """The violated constraint id lives only in presentation-mcp's display-text
-    `fix`. It rides along as `advice`, while `fix` stays the mergeable mapping
-    (empty here), so nothing that merges mapping fixes sees a string."""
-    outcome = _refusal_outcome(
+    `fix.advice`. It rides along as `advice`, and the pointer is dropped, so
+    `fix` holds only mergeable values (none here) and nothing that merges
+    mapping fixes sees a string."""
+    outcome = _presentation_refusal_outcome(
         {
-            "error": "constraint_violation",
-            "retry": "correct_and_retry",
-            "detail": "the chart breaks a display rule",
-            "fix": "violates constraint 'comparable_units_required'",
-        }
+            "code": "constraint_violation",
+            "retry_mode": "correct_and_retry",
+            "message": "the chart breaks a display rule",
+            "fix": {
+                "advice": "violates constraint 'comparable_units_required'",
+                "pointer": "/series/0",
+            },
+        },
+        fallback_text="",
     )
 
     assert outcome == {
@@ -886,13 +892,16 @@ async def test_the_executor_relays_a_platform_write_refusal_as_a_service_refusal
 ) -> None:
     scripted_presentation_client(
         [
-            _tool_result(
-                {
-                    "error": "constraint_violation",
-                    "retry": "correct_and_retry",
-                    "detail": "the chart breaks a display rule",
-                    "fix": "violates constraint 'comparable_units_required'",
-                }
+            SimpleNamespace(
+                is_error=True,
+                structured_content={
+                    "code": "constraint_violation",
+                    "retry_mode": "correct_and_retry",
+                    "message": "the chart breaks a display rule",
+                    "fix": {"advice": "violates constraint 'comparable_units_required'"},
+                },
+                content=[],
+                meta=None,
             )
         ]
     )
@@ -1959,15 +1968,14 @@ def _data_refusal(retry_mode: str, *, retry_after_s: float | None = 2.0) -> Simp
 def _presentation_refusal(
     retry: str, *, code: str = "service_unavailable", fix: dict[str, Any] | None = None
 ) -> SimpleNamespace:
-    """A presentation-mcp refusal in its own `{error, retry, detail}` grammar."""
+    """A presentation-mcp refusal in the refusal envelope."""
     body: dict[str, Any] = {
-        "error": code,
-        "retry": retry,
-        "detail": "the frame row budget is full",
+        "code": code,
+        "retry_mode": retry,
+        "message": "the frame row budget is full",
+        "fix": fix or {},
         "retry_after_s": 2.0,
     }
-    if fix is not None:
-        body["fix"] = fix
     return SimpleNamespace(
         is_error=True,
         structured_content=body,

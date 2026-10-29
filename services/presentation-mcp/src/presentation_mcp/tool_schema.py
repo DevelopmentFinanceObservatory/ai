@@ -6,6 +6,9 @@ look like, not this service. What is built here is assembly, not derivation:
 each member's own `$defs`, `$schema`, and `$id` are stripped, the six member
 schemas become the branches of one `anyOf`, and only the `$defs` entries a
 branch actually references by `$ref` are kept alongside it.
+
+`server.py` publishes `declared_schema` (`common.declaration`) of each
+assembled schema, so any release document gets the same treatment.
 """
 
 from __future__ import annotations
@@ -56,6 +59,10 @@ _FRAME_REF_DESCRIPTION = (
     "and whose content_version starts with ocv_ names an Analysis Toolkit "
     "result, and is presentable like any other frame_ref."
 )
+
+# Added to `_FRAME_REF_DESCRIPTION` on each intent member's frame_ref, whose
+# content_version is optional.
+_BARE_SPEC_ID_SENTENCE = "Leave content_version out to pass a spec_id and have the server fetch it."
 
 _DESCRIBE_COMPONENT_ID_DESCRIPTION = (
     "The id a previous write_component reply returned. The id is the only way back to a component."
@@ -157,7 +164,8 @@ def write_component_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
     if "frame_ref" in reachable_defs:
         reachable_defs["frame_ref"] = {
             **reachable_defs["frame_ref"],
-            "description": _FRAME_REF_DESCRIPTION,
+            "description": f"{_FRAME_REF_DESCRIPTION} {_BARE_SPEC_ID_SENTENCE}",
+            "required": ["spec_id"],
         }
     return {
         "type": "object",

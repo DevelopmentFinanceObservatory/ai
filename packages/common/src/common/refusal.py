@@ -1,17 +1,16 @@
 """The refusal text an MCP tool result carries in `content`.
 
-data-mcp, analysis-mcp and the harness's combined server each return
-refusals whose `content` ends in the refusal envelope as one line of
-compact JSON, so a client that shows its model only `content` still sees
-the code, the retry mode and the fix. `refusal_text` renders that text for
-all three. `refusal_code` reads the code from a refusal's
-`structuredContent`, whichever of the two envelopes that holds.
+data-mcp, analysis-mcp, presentation-mcp and the harness's combined server
+each return refusals whose `content` ends in the refusal envelope as one
+line of compact JSON, so a client that shows its model only `content` still
+sees the code, the retry mode and the fix. `refusal_text` renders that text
+for all four. `refusal_code` reads the code from a refusal's
+`structuredContent`.
 
-Every refusal from those three and from presentation-mcp also carries its
-code in `_meta` under `REFUSAL_META_KEY` (`refusal_meta`), where the
-combined server reads it. `structuredContent` cannot serve: presentation-mcp
-names its code `error`, and answers an MCP Apps host with a view there.
-MCP hosts keep `_meta` out of the model's context.
+Every refusal from those four also carries its code in `_meta` under
+`REFUSAL_META_KEY` (`refusal_meta`), where the combined server reads it.
+`structuredContent` cannot serve: presentation-mcp answers an MCP Apps host
+with a view there. MCP hosts keep `_meta` out of the model's context.
 
 An exception no typed handling anticipated answers `internal_error`. Its
 text can hold a bucket path, a URL or a service account, so the reply
@@ -66,13 +65,9 @@ def refusal_meta(*, code: str, upstream_code: str | None = None) -> dict[str, An
 
 def refusal_code(structured: Mapping[str, Any] | None) -> str | None:
     """The code of the refusal envelope in `structured`, or `None` when it
-    names none.
-
-    data-mcp, analysis-mcp and the combined server's own refusals carry the
-    code as `code`. presentation-mcp's `Refusal` carries it as `error`.
-    """
+    names none."""
     body = structured or {}
-    code = body.get("code") or body.get("error")
+    code = body.get("code")
     return str(code) if code else None
 
 
