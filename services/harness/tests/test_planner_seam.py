@@ -90,6 +90,7 @@ from harness.wiring import handing_back_planner_failures
 from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
+    ALIGNMENTS_STATE_KEY,
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -101,6 +102,7 @@ from planner.plan import (
     UNSUPPORTED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
+    AlignedInput,
     AnswerMode,
     AskBreakdown,
     DatasetRequirement,
@@ -121,6 +123,7 @@ from planner.plan import (
     ShareOfRequirement,
     Unit,
     WholeOf,
+    aligned_pins,
     alignments,
     amendment_entry,
     current_discovery_time_left,
@@ -3884,6 +3887,39 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     assert second_plan.previous_version is None
 
 
+async def test_a_later_first_draft_reads_none_of_the_earlier_plans_alignments(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """The earlier entry's plan moved its `second` onto a compile. A later
+    first-draft entry of the turn clears that plan, and its alignments go with
+    it, so they are gone even when the entry records no plan of its own."""
+    harness = _SeamHarness()
+    seam = _seam()
+    first_plan = _translated_plan(decision, requirement, derived_requirement, version=1)
+    use_compiled_proposals(seam._agent)
+    seam._agent.model = ScriptedPlannerLlm(script=[_DECLARE])
+    first = await harness.run(
+        seam, question="kenya debt", readings=[], prior_plan=first_plan.model_dump(mode="json")
+    )
+    assert first is not None and "plan" in first
+    moved = AlignedInput(
+        requirement_id="second",
+        spec_id=f"spec_{'3' * 32}",
+        origin=f"spec_{'4' * 32}",
+        option_ids=("measure_basis:gross",),
+        stated_pin=f"spec_{'4' * 32}",
+    )
+    harness.seed_state(ALIGNMENTS_STATE_KEY, [moved.model_dump(mode="json")])
+
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=[_DECLARE])
+    await harness.run(seam, question="kenya oda 2023", readings=[])
+
+    state = await harness.state()
+    assert load_plan(state) is None
+    assert alignments(state) == {}
+
+
 async def test_a_sixth_amendment_turn_still_records_its_own_version(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -5312,7 +5348,13 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
         (row,) = [d for d in revised.decisions if d.slot == "scope_measure_basis_of_total"]
         readings = switch._readings(ctx)
         target = switch._target(
-            revised, row, state=state, held=alignments(state), to_origin={}, readings=readings
+            revised,
+            row,
+            sources=pin_sources(state),
+            compiles=aligned_pins(state),
+            held=alignments(state),
+            to_origin={},
+            readings=readings,
         )
         return {
             "stored": [(r.spec_id, r.planner_axes) for r in readings],

@@ -33,7 +33,9 @@ scope (`planner.plan.compiled_pin`) and moves that input alone: the user
 takes it over, so it pins the switched dataset as its own. Its words, roles
 and every other choice stay those of the pin it states. Switched back to the
 option its own pin counts, the input keeps that pin, since the user's pick
-states the axis and alignment leaves a stated axis alone.
+states the axis and alignment leaves a stated axis alone. A row of a
+requirement pinning a compile directly, which no reading names, posts the
+compile's scope under that requirement's own words and parties.
 
 Each requirement the switch re-pins drops the source it stated
 (`source`, `source_ref`, `source_exclude`, and `source_code` unless the new
@@ -88,7 +90,6 @@ from planner.plan import (
     SessionState,
     aligned_pins,
     alignments,
-    compiled_pin,
     definitions_on_record,
     earlier_block,
     exact_codes,
@@ -108,6 +109,7 @@ from submission.service import part_scope, statement
 from translator.discovery import (
     RESOLVED_STATE_PREFIX,
     DefinitionNotResolvedError,
+    requirement_open_roles,
     resolve_definition,
     resolving_once,
 )
@@ -219,7 +221,7 @@ class _Target:
     compile (`planner.plan.AlignedPin`), the decision on an axis it moved is
     that requirement's alone: `moved_for` is its id, `scope` the compile's,
     and `block` the compile's spec block. A pin of a compile the planner was
-    not shown carries the compile's `scope` and `block` too, under `moved_for`
+    not shown reads the compile's `scope` and `block` too, under `moved_for`
     `None`.
     """
 
@@ -401,8 +403,18 @@ async def _switched_plan(
     to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
     held = alignments(state)
     readings = _readings(ctx)
+    sources = pin_sources(state)
+    compiles = aligned_pins(state)
     targets = [
-        _target(plan, decision, state=state, held=held, to_origin=to_origin, readings=readings)
+        _target(
+            plan,
+            decision,
+            sources=sources,
+            compiles=compiles,
+            held=held,
+            to_origin=to_origin,
+            readings=readings,
+        )
         for decision in listed_together(plan, clicked.slot)
     ]
     label = next(
@@ -414,7 +426,6 @@ async def _switched_plan(
             f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
         )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
-    sources = pin_sources(state)
     switched = await run_together(
         _resubmit(
             surface,
@@ -604,7 +615,8 @@ def _target(
     plan: PlannerPlan,
     decision: Decision,
     *,
-    state: SessionState,
+    sources: Mapping[str, PinSource],
+    compiles: Sequence[AlignedPin],
     held: Mapping[str, AlignedInput],
     to_origin: Mapping[str, str],
     readings: Sequence[SearchReading],
@@ -613,33 +625,65 @@ def _target(
 
     A pin's own scope decision (`planner.plan.is_scope_choice`) moves the pin it
     fixes, a windowed copy read as the pin it copies (`to_origin`), from the
-    newest reading of it with a scope holding the decision's axis. A pin of a
-    compile the planner was not shown moves from the compile, whose block the
-    card read the row from (`_compile_target`). A decision
-    on an axis alignment moved for one requirement (`held`), which only that
-    requirement cites and which fixes the pin it states, moves that requirement
-    alone, from the compile it is pinned to (`planner.plan.compiled_pin`): its scope
-    and block are the compile's, and its reading the newest of the pin the
-    alignment record says it states (`AlignedInput.stated_pin`), with a scope or
-    none, whose words and roles the input keeps.
+    newest reading of it with a scope holding the decision's axis. With no such
+    reading, a pin of a compile (`compiles`) the planner was not shown
+    (`sources`) moves from the compile, whose block the card read the row from
+    (`planner.plan.held_sources`), under the words and roles of the requirement
+    pinning it (`_requirement_reading`). A decision on an axis alignment moved
+    for one requirement (`held`), which only that requirement cites and which
+    fixes the pin it states, moves that requirement alone, from the compile it
+    is pinned to (`AlignedInput.key`): its scope and block are the compile's,
+    and its reading the newest of the pin the alignment record says it states
+    (`AlignedInput.stated_pin`), with a scope or none, whose words and roles
+    the input keeps.
 
     Raises:
-        SwitchFailedError: If `decision` is neither, no stored reading of its
-            pin holds what the switch reads, or no compile is held for it.
+        SwitchFailedError: If `decision` is neither, no stored reading or held
+            compile of its pin holds what the switch reads, or no compile is
+            held for it.
     """
     gone = SwitchFailedError("That choice is no longer on the plan.", code=SCOPE_CHOICE_NOT_APPLIED)
+    lost = SwitchFailedError(
+        "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
+    )
     if decision.fixes is None or decision.scope is None:
         raise gone
     axis = decision.scope.axis
     pinned = decision.fixes.source_spec_id or ""
     pin = to_origin.get(pinned, pinned)
     if is_scope_choice(decision):
-        compiled = None if pin in pin_sources(state) else _held_compile(state, pin)
-        if compiled is not None:
-            return _compile_target(compiled, axis=axis, readings=readings)
-        reading, choice = _newest_with(readings, pin=pin, axis=axis)
-        assert reading.scope is not None
-        return _Target(pin=pin, reading=reading, scope=reading.scope, choice=choice)
+        newest = _newest_with(readings, pin=pin, axis=axis)
+        if newest is not None:
+            reading, choice = newest
+            assert reading.scope is not None
+            return _Target(pin=pin, reading=reading, scope=reading.scope, choice=choice)
+        compiled = (
+            None
+            if pin in sources
+            else next(
+                (c for c in reversed(compiles) if c.spec_id == pin and c.block is not None), None
+            )
+        )
+        requirement = next(
+            (
+                requirement
+                for requirement in plan.evidence_requirements
+                if decision.slot in requirement.decision_ids
+                and isinstance(requirement, DatasetRequirement)
+                and requirement.source_spec_id in (pinned, pin)
+            ),
+            None,
+        )
+        if compiled is None or requirement is None:
+            raise lost
+        scope, choice = _compile_scope(compiled, axis=axis)
+        return _Target(
+            pin=pin,
+            reading=_requirement_reading(requirement, pin=pin),
+            scope=scope,
+            choice=choice,
+            block=compiled.block,
+        )
     if decision.caveat is not None:
         raise gone
     moved = next(
@@ -653,19 +697,14 @@ def _target(
     )
     if moved is None:
         raise gone
-    compiled = compiled_pin(state, moved)
-    scope = part_scope(compiled.spec_id, compiled.block) if compiled is not None else None
-    choice = next((c for c in scope.choices if c.axis == axis), None) if scope else None
-    if compiled is None or scope is None or choice is None:
-        raise SwitchFailedError(
-            "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
-        )
+    compiled = next((c for c in compiles if c.key == moved.key), None)
+    if compiled is None:
+        raise lost
+    scope, choice = _compile_scope(compiled, axis=axis)
     stated = moved.stated_pin
     reading = next((reading for reading in readings if reading.spec_id == stated), None)
     if stated is None or reading is None:
-        raise SwitchFailedError(
-            "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
-        )
+        raise lost
     return _Target(
         pin=stated,
         reading=reading,
@@ -676,60 +715,47 @@ def _target(
     )
 
 
-def _held_compile(state: SessionState, pin: str) -> AlignedPin | None:
-    """The newest compile `state` holds under the spec_id `pin` with a spec block,
-    the one whose block `planner.plan.held_sources` offers for `pin`."""
-    return next(
-        (c for c in reversed(aligned_pins(state)) if c.spec_id == pin and c.block is not None),
-        None,
-    )
-
-
-def _compile_target(
-    compiled: AlignedPin, *, axis: str, readings: Sequence[SearchReading]
-) -> _Target:
-    """What switching a requirement's own row on `axis` moves when it pins
-    `compiled` directly: the card read the row from the compile's block
-    (`planner.plan.held_sources`), so the switch posts from that block's scope,
-    under the words and roles of the newest reading of the pin it was compiled
-    from. A declared whole (`AlignedPin.whole_axis`) is no reading of its part's
-    words and keeps that reading's roles under no words.
+def _compile_scope(compiled: AlignedPin, *, axis: str) -> tuple[PartScope, ScopeChoice]:
+    """The scope `compiled`'s block carries and its choice on `axis`.
 
     Raises:
-        SwitchFailedError: If the block holds no choice on `axis` or no
-            reading of the pin it was compiled from is stored.
+        SwitchFailedError: If the block carries no scope or no choice on `axis`.
     """
     scope = part_scope(compiled.spec_id, compiled.block)
     choice = next((c for c in scope.choices if c.axis == axis), None) if scope else None
-    origin = next((reading for reading in readings if reading.spec_id == compiled.origin), None)
-    if scope is None or choice is None or origin is None:
+    if scope is None or choice is None:
         raise SwitchFailedError(
             "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
         )
-    if compiled.whole_axis is not None:
-        origin = origin.model_copy(update={"text": None})
-    return _Target(
-        pin=compiled.spec_id, reading=origin, scope=scope, choice=choice, block=compiled.block
+    return scope, choice
+
+
+def _requirement_reading(requirement: DatasetRequirement, *, pin: str) -> SearchReading:
+    """`pin`, a compile no reading names, read as `requirement`, which pins it,
+    states it: under its measure, asking for its entities' parties and holding
+    open those it covers (`translator.discovery.requirement_open_roles`), as a
+    search for it would (`submission.service.Unpinned`)."""
+    return SearchReading(
+        text=requirement.measure,
+        status="definite",
+        spec_id=pin,
+        asked_roles=tuple(entity.role for entity in requirement.entities if entity.role),
+        open_roles=tuple(requirement_open_roles(requirement)),
     )
 
 
 def _newest_with(
     readings: Sequence[SearchReading], *, pin: str, axis: str
-) -> tuple[SearchReading, ScopeChoice]:
-    """The newest of `readings` of `pin` whose scope holds a choice on `axis`, and that choice.
-
-    Raises:
-        SwitchFailedError: If no reading of `pin` holds one.
-    """
+) -> tuple[SearchReading, ScopeChoice] | None:
+    """The newest of `readings` of `pin` whose scope holds a choice on `axis`, and
+    that choice; `None` when no reading of `pin` holds one."""
     for reading in readings:
         if reading.spec_id != pin or reading.scope is None:
             continue
         choice = next((c for c in reading.scope.choices if c.axis == axis), None)
         if choice is not None:
             return reading, choice
-    raise SwitchFailedError(
-        "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
-    )
+    return None
 
 
 def _source_block(source: PinSource | None, pin: str) -> Mapping[str, Any] | None:
