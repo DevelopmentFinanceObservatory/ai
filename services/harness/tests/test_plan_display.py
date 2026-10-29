@@ -4102,6 +4102,63 @@ def test_a_revisions_retrieval_changing_its_option_is_told_apart_from_a_numbered
     assert words.options == {"r0": frozenset(), "r1": {"provider"}}
 
 
+def test_a_revisions_new_retrieval_is_told_apart_from_the_name_a_carried_one_keeps(
+    decision: DecisionFactory,
+) -> None:
+    """The card names health to Kenya, holding a provider option, apart from
+    health to Uganda by its parties. A revision drops Uganda and adds health
+    to Kenya with no provider decision. The carried retrieval keeps its card
+    name; the new one, whose own facets read as that name, takes a number."""
+    held = ("bilateral flows only", "bilateral plus imputed multilateral")
+    provider = Decision(
+        slot=scope_choice_slot(_SPEC_A, "provider"),
+        description="How provider is counted.",
+        options=held,
+        chosen=held[0],
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="Search's default for this question.",
+        fixes=DecisionFixes(source_spec_id=_SPEC_A),
+        scope=DecisionScope(
+            choice_id=f"{_SPEC_A}:provider",
+            axis="provider",
+            options=(
+                ScopeOptionState(option_id="provider:first", status="available"),
+                ScopeOptionState(option_id="provider:second", status="available"),
+            ),
+        ),
+    )
+
+    def dataset(requirement_id: str, recipient: str, *scopes: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure", *scopes],
+            measure="health",
+            entities=[Entity(name=recipient, role="recipient")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=_SPEC_A if scopes else None,
+        )
+
+    kenya = dataset("kenya", "Kenya", provider.slot)
+    prior = Plan(
+        question="Health aid to Kenya and Uganda",
+        decisions=[decision(), provider],
+        evidence_requirements=[kenya, dataset("uganda", "Uganda")],
+    )
+    revision = Plan(
+        question="Health aid to Kenya, twice",
+        decisions=[decision(), provider],
+        evidence_requirements=[kenya, dataset("again", "Kenya")],
+    )
+    assert _concepts(prior).names["kenya"] == "health to Kenya"
+
+    words = plan_words(revision, shown_as=prior)
+
+    assert (words.names["kenya"], words.names["again"]) == (
+        "health to Kenya",
+        "health to Kenya (1)",
+    )
+
+
 @pytest.mark.parametrize("helper", ["_concept", "_who"])
 def test_a_revision_reads_each_retrievals_naming_once_per_plan(
     decision: Callable[..., Decision], monkeypatch: pytest.MonkeyPatch, helper: str

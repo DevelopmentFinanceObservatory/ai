@@ -5745,12 +5745,12 @@ def _providers_counted(whole: Option | None, part: Option | None) -> str:
 def _dataset_holds(block: Mapping[str, Any] | None, scope: PartScope | None, name: str) -> bool:
     """Whether the dataset of `block`, a part's spec block, `scope` its scope record,
     has what `name` of `_WHOLE_ALIKE` counts: a party side the part binds parties on
-    (`bound_parties`) or Search states open (`resolved.role_axis_facts`), or a scope
+    (`block_parties`) or Search states open (`resolved.role_axis_facts`), or a scope
     axis the part's records hold a choice on."""
     column = _ALIKE_COLUMNS.get(name)
     if column is not None:
         facts = ((block or {}).get("resolved") or {}).get("role_axis_facts") or ()
-        return (scope is not None and bool(bound_parties(scope, column))) or any(
+        return bool(block_parties(block, column, scope=scope)) or any(
             isinstance(fact, Mapping) and fact.get("role") == column for fact in facts
         )
     return scope is not None and any(c.axis == _ALIKE_AXES[name] for c in scope.choices)
@@ -6118,6 +6118,19 @@ def bound_parties(scope: PartScope, column: str) -> tuple[str, ...]:
     a choice's option adds there (`EntitiesBinding`), as a region option adds its
     donors, counts as the base identity's own do."""
     return tuple((scope.compiled.identity.get("entities") or {}).get(column) or ())
+
+
+def block_parties(
+    block: Mapping[str, Any] | None, column: str, *, scope: PartScope | None
+) -> tuple[str, ...]:
+    """The parties the spec block `block` binds on the role column `column`, `scope`
+    its scope record (`part_scope`): those that record compiles to (`bound_parties`)
+    where it reads, else those of the block's definition (`definition.identity`), as
+    for a dataset whose scope builds no choices."""
+    if scope is not None:
+        return bound_parties(scope, column)
+    identity = ((block or {}).get("definition") or {}).get("identity") or {}
+    return tuple((identity.get("entities") or {}).get(column) or ())
 
 
 def whole_axis_held(scope: PartScope, axis: str) -> bool:

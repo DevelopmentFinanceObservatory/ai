@@ -51,7 +51,7 @@ from __future__ import annotations
 import json
 import re
 import typing
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Collection, Iterator, Mapping, Sequence
 
 from compiler.evidence import open_axes_for, resolve_group, resolve_name
@@ -907,7 +907,9 @@ def _concepts(
     states, given there. Namesakes are found by these facets, carried or not,
     each retrieval's name built from them before any number (`unnumbered`),
     so the others are told apart from a carried one as from each other,
-    whatever option or number its carried name states. The names are read
+    whatever option or number its carried name states. A retrieval not
+    carried whose name so built is the name a carried one keeps is numbered
+    with its namesakes too, so it never takes that name. The names are read
     off each retrieval's naming facets, `namings` where given, else read by
     `_namings`, a plan not compiled reading its sources off `sources`
     (`_source`).
@@ -938,7 +940,12 @@ def _concepts(
     names = {rid: carried.names.get(rid) or name for rid, name in unnumbered.items()}
     options = {rid: carried.options.get(rid, axes) for rid, axes in stated.items()}
     fresh = [dataset for dataset in datasets if dataset.id not in carried.names]
-    for name in dict.fromkeys(_alike(unnumbered).values()):
+    readers: dict[str, set[str]] = defaultdict(set)
+    for rid, name in [*unnumbered.items(), *carried.names.items()]:
+        readers[name].add(rid)
+    for name in dict.fromkeys(unnumbered.values()):
+        if len(readers[name]) < 2:
+            continue
         taken = set(names.values())
         number = 0
         for dataset in fresh:

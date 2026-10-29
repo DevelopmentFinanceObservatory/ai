@@ -8574,8 +8574,9 @@ class _OpenedWholeCompiles:
     it posts entries for and the sector, under `_OPENED_WHOLE`'s spec_id for the role it
     opens. `groups` are the sets Search names on the answer; else it counts the members
     left open on the role, as Search does where no total holds them. With `bound`,
-    the answer's identity binds those parties on the opened role. Each call's
-    arguments are recorded in `calls`."""
+    the answer's identity binds those parties on the opened role. Without
+    `scope_choices`, the answer carries no scope record. Each call's arguments
+    are recorded in `calls`."""
 
     def __init__(
         self,
@@ -8583,10 +8584,12 @@ class _OpenedWholeCompiles:
         *,
         groups: Mapping[str, Any] | None = None,
         bound: list[str] | None = None,
+        scope_choices: bool = True,
     ) -> None:
         self.part = part
         self.groups = groups
         self.bound = bound
+        self.scope_choices = scope_choices
         self.calls: list[Mapping[str, Any]] = []
 
     async def list_tools(self) -> list[Any]:
@@ -8632,6 +8635,8 @@ class _OpenedWholeCompiles:
             for choice in scope["choices"]
             if choice["axis"] in posted or choice["axis"] == "sector"
         ]
+        if not self.scope_choices:
+            del resolved["scope_choices"]
         part = {"status": "definite", "spec": block}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
@@ -9055,6 +9060,18 @@ _DAC_COUNTRIES = _DAC_DONOR_WHOLES["dac1"]["whole"]["resolved"]["entity_groups"]
         # Official donors, a whole population of its class, where the dataset also
         # publishes private donors: the US is a country, so an official donor.
         pytest.param(["DACOfficialDonors"], _OFFICIAL_DONORS, None, id="whole-class-of-the-party"),
+        # Private donors, a whole population of a class the US, a country, is not of.
+        pytest.param(
+            ["DACPrivateDonors"],
+            {
+                **_OFFICIAL_DONORS,
+                "label": "private donors (DAC)",
+                "total": "DACPrivateDonors",
+                "whole_of": ["private"],
+            },
+            "part_outside_whole",
+            id="whole-class-not-the-partys",
+        ),
         # A class of party this release does not know, on the side or the whole: the
         # group is unreadable, so nothing shows the total holds the US.
         pytest.param(
@@ -9078,8 +9095,8 @@ async def test_a_donor_whole_is_served_only_where_search_shows_it_holds_the_part
     on the opened role: the share is served where those hold the US, as parties,
     as the members Search lists for the total it binds, or as a whole-population
     total of the US's class. It is refused as a whole that does
-    not contain its part where Search shows the US is outside
-    (`part_outside_whole`), and as one nothing shows holds it where the bound
+    not contain its part where Search shows the US is outside, or the total it
+    binds is a whole population of another class (`part_outside_whole`), and as one nothing shows holds it where the bound
     total lists no members and no class of party holding it
     (`whole_members_unstated`). A whole binding nothing there counts every donor
     of the dataset
@@ -9087,6 +9104,38 @@ async def test_a_donor_whole_is_served_only_where_search_shows_it_holds_the_part
     block = _us_health_to_africa()
     groups = {"origin": group} if group is not None else None
     surface = _OpenedWholeCompiles(block, bound=bound, groups=groups)
+    ctx = _FakeToolContext()
+
+    result = await _share_over_every(surface, ctx, block, "donor", decision)
+
+    if cause is None:
+        assert result["outcome"] == Outcome.OK.value, result
+        assert dict(_pins(ctx))[_WHOLE] == _OPENED_WHOLE["donor"]
+        return
+    assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
+    assert result["detail"]["whole"]["cause"] == cause
+    assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("bound", "cause"),
+    [
+        # Search binds no donor on the whole: it counts every donor the dataset holds.
+        pytest.param(None, None, id="binding-no-donor"),
+        # Search's definition binds donors that leave the US out.
+        pytest.param(["country/FRA", "country/DEU"], "part_outside_whole", id="parties-without-it"),
+    ],
+)
+async def test_a_donor_whole_with_no_scope_record_is_read_by_its_definition(
+    decision: DecisionFactory, bound: list[str] | None, cause: str | None
+) -> None:
+    """US health aid to Africa over every donor's, where Search's answer for the
+    whole carries no scope choices, as for a dataset whose scope builds none: the
+    parties it binds on the opened role are those of its definition's identity. A
+    whole binding none there holds the US; one binding other donors does not
+    (`part_outside_whole`)."""
+    block = _us_health_to_africa()
+    surface = _OpenedWholeCompiles(block, bound=bound, scope_choices=False)
     ctx = _FakeToolContext()
 
     result = await _share_over_every(surface, ctx, block, "donor", decision)
@@ -9365,6 +9414,19 @@ def test_a_dac1_donor_whole_with_no_choices_says_nothing_both_sides_count_alike(
     scope = submission_service.part_scope(part["spec_id"], part)
     assert submission_service._whole_shares("donor", part, scope, scope) == (
         ", so both sides count the same measure basis and providers."
+    )
+
+
+def test_a_part_with_no_scope_record_counts_the_recipients_its_definition_binds() -> None:
+    """US health aid to Africa over every donor, its block carrying no scope choices:
+    the recipients it binds are those of its definition's identity, so the caveat
+    says both sides count the same recipients."""
+    part = _us_health_to_africa()
+    del part["resolved"]["scope_choices"]
+    part["resolved"].pop("role_axis_facts", None)
+
+    assert submission_service._whole_shares("donor", part, None, None) == (
+        ", so both sides count the same recipients."
     )
 
 

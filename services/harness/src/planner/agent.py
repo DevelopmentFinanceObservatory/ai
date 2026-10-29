@@ -93,6 +93,7 @@ from submission.service import (
     aligned_pins,
     axis_slot,
     basis_unservable,
+    block_parties,
     bound_parties,
     part_scope,
     realignments_wanted,
@@ -1752,13 +1753,14 @@ def _parties_outside(
     One binding parties there holds those it binds, and of a total it binds,
     the members Search lists for the group naming it on `column`
     (`ResolvedGroup.members`, DAC countries' total). A total holding a whole
-    population (`ResolvedGroup.whole_of`) holds every party of its classes:
-    the part's party where its ref shows it is of one
-    (`compiler.sources.party_class`, a country official), or where they are
-    every class the side publishes (`ResolvedGroup.side_classes`), residuals
-    aside; where the side publishes another class, or Search states no classes
-    for the side but residuals, nothing here says which class any other party
-    is, so it is unshown.
+    population (`ResolvedGroup.whole_of`) holds every party of its classes and
+    no other: the part's party where its ref shows it is of one
+    (`compiler.sources.party_class`, a country official), and not where its
+    ref shows another. It holds a party whose ref shows no class where its
+    classes are every class the side publishes (`ResolvedGroup.side_classes`),
+    residuals aside; where the side publishes another class, or Search states
+    no classes for the side but residuals, nothing here says which class that
+    party is, so it is unshown.
     Any other party is outside where Search binds parties or lists a total's
     members there, and unshown where the total it binds states neither its
     members nor a whole class. Where Search's group on `column` is not
@@ -1767,7 +1769,8 @@ def _parties_outside(
     another role is not read. The parties the part and the whole bind on
     `column` are those their scope records bind
     (`submission.service.bound_parties`), a choice's among them; where the
-    whole's record does not read, every party the part names is unshown.
+    whole's record does not read, those its definition binds
+    (`submission.service.block_parties`).
 
     A party of the part the whole neither binds nor lists is read through the
     part's own group on `column` where it is that group's total (the G7's): the
@@ -1776,11 +1779,7 @@ def _parties_outside(
     members, or the part's group there is not readable.
     """
     named = bound_parties(scope, column)
-    whole = part_scope(str(spec.get("spec_id")), spec)
-    if whole is None:
-        # Nothing reads what the whole binds on `column`.
-        return _Containment(unshown=named)
-    bound = bound_parties(whole, column)
+    bound = block_parties(spec, column, scope=part_scope(str(spec.get("spec_id")), spec))
     if not bound:
         return _Containment()
     try:
@@ -1794,8 +1793,8 @@ def _parties_outside(
         if party in bound or party in members:
             return True
         if group is not None and group.whole_of:
-            if party_class(party) in group.whole_of:
-                return True
+            if (held := party_class(party)) is not None:
+                return held in group.whole_of
             classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
             return True if classes and classes <= set(group.whole_of) else None
         if members or group is None or group.total not in bound:
