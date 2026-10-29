@@ -8,7 +8,9 @@ spare work capacity. Otherwise it answers 503 `service_unavailable` with
 `constraint_id` `BACKGROUND_DECLINED`, which this service's refusal carries
 on to the caller in its `fix` (`declined_in_background`). A background call
 answers once its POST has been written out (`background_result`, outcome
-`"posted"`), or with apis' answer when that comes first. The POST itself stays
+`"posted"`), or with apis' answer when that comes first, or at once with
+outcome `"joined"` when a POST of the same request is already open
+(`data_mcp.get_data_tool._post_mint`). The POST itself stays
 open in a task of its own until apis answers, since apis runs the mint on CPU
 that Cloud Run allocates only while the request is open. It never polls and
 reads no frame. Its tool-call span carries `BACKGROUND_MINT_SPAN_ATTRIBUTE`.
@@ -17,11 +19,11 @@ The harness sends it for a card's mints before the user approves the card
 
 A background call answers before its mint ends and leaves the POST open in a
 task that outlives the request, so only the harness may ask for one: a call
-that names a conversation caller (`common.caller.conversation_caller`) and
-arrives outside the combined server, whose outside calls all run under
-`EXTERNAL_CALL_BUDGET`. Every other call that carries the marker, an outside
-client's included, mints in the foreground, holding its connection for the
-mint as any call does.
+whose HTTP request carries the loopback mark (`LOOPBACK_SCOPE_KEY`), which
+`harness.server._loopback_only` sets on its direct mounts and which no request
+through the combined server carries. Every other call that carries the marker,
+an outside client's included, mints in the foreground, holding its connection
+for the mint as any call does.
 
 The marker rides `_meta`, outside the tool's arguments, so no input schema,
 tool description or capability pin carries it.
@@ -33,12 +35,11 @@ import dataclasses
 from collections.abc import Mapping
 from typing import Any, Final, Literal
 
-from common.caller import CONVERSATION_CALLER_PREFIX, current_caller
+from common.mcp_telemetry import is_loopback_request
 from common.refusal import refusal_code
 from fastmcp.server.dependencies import fastmcp_request_ctx
 from fastmcp.tools import ToolResult
 
-from data_mcp.deadline import EXTERNAL_CALL_BUDGET, current_call_budget
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal
 
@@ -57,8 +58,9 @@ BACKGROUND_DECLINED = "mint_background_declined"
 CONSTRAINT_ID_KEY = "constraint_id"
 
 # The structured-content key a background call's result states its outcome
-# under: "minted" (apis answered 200), "queued" (202) or "posted" (written out,
-# with apis' answer still to come).
+# under: "minted" (apis answered 200), "queued" (202), "posted" (written out,
+# with apis' answer still to come) or "joined" (not sent, since a POST of the
+# same request was already open).
 BACKGROUND_OUTCOME_KEY = "background_mint"
 
 # The span attribute a background call's tool-call span carries.
@@ -70,18 +72,18 @@ type Admission = Literal["background"] | None
 
 def requested_admission() -> Admission:
     """`"background"` when the current request's `_meta` asks for a background
-    mint and the harness sent it: a conversation caller, outside the combined
-    server's `EXTERNAL_CALL_BUDGET`. `None` for any other value, no value, any
-    other caller, or no MCP request in flight."""
+    mint and the harness sent it, over loopback (`is_loopback_request`). `None`
+    for any other value, no value, a request off loopback, or no HTTP request
+    in flight."""
     request_context = fastmcp_request_ctx.get()
     meta = request_context.meta if request_context is not None else None
-    asked = meta.get(MINT_ADMISSION_META_KEY) if meta else None
-    if asked != BACKGROUND_ADMISSION or current_call_budget() is EXTERNAL_CALL_BUDGET:
+    if not meta or meta.get(MINT_ADMISSION_META_KEY) != BACKGROUND_ADMISSION:
         return None
-    caller = current_caller()
-    if caller is None or not caller.startswith(CONVERSATION_CALLER_PREFIX):
+    try:
+        from_harness = is_loopback_request()
+    except RuntimeError:  # no HTTP request in flight
         return None
-    return BACKGROUND_ADMISSION
+    return BACKGROUND_ADMISSION if from_harness else None
 
 
 def admission_headers(admission: Admission) -> dict[str, str]:
@@ -98,9 +100,10 @@ def declined_in_background(refusal: ToolRefusal, exc: UpstreamError) -> ToolRefu
 
 
 def background_result(
-    *, spec_id: str, outcome: Literal["minted", "queued", "posted"]
+    *, spec_id: str, outcome: Literal["minted", "queued", "posted", "joined"]
 ) -> ToolResult:
-    """A background call's answer once its mint POST has been written out, or answered."""
+    """A background call's answer once its mint POST has been written out, or
+    answered, or at once when an open POST of the same request mints it."""
     return ToolResult(
         content=f"Background mint of {spec_id}: {outcome}.",
         structured_content={"spec_id": spec_id, BACKGROUND_OUTCOME_KEY: outcome},
@@ -109,7 +112,7 @@ def background_result(
 
 def background_outcome(structured: Mapping[str, Any] | None) -> str:
     """A background call's answer as one word, from its structured content:
-    its `BACKGROUND_OUTCOME_KEY` (`"minted"`, `"queued"` or `"posted"`),
+    its `BACKGROUND_OUTCOME_KEY` (`"minted"`, `"queued"`, `"posted"` or `"joined"`),
     `"declined"` when apis had no room for it, the refusal's code otherwise, or
     `"answered"` for an answer that is none of these."""
     body = structured or {}

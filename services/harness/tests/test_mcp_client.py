@@ -23,11 +23,11 @@ from typing import Any
 import httpx2
 import pytest
 from common.auth import apply_gate
-from common.caller import conversation_caller, supplied_caller
+from common.caller import conversation_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
 from compiler.surface import ProgressReport
-from data_mcp import client_holder, stat_var_list
+from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
 from data_mcp.manifest import Manifest
@@ -1665,17 +1665,17 @@ async def test_a_background_get_data_marks_its_mint_post_and_is_sent_once(
         return Client(data_mcp)
 
     monkeypatch.setattr(McpTimeoutPolicy, "client", _in_memory_client)
+    # The in-memory client has no HTTP request for the harness's loopback guard to
+    # mark, so the mark is read as set.
+    monkeypatch.setattr(mint_admission, "is_loopback_request", lambda: True)
     client_holder.set_client(
         UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(apis))
     )
     executor = McpExecutor(settings=Settings(), sleep=_no_sleep)
     try:
-        # The in-memory client sends no headers, so the conversation caller the
-        # harness names in `x-dfo-caller` is supplied.
-        with supplied_caller(conversation_caller("principal/conversation")):
-            background = await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
-            assert posts == ["background"]
-            await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
+        background = await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
+        assert posts == ["background"]
+        await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
     finally:
         await executor.aclose()
         client_holder.set_client(None)

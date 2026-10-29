@@ -761,8 +761,9 @@ class McpExecutor:
     async def get_data_in_background(self, args: dict[str, Any]) -> str:
         """One `get_data` call with `args`, its mint marked background, and the
         outcome as a word (`data_mcp.mint_admission.background_outcome`):
-        data-mcp's `"minted"`, `"queued"` or `"posted"`, `"declined"` when apis
-        had no room for it, or another refusal's code. data-mcp answers `"posted"` as soon as the mint POST is
+        data-mcp's `"minted"`, `"queued"`, `"posted"` or `"joined"` (a POST of
+        the same request was already open), `"declined"` when apis had no room
+        for it, or another refusal's code. data-mcp answers `"posted"` as soon as the mint POST is
         written out, so apis' own answer, a decline included, mostly arrives
         after this returns; data-mcp logs it (`background mint answered`).
 

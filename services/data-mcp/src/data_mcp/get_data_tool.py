@@ -211,9 +211,14 @@ _deadline_clock: Clock = time.monotonic
 # on `_deadline_clock`'s time. Tests replace it with an empty one.
 _mint_ledger = MintLedger()
 
-# Each background mint POST still open, under its request key (`_post_mint`), and
-# the event set when it ends. Per process.
-_open_background_posts: dict[str, asyncio.Event] = {}
+# Each mint POST still open, under its request key (`_post_mint`), and the event
+# set when it ends. Per process.
+_open_mint_posts: dict[str, asyncio.Event] = {}
+
+# How much more than `post_mint_reserve_s` plus `min_mint_timeout_s` a foreground
+# mint waiting on an open POST leaves of its deadline (`_post_mint`), so the time
+# the wait overruns its timeout by cannot take the POST under `min_mint_timeout_s`.
+_MINT_WAIT_SLACK_S = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -1166,49 +1171,53 @@ async def _post_mint(
     deadline: CallDeadline,
     admission: Admission = None,
     on_sent: Callable[[], None] | None = None,
-) -> httpx2.Response | ToolRefusal:
-    """POST one mint request inside what `deadline` leaves it (`_send_mint`), after
-    any background POST of the same request this process still holds open.
+) -> httpx2.Response | ToolResult:
+    """POST one mint request inside what `deadline` leaves it (`_send_mint`), unless
+    this process already holds a POST of the same request open. A refusal from
+    `_send_mint` comes back as its `ToolResult`.
 
-    apis runs two identical synchronous mints in flight at once as two mints, so a
-    foreground POST whose request body matches an open background POST's waits for
-    that POST to end, for as long as its own mint deadline leaves at most, and then
-    posts, finding the frame the background mint built. The harness posts a card's
-    mints in the background before the user approves it (`harness.early_mint`), and
-    the run then asks for the same frames in the foreground.
+    apis runs two identical synchronous mints in flight at once as two mints. A
+    background POST whose request body matches an open POST's therefore sends
+    nothing and answers at once with `background_result` outcome `"joined"`: the open
+    POST mints the frame. A foreground POST waits for the open POST to end, while its
+    deadline leaves more than `post_mint_reserve_s`, `min_mint_timeout_s` and
+    `_MINT_WAIT_SLACK_S`, and then posts, finding the frame the open POST built. The
+    harness posts a card's mints in the background before the user approves it
+    (`harness.early_mint`), and the run then asks for the same frames in the
+    foreground.
 
-    The open background POSTs are held per process, in `_open_background_posts`,
-    from before the POST is sent until it ends, answered, failed or cancelled. The
-    wait therefore holds where the harness reaches data-mcp in-process, as it does
-    over its loopback mount, and two processes can still mint the same request
-    twice.
+    Every POST is held open per process, in `_open_mint_posts`, from before it is
+    sent until it ends, answered, failed or cancelled. The dedupe therefore holds
+    where the harness reaches data-mcp in-process, as it does over its loopback
+    mount, and two processes can still mint the same request twice.
     """
     request_key = json.dumps(request_body, sort_keys=True)
-    send = functools.partial(
-        _send_mint,
-        client,
-        request_body,
-        request_key=request_key,
-        spec_id=spec_id,
-        settings=settings,
-        deadline=deadline,
-        admission=admission,
-        on_sent=on_sent,
-    )
-    if admission is not None:
-        ended = _open_background_posts[request_key] = asyncio.Event()
-        try:
-            return await send()
-        finally:
-            ended.set()
-            if _open_background_posts.get(request_key) is ended:
-                del _open_background_posts[request_key]
-    if (open_post := _open_background_posts.get(request_key)) is not None:
+    if (open_post := _open_mint_posts.get(request_key)) is not None:
+        if admission is not None:
+            return background_result(spec_id=spec_id, outcome="joined")
         budget = current_call_budget()
-        waitable_s = deadline.reserving(budget.post_mint_reserve_s).remaining()
+        waitable_s = deadline.reserving(
+            budget.post_mint_reserve_s + budget.min_mint_timeout_s + _MINT_WAIT_SLACK_S
+        ).remaining()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(open_post.wait(), timeout=max(waitable_s, 0.0))
-    return await send()
+    ended = _open_mint_posts[request_key] = asyncio.Event()
+    try:
+        sent = await _send_mint(
+            client,
+            request_body,
+            request_key=request_key,
+            spec_id=spec_id,
+            settings=settings,
+            deadline=deadline,
+            admission=admission,
+            on_sent=on_sent,
+        )
+    finally:
+        ended.set()
+        if _open_mint_posts.get(request_key) is ended:
+            del _open_mint_posts[request_key]
+    return to_tool_result(sent) if isinstance(sent, ToolRefusal) else sent
 
 
 async def _send_mint(
@@ -1334,7 +1343,8 @@ async def _attempt_mint(
 
     A background `admission` goes to the mint POST alone (`_post_mint`), and the
     mint ends on apis' answer to it, with `background_result`, with no poll and
-    no frame read. A background mint apis declines refuses with the decline named in its
+    no frame read, or at once, outcome `"joined"`, when a POST of the same request
+    is already open. A background mint apis declines refuses with the decline named in its
     `fix` (`data_mcp.mint_admission.declined_in_background`). `on_sent` hears each
     mint POST written out.
 
@@ -1431,8 +1441,8 @@ async def _attempt_mint(
                 admission=admission,
                 on_sent=on_sent,
             )
-            if isinstance(posted, ToolRefusal):
-                return to_tool_result(posted)
+            if isinstance(posted, ToolResult):
+                return posted
             if admission is not None:
                 # A background caller needs only the mint started, so it neither polls nor reads a frame.
                 outcome = "queued" if posted.status_code == HTTPStatus.ACCEPTED else "minted"
@@ -1749,8 +1759,8 @@ async def _mint_recorded_response(
             posted = await _post_mint(
                 client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
             )
-            if isinstance(posted, ToolRefusal):
-                return to_tool_result(posted)
+            if isinstance(posted, ToolResult):
+                return posted
             payload = await _manifest_payload_without_waiting(
                 posted,
                 client=client,

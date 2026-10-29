@@ -587,6 +587,8 @@ async def _sse_stream(
     armed_cancel: asyncio.Event | None = None
     if conversation is not None:
         armed_cancel = conversation.cancel_event = asyncio.Event()
+        # A reason left by an earlier stream was aimed at that stream.
+        conversation.cancel_reason = None
         cancel_wait = asyncio.ensure_future(armed_cancel.wait())
         if switch:
             # Armed here, by the stream the switch runs on, so an earlier

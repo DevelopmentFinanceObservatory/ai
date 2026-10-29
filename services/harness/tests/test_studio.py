@@ -3379,6 +3379,22 @@ async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
     assert conversation.cancel_event is None  # disarmed on unwind
 
 
+async def test_a_new_stream_drops_a_cancel_reason_left_for_an_earlier_one() -> None:
+    """A reason recorded after the earlier stream disarmed, with no event left to
+    carry it, was aimed at that stream, so the next stream arms without it."""
+
+    async def segment():
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    conversation.cancel_reason = "segment_lost"
+    stream = _sse_stream(segment(), conversation=conversation)
+    await anext(stream)
+
+    assert conversation.cancel_reason is None
+    await stream.aclose()
+
+
 async def test_a_stream_ending_leaves_the_cancel_event_a_later_stream_armed() -> None:
     """A request that took the conversation after the lock was released arms its
     own cancel event. The earlier stream's `finally` runs afterwards and leaves

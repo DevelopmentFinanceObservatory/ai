@@ -36,7 +36,11 @@ early call's mint POST open waits for that POST before posting its own
 
 One set per conversation, keyed by the card's `plan_revision`: an offer of
 the revision already started starts nothing. A new revision replaces the
-record, and the replaced set's calls run on. Nothing here touches the card,
+record, and the replaced set's calls already sent run on. A call still
+waiting for one of its card's slots is withdrawn, unsent and logged
+`withdrawn`, when a newer revision is offered or the card is approved
+(`withdraw`, called from `harness.graph.planning.approve`): the run then
+asks for the frames itself. Nothing here touches the card,
 the plan or the run ledger. Each call logs one line with its spec_id, the
 revision, its outcome and the seconds since the card was offered, and a
 failure is logged and dropped.
@@ -71,10 +75,12 @@ SendGetData = Callable[[dict[str, Any]], Awaitable[str]]
 @dataclass(kw_only=True)
 class _Call:
     """One early call: the spec_id it asks for, when the card was offered,
-    and whether its line has been logged."""
+    whether it has taken a slot and gone out, and whether its line has been
+    logged."""
 
     spec_id: Any
     offered_at: float
+    sent: bool = False
     logged: bool = False
 
 
@@ -126,8 +132,10 @@ class EarlyMints:
         revision = plan_revision(plan)
         conversation = current_conversation_id.get()
         latest = self._sets.get(conversation)
-        if latest is not None and latest.revision == revision:
-            return
+        if latest is not None:
+            if latest.revision == revision:
+                return
+            self._withdraw(latest)
         mint_set = _MintSet(revision=revision, slots=asyncio.Semaphore(self._max_concurrent))
         self._sets[conversation] = mint_set
         self._sets.move_to_end(conversation)
@@ -142,6 +150,21 @@ class EarlyMints:
             mint_set.calls[task] = call
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+
+    def withdraw(self) -> None:
+        """Withdraw the calls of this conversation's latest card still waiting
+        for a slot, once the card is approved."""
+        mint_set = self._sets.get(current_conversation_id.get())
+        if mint_set is not None:
+            self._withdraw(mint_set)
+
+    def _withdraw(self, mint_set: _MintSet) -> None:
+        """Cancel each call of `mint_set` that has not gone out, and log it
+        `withdrawn`."""
+        for task, call in mint_set.calls.items():
+            if not (call.sent or task.done()):
+                task.cancel()
+                self._log(mint_set, call, "withdrawn")
 
     async def settle(self) -> bool:
         """Wait, `settle_s` at most, for the calls of this conversation's
@@ -168,6 +191,7 @@ class EarlyMints:
         """Send one call, once one of the card's slots is free, and log how it
         ended unless `settle` logged it unsent."""
         async with mint_set.slots:
+            call.sent = True
             try:
                 outcome = await self._send(args)
             except Exception as exc:

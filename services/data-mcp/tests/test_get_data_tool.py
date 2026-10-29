@@ -9,7 +9,7 @@ import io
 import json
 import logging
 from collections.abc import Callable, Coroutine, Iterator, Mapping
-from contextlib import nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -28,9 +28,9 @@ from common.materialisation import (
 )
 from common.materialisation import set_store as set_frame_store
 from common.place_type import PARTY_KINDS
-from data_mcp import client_holder, get_data_tool
+from data_mcp import client_holder, get_data_tool, mint_admission
 from data_mcp.client import UpstreamClient
-from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, CallDeadline, use_call_budget
 from data_mcp.definition_store import (
     DefinitionStoreUnavailable,
     IdentityMismatch,
@@ -601,31 +601,41 @@ _BACKGROUND_META = {MINT_ADMISSION_META_KEY: "background"}
 _HARNESS_CALLER = conversation_caller("principal/conversation")
 
 
+@contextmanager
+def _over_loopback(*, loopback: bool = True) -> Iterator[None]:
+    """Make the in-memory client's calls read as arriving over the harness's
+    loopback mount (`common.mcp_telemetry.is_loopback_request`), or as
+    arriving off it. The in-memory transport has no HTTP request to mark."""
+
+    def marked() -> bool:
+        return loopback
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mint_admission, "is_loopback_request", marked)
+        yield
+
+
 @pytest.mark.parametrize(
-    ("meta", "caller", "external", "admissions", "background"),
+    ("meta", "loopback", "admissions", "background"),
     [
-        (_BACKGROUND_META, _HARNESS_CALLER, False, ["background"], "queued"),
-        ({MINT_ADMISSION_META_KEY: "foreground"}, _HARNESS_CALLER, False, [None, None], None),
-        (None, _HARNESS_CALLER, False, [None, None], None),
-        (_BACKGROUND_META, "ip:203.0.113.7", False, [None, None], None),
-        (_BACKGROUND_META, None, False, [None, None], None),
-        (_BACKGROUND_META, _HARNESS_CALLER, True, [None, None], None),
+        (_BACKGROUND_META, True, ["background"], "queued"),
+        ({MINT_ADMISSION_META_KEY: "foreground"}, True, [None, None], None),
+        (None, True, [None, None], None),
+        (_BACKGROUND_META, False, [None, None], None),
     ],
-    ids=["background", "other_value", "unmarked", "outside_caller", "no_caller", "combined"],
+    ids=["background", "other_value", "unmarked", "off_loopback"],
 )
 async def test_a_background_call_marks_its_mint_post_and_ends_once_it_is_answered(
     meta: dict[str, Any] | None,
-    caller: str | None,
-    external: bool,
+    loopback: bool,
     admissions: list[str | None],
     background: str | None,
     exported_spans: InMemorySpanExporter,
 ) -> None:
-    """A harness call whose `_meta` asks for a background mint sends apis the admission
-    header on its mint POST and ends on apis' 202 without polling, its span marked. Any
-    other call, the marked call of any caller but a conversation's or one through the
-    combined server's `EXTERNAL_CALL_BUDGET` included, sends the header nowhere and polls
-    the operation to its frame."""
+    """A harness call over loopback whose `_meta` asks for a background mint sends apis
+    the admission header on its mint POST and ends on apis' 202 without polling, its span
+    marked. Any other call, the marked call off loopback included, sends the header
+    nowhere and polls the operation to its frame."""
     stored = _stored_definition()
     manifest = _manifest_response(spec_id=stored.spec_id)
     sent: list[str | None] = []
@@ -650,10 +660,7 @@ async def test_a_background_call_marks_its_mint_post_and_ends_once_it_is_answere
             )
         raise AssertionError(f"unexpected call to {request.url.path}")
 
-    with (
-        supplied_caller(caller) if caller is not None else nullcontext(),
-        use_call_budget(EXTERNAL_CALL_BUDGET) if external else nullcontext(),
-    ):
+    with _over_loopback(loopback=loopback):
         result = await _call_get_data(
             handler, _StubStore(stored), {"spec_id": stored.spec_id}, meta=meta
         )
@@ -708,7 +715,7 @@ async def _background_call(apis: _ApisStillMinting, store: Any, *, answer: bool)
     otherwise."""
     async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
         client_holder.set_client(upstream)
-        with supplied_caller(_HARNESS_CALLER):
+        with supplied_caller(_HARNESS_CALLER), _over_loopback():
             async with Client(mcp) as client:
                 set_store(store)
                 result = await asyncio.wait_for(
@@ -813,7 +820,7 @@ async def test_a_foreground_mint_of_an_open_background_post_waits_for_it_before_
 
     async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
         client_holder.set_client(upstream)
-        with supplied_caller(_HARNESS_CALLER):
+        with supplied_caller(_HARNESS_CALLER), _over_loopback():
             async with Client(mcp) as client:
                 set_store(_StubStore(stored))
                 arguments = {"spec_id": stored.spec_id}
@@ -833,7 +840,82 @@ async def test_a_foreground_mint_of_an_open_background_post_waits_for_it_before_
 
     assert result.is_error is False
     assert apis.posts == 2
-    assert not get_data_tool._open_background_posts
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_background_call_for_a_request_already_being_posted_answers_joined_unsent() -> None:
+    """A background call for the frame a foreground POST is still minting sends
+    nothing, since apis would run the same mint twice, and answers `joined` at once."""
+    stored = _stored_definition()
+    apis = _ApisStillMinting(stored.spec_id)
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        client_holder.set_client(upstream)
+        with _over_loopback():
+            async with Client(mcp) as client:
+                set_store(_StubStore(stored))
+                arguments = {"spec_id": stored.spec_id}
+                foreground = asyncio.ensure_future(
+                    client.call_tool("get_data", arguments, raise_on_error=False)
+                )
+                for _ in range(20):
+                    await asyncio.sleep(0.01)
+                assert apis.posts == 1
+
+                joined = await asyncio.wait_for(
+                    client.call_tool(
+                        "get_data", arguments, raise_on_error=False, meta=_BACKGROUND_META
+                    ),
+                    timeout=5,
+                )
+                assert apis.posts == 1
+                apis.answer.set()
+                await asyncio.wait_for(foreground, timeout=5)
+
+    assert (joined.structured_content or {})[BACKGROUND_OUTCOME_KEY] == "joined"
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_waiting_on_an_open_post_still_leaves_itself_time_to_post() -> None:
+    """A foreground POST stops waiting on an open POST of the same request while its
+    deadline still leaves the post-mint reserve and the shortest mint, so it posts
+    rather than refusing for want of time."""
+    budget = CallBudget(
+        deadline_s=None,
+        pre_mint_reserve_s=0.2,
+        mint_timeout_s=0.1,
+        min_mint_timeout_s=0.1,
+        post_mint_reserve_s=0.05,
+    )
+    request_body = {"input": {"spec_id": "spec"}}
+    get_data_tool._open_mint_posts[json.dumps(request_body, sort_keys=True)] = asyncio.Event()
+    posts: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        posts.append(request.url.path)
+        return httpx2.Response(200, json={})
+
+    try:
+        async with _client(handler) as upstream, asyncio.timeout(5):
+            with use_call_budget(budget):
+                posted = await get_data_tool._post_mint(
+                    upstream,
+                    request_body,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(
+                        budget.post_mint_reserve_s
+                        + budget.min_mint_timeout_s
+                        + get_data_tool._MINT_WAIT_SLACK_S
+                        + 0.1
+                    ),
+                )
+    finally:
+        get_data_tool._open_mint_posts.clear()
+
+    assert isinstance(posted, httpx2.Response)
+    assert posts == ["/api/datasets"]
 
 
 async def test_shutdown_closes_a_background_post_apis_has_not_answered() -> None:

@@ -309,8 +309,9 @@ def approve(
 
     Offering a card pending approval hands its plan to `early_mints`
     (`harness.early_mint`), which starts the card's retrievals unless it
-    already started that revision. It returns at once and touches neither the
-    plan nor the state.
+    already started that revision. Approving a card withdraws its early calls
+    still waiting for a slot (`EarlyMints.withdraw`). Neither touches the plan
+    or the state.
     """
     answer = (ctx.resume_inputs or {}).get(APPROVE_INTERRUPT)
     if not (ctx.state.get("awaiting_approve") and answer is not None):
@@ -350,6 +351,8 @@ def approve(
         amended = plan_version > 1
         record_span("plan.approved", {"dfo.plan_version": plan_version, "dfo.amended": amended})
         logger.info("plan approved: plan_version=%s amended=%s", plan_version, amended)
+        if early_mints is not None:
+            early_mints.withdraw()
         yield Event(output=approved.model_dump(mode="json"), route="approved")
         return
     yield Event(

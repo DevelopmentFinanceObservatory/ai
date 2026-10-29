@@ -4575,12 +4575,7 @@ async def test_a_cards_early_calls_go_out_no_more_than_the_cap_at_once(
 ) -> None:
     """A card with more retrievals than the cap sends the cap's worth, and the
     rest as those end."""
-    plan = _seam_plan(schemas=real_schemas)
-    assert plan.workflow is not None
-    (retrieval,) = [step for step in plan.workflow.steps if step.tool == _GET_DATA]
-    wide = plan.model_copy(
-        update={"workflow": plan.workflow.model_copy(update={"steps": (retrieval,) * 3})}
-    )
+    wide = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
     hold = asyncio.Event()
     sends = _EarlySends(hold=hold)
     early = EarlyMints(send=sends, max_concurrent=2, settle_s=3.0)
@@ -4593,6 +4588,79 @@ async def test_a_cards_early_calls_go_out_no_more_than_the_cap_at_once(
     hold.set()
     await asyncio.gather(*early._tasks)
     assert len(sends.sent) == 3
+
+
+def _with_retrievals(plan: Any, count: int) -> Any:
+    """`plan` with its one retrieval step `count` times over, unvalidated: only
+    `EarlyMints` reads it."""
+    assert plan.workflow is not None
+    (retrieval,) = [step for step in plan.workflow.steps if step.tool == _GET_DATA]
+    return plan.model_copy(
+        update={"workflow": plan.workflow.model_copy(update={"steps": (retrieval,) * count})}
+    )
+
+
+async def test_offering_a_newer_card_withdraws_the_older_cards_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The older card's call already out runs on; its calls still queued are
+    withdrawn unsent and logged, and the newer card's call goes out."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+        await asyncio.sleep(0)
+        assert len(sends.sent) == 1
+        early.offer(_seam_plan(question="kenya debt, revised", schemas=real_schemas))
+        hold.set()
+        await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 2
+    assert sends.cancelled == 0
+    lines = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert sum("outcome=withdrawn" in line for line in lines) == 2
+
+
+async def test_withdrawing_cancels_the_latest_cards_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema],
+) -> None:
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+    early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+
+    early.withdraw()
+    hold.set()
+    await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 1
+    assert sends.cancelled == 0
+
+
+async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_not(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _seam_plan(schemas=real_schemas)
+    early = EarlyMints(send=_EarlySends(), max_concurrent=4, settle_s=3.0)
+    withdrawn: list[str] = []
+    monkeypatch.setattr(early, "withdraw", lambda: withdrawn.append("withdraw"))
+    runner, _ = orchestrator_runner(
+        plan_call(_BRIEF),
+        planner=_Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
+        tool_surface=_fixture_surface(real_schemas),
+        executor=ScriptedExecutor(),
+        early_mints=early,
+    )
+
+    await _start(runner)
+    assert withdrawn == []
+
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    assert withdrawn == ["withdraw"]
 
 
 async def test_closing_early_mints_cancels_the_calls_still_running(
