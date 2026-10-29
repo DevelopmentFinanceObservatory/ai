@@ -60,7 +60,10 @@ class _Runner:
         self.requests.append(request)
         if isinstance(self.answer, httpx2.Response):
             return self.answer
-        return self.answer(json.loads(request.content))
+        # A read has no body: `answer` gets its path.
+        return self.answer(
+            json.loads(request.content) if request.content else {"get": request.url.path}
+        )
 
     @property
     def body(self) -> dict[str, Any]:
@@ -924,20 +927,65 @@ def _ready_as(pair: dict[str, str]) -> dict[str, Any]:
     return {**body, "ref": {**body["ref"], "members": [member]}}
 
 
-async def test_a_bare_spec_id_is_sent_as_its_spec_and_the_digest_names_the_version_read(
+# The frame a Spec root was read as, as the result's stored recipe records it.
+_READ_FRAME = {"spec_id": _SPEC, "content_version": "cv_" + "a" * 32}
+_READ_RECORD = MintRecord(
+    frame=FrameRef(**_READ_FRAME),
+    dataset=FrameRef(spec_id=_SPEC, content_version=_NEWER_CV),
+    options={
+        "format": "parquet",
+        "bundle": False,
+        "layout": "frame",
+        "columns": ["observationAbout_type"],
+    },
+)
+
+
+def _reading_spec(body: dict[str, Any]) -> httpx2.Response:
+    """The runner's answer to a call that reads `_SPEC` at its newest version, and to
+    the read of its result's manifest, whose recipe records the frame read."""
+    if "get" in body:
+        return httpx2.Response(
+            200, json={"recipe": {"roots": [_READ_RECORD.model_dump(mode="json")]}}
+        )
+    read = {"spec_id": _SPEC, "content_version": _NEWER_CV}
+    return httpx2.Response(200, json=_reading(_recorded_ready("aggregate"), read))
+
+
+def _posts(runner: _Runner) -> list[dict[str, Any]]:
+    return [json.loads(request.content) for request in runner.requests if request.content]
+
+
+async def test_a_bare_spec_id_is_sent_as_its_spec_and_the_frame_it_read_is_recorded(
     store: InMemoryMaterialisationStore,
 ) -> None:
-    read = {"spec_id": _SPEC, "content_version": _NEWER_CV}
-    runner = _install(httpx2.Response(200, json=_reading(_recorded_ready("aggregate"), read)))
+    runner = _install(_reading_spec)
     result = await verbs.aggregate(frame_ref={"spec_id": _SPEC}, aggregation="sum")
 
-    assert result.is_error is False
-    assert runner.body["tree"]["inputs"] == {"data": {"spec_id": _SPEC}}
-    assert _NEWER_CV in _text(result)
+    assert result.is_error is False, _text(result)
+    assert _posts(runner)[-1]["tree"]["inputs"] == {"data": {"spec_id": _SPEC}}
+    # The digest names the frame's pair, and the store holds its mint record, so a
+    # later call naming the pair reads the frame this call read.
+    assert _READ_FRAME["content_version"] in _text(result)
+    assert await store.get_mint_record(FrameRef(**_READ_FRAME)) == _READ_RECORD
+
+
+async def test_a_bare_spec_id_whose_read_cannot_be_recorded_names_no_pair(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        return _problem(503, "service_unavailable") if "get" in body else _reading_spec(body)
+
+    _install(answer)
+    result = await verbs.aggregate(frame_ref={"spec_id": _SPEC}, aggregation="sum")
+
+    assert result.is_error is False, _text(result)
+    assert _READ_FRAME["content_version"] not in _text(result)
+    assert await store.get_mint_record(FrameRef(**_READ_FRAME)) is None
 
 
 @pytest.mark.parametrize(
-    ("record", "fetched", "was"),
+    ("record", "fetched", "lost"),
     [
         (
             _record({"format": "parquet", "columns": ["observationAbout_type"]}),
@@ -945,9 +993,9 @@ async def test_a_bare_spec_id_is_sent_as_its_spec_and_the_digest_names_the_versi
                 "spec_id": _SPEC,
                 "rendering": {"without_party_totals": False, "columns": ["observationAbout_type"]},
             },
-            _DATASET_CV,
+            {"spec_id": _SPEC, "content_version": _DATASET_CV},
         ),
-        (None, {"spec_id": _SPEC}, _CV),
+        (None, {"spec_id": _SPEC}, _FRAME),
     ],
     ids=["mint-record", "no-mint-record"],
 )
@@ -955,25 +1003,25 @@ async def test_a_frame_the_runner_lost_is_fetched_again_at_its_newest_version(
     store: InMemoryMaterialisationStore,
     record: MintRecord | None,
     fetched: dict[str, Any],
-    was: str,
+    lost: dict[str, str],
 ) -> None:
     if record is not None:
         await store.put_mint_record(record)
-    lost = {"spec_id": _SPEC, "content_version": was}
 
     def answer(body: dict[str, Any]) -> httpx2.Response:
-        if "content_version" in body["tree"]["inputs"]["data"]:
+        if "tree" in body and "content_version" in body["tree"]["inputs"]["data"]:
             return _problem(404, "snapshot_not_found", fix=lost)
-        read = {"spec_id": _SPEC, "content_version": _NEWER_CV}
-        return httpx2.Response(200, json=_reading(_recorded_ready("aggregate"), read))
+        return _reading_spec(body)
 
     runner = _install(answer)
     result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
 
     assert result.is_error is False, _text(result)
-    assert runner.body["tree"]["inputs"] == {"data": fetched}
-    assert was in _text(result)
-    assert _NEWER_CV in _text(result)
+    assert _posts(runner)[-1]["tree"]["inputs"] == {"data": fetched}
+    # The frame's pair moved: the digest names the one it had and the one it has.
+    assert _CV in _text(result)
+    assert _READ_FRAME["content_version"] in _text(result)
+    assert await store.get_mint_record(FrameRef(**_READ_FRAME)) == _READ_RECORD
 
 
 async def test_a_derived_input_that_lost_its_root_is_computed_again_on_current_data(

@@ -198,13 +198,18 @@ WITHOUT_PARTY_TOTALS = "without_party_totals"
 def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
     """The `options.columns` `get_data(place_types=True)` asks apis for.
 
-    A spec whose identity names a flow axis, as an entity or an open role, asks for each
-    party's type and kind (`FLOW_ENRICHMENT_COLUMNS`); any other spec, and a call holding
-    no identity, for the places' types. A list that names only enrichment columns adds them
-    to every default column, so the decoded `stat_var_<code system>` columns stay beside them.
+    A spec whose identity names a flow axis, as an entity or an open role, by its role word
+    (`origin`) or its column (`financingRecipient`), asks for each party's type and kind
+    (`FLOW_ENRICHMENT_COLUMNS`); any other spec, and a call holding no identity, for the
+    places' types. A list that names only enrichment columns adds them to every default
+    column, so the decoded `stat_var_<code system>` columns stay beside them.
+
+    The rule is dfo-apis' `datasets_api.analysis_roots.enrichment_columns`, which gives a
+    runner root its default columns, so a frame this mints and the analysis runner's read
+    of its Spec are one frame.
     """
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
-    if roles & FLOW_ROLE_COLUMNS.keys():
+    if roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES):
         return FLOW_ENRICHMENT_COLUMNS
     return (type_column(PLACE_ROLE),)
 

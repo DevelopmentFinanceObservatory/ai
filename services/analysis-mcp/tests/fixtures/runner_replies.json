@@ -3494,6 +3494,534 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"observationAbout\",\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: aggregate.",
+            "spec": {
+              "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+              "recipe": {
+                "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
+                "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196"
+              }
+            },
+            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+            "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:3a30cabf83ad7a2a92c5fd8dbc9c9b5f4e4e6b056a8397659f976eddcc024fd8",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+      "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+        "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+        "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+        "rows": 8,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [
+            "observationAbout",
+            "time_period"
+          ],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 8,
+          "present_cell_count": 8,
+          "group_summaries": [
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 105.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 106.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 18.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 19.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 0.3,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 1.3,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 27.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 28.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2022",
+            "2023"
+          ],
+          "period_label": null,
+          "entity_count": 4,
+          "period_entities": [
+            [
+              "2022",
+              4
+            ],
+            [
+              "2023",
+              4
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 8,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"observationAbout\",\"time_period\"]},\"inputs\":{\"data\":{\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: aggregate.",
+            "spec": {
+              "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+              "recipe": {
+                "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
+                "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196"
+              }
+            },
+            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+            "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:3a30cabf83ad7a2a92c5fd8dbc9c9b5f4e4e6b056a8397659f976eddcc024fd8",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+      "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+        "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+        "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+        "rows": 8,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [
+            "observationAbout",
+            "time_period"
+          ],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 8,
+          "present_cell_count": 8,
+          "group_summaries": [
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 105.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 106.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 18.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 19.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 0.3,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 1.3,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 27.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 28.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2022",
+            "2023"
+          ],
+          "period_label": null,
+          "entity_count": 4,
+          "period_entities": [
+            [
+              "2022",
+              4
+            ],
+            [
+              "2023",
+              4
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 8,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"reporter\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_fdf343db22646eac2d6e30d8cac9a5f9\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_fdf343db22646eac2d6e30d8cac9a5f9\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
@@ -15323,6 +15851,185 @@
           "content_version": "cv_6929bac734227b316ed99b66b65ffbfc"
         }
       ]
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_3ba66c5a3a5d27e37d4882343feaac0d/ocv_d2bf532ce770acf5cfb69cd6390eea9d?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+      "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
+        "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2",
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "aggregation": "sum",
+              "group_by": [
+                "observationAbout",
+                "time_period"
+              ],
+              "unit": null
+            },
+            "verb": "aggregate"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+            },
+            "dataset": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6c09c7172ee773753e041cd711e3de27"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "columns": [
+                "observationAbout_type"
+              ]
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+          "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_b668a43f8241b425eb6deb75144c4075/ocv_284bd476345408f12b05c5d670ad8df7?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+      "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_817803369a3c149a24ba3d98c0beb98c",
+        "replay_key": "rpk_faebd304310e37f4f2faa0f99229d559",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+            "content_version": "ocv_284bd476345408f12b05c5d670ad8df7"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2",
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "change": "relative",
+              "entity_by": [
+                "observationAbout"
+              ],
+              "unit": null,
+              "window_end": "2023",
+              "window_start": "2022"
+            },
+            "verb": "growth"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+            },
+            "dataset": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6c09c7172ee773753e041cd711e3de27"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "columns": [
+                "observationAbout_type"
+              ]
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+          "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
     },
     "retry_after": null
   }

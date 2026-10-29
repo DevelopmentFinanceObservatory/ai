@@ -38,9 +38,6 @@ that ends at another dataset's latest period. The ref's roots are the roots
 the runner read, those behind a derived input and the anchor roots included,
 so the check covers a derived input as it covers a fetched frame.
 
-A ready answer is the summary and the root pairs the answer's ref names
-(`Ready`), which is how a caller learns the version a Spec root was read at.
-
 `replay_derived` asks the runner to compute a derived frame again from its stored
 recipe with `latest: true`, which reads its roots at their datasets' current
 versions, and returns the pair it computed. A call whose derived input lost a
@@ -128,14 +125,6 @@ class Anchor:
     key: str
     nodes: tuple[dict[str, Any], ...]
     pairs: frozenset[Pair]
-
-
-@dataclass(frozen=True, kw_only=True)
-class Ready:
-    """A ready analysis answer: the call's `summary` and the root pairs its ref names."""
-
-    summary: VerbSummary
-    roots: frozenset[Pair]
 
 
 class AnchorAnswer(BaseModel):
@@ -439,8 +428,8 @@ def _unread_summary(exc: ValidationError | KeyError) -> str:
 
 async def run_tree(
     node: Mapping[str, Any], *, anchor: Anchor | None = None, refs_by_root: RefsByRoot
-) -> Ready | ToolRefusal:
-    """The answer of the tree `node` computed by the runner, or its refusal.
+) -> VerbSummary | ToolRefusal:
+    """The summary of the tree `node` computed by the runner, or its refusal.
     `anchor`, for a rolling call, sends its record's roots, which the runner takes
     the latest period over, and checks the answer read no other root."""
     request: dict[str, Any] = {"tree": node, "latest": False}
@@ -453,11 +442,13 @@ async def run_tree(
         return _pending(response)
     if not response.is_success:
         return await refusal_for(response, refs_by_root=refs_by_root, anchor=anchor)
-    return _ready(_json(response), anchor=anchor)
+    return _ready_summary(_json(response), anchor=anchor)
 
 
-def _ready(body: Mapping[str, Any] | None, *, anchor: Anchor | None) -> Ready | ToolRefusal:
-    """The ready answer `body`, or the refusal for an answer outside the contract
+def _ready_summary(
+    body: Mapping[str, Any] | None, *, anchor: Anchor | None
+) -> VerbSummary | ToolRefusal:
+    """The summary of the ready answer `body`, or the refusal for an answer outside the contract
     or, for a rolling call, one that read a root outside `anchor`."""
     if (
         body is None
@@ -468,11 +459,10 @@ def _ready(body: Mapping[str, Any] | None, *, anchor: Anchor | None) -> Ready | 
     if anchor is not None and (refusal := _uncovered(body, anchor)) is not None:
         return refusal
     try:
-        summary = VerbSummary.parse(body["summary"])
+        return VerbSummary.parse(body["summary"])
     except (ValidationError, KeyError) as exc:
         logger.warning("analysis runner summary unreadable: %s", exc)
         return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
-    return Ready(summary=summary, roots=_ref_roots(body) or frozenset())
 
 
 async def replay_derived(ref: FrameRef) -> FrameRef | None:

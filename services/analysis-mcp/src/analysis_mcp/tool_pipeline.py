@@ -24,9 +24,10 @@ computes from its stored recipe on current data (`runner_client.replay_derived`)
 When a rebuild fails, or the call sent again refuses for any reason but the
 engine's over the data or a busy runner's, the call refuses with the first
 refusal and the sentence that says so (`ToolRefusal.not_rebuilt`).
-The digest opens with a sentence naming the version each bare `spec_id` was read
-at, and one naming the old and the new version of each rebuilt frame whose
-version moved.
+The frame each bare `spec_id` and each fetched-again `spec_` frame was read as is
+recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
+opens with a sentence naming that frame's pair, and one naming the old and the
+new version of each rebuilt frame whose version moved.
 
 The rest of this module serves the in-process tools, which no registered tool
 calls.
@@ -48,8 +49,9 @@ from analysis_mcp.execution_identity import ExecutionIdentity, current_execution
 from analysis_mcp.frame_ref_resolution import call_row_claim, op_spec_hash_or_refusal
 from analysis_mcp.identity import mint_toolkit_content_version
 from analysis_mcp.result import VerbResult, observed_shape
-from analysis_mcp.runner_client import RUNNER_CODES, Pair, Ready, replay_derived, run_tree
-from analysis_mcp.runner_tree import newest_ref, spec_root, verb_tree
+from analysis_mcp.runner_client import RUNNER_CODES, Pair, replay_derived, run_tree
+from analysis_mcp.runner_tree import newest_ref, record_spec_reads, spec_root, verb_tree
+from analysis_mcp.summary import VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 
 if TYPE_CHECKING:
@@ -229,12 +231,10 @@ async def store_result_and_render(
 
 @dataclass(frozen=True, kw_only=True)
 class _Rebuilt:
-    """A lost frame `ref` and the root `node` that stands for it, and the version it
-    held before (`was`): its mint record's dataset version, or its own."""
+    """A lost frame `ref` and the root `node` that stands for it."""
 
     ref: FrameRef
     node: dict[str, Any]
-    was: str
 
 
 async def _rebuilt(ref: FrameRef) -> _Rebuilt | None:
@@ -243,40 +243,37 @@ async def _rebuilt(ref: FrameRef) -> _Rebuilt | None:
         replayed = await replay_derived(ref)
         if replayed is None:
             return None
-        return _Rebuilt(ref=ref, node=replayed.model_dump(), was=ref.content_version)
-    node, record = await spec_root(ref)
-    was = ref.content_version if record is None else record.dataset.content_version
-    return _Rebuilt(ref=ref, node=node, was=was)
+        return _Rebuilt(ref=ref, node=replayed.model_dump())
+    return _Rebuilt(ref=ref, node=await spec_root(ref))
 
 
-def _read_at(spec_id: str, roots: Collection[Pair]) -> list[str]:
-    """The versions of `spec_id` among the root pairs an answer read, sorted."""
-    return sorted(version for root, version in roots if root == spec_id)
+def _versions(frames: tuple[FrameRef, ...]) -> str:
+    return ", ".join(frame.content_version for frame in frames)
 
 
-def _rebuilt_sentence(rebuilt: _Rebuilt, roots: Collection[Pair]) -> str | None:
+def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]]) -> str | None:
     """The sentence naming a rebuilt frame's old and new version, `None` when its
-    version did not move."""
+    version did not move or the new one is unknown."""
     ref = rebuilt.ref
     if "content_version" in rebuilt.node:
-        now = [rebuilt.node["content_version"]]
+        now = (FrameRef.model_validate(rebuilt.node),)
         how = "computed again from its recipe on current data"
     else:
-        now = _read_at(ref.spec_id, roots)
+        now = read.get(ref.spec_id, ())
         how = "fetched again at its newest version"
-    if not now or now == [rebuilt.was]:
+    if not now or [frame.content_version for frame in now] == [ref.content_version]:
         return None
     return (
         f"The frame {ref.spec_id}, {ref.content_version} was no longer held, so it was "
-        f"{how}: {', '.join(now)} in place of {rebuilt.was}."
+        f"{how}: {_versions(now)} in place of {ref.content_version}."
     )
 
 
-def _newest_sentence(spec_id: str, roots: Collection[Pair]) -> str | None:
-    """The sentence naming the version a bare `spec_id` was read at, `None` when the
-    answer names none."""
-    read = _read_at(spec_id, roots)
-    return f"{spec_id} was read at its newest version, {', '.join(read)}." if read else None
+def _newest_sentence(spec_id: str, read: Mapping[str, tuple[FrameRef, ...]]) -> str:
+    """The sentence naming the frame a bare `spec_id` was read as."""
+    if not (frames := read.get(spec_id)):
+        return f"{spec_id} was read at its newest version."
+    return f"{spec_id} was read at its newest version as content_version {_versions(frames)}."
 
 
 def _not_rebuilt(refusal: ToolRefusal) -> bool:
@@ -314,7 +311,7 @@ async def run_on_runner(
         (spec_id, newest_ref(spec_id).content_version): {"spec_id": spec_id} for spec_id in newest
     }
 
-    async def run(replaced: Mapping[Pair, dict[str, Any]]) -> Ready | ToolRefusal:
+    async def run(replaced: Mapping[Pair, dict[str, Any]]) -> VerbSummary | ToolRefusal:
         tree = await verb_tree(
             op_spec, anchor_key=anchor_key, place_level=place_level, replaced=replaced
         )
@@ -338,18 +335,30 @@ async def run_on_runner(
             return to_tool_result(lost.not_rebuilt())
     if isinstance(answer, ToolRefusal):
         return to_tool_result(answer if refine is None else refine(answer))
+    fetched = {
+        *newest,
+        *(root.ref.spec_id for root in rebuilt if "content_version" not in root.node),
+    }
+    read = (
+        await record_spec_reads(
+            FrameRef(spec_id=answer.spec_id, content_version=answer.content_version),
+            fetched,
+        )
+        if fetched
+        else {}
+    )
     sentences = [
         sentence
         for sentence in (
-            *(_newest_sentence(spec_id, answer.roots) for spec_id in newest),
-            *(_rebuilt_sentence(root, answer.roots) for root in rebuilt),
+            *(_newest_sentence(spec_id, read) for spec_id in newest),
+            *(_rebuilt_sentence(root, read) for root in rebuilt),
         )
         if sentence is not None
     ]
-    digest = render_summary_digest(answer.summary)
+    digest = render_summary_digest(answer)
     return ToolResult(
         content="\n\n".join([" ".join(sentences), digest]) if sentences else digest,
-        structured_content=answer.summary.verb_result().model_dump(mode="json"),
+        structured_content=answer.verb_result().model_dump(mode="json"),
         is_error=False,
     )
 

@@ -80,23 +80,26 @@ type Refine = Callable[[Arguments, ToolRefusal], ToolRefusal]
 
 _FRAME_ARGUMENTS = ("frame_ref", "right_frame_ref", "denominator_frame_ref")
 
-# The argument `rank`, `aggregate` and `share_of` take beside their twins' own.
-_PLACE_LEVEL = inspect.Parameter(
-    "place_level",
-    inspect.Parameter.KEYWORD_ONLY,
-    default=None,
-    annotation=Annotated[
-        PlaceLevel | None,
-        Field(
-            default=None,
-            description=(
-                "Keep only the places at this level before the call, such as Country. Set it "
-                "when the frame holds places of several levels and the call refuses "
-                "place_levels_mixed."
-            ),
-        ),
-    ],
+_PLACE_LEVEL_DESCRIPTION = (
+    "Keep only the places at this level before the call, such as Country. Set it when the "
+    "frame holds places of several levels and the call refuses place_levels_mixed."
 )
+# `share_of` filters its denominator too.
+_SHARE_PLACE_LEVEL_DESCRIPTION = (
+    f"{_PLACE_LEVEL_DESCRIPTION} The denominator is filtered too, so a denominator bound to a "
+    "group entity such as the world is left out."
+)
+
+
+def _place_level(description: str) -> inspect.Parameter:
+    """The `place_level` argument `rank`, `aggregate` and `share_of` take beside their
+    twins' own."""
+    return inspect.Parameter(
+        "place_level",
+        inspect.Parameter.KEYWORD_ONLY,
+        default=None,
+        annotation=Annotated[PlaceLevel | None, Field(default=None, description=description)],
+    )
 
 
 def _bare(ref: Any) -> str | None:
@@ -135,18 +138,19 @@ def _on_runner(
     build: Callable[[Arguments], OpSpecVariant],
     *,
     refine: Refine | None = None,
-    takes_place_level: bool = False,
+    place_level_description: str | None = None,
 ) -> Tool:
     """The registered tool for `in_process`. It keeps that tool's signature and
     docstring, builds its op-spec with `build` from the bound arguments, and
     computes it on the runner. `refine` rewrites a runner refusal given the
-    call's arguments. `takes_place_level` adds `place_level` to the signature."""
+    call's arguments. `place_level_description`, when given, adds `place_level` to the
+    signature with that description."""
     signature = inspect.signature(in_process)
 
     @functools.wraps(in_process)
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:
         place_level: PlaceLevel | None = (
-            kwargs.pop("place_level", None) if takes_place_level else None
+            kwargs.pop("place_level", None) if place_level_description is not None else None
         )
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
@@ -165,14 +169,12 @@ def _on_runner(
             refine=None if refine is None else functools.partial(refine, arguments),
         )
 
-    if takes_place_level:
+    if place_level_description is not None:
+        place_level = _place_level(place_level_description)
         tool.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]  # inspect reads it
-            parameters=[*signature.parameters.values(), _PLACE_LEVEL]
+            parameters=[*signature.parameters.values(), place_level]
         )
-        tool.__annotations__ = {
-            **in_process.__annotations__,
-            "place_level": _PLACE_LEVEL.annotation,
-        }
+        tool.__annotations__ = {**in_process.__annotations__, "place_level": place_level.annotation}
     return tool
 
 
@@ -293,12 +295,17 @@ def _join(a: Arguments) -> JoinOpSpec:
     )
 
 
-aggregate = _on_runner(aggregate_tool.aggregate, _aggregate, takes_place_level=True)
+aggregate = _on_runner(
+    aggregate_tool.aggregate, _aggregate, place_level_description=_PLACE_LEVEL_DESCRIPTION
+)
 compare = _on_runner(compare_tool.compare, _compare)
 growth = _on_runner(growth_tool.growth, _growth)
-rank = _on_runner(rank_tool.rank, _rank, takes_place_level=True)
+rank = _on_runner(rank_tool.rank, _rank, place_level_description=_PLACE_LEVEL_DESCRIPTION)
 share_of = _on_runner(
-    share_of_tool.share_of, _share_of, refine=_quotient_for_two_units, takes_place_level=True
+    share_of_tool.share_of,
+    _share_of,
+    refine=_quotient_for_two_units,
+    place_level_description=_SHARE_PLACE_LEVEL_DESCRIPTION,
 )
 join = _on_runner(join_tool.join, _join)
 filter_verb = _on_runner(filter_tool.filter_verb, _filter)

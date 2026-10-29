@@ -70,9 +70,21 @@ def _trace(ref: FrameRef) -> MaterialisationTrace:
     )
 
 
+class _RecordingStore(InMemoryMaterialisationStore):
+    """The store, keeping each mint record put in it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.mint_records: list[MintRecord] = []
+
+    async def put_mint_record(self, record: MintRecord) -> None:
+        self.mint_records.append(record)
+        await super().put_mint_record(record)
+
+
 @pytest.fixture
 def store():
-    held = InMemoryMaterialisationStore()
+    held = _RecordingStore()
     set_store(held)
     yield held
     set_store(None)
@@ -101,39 +113,52 @@ def _ids(result: ToolResult) -> tuple[str, str]:
     return content["spec_id"], content["content_version"]
 
 
-def _dataset_version(runner: ReplayedRunner) -> str:
-    """The version the last call's data root was read at."""
-    return runner.requests[0]["tree"]["inputs"]["data"].get("content_version", "")
+_WINDOW = {"window_start": "2022", "window_end": "2023", "entity_by": ("observationAbout",)}
 
 
 # A bare spec_id ----------------------------------------------------------------------
 
 
 async def test_a_bare_spec_id_computes_what_the_frame_get_data_returns_computes(
-    store: InMemoryMaterialisationStore, runner: ReplayedRunner
+    store: _RecordingStore, runner: ReplayedRunner
 ) -> None:
     fetched = await _fetch(store)
-    window = {"window_start": "2022", "window_end": "2023", "entity_by": ("observationAbout",)}
 
-    after_get_data = await verbs.growth(frame_ref=fetched, **window)
-    dataset_version = _dataset_version(runner)
-    bare = await verbs.growth(frame_ref={"spec_id": fetched["spec_id"]}, **window)
+    after_get_data = await verbs.growth(frame_ref=fetched, **_WINDOW)
+    bare = await verbs.growth(frame_ref={"spec_id": fetched["spec_id"]}, **_WINDOW)
 
     assert runner.requests[-1]["tree"]["inputs"]["data"] == {"spec_id": fetched["spec_id"]}
     assert _ids(bare) == _ids(after_get_data)
-    # The digest names the version the Spec was read at.
+    # The digest names the frame the Spec was read as, which the store now records.
+    read = store.mint_records[-1]
     assert isinstance(bare.content, list)
-    assert dataset_version in bare.content[0].text
+    assert read.frame.content_version in bare.content[0].text
+
+
+async def test_the_pair_a_bare_call_names_reads_the_frame_that_call_read(
+    store: _RecordingStore, runner: ReplayedRunner
+) -> None:
+    spec_id = (await _fetch(store, recorded=False))["spec_id"]
+    by_place = {"aggregation": "sum", "group_by": ("observationAbout", "time_period")}
+
+    await verbs.growth(frame_ref={"spec_id": spec_id}, **_WINDOW)
+    (read,) = store.mint_records
+    named = await verbs.aggregate(frame_ref=read.frame.model_dump(), **by_place)
+    bare = await verbs.aggregate(frame_ref={"spec_id": spec_id}, **by_place)
+
+    assert runner.requests[-2]["tree"]["inputs"]["data"] == {
+        **read.dataset.model_dump(),
+        "rendering": {"without_party_totals": False, "columns": ["observationAbout_type"]},
+    }
+    assert _ids(named) == _ids(bare)
 
 
 async def test_a_frame_lost_with_its_mint_record_is_fetched_again(
-    store: InMemoryMaterialisationStore, runner: ReplayedRunner
+    store: _RecordingStore, runner: ReplayedRunner
 ) -> None:
     lost = await _fetch(store, recorded=False)
-    window = {"window_start": "2022", "window_end": "2023", "entity_by": ("observationAbout",)}
-
-    rebuilt = await verbs.growth(frame_ref=lost, **window)
-    bare = await verbs.growth(frame_ref={"spec_id": lost["spec_id"]}, **window)
+    rebuilt = await verbs.growth(frame_ref=lost, **_WINDOW)
+    bare = await verbs.growth(frame_ref={"spec_id": lost["spec_id"]}, **_WINDOW)
 
     assert [request["tree"]["inputs"]["data"] for request in runner.requests[:2]] == [
         {**lost, "rendering": {"without_party_totals": False, "columns": []}},

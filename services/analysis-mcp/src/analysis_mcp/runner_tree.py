@@ -34,6 +34,12 @@ version, and `verb_tree` sends its Spec root in its place (`replaced`). A frame
 fetched again after the runner lost it is the Spec root of its mint record's
 rendering, or of no rendering when no record is held.
 
+The runner names the frame a Spec root read only in the stored recipe's root
+records, each the shape of a mint record: the frame pair, the dataset version and
+the options. `record_spec_reads` reads them from the result's manifest and puts
+each in the store as the mint record `get_data` would write for that frame, so a
+later call naming the frame pair reads the same root as the call that named it.
+
 `place_level` puts a `filter` step keeping the places at that level under the
 verb, on each input, so the call computes the tree an explicit `filter` call and
 the verb over its result would, and gets its ids. The step's predicate reads the
@@ -58,7 +64,7 @@ answer is checked to have read no root outside the record (`runner_client`).
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -70,6 +76,7 @@ from common.materialisation import (
     get_store,
 )
 from common.place_type import PLACE_ROLE, TYPED_ROLES, PlaceLevel, type_column
+from pydantic import ValidationError
 
 from analysis_mcp.identity import OpSpecVariant
 from analysis_mcp.op_spec import (
@@ -80,7 +87,13 @@ from analysis_mcp.op_spec import (
     RankOpSpec,
     Verb,
 )
-from analysis_mcp.runner_client import DEFAULT_RETRY_AFTER_S, Anchor, Pair
+from analysis_mcp.runner_client import (
+    DEFAULT_RETRY_AFTER_S,
+    Anchor,
+    DerivedUnread,
+    Pair,
+    read_derived_manifest,
+)
 from analysis_mcp.tool_errors import ToolRefusal
 
 logger = logging.getLogger(__name__)
@@ -187,15 +200,49 @@ def _rendering(record: MintRecord) -> dict[str, Any]:
     return rendering
 
 
-async def spec_root(ref: FrameRef) -> tuple[dict[str, Any], MintRecord | None]:
+async def spec_root(ref: FrameRef) -> dict[str, Any]:
     """The Spec root that fetches the `spec_` frame `ref` again at its newest version,
-    with the rendering its mint record states, and the record. With no record, or
-    one that cannot be read or read again, the root takes the default rendering, as
-    `get_data` with default arguments fetches it."""
+    with the rendering its mint record states. With no record, or one that cannot be
+    read or read again, the root takes the default rendering, as `get_data` with
+    default arguments fetches it."""
     record = await _mint_record(ref)
     if not isinstance(record, MintRecord) or set(record.options) - _READ_OPTIONS:
-        return {"spec_id": ref.spec_id}, None
-    return {"spec_id": ref.spec_id, "rendering": _rendering(record)}, record
+        return {"spec_id": ref.spec_id}
+    return {"spec_id": ref.spec_id, "rendering": _rendering(record)}
+
+
+async def record_spec_reads(
+    result: FrameRef, spec_ids: Collection[str]
+) -> dict[str, tuple[FrameRef, ...]]:
+    """The frames of the Specs `spec_ids` the runner read to compute `result`, each
+    put in the store as its mint record, by Spec. A frame whose manifest or record
+    cannot be read, or whose record cannot be stored, is left out, so the caller is
+    named no pair a later call cannot read again."""
+    try:
+        manifest = await read_derived_manifest(result)
+    except DerivedUnread as exc:
+        logger.warning("manifest of %s unread; Spec reads not recorded: %s", result.spec_id, exc)
+        return {}
+    recipe = manifest.get("recipe")
+    roots = recipe.get("roots") if isinstance(recipe, Mapping) else None
+    read: dict[str, tuple[FrameRef, ...]] = {}
+    for root in roots if isinstance(roots, list) else ():
+        try:
+            record = MintRecord.model_validate(root)
+        except ValidationError:
+            continue
+        spec_id = record.dataset.spec_id
+        if spec_id not in spec_ids or record.frame in read.get(spec_id, ()):
+            continue
+        try:
+            await get_store().put_mint_record(record)
+        except Exception:
+            # Broad on purpose, as `_mint_record` reads it: the store's failures belong
+            # to its backend.
+            logger.warning("mint record of %s unstored", spec_id, exc_info=True)
+            continue
+        read[spec_id] = (*read.get(spec_id, ()), record.frame)
+    return read
 
 
 def _sides(op_spec: OpSpecVariant) -> tuple[FrameRef, FrameRef | None]:
