@@ -39,6 +39,7 @@ from data_mcp.definition_store import (
     set_store,
     spec_id_for,
 )
+from data_mcp.errors import UpstreamError
 from data_mcp.frame_materialisation import (
     CANONICAL_FRAME_RENDERING,
     KIND_COLUMNS,
@@ -812,9 +813,9 @@ def test_a_background_calls_answer_reads_as_one_word(
     assert background_outcome(structured) == word
 
 
-async def test_a_foreground_mint_of_an_open_background_post_waits_for_it_before_posting() -> None:
+async def test_a_foreground_mint_of_an_open_background_post_takes_its_answer() -> None:
     """apis would run the same mint twice, so the run's own call for the frame a
-    background POST is still minting posts only once apis has answered that POST."""
+    background POST is still minting posts nothing and answers from that POST."""
     stored = _stored_definition()
     apis = _ApisStillMinting(stored.spec_id)
 
@@ -839,7 +840,7 @@ async def test_a_foreground_mint_of_an_open_background_post_waits_for_it_before_
                 result = await asyncio.wait_for(foreground, timeout=5)
 
     assert result.is_error is False
-    assert apis.posts == 2
+    assert apis.posts == 1
     assert not get_data_tool._open_mint_posts
 
 
@@ -877,45 +878,227 @@ async def test_a_background_call_for_a_request_already_being_posted_answers_join
     assert not get_data_tool._open_mint_posts
 
 
-async def test_a_foreground_mint_waiting_on_an_open_post_still_leaves_itself_time_to_post() -> None:
-    """A foreground POST stops waiting on an open POST of the same request while its
-    deadline still leaves the post-mint reserve and the shortest mint, so it posts
-    rather than refusing for want of time."""
-    budget = CallBudget(
-        deadline_s=None,
-        pre_mint_reserve_s=0.2,
-        mint_timeout_s=0.1,
-        min_mint_timeout_s=0.1,
-        post_mint_reserve_s=0.05,
+class _ApisFirstPostOpen(httpx2.AsyncBaseTransport):
+    """apis holding the first mint POST open until `answer` is set, then answering it
+    `first`, and answering every later POST 200 at once. Each POST is reported written
+    out to the request's trace extension on arrival, as httpcore reports it, except
+    that a `first` exception fails the first POST's connection before its body is
+    written."""
+
+    def __init__(self, first: httpx2.Response | Exception) -> None:
+        self.first = first
+        self.answer = asyncio.Event()
+        self.posts = 0
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self.posts += 1
+        first = self.posts == 1
+        trace = request.extensions.get("trace")
+        if trace is not None and not (first and isinstance(self.first, Exception)):
+            await trace("http11.send_request_body.complete", {"request": request})
+        if not first:
+            return httpx2.Response(200, json={})
+        await self.answer.wait()
+        if isinstance(self.first, Exception):
+            raise self.first
+        return self.first
+
+
+_REQUEST_BODY = {"input": {"spec_id": "spec"}}
+
+# A deadline under which `DIRECT_CALL_BUDGET`, the default, sends a mint POST.
+_DIRECT_DEADLINE_S = 120.0
+
+# A budget whose deadline runs out long before apis answers the open POST.
+_SHORT_BUDGET = CallBudget(
+    deadline_s=None,
+    pre_mint_reserve_s=0.2,
+    mint_timeout_s=0.1,
+    min_mint_timeout_s=0.1,
+    post_mint_reserve_s=0.05,
+)
+
+
+async def _open_post(
+    upstream: UpstreamClient, apis: _ApisFirstPostOpen, *, admission: Any = None
+) -> asyncio.Task[httpx2.Response | ToolResult]:
+    """A `_post_mint` of `_REQUEST_BODY` under the default budget, once apis has its POST."""
+    task = asyncio.create_task(
+        get_data_tool._post_mint(
+            upstream,
+            _REQUEST_BODY,
+            spec_id="spec",
+            settings=_settings(),
+            deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+            admission=admission,
+        )
     )
-    request_body = {"input": {"spec_id": "spec"}}
-    get_data_tool._open_mint_posts[json.dumps(request_body, sort_keys=True)] = asyncio.Event()
-    posts: list[str] = []
+    while apis.posts == 0 and not task.done():
+        await asyncio.sleep(0.01)
+    assert apis.posts == 1, await task
+    return task
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        posts.append(request.url.path)
-        return httpx2.Response(200, json={})
 
-    try:
-        async with _client(handler) as upstream, asyncio.timeout(5):
-            with use_call_budget(budget):
-                posted = await get_data_tool._post_mint(
+async def test_a_foreground_mint_out_of_time_on_an_open_post_refuses_without_posting() -> None:
+    """A foreground call joined to an open POST of the same request waits up to its own
+    deadline. When that runs out first it refuses `mint_unanswered`, retryable, and
+    sends nothing, so apis never runs the mint twice. The open POST answers its caller."""
+    apis = _ApisFirstPostOpen(httpx2.Response(200, json={}))
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis)
+            with use_call_budget(_SHORT_BUDGET):
+                joined = await get_data_tool._post_mint(
                     upstream,
-                    request_body,
+                    _REQUEST_BODY,
                     spec_id="spec",
                     settings=_settings(),
-                    deadline=CallDeadline.after(
-                        budget.post_mint_reserve_s
-                        + budget.min_mint_timeout_s
-                        + get_data_tool._MINT_WAIT_SLACK_S
-                        + 0.1
-                    ),
+                    deadline=CallDeadline.after(0.3),
                 )
-    finally:
-        get_data_tool._open_mint_posts.clear()
+            assert apis.posts == 1
+            apis.answer.set()
+            answered = await open_post
+
+    assert isinstance(joined, ToolResult)
+    refusal = joined.structured_content or {}
+    assert refusal["code"] == "service_unavailable"
+    assert refusal["retry_mode"] == "retry_after_delay"
+    assert refusal["fix"]["spec_id"] == "spec"
+    assert isinstance(answered, httpx2.Response)
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_joined_to_an_open_post_raises_its_failure() -> None:
+    """A failure of the open POST reaches the call that joined it, which posts nothing."""
+    apis = _ApisFirstPostOpen(
+        httpx2.Response(404, content=_problem_body(code="spec_not_found", retryable=False))
+    )
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis)
+            joined = asyncio.ensure_future(
+                get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                )
+            )
+            await asyncio.sleep(0.05)
+            apis.answer.set()
+            with pytest.raises(UpstreamError) as from_open:
+                await open_post
+            with pytest.raises(UpstreamError) as from_joined:
+                await joined
+
+    assert from_joined.value.code == from_open.value.code == "spec_not_found"
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_joined_to_a_cancelled_post_refuses_without_posting() -> None:
+    """apis may still run a POST whose caller went away, so the call that joined it
+    refuses `mint_unanswered`, retryable, and posts nothing."""
+    apis = _ApisFirstPostOpen(httpx2.Response(200, json={}))
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis)
+            joined = asyncio.ensure_future(
+                get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                )
+            )
+            await asyncio.sleep(0.05)
+            open_post.cancel()
+            refused = await joined
+
+    assert isinstance(refused, ToolResult)
+    assert (refused.structured_content or {})["retry_mode"] == "retry_after_delay"
+    assert apis.posts == 1
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_joined_to_a_background_post_never_written_out_posts_its_own() -> (
+    None
+):
+    """A background POST whose connection failed before its body went out started
+    nothing in apis, so the foreground call that joined it posts its own request and
+    takes apis' answer to that."""
+    apis = _ApisFirstPostOpen(httpx2.ConnectError("refused"))
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis, admission="background")
+            joined = asyncio.ensure_future(
+                get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert apis.posts == 1
+            apis.answer.set()
+            unsent = await open_post
+            posted = await joined
+
+    assert isinstance(unsent, ToolResult)
+    assert (unsent.structured_content or {})["code"] == "service_unavailable"
+    assert isinstance(posted, httpx2.Response)
+    assert posted.status_code == 200
+    assert apis.posts == 2
+    assert not get_data_tool._open_mint_posts
+
+
+async def test_a_foreground_mint_joined_to_a_declined_background_post_posts_its_own() -> None:
+    """apis ran nothing for a background POST it declined, so the foreground call that
+    joined it posts its own request once that POST has ended."""
+    apis = _ApisFirstPostOpen(
+        httpx2.Response(
+            503,
+            content=_problem_body(
+                code="service_unavailable",
+                retryable=True,
+                constraint_id="mint_background_declined",
+            ),
+            headers={"Retry-After": "1"},
+        )
+    )
+
+    async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
+        async with asyncio.timeout(5):
+            open_post = await _open_post(upstream, apis, admission="background")
+            joined = asyncio.ensure_future(
+                get_data_tool._post_mint(
+                    upstream,
+                    _REQUEST_BODY,
+                    spec_id="spec",
+                    settings=_settings(),
+                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert apis.posts == 1
+            apis.answer.set()
+            with pytest.raises(UpstreamError):
+                await open_post
+            posted = await joined
 
     assert isinstance(posted, httpx2.Response)
-    assert posts == ["/api/datasets"]
+    assert posted.status_code == 200
+    assert apis.posts == 2
+    assert not get_data_tool._open_mint_posts
 
 
 async def test_shutdown_closes_a_background_post_apis_has_not_answered() -> None:

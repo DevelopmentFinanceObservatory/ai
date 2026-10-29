@@ -31,8 +31,8 @@ waited for once, by the response that offered it.
 The arguments are each retrieval step's own `step.args`, the arguments
 `executor.run` sends for a step with no bindings, so the run asks for the
 frame the early call built. A run that asks while data-mcp still holds the
-early call's mint POST open waits for that POST before posting its own
-(`data_mcp.get_data_tool._post_mint`), so apis mints the frame once.
+early call's mint POST open joins that POST and takes its answer, posting
+nothing (`data_mcp.get_data_tool._post_mint`), so apis mints the frame once.
 
 One set per conversation, keyed by the card's `plan_revision`: an offer of
 the revision already started starts nothing. A new revision replaces the

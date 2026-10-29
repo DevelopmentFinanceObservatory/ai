@@ -883,7 +883,8 @@ class ToolRefusal:
     ) -> Self:
         # Raised by `get_data._post_mint` on any `UpstreamTransportError` from the mint
         # POST: a timeout, whether its own `CallBudget.mint_timeout_s` cap or the call
-        # deadline ended it, or a connection failure. A mint within apis' sync budget
+        # deadline ended it, or a connection failure. Also raised for a call that joined
+        # an open POST of the same request which had not answered by its deadline. A mint within apis' sync budget
         # runs inline and keeps running after its client leaves, with no operation
         # record; only a mint over that budget becomes an operation a repeat submit
         # rejoins (`datasets_api.operations.submit.submit_over_budget`). A repeat call is
