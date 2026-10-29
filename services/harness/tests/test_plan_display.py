@@ -88,7 +88,6 @@ from planner.plan import (
     frame_shapes,
     scope_choice_slot,
     search_pin_slot,
-    slot_reading,
     split_of,
 )
 from planner.records import (
@@ -4615,13 +4614,9 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
         ]
     ]
 
-    origin = {
-        "origin_chosen": measure.chosen,
-        "origin_reading": slot_reading(plan.evidence_requirements, "measure", to_origin={}),
-    }
     assert picks == [
-        DecisionPick(slot="measure", chosen=healthy, **origin),
-        DecisionPick(slot="measure", chosen=birth, **origin),
+        DecisionPick.on_card(plan, slot="measure", chosen=healthy),
+        DecisionPick.on_card(plan, slot="measure", chosen=birth),
         None,
         None,
         None,

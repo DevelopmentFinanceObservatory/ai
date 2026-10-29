@@ -6297,38 +6297,68 @@ def save_amendment_entry(state: SessionState, amended: bool) -> None:
 
 class DecisionPick(StrictModel):
     """The option `chosen` the user picked on the plan card for the planner
-    decision under `slot`, exactly as the decision's `options` states it.
+    decision under `slot`, exactly as the decision's `options` states it,
+    with the scope the replan for it may change.
 
     `origin_chosen` is that decision's `chosen` as the card showed it when
-    the user picked, and `origin_reading` the `slot_reading` of the card's
-    requirements: every proposal of the replan is held against them
-    (`submission.service._picked_decision`), so no proposal can return the
-    old plan under the picked label.
+    the user picked. The card's requirements citing `slot` are the ones the
+    replan may replace: `origin_reading` is what they read
+    (`requirements_reading`). Everything else on the card stands:
+    `kept_requirements` holds each other requirement's `content_digest` by
+    id, and `kept_decisions` each decision's other than `slot` that the user
+    made or a kept requirement cites, by slot. Every proposal of the replan
+    is held against them (`submission.service._picked_decision`), so no
+    proposal can change the rest of the plan or return the old one under
+    the picked label. Built by `on_card`.
     """
 
     slot: str
     chosen: str
     origin_chosen: str
     origin_reading: str
+    kept_requirements: dict[str, str]
+    kept_decisions: dict[str, str]
+
+    @classmethod
+    def on_card(cls, card: Plan, *, slot: str, chosen: str) -> DecisionPick:
+        """The pick of `chosen` for the decision under `slot` on `card`.
+
+        `card` is the plan as the model wrote it (`authored`), with every
+        windowed copy's pin moved back to the pin it copies, as admission
+        reads the plan a proposal amends.
+        """
+        replaced = [r.id for r in card.evidence_requirements if slot in r.decision_ids]
+        kept = [r for r in card.evidence_requirements if r.id not in replaced]
+        cited = {cited for requirement in kept for cited in requirement.decision_ids}
+        return cls(
+            slot=slot,
+            chosen=chosen,
+            origin_chosen=next(d.chosen for d in card.decisions if d.slot == slot),
+            origin_reading=requirements_reading(card.evidence_requirements, replaced),
+            kept_requirements={r.id: content_digest(r) for r in kept},
+            kept_decisions={
+                d.slot: content_digest(d)
+                for d in card.decisions
+                if d.slot != slot and (d.resolved_by is ResolvedBy.USER or d.slot in cited)
+            },
+        )
 
 
-def slot_reading(
-    requirements: Sequence[EvidenceRequirement],
-    slot: str,
-    *,
-    to_origin: Mapping[str, str],
-) -> str:
-    """The digest of what the requirements of `requirements` citing `slot` read.
+def content_digest(item: StrictModel) -> str:
+    """The digest of `item`'s whole content. Canonical JSON (RFC 8785) under SHA-256."""
+    return _digest(item.model_dump(mode="json"))
+
+
+def requirements_reading(requirements: Sequence[EvidenceRequirement], ids: Collection[str]) -> str:
+    """The digest of what the requirements of `requirements` under `ids` read, as a set.
 
     Each requirement enters as its content less `id` and `decision_ids`,
     with every input it reads (`inputs_of`) standing for that input's own
-    content, read the same way, and every pin of a windowed copy
-    (`to_origin`, `WindowedPin.windowed_from` by copy spec_id) standing for
-    the pin it copies. So the digest moves only when a requirement citing
-    `slot`, or a requirement under it, reads something else: renaming one,
-    citing other decisions from it, or recording a pin over another period
-    leaves it as it was. `requirements` must not read one another in a
-    cycle. Canonical JSON (RFC 8785) under SHA-256, as `plan_revision`.
+    content, read the same way. So the digest moves only when the set reads
+    something else: renaming a requirement, citing other decisions from it,
+    or stating one reading twice leaves it as it was. `requirements` must
+    not read one another in a cycle. Canonical JSON (RFC 8785) under
+    SHA-256, as `plan_revision`.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
     digests: dict[str, str] = {}
@@ -6343,14 +6373,16 @@ def slot_reading(
                     if input_id in by_id
                 },
             )
-            content = read.model_dump(mode="json", exclude={"id", "decision_ids"})
-            if isinstance(read, DatasetRequirement) and read.source_spec_id is not None:
-                content["source_spec_id"] = to_origin.get(read.source_spec_id, read.source_spec_id)
-            digests[requirement.id] = hashlib.sha256(rfc8785.dumps(content)).hexdigest()
+            digests[requirement.id] = _digest(
+                read.model_dump(mode="json", exclude={"id", "decision_ids"})
+            )
         return digests[requirement.id]
 
-    citing = sorted(digest(r) for r in requirements if slot in r.decision_ids)
-    return hashlib.sha256(rfc8785.dumps(citing)).hexdigest()
+    return _digest(sorted({digest(by_id[requirement_id]) for requirement_id in ids}))
+
+
+def _digest(content: dict[str, Any] | list[str]) -> str:
+    return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
 def decision_pick(state: SessionState) -> DecisionPick | None:

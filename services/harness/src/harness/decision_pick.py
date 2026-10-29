@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from planner.plan import DecisionPick, Plan, authored, slot_reading
+from planner.plan import DecisionPick, Plan, authored
+from submission.service import unwindowed
 
 from harness.plan_display import (
     DECISION_CHOICE_PREFIX,
@@ -30,13 +31,12 @@ def decision_pick(
 ) -> DecisionPick | None:
     """The pick a switch of row `choice_id` to option `option_id` makes on `plan`.
 
-    The pick records the decision's `chosen` as `plan` states it, and what
-    `plan`'s requirements citing it read as the model wrote them
-    (`planner.plan.slot_reading` over `planner.plan.authored`, with
-    `to_origin` mapping each windowed copy's spec_id to the pin it copies):
-    the origin every proposal of the replan is held against. `None` when
-    `choice_id` names no switchable planner decision of `plan`, or
-    `option_id` none of its options.
+    The pick records, off `plan` as the model wrote it
+    (`planner.plan.authored`) with `to_origin` mapping each windowed copy's
+    spec_id to the pin it copies, what the replan for it may change and what
+    it must keep (`DecisionPick.on_card`): the origin every proposal of the
+    replan is held against. `None` when `choice_id` names no switchable
+    planner decision of `plan`, or `option_id` none of its options.
     """
     if not is_decision_choice(choice_id):
         return None
@@ -44,18 +44,7 @@ def decision_pick(
     decision = next((d for d in plan.decisions if d.slot == slot), None)
     if decision is None or decision.fixes is None or not switchable_decision(decision):
         return None
-    return next(
-        (
-            DecisionPick(
-                slot=slot,
-                chosen=option,
-                origin_chosen=decision.chosen,
-                origin_reading=slot_reading(
-                    authored(plan).evidence_requirements, slot, to_origin=to_origin
-                ),
-            )
-            for option in decision.options
-            if decision_option_id(option) == option_id
-        ),
-        None,
-    )
+    option = next((o for o in decision.options if decision_option_id(o) == option_id), None)
+    if option is None:
+        return None
+    return DecisionPick.on_card(unwindowed(authored(plan), to_origin), slot=slot, chosen=option)

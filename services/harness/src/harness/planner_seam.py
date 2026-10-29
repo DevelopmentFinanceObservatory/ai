@@ -585,10 +585,10 @@ class PlannerSeam:
             # amendment on the same test.
             save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
             # The option the user picked on the plan card, which this entry
-            # replans to hold, with the decision as the card showed it:
-            # admission refuses a plan that does not state it, and holds every
-            # other decision of the user's as they made it
-            # (`submission.service.admit`). Any other entry clears it.
+            # replans to hold, with the scope the card gave the replan:
+            # admission refuses a plan that does not state it or that changes
+            # anything but the picked decision and the requirements citing it
+            # (`submission.service._picked_decision`). Any other entry clears it.
             save_decision_pick(cast(SessionState, ctx.session.state), pick)
             clear_unsupported(cast(SessionState, ctx.session.state))
             for operation in _earned_by_refusal(refusal):

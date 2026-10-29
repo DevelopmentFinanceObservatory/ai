@@ -2125,6 +2125,8 @@ _PICKED = DecisionPick(
     chosen="the top 10 donors",
     origin_chosen="the DAC total",
     origin_reading="0" * 64,
+    kept_requirements={},
+    kept_decisions={},
 )
 
 

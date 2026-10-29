@@ -139,7 +139,6 @@ from planner.plan import (
     plan_revision,
     repinned,
     save_decision_pick,
-    slot_reading,
     windowed_pins,
     with_authored_requirements,
 )
@@ -1775,12 +1774,7 @@ def _picked_window(plan: PlannerPlan) -> DecisionPick:
     """The pick of a planner decision the card offers to switch
     (`plan_display.switchable_decision`): `_seam_plan`'s window, fixing the
     period, switched to its other option on `plan`."""
-    return DecisionPick(
-        slot="window",
-        chosen="2018-2024",
-        origin_chosen="2015-2024",
-        origin_reading=slot_reading(authored(plan).evidence_requirements, "window", to_origin={}),
-    )
+    return DecisionPick.on_card(authored(plan), slot="window", chosen="2018-2024")
 
 
 _PICK_SWITCH = {"choice_id": "decision/window", "option_id": decision_option_id("2018-2024")}

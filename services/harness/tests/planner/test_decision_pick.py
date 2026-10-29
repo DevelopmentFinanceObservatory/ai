@@ -1,13 +1,16 @@
 """A replan for the option the user picked on the plan card holds that pick.
 
 The planner seam records the pick for the entry (`planner.plan.
-DECISION_PICK_STATE_KEY`), with the decision as the card showed it.
-`propose_plan` then refuses a plan whose decision under the pick's slot
-states another option (`submission.service._picked_decision`) or whose
-requirements citing it fix nothing or what they fixed on the card, and
-records that decision as the user's. The pick speaks for its own slot
-alone: every other decision of the user's stands as they made it
-(`submission.service._user_decision_refused`).
+DECISION_PICK_STATE_KEY`), with the scope the card gave the replan
+(`DecisionPick.on_card`, as `harness.decision_pick.decision_pick` reads it off the card). `propose_plan` admits a plan only when it keeps
+every other requirement exactly as the card had it, ids and citations
+included, keeps every decision of the user's and every one a kept
+requirement cites unchanged, cited and uncontradicted, replaces the card's
+requirements citing the picked decision with requirements that read
+something else, and states the picked option fixing something
+(`submission.service._picked_decision`). That decision is recorded as the
+user's. Anything else is refused `USER_PICK_NOT_HELD`, whatever the session
+records of the user's words, since a pick is none.
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ from typing import Any
 
 import pytest
 from google.adk.events import EventActions
+from harness.decision_pick import decision_pick
+from harness.plan_display import decision_option_id
 from planner.agent import build_planner_tools
 from planner.plan import (
     ASKS_STATE_KEY,
@@ -25,7 +30,6 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     DecisionFixes,
-    DecisionPick,
     Entity,
     Period,
     RankRequirement,
@@ -33,7 +37,6 @@ from planner.plan import (
     Unit,
     load_plan,
     save_decision_pick,
-    slot_reading,
 )
 from planner.records import RankAmong, RankDirection, Reduction
 from planner.tool_results import Outcome, ProblemCode
@@ -102,13 +105,18 @@ def _dac_total() -> DatasetRequirement:
     )
 
 
-# The pick of the top 10 donors on the card showing the DAC total.
-PICK = DecisionPick(
-    slot="donor_scope",
-    chosen="the top 10 donors",
-    origin_chosen="the DAC total",
-    origin_reading=slot_reading([_dac_total()], "donor_scope", to_origin={}),
-)
+def _pick_top_ten(ctx: Any) -> None:
+    """Record, for the entry, the pick of the top 10 donors on the card the plan in `ctx` shows."""
+    card = load_plan(ctx.state)
+    assert card is not None
+    pick = decision_pick(
+        card,
+        choice_id="decision/donor_scope",
+        option_id=decision_option_id("the top 10 donors"),
+        to_origin={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
 
 
 def _ranked_donors() -> list[Any]:
@@ -171,7 +179,7 @@ def test_a_pick_that_changes_the_plans_shape_is_admitted_as_the_users(
     read over the user's year, and the picked decision is theirs."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
 
     result = _propose_plan(
         ctx,
@@ -226,7 +234,7 @@ def test_a_plan_that_does_not_state_the_pick_is_refused(
     the requirements citing it read is unchanged."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
     requirements = (
         [_dac_total().model_copy(update={"decision_ids": ("measure", "year")})]
         if "removed_decisions" in patch
@@ -250,6 +258,7 @@ def test_a_plan_that_does_not_state_the_pick_is_refused(
         "slot": "donor_scope",
         "chosen": "the top 10 donors",
         "stated": stated,
+        "kept": None,
     }
     recorded = load_plan(ctx.state)
     assert recorded is not None and recorded.version == first["version"]
@@ -264,7 +273,7 @@ def test_a_restated_pick_its_requirements_fix_nothing_of_is_refused_saying_so(
     what it names."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
 
     result = _propose_plan(
         ctx,
@@ -284,14 +293,13 @@ def _year_kept(period: Period) -> list[Any]:
 
 
 @pytest.mark.parametrize(
-    ("patch", "code"),
+    "patch",
     [
         pytest.param(
             {
                 "evidence_requirements": _year_kept(Period(start=2022, end=2022)),
                 "removed_evidence_requirements": ["dac"],
             },
-            ProblemCode.USER_DECISION_CONTRADICTED,
             id="still-cited-and-changed",
         ),
         pytest.param(
@@ -301,19 +309,18 @@ def _year_kept(period: Period) -> list[Any]:
                     *_ranked_donors(),
                 ]
             },
-            ProblemCode.USER_DECISION_DROPPED,
             id="uncited-on-a-surviving-requirement",
         ),
     ],
 )
 def test_a_pick_releases_no_user_decision_the_new_plan_still_rests_on(
-    decision: Callable[..., Decision], patch: dict[str, Any], code: ProblemCode
+    decision: Callable[..., Decision], patch: dict[str, Any]
 ) -> None:
     """The pick speaks for its own slot. Another user decision the new plan
     still cites, or whose requirement it keeps, stands as the user made it."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
 
     result = _propose_plan(
         ctx,
@@ -323,8 +330,8 @@ def test_a_pick_releases_no_user_decision_the_new_plan_still_rests_on(
     )
 
     assert result["outcome"] == Outcome.REFUSED.value, result
-    assert result["code"] == code.value
-    assert result["detail"]["slot"] == "year"
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value
+    assert result["detail"]["kept"] == "year"
 
 
 def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
@@ -332,7 +339,7 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
 ) -> None:
     """The user's year rests on a requirement that does not cite the picked
     decision. A replan that renames that requirement and drops the year from
-    it is refused, though no requirement that cited the year survives by id."""
+    it is refused for leaving that requirement off."""
     ctx = _context()
     gross = _dac_total().model_copy(
         update={"id": "gross", "decision_ids": ("measure", "year"), "measure": "gross ODA"}
@@ -349,7 +356,7 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
     )
     assert first["outcome"] == Outcome.OK.value, first
     ctx.session.events = [response_event("propose_plan", first)]
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
 
     result = _propose_plan(
         ctx,
@@ -363,8 +370,8 @@ def test_a_pick_releases_no_user_decision_of_a_requirement_it_did_not_change(
     )
 
     assert result["outcome"] == Outcome.REFUSED.value, result
-    assert result["code"] == ProblemCode.USER_DECISION_DROPPED.value
-    assert result["detail"]["slot"] == "year"
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value
+    assert result["detail"]["kept"] == "gross"
 
 
 @pytest.mark.parametrize(
@@ -392,7 +399,7 @@ def test_a_pick_releases_no_other_user_decision(
     lists: the pick speaks for its own slot alone."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
     aid, top = _ranked_donors()
 
     result = _propose_plan(
@@ -412,8 +419,8 @@ def test_a_pick_releases_no_other_user_decision(
     )
 
     assert result["outcome"] == Outcome.REFUSED.value, result
-    assert result["code"] == ProblemCode.USER_DECISION_DROPPED.value
-    assert result["detail"]["slot"] == "year"
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value
+    assert result["detail"]["kept"] == "year"
 
 
 def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
@@ -446,7 +453,7 @@ def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
     )
     assert first["outcome"] == Outcome.OK.value, first
     ctx.session.events = [response_event("propose_plan", first)]
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
     aid, top = _ranked_donors()
     ghana = (Entity(name="Ghana", role="recipient"),)
 
@@ -470,8 +477,8 @@ def test_a_pick_listing_entities_releases_no_user_decision_fixing_the_recipient(
     )
 
     assert result["outcome"] == Outcome.REFUSED.value, result
-    assert result["code"] == ProblemCode.USER_DECISION_DROPPED.value
-    assert result["detail"]["slot"] == "recipient"
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value
+    assert result["detail"]["kept"] == "recipient"
 
 
 @pytest.mark.parametrize(
@@ -496,7 +503,7 @@ def test_a_later_proposal_of_the_pick_replan_holds_the_pick_against_the_plan_pic
     though the plan it amends already states that label."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
-    save_decision_pick(ctx.state, PICK)
+    _pick_top_ten(ctx)
     held = _propose_plan(
         ctx,
         decisions=drafts([TOP_TEN]),
@@ -519,3 +526,163 @@ def test_a_later_proposal_of_the_pick_replan_holds_the_pick_against_the_plan_pic
     assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value
     recorded = load_plan(ctx.state)
     assert recorded is not None and recorded.version == held["version"]
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        pytest.param(lambda first: [], id="card-version-unrecorded"),
+        pytest.param(
+            lambda first: [
+                response_event("propose_plan", first),
+                response_event("propose_plan", {**first, "version": first["version"] + 1}),
+            ],
+            id="later-version-recorded-after-the-card",
+        ),
+    ],
+)
+def test_a_pick_holds_the_users_decisions_whatever_the_session_records(
+    decision: Callable[..., Decision], recorded: Callable[[dict[str, Any]], list[Any]]
+) -> None:
+    """The card shows a plan the session holds no `propose_plan` response
+    for, as after a scope switch revised it in code, or one a later version's
+    response follows, as after a failed pick replan put it back. A replan
+    reading the donors over 2022 and dropping the user's year is refused all
+    the same: the pick is no word of the user's."""
+    ctx = _context()
+    first = _recorded_dac_total(ctx, decision)
+    ctx.session.events = recorded(first)
+    _pick_top_ten(ctx)
+    aid, top = _ranked_donors()
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=[
+            aid.model_copy(
+                update={
+                    "period": Period(start=2022, end=2022),
+                    "decision_ids": ("measure", "donor_scope"),
+                }
+            ),
+            top,
+        ],
+        removed_evidence_requirements=["dac"],
+        amends_version=first["version"],
+    )
+
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value, result
+    assert result["detail"]["kept"] == "year"
+    recorded_plan = load_plan(ctx.state)
+    assert recorded_plan is not None and recorded_plan.version == first["version"]
+
+
+def _prior_total() -> DatasetRequirement:
+    """The DAC total for 2021, which does not cite the picked decision."""
+    return _dac_total().model_copy(
+        update={
+            "id": "dac_prior",
+            "decision_ids": ("measure",),
+            "period": Period(start=2021, end=2021),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("patch", "kept"),
+    [
+        pytest.param(
+            {
+                "decisions": [DONOR_SCOPE.model_copy(update={"chosen": "the top 10 donors"})],
+                "evidence_requirements": [
+                    _dac_total().model_copy(update={"decision_ids": ("measure", "year")}),
+                    _prior_total().model_copy(update={"decision_ids": ("measure", "donor_scope")}),
+                ],
+            },
+            "dac_prior",
+            id="citation-moved-onto-a-kept-requirement",
+        ),
+        pytest.param(
+            {
+                "decisions": [TOP_TEN],
+                "evidence_requirements": [
+                    *_year_kept(YEAR),
+                    _prior_total().model_copy(update={"period": Period(start=2020, end=2020)}),
+                ],
+                "removed_evidence_requirements": ["dac"],
+            },
+            "dac_prior",
+            id="kept-requirement-edited",
+        ),
+        pytest.param(
+            {
+                "decisions": [TOP_TEN],
+                "evidence_requirements": _year_kept(YEAR),
+                "removed_evidence_requirements": ["dac", "dac_prior"],
+            },
+            "dac_prior",
+            id="kept-requirement-removed",
+        ),
+    ],
+)
+def test_a_pick_replan_may_change_only_the_requirements_citing_the_picked_decision(
+    decision: Callable[..., Decision], patch: dict[str, Any], kept: str
+) -> None:
+    """The card states the DAC total for 2023, citing the picked decision,
+    and for 2021, not citing it. A replan that moves the picked decision's
+    citation onto the 2021 total, or edits or removes that total, is refused
+    naming it, and the refusal says what the replan may change."""
+    ctx = _context()
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), DONOR_SCOPE, USER_YEAR]),
+        evidence_requirements=[_dac_total(), _prior_total()],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    _pick_top_ten(ctx)
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts(patch["decisions"]),
+        evidence_requirements=patch["evidence_requirements"],
+        removed_evidence_requirements=patch.get("removed_evidence_requirements", []),
+        amends_version=first["version"],
+    )
+
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value, result
+    assert result["detail"]["kept"] == kept
+    assert "may change two things only" in result["message"]
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.version == first["version"]
+
+
+def test_a_pick_replan_keeping_the_rest_of_the_card_is_admitted(
+    decision: Callable[..., Decision],
+) -> None:
+    """The DAC total for 2023 becomes the top 10 donors read over the user's
+    year, and the 2021 total the card also states is carried as it was."""
+    ctx = _context()
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), DONOR_SCOPE, USER_YEAR]),
+        evidence_requirements=[_dac_total(), _prior_total()],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    _pick_top_ten(ctx)
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=_year_kept(YEAR),
+        removed_evidence_requirements=["dac"],
+        amends_version=first["version"],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert sorted(r.id for r in plan.evidence_requirements) == ["aid", "dac_prior", "top"]
