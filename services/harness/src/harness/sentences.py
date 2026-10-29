@@ -704,6 +704,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "over_ceiling",
             "frame_too_large",
             "resource_exhausted",
+            "payload_too_large",
             HarnessCode.SERIES_LIMIT_EXCEEDED,
         }
     ),
@@ -833,6 +834,10 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "constraint_violation",
             "schema_invalid",
             "write_refused",
+            "allowance_exhausted",
+            "share_not_replaceable",
+            "write_token_invalid",
+            "write_token_required",
             "render_target_mismatch",
             "unsupported_schema_version",
             "unsupported_version",
