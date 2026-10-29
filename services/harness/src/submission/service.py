@@ -108,6 +108,7 @@ from planner.plan import (
     MAX_PLAN_ROUNDS,
     AggregateRequirement,
     AlignedPin,
+    AlignmentKey,
     AnswerMode,
     AskAnswer,
     AskRoleDroppedError,
@@ -126,6 +127,7 @@ from planner.plan import (
     FirstYear,
     FixDisagreement,
     FullHistory,
+    HeldSources,
     OneYearRead,
     PinSource,
     Plan,
@@ -148,6 +150,7 @@ from planner.plan import (
     bound_fixes,
     check_acyclic,
     check_wholes_span_their_totals,
+    compile_key,
     cut_user_text,
     dataset_roots,
     exact_codes,
@@ -485,15 +488,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     if previous is not None:
         previous = _with_inferred_origins(previous, aligned_pins(view.state))
     evidence_requirements = _with_aligned_origins(evidence_requirements, previous)
-    pins = pin_sources(view.state)
+    held = HeldSources.of(view.state)
+    pins = held.shown
+    # Read by spec_id: an input's origin, which alignment reads before any pin moves.
     sources = SourceReadings.of_shown(pins)
-    measures = measure_choices(
-        pins,
-        compiled=previous.workflow.sources if previous is not None and previous.workflow else (),
-        offered=chain.from_iterable(referral.offered().values()) if referral else (),
-        sources=sources,
-    )
-    user_settled = _user_settled_measures(measures, view, pins)
     evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
     stated_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
@@ -506,9 +504,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     realigned = _aligned_bases(
         stated_after,
         evidence_requirements,
-        shown=pins,
+        held=held,
         sources=sources,
-        aligned=aligned_pins(view.state),
         searched=searched_pins(view.state),
         view=view,
         proposer=proposer,
@@ -520,7 +517,19 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     aligned_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
     )
-    wholes = _compiled_wholes(aligned_after, aligned=aligned_pins(view.state))
+    # The source of each requirement's own pin, a compile alignment made for it
+    # read as that requirement's alone (`planner.plan.HeldSources.source_of`).
+    pinned = held.by_requirement(aligned_after)
+    sources = sources.with_pinned(pinned)
+    measures = measure_choices(
+        pins,
+        compiled=previous.workflow.sources if previous is not None and previous.workflow else (),
+        offered=chain.from_iterable(referral.offered().values()) if referral else (),
+        sources=sources,
+    )
+    aligned_measures = _aligned_measures(aligned_after, pinned)
+    user_settled = _user_settled_measures(measures, view, pins)
+    wholes = _compiled_wholes(aligned_after, held=held)
     settled, evidence_requirements = _without_replaced_whole_decisions(
         settle_decisions(patch.decisions, aligned_after),
         evidence_requirements,
@@ -533,15 +542,16 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         evidence_requirements,
         previous=previous,
         measures=measures,
+        aligned=aligned_measures,
         user_settled=user_settled,
     )
-    scopes = scope_choice_decisions(pins, wholes=_whole_only_pins(aligned_after, wholes))
+    scopes = requirement_scope_decisions(aligned_after, pinned=pinned)
     settled, evidence_requirements = _scope_decisions(
         settled,
         evidence_requirements,
         previous=previous,
         scopes=scopes,
-        wholes=_whole_decisions(wholes, aligned_after, shown=pins),
+        wholes=_whole_decisions(wholes, aligned_after, shown=pins, pinned=pinned),
         calculations=_difference_decisions(
             aligned_after,
             sources=sources,
@@ -631,7 +641,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 ask_breakdowns=load_ask_breakdowns(view.state),
                 asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
-                first_years=_first_years_on_record(requirements_after, shown=pins, read=read),
+                first_years=_first_years_on_record(requirements_after, pinned=pinned, read=read),
             )
         elif question is None or answer_mode is None:
             missing = " and ".join(
@@ -658,7 +668,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 ask_breakdowns=load_ask_breakdowns(view.state),
                 asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
-                first_years=_first_years_on_record(requirements_after, shown=pins, read=read),
+                first_years=_first_years_on_record(requirements_after, pinned=pinned, read=read),
             )
         stated = plan.model_copy(
             update={
@@ -685,7 +695,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             if split.copies
             else stated
         )
-        plan, copies = _window_pins(materialized, shown=pins, definition_lookup=definition_lookup)
+        plan, copies = _window_pins(
+            materialized,
+            shown=pins,
+            requirement_sources=pinned,
+            definition_lookup=definition_lookup,
+        )
     except (ValidationError, ValueError) as exc:
         # The plan-level rules: unique slots and ids, every citation naming
         # a decision, every decision cited, the length and count limits on
@@ -699,7 +714,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         unknown = _first_year_unknown_cause(exc)
         if unknown is not None:
             exc = _first_year_refusal(
-                unknown, shown=pins, read=read, definition_lookup=definition_lookup
+                unknown, pinned=pinned, read=read, definition_lookup=definition_lookup
             )
         return _invalid_data(exc, proposer)
     blocked = _unrecordable(
@@ -1119,7 +1134,9 @@ def _ask_list(asks: Sequence[int]) -> str:
     return " and ".join(str(ask) for ask in asks)
 
 
-def _breakdown_decline_unearned(plan: Plan, view: SessionView) -> dict[str, object] | None:
+def _breakdown_decline_unearned(
+    plan: Plan, view: SessionView, sources: SourceReadings
+) -> dict[str, object] | None:
     """Return the refusal for a `BREAKDOWN_NOT_KEPT` decline the turn's search did not earn.
 
     Such a decline names an ask (`ask_ref`) whose answer drops a party it
@@ -1139,10 +1156,11 @@ def _breakdown_decline_unearned(plan: Plan, view: SessionView) -> dict[str, obje
     neither states a pair.
 
     `plan` pins the sources as the planner named them, before `_window_pins`
-    moves each to its copy over the requirement's period. `pin_sources`
-    holds a dataset under the spec_id its search returned, and `admit` moves
-    every pin the amended plan carries back to that spec_id
-    (`_unwindowed_pins`). A copy keeps the definition of the dataset it
+    moves each to its copy over the requirement's period. Each pin is read off
+    the source admission holds for its requirement
+    (`SourceReadings.pin_source_for`), a dataset under the spec_id its search
+    returned, and `admit` moves every pin the amended plan carries back to that
+    spec_id (`_unwindowed_pins`). A copy keeps the definition of the dataset it
     copies, so that dataset's open axes decide for the copy.
 
     Every such decline is checked against `plan`, one the plan it amends
@@ -1160,7 +1178,6 @@ def _breakdown_decline_unearned(plan: Plan, view: SessionView) -> dict[str, obje
         return None
     dropped = roles_not_kept(plan)
     parties = {breakdown.ask: breakdown.by for breakdown in plan.ask_breakdowns}
-    sources = pin_sources(view.state)
     requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
     problems: list[str] = []
     held: dict[str, list[dict[str, object]]] = {"held_open": [], "held_named": []}
@@ -1237,7 +1254,7 @@ class _PinHolding:
 def _answer_pin_holding(
     requirements: Mapping[str, EvidenceRequirement],
     outputs: Sequence[str],
-    sources: Mapping[str, PinSource],
+    sources: SourceReadings,
     by: Sequence[str],
     *,
     kept: int,
@@ -1245,7 +1262,8 @@ def _answer_pin_holding(
     """The dataset requirement under `outputs` that can keep more than `kept` of the parties in `by` on the source it pins, with those parties.
 
     The chain runs from the ask's answering `outputs` through `dataset_roots`
-    to each root's `source_spec_id` and the `PinSource` shown for it. A root
+    to each root's `source_spec_id` and the `PinSource` admission holds for it
+    (`SourceReadings.pin_source_for`). A root
     keeps a party of `by` in one of two ways. It names entities with that
     role: the frame has one row per named member, and the axis on that side
     of the flow is not open to cover. Or the source holds the party open: an
@@ -1287,7 +1305,7 @@ def _answer_pin_holding(
         root = requirements[root_id]
         if not isinstance(root, DatasetRequirement) or root.source_spec_id is None:
             continue
-        source = sources.get(root.source_spec_id)
+        source = sources.pin_source_for(root)
         if source is None or not source.settled or source.block is None:
             continue
         named_roles = [entity.role for entity in root.entities if entity.role is not None]
@@ -1839,17 +1857,76 @@ class SourceReadings:
     One proposal reads its pins' sources through one of these at every site
     that names, labels or resolves by a pin's source, so each block is parsed
     once and an unreadable one logs its warning once.
+
+    A pin is read by spec_id (`block`, `get`) where the spec_id is all that
+    names it, as an input's origin is (`DatasetRequirement.aligned_from`). A
+    dataset requirement's own pin is read through the source admission holds
+    for that requirement (`pinned`, by requirement id,
+    `planner.plan.HeldSources.by_requirement`) where one is given
+    (`block_for`, `source_for`), so a compile alignment made for one
+    requirement is never read as another's pin of the same spec_id.
     """
 
-    def __init__(self, block_of: Callable[[str], Mapping[str, Any] | None]) -> None:
+    def __init__(
+        self,
+        block_of: Callable[[str], Mapping[str, Any] | None],
+        *,
+        shown: Mapping[str, PinSource] | None = None,
+        pinned: Mapping[str, PinSource] | None = None,
+    ) -> None:
         self._block_of = block_of
+        self._shown = shown
+        self._pinned = pinned
         self._blocks: dict[str, Mapping[str, Any] | None] = {}
         self._sources: dict[str, SelectedSource | None] = {}
+        self._pinned_sources: dict[str, SelectedSource | None] = {}
 
     @classmethod
-    def of_shown(cls, shown: Mapping[str, PinSource]) -> SourceReadings:
-        """The readings of the blocks of the datasets the planner was shown (`_pin_block`)."""
-        return cls(lambda spec_id: _pin_block(spec_id, shown))
+    def of_shown(
+        cls, shown: Mapping[str, PinSource], *, pinned: Mapping[str, PinSource] | None = None
+    ) -> SourceReadings:
+        """The readings of the blocks of the datasets the planner was shown (`_pin_block`),
+        each requirement's pin read off `pinned` where given."""
+        return cls(lambda spec_id: _pin_block(spec_id, shown), shown=shown, pinned=pinned)
+
+    def with_pinned(self, pinned: Mapping[str, PinSource]) -> SourceReadings:
+        """These readings, each requirement's pin read off `pinned`, by requirement id,
+        sharing what was read by spec_id so far."""
+        readings = SourceReadings(self._block_of, shown=self._shown, pinned=pinned)
+        readings._blocks, readings._sources = self._blocks, self._sources
+        return readings
+
+    def block_for(self, requirement: DatasetRequirement) -> Mapping[str, Any] | None:
+        """The spec block of `requirement`'s pin, `None` where it pins none or none is held."""
+        pin = requirement.source_spec_id
+        if pin is None:
+            return None
+        if self._pinned is None:
+            return self.block(pin)
+        source = self._pinned.get(requirement.id)
+        return source.spec_block(pin) if source is not None else None
+
+    def pin_source_for(self, requirement: DatasetRequirement) -> PinSource | None:
+        """The source admission holds for `requirement`'s pin (`pinned`), else, where no
+        sources by requirement are given, the dataset shown under its pin; `None` where
+        none is held."""
+        if self._pinned is not None:
+            return self._pinned.get(requirement.id)
+        pin = requirement.source_spec_id
+        return self._shown.get(pin) if self._shown is not None and pin is not None else None
+
+    def source_for(self, requirement: DatasetRequirement) -> SelectedSource | None:
+        """The source `requirement`'s pin's block states (`block_for`), `None` where no
+        block is held or it is not readable."""
+        if self._pinned is None:
+            pin = requirement.source_spec_id
+            return self.get(pin) if pin is not None else None
+        if requirement.id not in self._pinned_sources:
+            block = self.block_for(requirement)
+            self._pinned_sources[requirement.id] = (
+                readable_source(block) if block is not None else None
+            )
+        return self._pinned_sources[requirement.id]
 
     def block(self, spec_id: str) -> Mapping[str, Any] | None:
         """The spec block of `spec_id`, `None` when none is held."""
@@ -1868,30 +1945,32 @@ class SourceReadings:
 def pinned_sources(
     requirements: Iterable[EvidenceRequirement], sources: SourceReadings
 ) -> dict[str, SelectedSource]:
-    """The source each dataset requirement of `requirements` pins, by spec_id, as
-    `sources` reads it, leaving out a pin whose block is not held or not readable."""
+    """The source each dataset requirement of `requirements` pins, by requirement id,
+    as `sources` reads it (`SourceReadings.source_for`), leaving out a pin whose
+    block is not held or not readable."""
     return {
-        requirement.source_spec_id: source
+        requirement.id: source
         for requirement in requirements
         if isinstance(requirement, DatasetRequirement)
-        and requirement.source_spec_id is not None
-        and (source := sources.get(requirement.source_spec_id)) is not None
+        and (source := sources.source_for(requirement)) is not None
     }
 
 
 def _pinned_source(
-    spec_id: str | None, view: SessionView, sources: SourceReadings
+    requirement: DatasetRequirement, view: SessionView, sources: SourceReadings
 ) -> SelectedSource | None:
-    """The source `spec_id` pins, as the record that states it; `None` when nothing on record does.
+    """The source `requirement` pins, as the record that states it; `None` when nothing on record does.
 
-    The source is a block's the planner was shown, as `sources` reads it, or
-    one the translator's discovery recorded, such as a referral's candidate
+    The source is the block admission holds for its pin, as `sources` reads it
+    (`SourceReadings.block_for`), or one the translator's discovery recorded,
+    such as a referral's candidate
     (`translator.discovery.DiscoveryLog.recorded_source`).
     """
+    spec_id = requirement.source_spec_id
     if spec_id is None:
         return None
-    if sources.block(spec_id) is not None:
-        return sources.get(spec_id)
+    if sources.block_for(requirement) is not None:
+        return sources.source_for(requirement)
     return load_log(view.state).recorded_source(spec_id)
 
 
@@ -1911,14 +1990,17 @@ def _entity_refs(
 
     # `sources` caches a shown block's source; this also caches the discovery log's
     # source for a pin with no shown block, which `load_log` rebuilds on every read.
-    @functools.cache
-    def source(spec_id: str) -> SelectedSource | None:
-        return _pinned_source(spec_id, view, sources)
+    held: dict[str, SelectedSource | None] = {}
+
+    def source(dataset: DatasetRequirement) -> SelectedSource | None:
+        if dataset.id not in held:
+            held[dataset.id] = _pinned_source(dataset, view, sources)
+        return held[dataset.id]
 
     def refs(dataset: DatasetRequirement | None, entity: Entity) -> frozenset[str]:
         if dataset is None or dataset.source_spec_id is None:
             return frozenset()
-        pinned = source(dataset.source_spec_id)
+        pinned = source(dataset)
         return frozenset() if pinned is None else frozenset(named_refs((entity,), pinned))
 
     return refs
@@ -1957,8 +2039,8 @@ def _sum_datasets(
     while pending:
         read = plan.requirement(pending.pop())
         if isinstance(read, DatasetRequirement):
-            source = _pinned_source(read.source_spec_id, view, sources)
-            prior = pin_sources(view.state).get(read.source_spec_id or "")
+            source = _pinned_source(read, view, sources)
+            prior = sources.pin_source_for(read)
             dataset = (
                 source.provenance_ref
                 if source is not None
@@ -2332,7 +2414,7 @@ def _unrecordable(
         or _choice_not_offered(stated, referral, view)
         or _combination_unasked(stated, view, previous=previous, sources=sources)
         or _decline_unearned(plan, previous, view)
-        or _breakdown_decline_unearned(stated, view)
+        or _breakdown_decline_unearned(stated, view, sources)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
         or _period_reduction_unstated(stated, view, reads_user_words=reads_user_words)
@@ -2807,17 +2889,16 @@ def _unwindowed_pins(
 def _first_year_on_record(
     pin: str,
     *,
-    shown: Mapping[str, PinSource],
+    source: PinSource | None,
     read: Mapping[str, FullHistory | None],
 ) -> FullHistory | None:
     """What is on record about every year the dataset `pin` holds; `None` when nothing is.
 
-    Read from the Search answer the planner was shown for `pin`
+    Read from Search's answer `source` holds for `pin`
     (`planner.plan.full_history`), or else from what `propose_plan` read for
     it over no window (`read`, `planner.plan.full_histories`). A first year
     outside the years a plan states (`planner.records.Year`) is none.
     """
-    source = shown.get(pin)
     block = source.spec_block(pin) if source is not None else None
     history = full_history(block) if block is not None else None
     if history is None or not _is_year(history.first_year):
@@ -2840,7 +2921,7 @@ def _is_year(year: int) -> bool:
 def _first_years_on_record(
     requirements: Iterable[EvidenceRequirement],
     *,
-    shown: Mapping[str, PinSource],
+    pinned: Mapping[str, PinSource],
     read: Mapping[str, FullHistory | None],
 ) -> list[FirstYear]:
     """The first year on record for each pinned dataset requirement of `requirements` stating `period_end_open`.
@@ -2851,7 +2932,8 @@ def _first_years_on_record(
     year than one frame may hold (data-mcp's `max_frame_rows`), or counted
     none, and then `get_data` itself refuses one too large
     (`over_ceiling`). A requirement with none that the split reads from
-    its first year is refused (`_first_year_refusal`).
+    its first year is refused (`_first_year_refusal`). Each requirement's pin is
+    read off the source admission holds for it (`pinned`, by requirement id).
     """
     ceiling = DataMcpSettings().max_frame_rows
     years = []
@@ -2859,7 +2941,11 @@ def _first_years_on_record(
         if not isinstance(requirement, DatasetRequirement) or not requirement.period_end_open:
             continue
         pin = requirement.source_spec_id
-        history = _first_year_on_record(pin, shown=shown, read=read) if pin is not None else None
+        history = (
+            _first_year_on_record(pin, source=pinned.get(requirement.id), read=read)
+            if pin is not None
+            else None
+        )
         if history is None or (history.rows is not None and history.rows > ceiling):
             continue
         years.append(FirstYear(requirement_id=requirement.id, year=history.first_year))
@@ -2883,7 +2969,7 @@ def _first_year_unknown_cause(exc: ValueError) -> RollingPlanError | None:
 def _first_year_refusal(
     refused: RollingPlanError,
     *,
-    shown: Mapping[str, PinSource],
+    pinned: Mapping[str, PinSource],
     read: Mapping[str, FullHistory | None],
     definition_lookup: Callable[[str], RecordedDefinition | None] | None,
 ) -> RollingPlanError:
@@ -2902,6 +2988,8 @@ def _first_year_refusal(
     """
     (requirement_id,) = refused.requirement_ids
     pin = refused.spec_id
+    source = pinned.get(requirement_id)
+    shown = {pin: source} if pin is not None and source is not None else {}
     if (
         pin is None
         or identity_on_record(pin, shown=shown, end_open=True, definition_lookup=definition_lookup)
@@ -2916,7 +3004,7 @@ def _first_year_refusal(
             requirement_ids=[requirement_id],
             fault=OpenPeriodFault.NO_SOURCE_ON_RECORD,
         )
-    history = _first_year_on_record(pin, shown=shown, read=read)
+    history = _first_year_on_record(pin, source=source, read=read)
     if history is None and pin in read:
         return RollingPlanError(
             RollingIssue.NEEDS_OPEN_PERIOD,
@@ -2986,8 +3074,8 @@ def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     shown = pin_sources(state)
     read = full_histories(state)
     reads = []
-    for pin in shown:
-        if pin in read or _first_year_on_record(pin, shown=shown, read=read) is not None:
+    for pin, source in shown.items():
+        if pin in read or _first_year_on_record(pin, source=source, read=read) is not None:
             continue
         recorded = identity_on_record(pin, shown=shown, end_open=True)
         if recorded is not None:
@@ -2999,6 +3087,7 @@ def _window_pins(
     plan: Plan,
     *,
     shown: Mapping[str, PinSource] = {},
+    requirement_sources: Mapping[str, PinSource] | None = None,
     definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
 ) -> tuple[Plan, list[WindowedPin]]:
     """`plan` with each pin whose identity is on record moved to that identity over the requirement's own period.
@@ -3024,7 +3113,9 @@ def _window_pins(
     a range with no end year (`_open_window`), which apis ends at the
     current year at every mint, so its retrieval reaches years published
     after the plan. `shown` are the datasets the planner was shown this
-    entry (`planner.plan.pin_sources`). A pinned one needs an identity on
+    entry (`planner.plan.pin_sources`), and `requirement_sources` the source admission holds
+    for each requirement's pin, by requirement id, which a requirement it
+    holds reads in place of `shown`. A pinned one needs an identity on
     record (`identity_on_record`). An unpinned one is searched for from its
     first year on (`translator.discovery`), and Search answers with a
     definition that has no end year; plan validation refuses one the plan
@@ -3053,10 +3144,13 @@ def _window_pins(
         if not isinstance(requirement, DatasetRequirement):
             continue
         pin = requirement.source_spec_id
+        source = (
+            requirement_sources.get(requirement.id) if requirement_sources is not None else None
+        )
         recorded = (
             identity_on_record(
                 pin,
-                shown=shown,
+                shown={pin: source} if source is not None else shown,
                 end_open=requirement.period_end_open,
                 definition_lookup=definition_lookup,
             )
@@ -3134,13 +3228,17 @@ def _measure_decisions(
     *,
     previous: Plan | None,
     measures: Mapping[str, MeasureChoice],
+    aligned: Mapping[str, MeasureChoice] = {},
     user_settled: Mapping[str, UserChoice] = {},
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
     """Add the decision a pin of a measure a shown source offers states, and cite it.
 
     A pin of a spec_id in `measures` chooses how the flow is counted, so
     this writes that choice as a `Decision` on the model's behalf
-    (`_measure_decision`). Its options are the measure search elected and
+    (`_measure_decision`). A requirement alignment moved onto a compile
+    (`DatasetRequirement.aligned_from`) reads the choice that compile states
+    (`aligned`, by requirement id) in place of any a source shown under the
+    same spec_id offers. Its options are the measure search elected and
     the others counting the flow another way, by label, and it chooses the
     pinned one's. The user settled it (`resolved_by=user`) when the pin is
     in `user_settled`, else the planner did. Each requirement pinning such a
@@ -3164,6 +3262,8 @@ def _measure_decisions(
             restart.
         measures: The measure choice a pin of each spec_id states
             (`measure_choices`).
+        aligned: The measure choice the compile of each aligned requirement
+            states, by requirement id (`_aligned_measures`).
         user_settled: The spec_ids of `measures` whose measure the user
             chose, each with how they chose it (`_user_settled_measures`).
 
@@ -3175,11 +3275,19 @@ def _measure_decisions(
     known = {decision.slot: decision for decision in (previous.decisions if previous else ())}
     known.update({decision.slot: decision for decision in decisions})
 
+    def _choice(requirement: DatasetRequirement) -> MeasureChoice | None:
+        pin = requirement.source_spec_id
+        if pin is None:
+            return None
+        if requirement.aligned_from is not None:
+            return aligned.get(requirement.id)
+        return measures.get(pin)
+
     def _uncited_pin(requirement: EvidenceRequirement) -> str | None:
         if not isinstance(requirement, DatasetRequirement):
             return None
         pin = requirement.source_spec_id
-        if pin is None or pin not in measures:
+        if pin is None or _choice(requirement) is None:
             return None
         for slot in requirement.decision_ids:
             cited = known.get(slot)
@@ -3222,9 +3330,30 @@ def _measure_decisions(
         )
         if slot in known:
             continue
-        known[slot] = _measure_decision(slot, pin, measures[pin], user=user_settled.get(pin))
+        choice = _choice(cast(DatasetRequirement, requirement))
+        assert choice is not None
+        known[slot] = _measure_decision(slot, pin, choice, user=user_settled.get(pin))
         written.append(known[slot])
     return [*decisions, *written], patched_requirements
+
+
+def _aligned_measures(
+    requirements: Iterable[EvidenceRequirement], pinned: Mapping[str, PinSource]
+) -> dict[str, MeasureChoice]:
+    """The measure choice the compile of each requirement of `requirements` alignment
+    moved (`DatasetRequirement.aligned_from`) states, by requirement id, read off
+    that compile's source (`pinned`, by requirement id) as `measure_choices` reads a
+    shown one."""
+    choices: dict[str, MeasureChoice] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.aligned_from is None:
+            continue
+        pin, source = requirement.source_spec_id, pinned.get(requirement.id)
+        if pin is None or source is None:
+            continue
+        if (choice := measure_choices({pin: source}).get(pin)) is not None:
+            choices[requirement.id] = choice
+    return choices
 
 
 class UserChoice(StrEnum):
@@ -3346,9 +3475,7 @@ _SCOPE_QUESTIONS: dict[str, str] = {
 }
 
 
-def scope_choice_decisions(
-    shown: Mapping[str, PinSource], *, wholes: Collection[str] = ()
-) -> dict[str, tuple[Decision, ...]]:
+def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[Decision, ...]]:
     """The scope decisions a pin of each spec_id of `shown` states, in the order Search lists its choices.
 
     Read from the source's spec block (`resolved.scope_choices`,
@@ -3356,31 +3483,74 @@ def scope_choice_decisions(
     release cannot read, states none. Each choice is one decision
     (`_scope_decision`), when it states one; a choice on an axis the block
     marks as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`)
-    is the planner's decision. The pin of a declared whole (`wholes`, by
-    spec_id, `_whole_only_pins`) states none. Its choices hold its part's
-    options, so the part's rows move both, and any one option on the axis
-    it leaves open would count a single slice of what the whole counts in
-    full. A pin a plain requirement shares with a declared whole is no
-    whole's alone, and states its rows.
+    is the planner's decision. Admission states them per requirement
+    (`requirement_scope_decisions`).
     """
     decisions: dict[str, tuple[Decision, ...]] = {}
     for spec_id, source in shown.items():
-        if spec_id in wholes:
-            continue
-        block = source.spec_block(spec_id)
-        scope = part_scope(spec_id, block)
-        if scope is None:
-            continue
-        planner = planner_axes(block)
-        written = tuple(
-            decision
-            for choice in scope.choices
-            if (decision := _scope_decision(spec_id, choice, scope=scope, planner=planner))
-            is not None
-        )
-        if written:
+        if written := _source_scope_decisions(spec_id, source):
             decisions[spec_id] = written
     return decisions
+
+
+def requirement_scope_decisions(
+    requirements: Iterable[EvidenceRequirement], *, pinned: Mapping[str, PinSource]
+) -> dict[str, tuple[Decision, ...]]:
+    """The scope decisions each dataset requirement of `requirements` states for its
+    pin, by requirement id, read off the source admission holds for that pin
+    (`pinned`, by requirement id, `planner.plan.HeldSources.by_requirement`), as
+    `scope_choice_decisions` reads a shown one.
+
+    A requirement pinning a source as its own states that source's decisions,
+    which every such requirement pinning the spec_id shares. One alignment moved
+    onto a compile (`DatasetRequirement.aligned_from`) states the compile's, its
+    own alone (`planner.plan.DecisionScope.aligned_for`), so a planner's move
+    reads as the planner's beside a user's choice on the same spec_id. A declared
+    whole (`DatasetRequirement.whole_of`) states none: its choices hold its part's
+    options, so the part's rows move both, and any one option on the axis it leaves
+    open would count a single slice of what the whole counts in full. A plain
+    requirement pinning a whole's dataset is no whole, and states its rows.
+    """
+    shared: dict[str, tuple[Decision, ...]] = {}
+    decisions: dict[str, tuple[Decision, ...]] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.whole_of is not None:
+            continue
+        pin, source = requirement.source_spec_id, pinned.get(requirement.id)
+        if pin is None or source is None:
+            continue
+        if requirement.aligned_from is not None:
+            written = _source_scope_decisions(pin, source, aligned_for=requirement.id)
+        else:
+            if pin not in shared:
+                shared[pin] = _source_scope_decisions(pin, source)
+            written = shared[pin]
+        if written:
+            decisions[requirement.id] = written
+    return decisions
+
+
+def _source_scope_decisions(
+    spec_id: str, source: PinSource, *, aligned_for: str | None = None
+) -> tuple[Decision, ...]:
+    """The scope decisions a pin of `spec_id` read off `source` states, in the order
+    Search lists its choices (`_scope_decision`), each for the aligned requirement
+    `aligned_for` alone where given."""
+    block = source.spec_block(spec_id)
+    scope = part_scope(spec_id, block)
+    if scope is None:
+        return ()
+    planner = planner_axes(block)
+    return tuple(
+        decision
+        for choice in scope.choices
+        if (
+            decision := _scope_decision(
+                spec_id, choice, scope=scope, planner=planner, aligned_for=aligned_for
+            )
+        )
+        is not None
+    )
 
 
 def part_scope(spec_id: str, block: Mapping[str, Any] | None) -> PartScope | None:
@@ -3396,7 +3566,12 @@ def part_scope(spec_id: str, block: Mapping[str, Any] | None) -> PartScope | Non
 
 
 def _scope_decision(
-    pin: str, choice: ScopeChoice, *, scope: PartScope, planner: Collection[str] = frozenset()
+    pin: str,
+    choice: ScopeChoice,
+    *,
+    scope: PartScope,
+    planner: Collection[str] = frozenset(),
+    aligned_for: str | None = None,
 ) -> Decision | None:
     """The decision a pin of `pin` states for `choice`, or `None` when it states none.
 
@@ -3414,6 +3589,8 @@ def _scope_decision(
     is the planner's: a switch of the measure basis or provider scope there
     compiled the pin on the option of a calculation's other inputs
     (`_aligned_bases`), and is stated whatever else the pin could be served on.
+    A decision read off the compile alignment made for the requirement
+    `aligned_for` is that requirement's alone (`planner.plan.scope_choice_slot`).
     """
     active = choice.active_option
     switched = any(
@@ -3445,7 +3622,7 @@ def _scope_decision(
         rationale = SEARCH_DEFAULT_RATIONALE
     try:
         return Decision(
-            slot=scope_choice_slot(pin, choice.axis),
+            slot=scope_choice_slot(pin, choice.axis, aligned_for=aligned_for),
             description=_SCOPE_QUESTIONS[choice.axis],
             options=tuple(option.label for option in choice.options),
             chosen=active.label,
@@ -3458,6 +3635,7 @@ def _scope_decision(
                 choice_id=choice.id,
                 axis=choice.axis,
                 provenance=choice.provenance,
+                aligned_for=aligned_for,
                 options=tuple(
                     ScopeOptionState(
                         option_id=option.option_id,
@@ -3488,9 +3666,11 @@ def _scope_decisions(
 
     Runs after the model's decisions and the measure decisions
     (`_measure_decisions`), so those come first under the cap. Each dataset
-    requirement of `evidence_requirements` pinning a spec_id of `scopes`
-    cites that pin's scope decisions; one citing a scope decision, or a
-    whole's (`_whole_decisions`), for a pin it does not state has that
+    requirement of `evidence_requirements` cites the scope decisions `scopes`
+    holds for it; one citing a scope decision, or a
+    whole's (`_whole_decisions`), for a pin it does not state, or a scope
+    decision of another requirement's compile
+    (`planner.plan.DecisionScope.aligned_for`), has that
     citation dropped, as does a declared whole (`DatasetRequirement.whole_of`)
     citing a scope decision and a requirement declaring none citing a
     whole's. Each calculation of `calculations`, this call's or
@@ -3520,8 +3700,8 @@ def _scope_decisions(
         decisions: This call's decisions, the measure decisions included.
         evidence_requirements: This call's own requirements.
         previous: The plan this call amends, or `None`.
-        scopes: The scope decisions a pin of each spec_id states
-            (`scope_choice_decisions`).
+        scopes: The scope decisions each dataset requirement states for its
+            pin, by requirement id (`requirement_scope_decisions`).
         wholes: The decision each whole compiled from its part states, by
             requirement id (`_whole_decisions`).
         calculations: The provider-scope and measure-basis decisions each
@@ -3570,6 +3750,12 @@ def _scope_decisions(
                     # A declared whole states no scope row, and only a declared
                     # whole states the whole's decision.
                     or (decision.caveat == "derived_whole") == (requirement.whole_of is None)
+                    # A compile's row is the aligned requirement's alone.
+                    or (
+                        decision.scope is not None
+                        and decision.scope.aligned_for
+                        != (requirement.id if requirement.aligned_from is not None else None)
+                    )
                 )
             )
         ]
@@ -3587,8 +3773,7 @@ def _scope_decisions(
     def derived_for(requirement: EvidenceRequirement) -> Sequence[Decision]:
         if not isinstance(requirement, DatasetRequirement):
             return calculations.get(requirement.id, ())
-        pin = requirement.source_spec_id
-        own = scopes.get(pin, ()) if pin is not None and requirement.whole_of is None else ()
+        own = scopes.get(requirement.id, ()) if requirement.whole_of is None else ()
         return (*own, *wholes.get(requirement.id, ()))
 
     cited_after = {
@@ -3776,8 +3961,9 @@ class Realignment(NamedTuple):
     with its choice on `whole_axis` left open, `option_ids` is empty, and
     `requirement_id` and `step_id` both name the whole (`_declared_wholes`).
     Where alignment moved the part onto that pin, `part_origin` is the pin it was
-    compiled from (`DatasetRequirement.aligned_from`), which
-    `planner.agent.compile_whole` reads the part's source through.
+    compiled from and `part_option_ids` the options it was compiled on
+    (`DatasetRequirement.aligned_from`, `DatasetRequirement.aligned_options`),
+    which `planner.agent.compile_whole` reads the part's own compile by.
     """
 
     spec_id: str
@@ -3786,13 +3972,29 @@ class Realignment(NamedTuple):
     step_id: str
     whole_axis: str | None = None
     part_origin: str | None = None
+    part_option_ids: tuple[str, ...] = ()
+
+    @property
+    def key(self) -> AlignmentKey:
+        """The compile this realignment asks for, as the pin it holds is keyed (`AlignedPin.key`)."""
+        return AlignmentKey(
+            self.spec_id,
+            tuple(sorted(set(self.option_ids))),
+            self.whole_axis,
+            self.part_origin,
+            self.part_option_ids,
+        )
 
     def detail(self) -> dict[str, object]:
-        """This realignment as a refusal's detail states it, `whole_axis` and
-        `part_origin` only when set."""
-        detail: dict[str, object] = {**self._asdict(), "option_ids": list(self.option_ids)}
-        for key in ("whole_axis", "part_origin"):
-            if detail[key] is None:
+        """This realignment as a refusal's detail states it, `whole_axis`,
+        `part_origin` and `part_option_ids` only when set."""
+        detail: dict[str, object] = {
+            **self._asdict(),
+            "option_ids": list(self.option_ids),
+            "part_option_ids": list(self.part_option_ids),
+        }
+        for key in ("whole_axis", "part_origin", "part_option_ids"):
+            if not detail[key]:
                 del detail[key]
         return detail
 
@@ -3810,6 +4012,7 @@ def realignments_wanted(result: Mapping[str, object]) -> list[Realignment]:
             step_id=entry["step_id"],
             whole_axis=entry.get("whole_axis"),
             part_origin=entry.get("part_origin"),
+            part_option_ids=tuple(entry.get("part_option_ids") or ()),
         )
         for entry in detail.get("realign") or ()
     ]
@@ -3832,6 +4035,8 @@ class _InputBasis:
     what the requirement reads of it (`_Reads`), which alignment sees before
     `_window_pins` puts each pin on its own period, so two inputs holding one
     `held.part`, one option on every axis and one `reads` read one series.
+    `stands` is the pin with the compile the requirement records
+    (`DatasetRequirement.aligned_options`).
     """
 
     requirement_id: str
@@ -3841,6 +4046,7 @@ class _InputBasis:
     stated: bool
     held: _Origin
     reads: _Reads
+    stands: _Moved
 
     def label(self, option_id: str) -> str:
         """The reader's label of `option_id` on this input, or the id when the choice lists none."""
@@ -4034,12 +4240,14 @@ class _Input(NamedTuple):
     """One dataset requirement's pin as alignment reads it on every axis (`_read_inputs`):
     the spec_id it states, the `origin` it was compiled from, that origin as read
     (`held`), `None` where it carries no choice on an aligned axis
-    (`_ALIGNED_AXES`), and what the requirement reads of it (`reads`)."""
+    (`_ALIGNED_AXES`), what the requirement reads of it (`reads`), and its pin
+    with the compile it records (`stands`)."""
 
     pin: str
     origin: str
     held: _Origin | None
     reads: _Reads
+    stands: _Moved
 
 
 def _read_inputs(
@@ -4070,6 +4278,7 @@ def _read_inputs(
             origin=origin,
             held=held[origin],
             reads=_Reads.of(requirement, sources.get(origin)),
+            stands=_Moved.of(requirement),
         )
     return inputs
 
@@ -4099,6 +4308,7 @@ def _input_bases(inputs: Mapping[str, _Input], *, axis: str) -> dict[str, _Input
             ),
             held=held,
             reads=read.reads,
+            stands=read.stands,
         )
     return bases
 
@@ -4201,9 +4411,8 @@ def _aligned_bases(
     requirements: Sequence[EvidenceRequirement],
     evidence_requirements: Sequence[EvidenceRequirement],
     *,
-    shown: Mapping[str, PinSource],
+    held: HeldSources,
     sources: SourceReadings,
-    aligned: Sequence[AlignedPin],
     searched: Sequence[SearchedPin],
     view: SessionView,
     proposer: Proposer,
@@ -4289,8 +4498,9 @@ def _aligned_bases(
 
     An input already on its options keeps its origin pin. Another is pinned
     to the pin compiled from its origin on the options it moves to, one per
-    axis (`aligned`), and the requirement is restated under it, recording
-    that origin (`DatasetRequirement.aligned_from`), appended when only the
+    axis (`held`), and the requirement is restated under it, recording
+    that origin and those options (`DatasetRequirement.aligned_from`,
+    `DatasetRequirement.aligned_options`), appended when only the
     plan this call amends states it. An input's origin is the one its
     requirement records, else its own pin, so a pin the plan holds for its
     own reasons reads as itself though a compile answered with its spec_id. An input with no such
@@ -4309,14 +4519,15 @@ def _aligned_bases(
         requirements: Every requirement the plan states once this call's
             patch lands (`_requirements_after`).
         evidence_requirements: This call's own requirements.
-        shown: The datasets the planner was shown (`planner.plan.pin_sources`).
-        sources: The proposal's readings of the blocks of `shown` (`SourceReadings`).
-        aligned: The pins compiled so far (`aligned_pins`).
+        held: The datasets the planner was shown and the pins compiled so far
+            (`planner.plan.HeldSources`).
+        sources: The proposal's readings of the blocks of the datasets shown
+            (`SourceReadings`).
         searched: The searches made so far for unpinned inputs (`searched_pins`).
         view: The session, where an `unsupported` answer is recorded.
         proposer: The tool a refusal's `action` names.
     """
-    held = {pin.requirement_key: pin for pin in searched}
+    searches = {pin.requirement_key: pin for pin in searched}
     searchable = [
         requirement
         for requirement in requirements
@@ -4327,18 +4538,19 @@ def _aligned_bases(
     found = {
         requirement.id: pin.spec_id
         for requirement in searchable
-        if (pin := held.get(requirement_revision(requirement))) is not None
+        if (pin := searches.get(requirement_revision(requirement))) is not None
         and pin.spec_id is not None
     }
     unsearched = {
         requirement.id: requirement
         for requirement in searchable
-        if requirement_revision(requirement) not in held
+        if requirement_revision(requirement) not in searches
     }
     unsettled = {
         requirement.id: pin
         for requirement in searchable
-        if (pin := held.get(requirement_revision(requirement))) is not None and pin.spec_id is None
+        if (pin := searches.get(requirement_revision(requirement))) is not None
+        and pin.spec_id is None
     }
     requirements = [_pinned(requirement, found) for requirement in requirements]
     evidence_requirements = [_pinned(requirement, found) for requirement in evidence_requirements]
@@ -4347,7 +4559,9 @@ def _aligned_bases(
     except _Unservable as exc:
         return exc.problem
     compiled = {
-        (pin.origin, pin.option_ids): pin.spec_id for pin in aligned if pin.whole_axis is None
+        (key.origin, key.option_ids): pin.spec_id
+        for key, pin in held.compiled.items()
+        if key.whole_axis is None
     }
     # Alignment leaves a declared whole alone. It is compiled from its part's
     # final pin below.
@@ -4392,45 +4606,92 @@ def _aligned_bases(
         wanted, realigned = _realigned_pins(targets, by_axis, compiled=compiled)
         if wanted:
             raise _Unservable(_bases_unaligned(wanted, by_axis))
-        wholes = _declared_wholes(
-            declared,
-            realigned=realigned,
-            inputs=inputs,
-            shown=shown,
-            compiled=[pin for pin in aligned if pin.whole_axis is not None],
-        )
+        parts = {
+            requirement.id: _Moved.of(requirement)
+            for requirement in aligning
+            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+        }
+        wholes = _declared_wholes(declared, parts={**parts, **realigned}, held=held)
     except _Unservable as exc:
         return exc.problem
     moved = {**wholes, **realigned}
+    # Every requirement where alignment puts it, so a whole reads its part's final compile.
+    after = {
+        requirement.id: _moved_to(requirement, move)
+        if isinstance(requirement, DatasetRequirement)
+        and (move := moved.get(requirement.id)) is not None
+        else requirement
+        for requirement in requirements
+    }
     return [
         repinned(
             requirement,
-            pin,
-            exact_codes(_pin_block(pin, shown)),
-            aligned_from=_aligned_from(inputs.get(requirement.id), pin),
+            move.pin,
+            _exact_codes_of(
+                held.source_of(_moved_to(requirement, move), after),
+                move.pin,
+            ),
+            aligned_from=move.origin,
+            aligned_options=move.option_ids,
         )
         if isinstance(requirement, DatasetRequirement)
-        and (pin := moved.get(requirement.id)) is not None
+        and (move := moved.get(requirement.id)) is not None
         else requirement
-        for requirement in _with_found(evidence_requirements, requirements, {**found, **moved})
+        for requirement in _with_found(
+            evidence_requirements,
+            requirements,
+            {**found, **{requirement_id: move.pin for requirement_id, move in moved.items()}},
+        )
     ]
 
 
-def _aligned_from(read: _Input | None, pin: str) -> str | None:
-    """The origin a requirement read as `read` and moved to `pin` records
-    (`DatasetRequirement.aligned_from`): `read`'s origin where `pin` was compiled
-    from it, `None` for a declared whole (no `read`) or a move back onto the origin."""
-    return read.origin if read is not None and read.origin != pin else None
+class _Moved(NamedTuple):
+    """Where alignment puts one dataset requirement (`_aligned_bases`): the pin `pin`,
+    compiled from `origin` on the options `option_ids`, or with `origin` `None` and
+    no options a pin that is its own, as a declared whole's and an input's moved back
+    onto its origin are (`DatasetRequirement.aligned_from`)."""
+
+    pin: str
+    origin: str | None = None
+    option_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, requirement: DatasetRequirement) -> _Moved:
+        """Where `requirement` stands now, its pin and the compile it records."""
+        assert requirement.source_spec_id is not None
+        return cls(
+            requirement.source_spec_id,
+            requirement.aligned_from,
+            requirement.aligned_options if requirement.aligned_from is not None else (),
+        )
+
+
+def _moved_to(requirement: DatasetRequirement, move: _Moved) -> DatasetRequirement:
+    """`requirement` pinned where `move` puts it, recording the compile it reads, for
+    reading that pin's source before it is restated (`planner.plan.repinned`)."""
+    return requirement.model_copy(
+        update={
+            "source_spec_id": move.pin,
+            "aligned_from": move.origin,
+            "aligned_options": move.option_ids,
+        }
+    )
+
+
+def _exact_codes_of(source: PinSource | None, pin: str) -> frozenset[str]:
+    """The codes `source`'s block for `pin` states exactly (`exact_codes`); none without a block."""
+    return exact_codes(source.spec_block(pin) if source is not None else None)
 
 
 def _with_inferred_origins(previous: Plan, aligned: Sequence[AlignedPin]) -> Plan:
     """`previous` with each aligned input held beside a pin that does not record its
-    origin (`AlignedPin.records_origin` unset) given the origin it was moved from
-    (`DatasetRequirement.aligned_from`).
+    origin (`AlignedPin.records_origin` unset) given the origin it was moved from and
+    the options it was moved to (`DatasetRequirement.aligned_from`,
+    `DatasetRequirement.aligned_options`).
 
     Such a pin is stored beside a plan that holds an aligned input on its compiled pin
     alone and records no origin on any requirement. An input pinning the spec_id of
-    exactly one such origin's compile (not a declared whole's) records that origin,
+    exactly one such compile (not a declared whole's) records its origin and options,
     where no other requirement of `previous` pins that spec_id, since one that does
     may hold it as its own, and none pins the origin, which an input pinned to the
     compile directly beside its origin's own requirement would. A pin that records
@@ -4438,28 +4699,33 @@ def _with_inferred_origins(previous: Plan, aligned: Sequence[AlignedPin]) -> Pla
     records none, keeps none. The stored plan keeps its form and revision; only the
     plan this call admits records the origin.
     """
-    origins: dict[str, set[str]] = {}
+    origins: dict[str, set[tuple[str, tuple[str, ...]]]] = {}
     for pin in aligned:
         if pin.whole_axis is None and not pin.records_origin:
-            origins.setdefault(pin.spec_id, set()).add(pin.origin)
+            origins.setdefault(pin.spec_id, set()).add((pin.origin, pin.option_ids))
     datasets = [r for r in previous.evidence_requirements if isinstance(r, DatasetRequirement)]
     if not origins or any(dataset.aligned_from is not None for dataset in datasets):
         return previous
     pinning = Counter(dataset.source_spec_id for dataset in datasets)
     inferred = {
-        dataset.id: origin
+        dataset.id: moved
         for dataset in datasets
         if dataset.source_spec_id is not None
         and pinning[dataset.source_spec_id] == 1
         and len(held := origins.get(dataset.source_spec_id, set())) == 1
-        and (origin := next(iter(held))) not in pinning
+        and (moved := next(iter(held)))[0] not in pinning
     }
     if not inferred:
         return previous
     return previous.model_copy(
         update={
             "evidence_requirements": tuple(
-                requirement.model_copy(update={"aligned_from": inferred[requirement.id]})
+                requirement.model_copy(
+                    update={
+                        "aligned_from": inferred[requirement.id][0],
+                        "aligned_options": inferred[requirement.id][1],
+                    }
+                )
                 if requirement.id in inferred
                 else requirement
                 for requirement in previous.evidence_requirements
@@ -4471,13 +4737,14 @@ def _with_inferred_origins(previous: Plan, aligned: Sequence[AlignedPin]) -> Pla
 def _with_aligned_origins(
     evidence_requirements: Sequence[EvidenceRequirement], previous: Plan | None
 ) -> list[EvidenceRequirement]:
-    """This call's requirements, each dataset requirement's `aligned_from` the one the
-    plan `previous` records for it where the requirement restates that one unchanged
-    apart from the fields admission writes (`_asked_content`), else unset.
+    """This call's requirements, each dataset requirement's `aligned_from` and
+    `aligned_options` the ones the plan `previous` records for it where the
+    requirement restates that one unchanged apart from the fields admission writes
+    (`_asked_content`), else unset.
 
-    Alignment alone writes `aligned_from` (`_aligned_bases`). The planner's schema
-    leaves it out, so a value the planner sends is dropped, and a requirement it
-    restates as it stands keeps the origin recorded for it. One restated with any
+    Alignment alone writes them (`_aligned_bases`). The planner's schema
+    leaves them out, so a value the planner sends is dropped, and a requirement it
+    restates as it stands keeps the compile recorded for it. One restated with any
     other field changed on the same pin can ask for something else, so it reads its
     pin as its own.
     """
@@ -4492,15 +4759,17 @@ def _with_aligned_origins(
             restated.append(requirement)
             continue
         before = held.get(requirement.id)
-        origin = (
-            before.aligned_from
+        recorded = (
+            (before.aligned_from, before.aligned_options)
             if before is not None and _asked_content(before) == _asked_content(requirement)
-            else None
+            else (None, ())
         )
         restated.append(
             requirement
-            if origin == requirement.aligned_from
-            else requirement.model_copy(update={"aligned_from": origin})
+            if recorded == (requirement.aligned_from, requirement.aligned_options)
+            else requirement.model_copy(
+                update={"aligned_from": recorded[0], "aligned_options": recorded[1]}
+            )
         )
     return restated
 
@@ -4511,7 +4780,15 @@ def _with_aligned_origins(
 # (`_stated_source_given_way`), and what alignment's repin clears and records
 # (`planner.plan.repinned`).
 _ADMISSION_WRITTEN = frozenset(
-    {"decision_ids", "source", "source_ref", "source_exclude", "source_code", "aligned_from"}
+    {
+        "decision_ids",
+        "source",
+        "source_ref",
+        "source_exclude",
+        "source_code",
+        "aligned_from",
+        "aligned_options",
+    }
 )
 
 
@@ -5193,12 +5470,16 @@ def _realigned_pins(
     by_axis: Mapping[str, Mapping[str, _InputBasis]],
     *,
     compiled: Mapping[tuple[str, tuple[str, ...]], str],
-) -> tuple[list[Realignment], dict[str, str]]:
-    """The inputs still to compile on their `targets`, and the pins of the inputs compiled already, by requirement id (`_aligned_bases`).
+) -> tuple[list[Realignment], dict[str, _Moved]]:
+    """The inputs still to compile on their `targets`, and where each input compiled
+    already moves, by requirement id (`_aligned_bases`).
 
     An input is compiled from its origin once on every option it moves to,
     one per axis, so a gross inclusive total wanted net and bilateral is
     one compile, and `compiled` holds it under the origin and those options.
+    An input moves where its pin, or the compile it records, is not the one it
+    is wanted on, so two compiles of one origin Search answered with one
+    spec_id are each read as their own.
     """
     moves: dict[str, list[tuple[str, str]]] = {}
     for (requirement_id, axis), (target, step_id) in targets.items():
@@ -5206,15 +5487,17 @@ def _realigned_pins(
         if by_axis[axis][requirement_id].choice.active != target:
             moved.append((target, step_id))
     wanted: list[Realignment] = []
-    repinned: dict[str, str] = {}
+    repinned: dict[str, _Moved] = {}
     for requirement_id, moved in moves.items():
         basis = next(bases[requirement_id] for bases in by_axis.values() if requirement_id in bases)
         option_ids = tuple(sorted(target for target, _ in moved))
         pin = compiled.get((basis.origin, option_ids)) if moved else basis.origin
         if pin is None:
             wanted.append(Realignment(basis.origin, option_ids, requirement_id, moved[0][1]))
-        elif pin != basis.pin:
-            repinned[requirement_id] = pin
+            continue
+        move = _Moved(pin, basis.origin, option_ids) if pin != basis.origin else _Moved(pin)
+        if move != basis.stands:
+            repinned[requirement_id] = move
     return wanted, repinned
 
 
@@ -5460,66 +5743,68 @@ def _whole_parts(
 def _declared_wholes(
     declared: Sequence[tuple[DatasetRequirement, DatasetRequirement, str]],
     *,
-    realigned: Mapping[str, str],
-    inputs: Mapping[str, _Input],
-    shown: Mapping[str, PinSource],
-    compiled: Sequence[AlignedPin],
-) -> dict[str, str]:
-    """The pin of each declared whole of `declared` (`_whole_parts`), by requirement id (`_aligned_bases`).
+    parts: Mapping[str, _Moved],
+    held: HeldSources,
+) -> dict[str, _Moved]:
+    """Where each declared whole of `declared` (`_whole_parts`) is pinned, by requirement id (`_aligned_bases`).
 
-    A declared whole is its part's final pin, the one alignment moved the
-    part to (`realigned`) else its own, with the declared axis left open
+    A declared whole is its part's final pin, where alignment puts the part
+    (`parts`, by requirement id) else its own, with the declared axis left open
     (`whole_axis_held`, `planner.agent.compile_whole`) and every other choice
-    held. A part alignment moved names the pin it was compiled from, as read
-    (`inputs`), so its compile is read as the part (`Realignment.part_origin`).
-    `compiled` holds the wholes compiled so far
-    (`AlignedPin.key`), so wholes declaring one part and axis share one
-    compile.
+    held. A part alignment moved is read as its own compile
+    (`Realignment.part_origin`, `Realignment.part_option_ids`), so a whole of it
+    and a whole of a part pinning the same spec_id as its own are compiled
+    apart. `held` holds the wholes compiled so far (`AlignedPin.key`), so wholes
+    declaring one part and axis share one compile.
 
     Raises:
         _Unservable: With `BASES_UNALIGNED`, naming each whole not compiled
-            yet, once per part pin and axis (`Realignment.whole_axis`),
+            yet, once per part compile and axis (`Realignment.whole_axis`),
             or `SHARE_WHOLE_UNDERIVABLE` when Search's scope records for a
             part's pin hold nothing on the axis to leave open, or when a
             compiled whole names an entity on the side it leaves open other
             than the total Search bound there (`_misnamed_total`).
     """
-    pins = {pin.key: pin for pin in compiled}
-    wanted: dict[tuple[str, str], Realignment] = {}
-    wholes: dict[str, str] = {}
+    wanted: dict[AlignmentKey, Realignment] = {}
+    wholes: dict[str, _Moved] = {}
     for whole, part, axis in declared:
-        pin = realigned.get(part.id) or cast(str, part.source_spec_id)
-        block = _pin_block(pin, shown)
-        scope = part_scope(pin, block)
+        at = parts.get(part.id) or _Moved.of(part)
+        source = held.source_at(
+            at.pin, AlignmentKey(at.origin, at.option_ids) if at.origin else None
+        )
+        block = source.spec_block(at.pin) if source is not None else None
+        scope = part_scope(at.pin, block)
         if scope is None or not whole_axis_held(scope, axis):
-            reason, cause = unread_part(pin, axis, source=shown.get(pin), block=block, scope=scope)
+            reason, cause = unread_part(at.pin, axis, source=source, block=block, scope=scope)
             raise _Unservable(
                 share_whole_underivable(
-                    whole_id=whole.id, part_spec_id=pin, reason=reason, cause=cause
+                    whole_id=whole.id, part_spec_id=at.pin, reason=reason, cause=cause
                 )
             )
-        held = pins.get((pin, (), axis))
-        if held is not None:
-            if reason := _misnamed_total(whole, axis, held):
+        key = AlignmentKey(at.pin, (), axis, at.origin, at.option_ids)
+        compiled = held.compiled.get(key)
+        if compiled is not None:
+            if reason := _misnamed_total(whole, axis, compiled):
                 raise _Unservable(
                     share_whole_underivable(
                         whole_id=whole.id,
-                        part_spec_id=pin,
+                        part_spec_id=at.pin,
                         reason=reason,
                         cause="whole_names_another_total",
                     )
                 )
-            wholes[whole.id] = held.spec_id
+            wholes[whole.id] = _Moved(compiled.spec_id)
         else:
             wanted.setdefault(
-                (pin, axis),
+                key,
                 Realignment(
-                    pin,
+                    at.pin,
                     (),
                     whole.id,
                     whole.id,
                     whole_axis=axis,
-                    part_origin=_aligned_from(inputs.get(part.id), pin),
+                    part_origin=at.origin,
+                    part_option_ids=at.option_ids,
                 ),
             )
     if wanted:
@@ -5573,34 +5858,26 @@ def _whole_slot(requirement_id: str) -> str:
 
 
 def _compiled_wholes(
-    requirements: Sequence[EvidenceRequirement], *, aligned: Sequence[AlignedPin]
+    requirements: Sequence[EvidenceRequirement], *, held: HeldSources
 ) -> dict[str, AlignedPin]:
     """The whole compiled from its part (`AlignedPin.whole_axis`) each declared whole
-    of `requirements` (`DatasetRequirement.whole_of`) pins, by requirement id.
+    of `requirements` (`DatasetRequirement.whole_of`) pins, by requirement id, read
+    by what it was compiled for (`planner.plan.compile_key`), so a whole of an
+    aligned part and one of a part pinning the same spec_id as its own each read
+    their own.
 
     A requirement stating no `whole_of` is no whole, though it pins a whole an
     earlier plan compiled: the rules for wholes read the plan as it stands,
     and use the compiled pins only for what they record."""
-    compiled = {pin.spec_id: pin for pin in aligned if pin.whole_axis is not None}
+    by_id = {requirement.id: requirement for requirement in requirements}
     return {
-        requirement.id: compiled[requirement.source_spec_id]
+        requirement.id: compiled
         for requirement in requirements
         if isinstance(requirement, DatasetRequirement)
         and requirement.whole_of is not None
-        and requirement.source_spec_id in compiled
-    }
-
-
-def _whole_only_pins(
-    requirements: Sequence[EvidenceRequirement], wholes: Mapping[str, AlignedPin]
-) -> set[str]:
-    """The spec_ids `wholes` (`_compiled_wholes`) pin that no requirement of
-    `requirements` other than a declared whole pins, which state no scope rows. A
-    plain requirement the planner pins to a whole's dataset is no whole: its rows stay."""
-    return {pin.spec_id for pin in wholes.values()} - {
-        requirement.source_spec_id
-        for requirement in requirements
-        if isinstance(requirement, DatasetRequirement) and requirement.whole_of is None
+        and (key := compile_key(requirement, by_id)) is not None
+        and (compiled := held.compiled.get(key)) is not None
+        and compiled.spec_id == requirement.source_spec_id
     }
 
 
@@ -5673,6 +5950,7 @@ def _whole_decisions(
     requirements: Sequence[EvidenceRequirement],
     *,
     shown: Mapping[str, PinSource],
+    pinned: Mapping[str, PinSource] = {},
 ) -> dict[str, tuple[Decision, ...]]:
     """The decision each whole compiled from its part (`AlignedPin.whole_axis`) states,
     by the whole's requirement id, `wholes` holding each one's pin.
@@ -5682,8 +5960,10 @@ def _whole_decisions(
     part's own dataset over the axis left open (`_whole_total`), and what
     both sides count alike (`_whole_shares`), naming the part's dataset by
     its title where that fits the rationale's limit (`_fitting_rationale`). The part is
-    the one the whole declares (`DatasetRequirement.whole_of`), else the pin
-    it was compiled from (`AlignedPin.origin`), so two wholes compiled to one
+    the one the whole declares (`DatasetRequirement.whole_of`), read off the
+    source admission holds for the part's pin (`pinned`, by requirement id), its
+    own compile where alignment moved it, else as shown (`shown`), or else the pin
+    it was compiled from (`AlignedPin.origin`) as shown, so two wholes compiled to one
     pin each name their own. It is the planner's, qualifies the answer
     (`Decision.caveat` `derived_whole`), and is cited by the whole's
     requirement as a scope decision is (`_scope_decisions`).
@@ -5697,10 +5977,10 @@ def _whole_decisions(
             if isinstance(declared, DatasetRequirement) and declared.whole_of is not None
             else None
         )
-        origin = (
-            part.source_spec_id
+        origin, part_source = (
+            (part.source_spec_id, pinned.get(part.id) or shown.get(part.source_spec_id))
             if isinstance(part, DatasetRequirement) and part.source_spec_id is not None
-            else whole.origin
+            else (whole.origin, shown.get(whole.origin))
         )
         over_whole = requirements_over(requirement_id, by_id)
         divides = (
@@ -5712,7 +5992,7 @@ def _whole_decisions(
             )
             else "share"
         )
-        part_block = _pin_block(origin, shown)
+        part_block = part_source.spec_block(origin) if part_source is not None else None
         whole_block = whole.digest.get("spec_block")
         part_held, whole_held = _block_scope(part_block), _block_scope(whole_block)
         dataset = _dataset_title(part_block)
@@ -5873,10 +6153,11 @@ def _card_names(
     """How the plan card names each retrieval of `requirements`, by requirement
     id (`harness.plan_display.plan_words`), read off the plan they state once this
     call lands, not compiled yet: `decisions`, and each retrieval citing the scope
-    decisions its pin states (`scope_decisions`, `scope_choice_decisions`), as
-    `_scope_decisions` cites them, since its sector decision names it where Search
-    states no concept. Each retrieval reads the source of the block its pin was
-    shown with (`sources`), and is named afresh as the card of the compiled plan
+    decisions it states for its pin (`scope_decisions`, by requirement id,
+    `requirement_scope_decisions`), as `_scope_decisions` cites them, since its
+    sector decision names it where Search states no concept. Each retrieval reads
+    the source admission holds for its pin (`sources`, `SourceReadings.source_for`),
+    and is named afresh as the card of the compiled plan
     names it (`harness.plan_display.card_rows`), whatever the card it revises
     named it. Retrievals named alike are numbered in the order the plan states
     them, as the card numbers them (`harness.plan_display._card_order`)."""
@@ -5885,10 +6166,7 @@ def _card_names(
             update={
                 "decision_ids": (
                     *requirement.decision_ids,
-                    *(
-                        decision.slot
-                        for decision in scope_decisions.get(requirement.source_spec_id, ())
-                    ),
+                    *(decision.slot for decision in scope_decisions.get(requirement.id, ())),
                 )
             }
         )
@@ -5900,8 +6178,9 @@ def _card_names(
     # The card names a retrieval off the retrievals and decisions alone. The
     # calculations are left out, since the plan is not validated yet and one can
     # still read a requirement the patch removed.
+    scoped = {d.slot: d for held in scope_decisions.values() for d in held}
     draft = Plan.model_construct(
-        decisions=(*decisions, *(d for held in scope_decisions.values() for d in held)),
+        decisions=(*decisions, *scoped.values()),
         evidence_requirements=tuple(datasets),
     )
     return plan_words(draft, pinned=pinned_sources(datasets, sources))
@@ -5990,7 +6269,7 @@ def _difference_decisions(
     so in reader words, one sentence per input naming what it counts, or
     that its dataset does not say (`_difference_sentence`), each input named
     as the plan card names it on the plan `requirements`, `plan_decisions`
-    and the scope decisions of their pins (`scope_decisions`) state
+    and the scope decisions of their pins (`scope_decisions`, by requirement id) state
     (`_card_names`); where that passes the
     rationale's limit, each input is named without its dataset title, and
     where that still does, the first sentence is followed by how many inputs
@@ -6005,7 +6284,7 @@ def _difference_decisions(
         (requirement, block, _block_scope(block))
         for requirement in requirements
         if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
-        for block in [sources.block(requirement.source_spec_id)]
+        for block in [sources.block_for(requirement)]
     ]
     # The card's names are read only once a difference needs its inputs named.
     words: PlanWords | None = None

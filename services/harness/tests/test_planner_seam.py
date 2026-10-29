@@ -5104,12 +5104,13 @@ def test_a_declared_whole_with_no_block_is_named_by_its_axis_with_no_warning(
 
 
 @pytest.mark.parametrize("settled", [True, False], ids=["settled", "candidate"])
-def test_a_compiled_pin_shown_by_a_search_reads_its_compile_unless_settled(
-    settled: bool,
+def test_a_compiled_pin_shown_by_a_search_is_read_by_the_requirement_it_was_compiled_for(
+    requirement: Any, settled: bool
 ) -> None:
-    """A compile Search answered with a spec_id the planner was shown. A settled
-    source keeps its block, since a pin of the plan's may rest on it; one only
-    offered as a candidate gives way to the compile's block."""
+    """A compile Search answered with a spec_id the planner was shown, settled or only
+    offered as a candidate. The shown source keeps its block for the spec_id, so a
+    requirement pinning it as its own reads it; the requirement alignment moved onto
+    the compile reads the compile's block (`planner.plan.HeldSources`)."""
     shown = {"spec_id": TOTAL, "resolved": {"concept_label": "shown"}}
     compiled = {"spec_id": TOTAL, "resolved": {"concept_label": "compiled"}}
     state: dict[str, Any] = {}
@@ -5124,10 +5125,26 @@ def test_a_compiled_pin_shown_by_a_search_reads_its_compile_unless_settled(
             records_origin=True,
         ),
     )
+    plan = Plan.model_construct(
+        evidence_requirements=(
+            requirement(id="direct", source_spec_id=TOTAL),
+            requirement(
+                id="aligned",
+                source_spec_id=TOTAL,
+                aligned_from=HEALTH,
+                aligned_options=("measure_basis:gross",),
+            ),
+        )
+    )
 
     blocks = planner_seam._spec_blocks(cast(SessionState, state))
+    sources = planner_seam._sources_by_requirement(cast(SessionState, state), plan)
 
-    assert blocks[TOTAL] == (shown if settled else compiled)
+    assert blocks[TOTAL] == shown
+    assert {rid: source.concept_label for rid, source in sources.items()} == {
+        "direct": "shown",
+        "aligned": "compiled",
+    }
 
 
 _WINDOWED_HEALTH = "spec_" + "e" * 32
@@ -5166,7 +5183,7 @@ def test_a_revision_names_a_pin_by_the_block_it_is_held_in(
     )
     token = current_earlier_block.set({HEALTH: block}.get)
     try:
-        sources = planner_seam._sources_by_spec_id(cast(SessionState, state), plan)
+        sources = planner_seam._sources_by_requirement(cast(SessionState, state), plan)
     finally:
         current_earlier_block.reset(token)
 

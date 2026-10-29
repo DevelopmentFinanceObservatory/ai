@@ -14,6 +14,7 @@ from harness.scope_choices import mark_planner_axes, planner_axes
 from planner import agent as planner_agent
 from planner.plan import (
     AlignedPin,
+    HeldSources,
     PinSource,
     SessionState,
     aligned_pins,
@@ -142,13 +143,14 @@ async def test_a_basis_compile_whose_sets_cannot_be_read_is_refused_unposted(
 
 @pytest.mark.parametrize("settled", [True, False], ids=["settled", "candidate"])
 @pytest.mark.parametrize("whole", [False, True], ids=["basis", "whole"])
-async def test_a_compile_answered_with_a_shown_spec_id_replaces_it_unless_settled(
+async def test_a_compile_answered_with_a_shown_spec_id_leaves_it_as_shown(
     whole: bool, settled: bool
 ) -> None:
     """Search answers a compile, the US donor total on gross or US health aid over
-    every sector, with a spec_id the planner was shown. A settled source stands as
-    shown, since a pin of the plan's may rest on it; one only offered as a candidate
-    gives way to the compile, so admission reads the aligned input's pin from it."""
+    every sector, with a spec_id the planner was shown, settled or only offered as a
+    candidate. The shown source stands as shown either way, since a pin of the plan's
+    may rest on it, and the compile is held by what it was compiled for, so the
+    requirement it was made for reads it (`planner.plan.HeldSources`)."""
     state = cast(SessionState, {})
     if whole:
         surface: Any = WholeCompiles()
@@ -175,7 +177,9 @@ async def test_a_compile_answered_with_a_shown_spec_id_replaces_it_unless_settle
     (held,) = aligned_pins(state)
     assert held.spec_id == compiled
     (part,) = held.digest["part_digests"]
-    assert pin_sources(state)[compiled].block == (shown.block if settled else part["spec_block"])
+    assert pin_sources(state)[compiled] == shown
+    read = HeldSources.of(state).compiled_source(held.key, compiled)
+    assert read is not None and read.block == part["spec_block"]
 
 
 async def test_a_whole_of_an_aligned_part_reads_the_part_from_its_compile() -> None:
@@ -215,6 +219,7 @@ async def test_a_whole_of_an_aligned_part_reads_the_part_from_its_compile() -> N
             _WHOLE,
             whole_axis="sector",
             part_origin=origin["spec_id"],
+            part_option_ids=("provider:bilateral",),
         ),
         state=state,
     )

@@ -142,6 +142,7 @@ from planner.plan import (
     AggregateRequirement,
     DatasetRequirement,
     Entity,
+    HeldSources,
     Plan,
     PlanStatus,
     QuotientRequirement,
@@ -149,7 +150,6 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     Unit,
-    aligned_source,
     authored,
     dataset_of,
     discovery_time_left,
@@ -157,7 +157,7 @@ from planner.plan import (
     identity_on_record,
     inputs_of,
     load_plan,
-    pin_sources,
+    pin_source_of,
     plan_revision,
     retrieves_period,
     save_plan,
@@ -2336,6 +2336,7 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
 async def _recorded_source(
     tool_context: ToolContext,
     *,
+    plan: Plan,
     requirement: DatasetRequirement,
     first_year: int | None,
     surface: ToolSurface,
@@ -2346,7 +2347,8 @@ async def _recorded_source(
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
     the one on record for the pin itself (`planner.plan.identity_on_record`:
     a search in the conversation, this session's discovery, or the block of
-    the pin the planner was shown) when its window is that period, or
+    the requirement's own pin, `planner.plan.pin_source_of`) when its window is
+    that period, or
     a range with no end year for a requirement stating `period_end_open`,
     from `first_year` where the plan reads its dataset's whole history
     (`planner.plan.retrieves_period`). It
@@ -2362,9 +2364,10 @@ async def _recorded_source(
     back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
+    pinned = pin_source_of(tool_context.state, plan, requirement)
     recorded = windowed_pins(tool_context.state).get(spec_id) or identity_on_record(
         spec_id,
-        shown=pin_sources(tool_context.state),
+        shown={spec_id: pinned} if pinned is not None else {},
         end_open=True,
         definition_lookup=load_log(tool_context.state).recorded_definition,
     )
@@ -2415,8 +2418,8 @@ def _resolve_pin_block(
     dataset requirement in `plan` pinning it as its own. With several, nothing
     tells which one the search that returned it was about. A requirement
     `propose_plan` compiled its pin for, an input alignment moved or a declared
-    whole, reads that compile's own source (`planner.plan.aligned_source`), its
-    block and warnings, whatever source a search showed under the same spec_id,
+    whole, reads that compile's own source (`planner.plan.HeldSources.compile_of`),
+    its block and warnings, whatever source a search showed under the same spec_id,
     and is not counted among those pinning it as their own. `None` too when the
     search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
     since one means the search dropped part of the ask and answered a
@@ -2427,9 +2430,10 @@ def _resolve_pin_block(
     pin = requirement.source_spec_id
     if pin is None:
         return None
-    state = tool_context.state
-    compiled = aligned_source(state, requirement, plan=plan)
-    source = compiled or pin_sources(state).get(pin)
+    held = HeldSources.of(tool_context.state)
+    by_id = {item.id: item for item in plan.evidence_requirements}
+    compiled = held.compile_of(requirement, by_id)
+    source = held.source_of(requirement, by_id)
     if source is None or BLOCKING_WARNING_CODES.intersection(source.warnings):
         return None
     pinning = [
@@ -2437,7 +2441,7 @@ def _resolve_pin_block(
         for item in plan.evidence_requirements
         if isinstance(item, DatasetRequirement)
         and item.source_spec_id == pin
-        and aligned_source(state, item, plan=plan) is None
+        and held.compile_of(item, by_id) is None
     ]
     if compiled is None and len(pinning) != 1:
         return None
@@ -2588,6 +2592,7 @@ async def _pin_source(
     if source is None:
         source = await _recorded_source(
             tool_context,
+            plan=plan,
             requirement=requirement,
             first_year=first_year,
             surface=surface,

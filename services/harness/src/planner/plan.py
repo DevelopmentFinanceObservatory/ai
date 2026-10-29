@@ -76,6 +76,7 @@ from planner.records import (
     MAX_ENTITIES,
     MAX_ENTITY_NAME_CHARS,
     MAX_ENTITY_ROLE_CHARS,
+    MAX_IDENTIFIER_CHARS,
     Breakdown,
     DenominatorScope,
     EntityIn,
@@ -653,12 +654,19 @@ class DecisionScope(StrictModel):
     holds one state per `Decision.options` label, in the same order.
     `provenance` is how the choice came to hold its option, `"default"` when
     Search's default settled it, and `None` on a decision recorded without it.
+    `aligned_for` names the one requirement whose pin alignment compiled
+    (`DatasetRequirement.aligned_from`) the decision states the choice of, read
+    off that compile, `None` on a decision every requirement pinning the source
+    as its own cites (`scope_choice_slot`).
     """
 
     choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
     axis: ScopeAxis
     options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
     provenance: Annotated[ChoiceProvenance | None, HASHED_WHEN_SET] = None
+    aligned_for: Annotated[Identifier | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda aligned_for: aligned_for is None
+    )
 
 
 # How a calculation qualifies the answer where its inputs differ on one aligned
@@ -742,23 +750,34 @@ def is_search_pin(decision: Decision) -> bool:
     )
 
 
-def scope_choice_slot(spec_id: str, axis: ScopeAxis) -> str:
+def scope_choice_slot(spec_id: str, axis: ScopeAxis, *, aligned_for: str | None = None) -> str:
     """The `Decision.slot` `propose_plan` records the scope choice on `axis` of a pin of `spec_id` under.
 
     Derived from the pin as `search_pin_slot` is, so each source's choices
-    have slots of their own.
+    have slots of their own. A choice read off the compile alignment made for
+    the requirement `aligned_for` (`DecisionScope.aligned_for`) is that
+    requirement's alone, so its slot is derived from the requirement's id, or
+    from a digest of the id where the slot would pass an identifier's
+    `MAX_IDENTIFIER_CHARS`, whatever pin the compile answered.
     """
-    return f"scope_{axis}_{spec_id}"
+    if aligned_for is None:
+        return f"scope_{axis}_{spec_id}"
+    slot = f"scope_{axis}_of_{aligned_for}"
+    if len(slot) <= MAX_IDENTIFIER_CHARS:
+        return slot
+    return f"scope_{axis}_of_{hashlib.sha256(aligned_for.encode()).hexdigest()[:16]}"
 
 
 def is_scope_choice(decision: Decision) -> bool:
     """Whether `decision` is one `propose_plan` wrote for a scope choice of a pinned source."""
     fixes = decision.fixes
+    scope = decision.scope
     return (
-        decision.scope is not None
+        scope is not None
         and fixes is not None
         and fixes.source_spec_id is not None
-        and decision.slot == scope_choice_slot(fixes.source_spec_id, decision.scope.axis)
+        and decision.slot
+        == scope_choice_slot(fixes.source_spec_id, scope.axis, aligned_for=scope.aligned_for)
     )
 
 
@@ -980,11 +999,16 @@ class DatasetRequirement(TaggedModel):
 
     # The pin `propose_plan`'s alignment moved this requirement from
     # (`submission.service._aligned_bases`), read as its origin wherever
-    # `source_spec_id` is another pin's compile (`AlignedPin`).
-    # Admission writes it and carries it while the pin stands; the planner's
-    # schema leaves it out, and a value the planner sends is dropped.
+    # `source_spec_id` is another pin's compile (`AlignedPin`), and the
+    # options that compile moved it to (`AlignedPin.option_ids`), so the
+    # requirement reads its own compile (`pin_source_of`).
+    # Admission writes both and carries them while the pin stands; the planner's
+    # schema leaves them out, and a value the planner sends is dropped.
     aligned_from: Annotated[SkipJsonSchema[SpecId | None], HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda aligned_from: aligned_from is None
+    )
+    aligned_options: Annotated[SkipJsonSchema[tuple[str, ...]], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda options: not options
     )
 
     @field_validator("source_code", mode="before")
@@ -3310,11 +3334,13 @@ def repinned(
     exact_codes: frozenset[str],
     *,
     aligned_from: str | None = None,
+    aligned_options: tuple[str, ...] = (),
 ) -> DatasetRequirement:
     """`requirement` pinned to `spec_id`, a dataset code chose in place of the one it named.
 
-    `aligned_from` is the pin alignment compiled `spec_id` from
-    (`DatasetRequirement.aligned_from`), `None` for a pin that is its own, as a
+    `aligned_from` is the pin alignment compiled `spec_id` from on the options
+    `aligned_options` (`DatasetRequirement.aligned_from`,
+    `DatasetRequirement.aligned_options`), `None` for a pin that is its own, as a
     scope switch's is.
 
     The source it stated goes with the pin it left: `source`, `source_ref`
@@ -3331,6 +3357,7 @@ def repinned(
         "source_ref": None,
         "source_exclude": False,
         "aligned_from": aligned_from,
+        "aligned_options": aligned_options if aligned_from is not None else (),
     }
     if requirement.source_code not in exact_codes:
         update["source_code"] = None
@@ -6173,6 +6200,12 @@ def save_pin_sources(state: SessionState, sources: Mapping[str, PinSource]) -> N
 # writes.
 ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 
+# The session slot holding what each pin compiled in the current planner entry was
+# compiled for (`AlignedPin.key`), written beside `ALIGNED_PINS_STATE_KEY` by
+# `save_aligned_pin` and emptied when an entry opens (`clear_entry_compiles`,
+# `harness.planner_seam`). A resume of the entry keeps it.
+ENTRY_COMPILES_STATE_KEY = "planner:entry_compiles"
+
 
 class AlignedPin(StrictModel):
     """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
@@ -6185,7 +6218,16 @@ class AlignedPin(StrictModel):
     A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is
     the part pinned to `origin` with its choice on `whole_axis` left open
     and every other choice on the part's options, and moves no option
-    (`option_ids` empty, `submission.service.Realignment.whole_axis`).
+    (`option_ids` empty, `submission.service.Realignment.whole_axis`). Where
+    alignment moved that part onto `origin`, `part_origin` and
+    `part_option_ids` name the part's own compile (its `origin` and
+    `option_ids`), whose block the whole was compiled from, so a whole of
+    that part and a whole of a part pinning `origin` as its own are held
+    apart.
+
+    A compile is admission's answer for the requirements it was compiled for,
+    read through `pin_source_of`, and is not among the sources the planner
+    was shown (`pin_sources`), whatever spec_id Search answered.
 
     `records_origin` is set on every pin `planner.agent.compile_on_basis` and
     `planner.agent.compile_whole` hold: the requirement alignment moves onto it
@@ -6200,12 +6242,36 @@ class AlignedPin(StrictModel):
     spec_id: str
     digest: dict[str, Any]
     whole_axis: str | None = None
+    part_origin: str | None = None
+    part_option_ids: tuple[str, ...] = ()
     records_origin: bool = False
 
     @property
-    def key(self) -> tuple[str, tuple[str, ...], str | None]:
-        """What this pin was compiled for: its origin, its options and the axis it leaves open."""
-        return self.origin, self.option_ids, self.whole_axis
+    def key(self) -> AlignmentKey:
+        """What this pin was compiled for: its origin, its options, the axis it leaves
+        open and the compile of the part it was compiled from."""
+        return AlignmentKey(
+            self.origin, self.option_ids, self.whole_axis, self.part_origin, self.part_option_ids
+        )
+
+    @property
+    def block(self) -> Mapping[str, Any] | None:
+        """The spec block of Search's answer, `None` where it holds no one part's."""
+        parts = self.digest.get("part_digests") or ()
+        return parts[0].get("spec_block") if len(parts) == 1 else None
+
+
+class AlignmentKey(NamedTuple):
+    """What one compile was made for (`AlignedPin.key`): the pin `origin` on the options
+    `option_ids`, or with its choice on `whole_axis` left open, and for a whole the
+    compile of its part (`part_origin`, `part_option_ids`), `None` and empty where the
+    part pins `origin` as its own."""
+
+    origin: str
+    option_ids: tuple[str, ...]
+    whole_axis: str | None = None
+    part_origin: str | None = None
+    part_option_ids: tuple[str, ...] = ()
 
 
 def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
@@ -6214,88 +6280,206 @@ def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
 
 
 def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
-    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`)."""
+    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`),
+    as one compiled in the current entry (`ENTRY_COMPILES_STATE_KEY`)."""
     kept = [held for held in aligned_pins(state) if held.key != pin.key]
     state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
+    if pin.key not in entry_compiles(state):
+        state[ENTRY_COMPILES_STATE_KEY] = [
+            *(state.get(ENTRY_COMPILES_STATE_KEY) or ()),
+            [
+                pin.origin,
+                list(pin.option_ids),
+                pin.whole_axis,
+                pin.part_origin,
+                list(pin.part_option_ids),
+            ],
+        ]
 
 
-def aligned_source(
-    state: SessionState, requirement: DatasetRequirement, *, plan: Plan
-) -> PinSource | None:
-    """The source alignment compiled `requirement`'s pin as, read off its own `AlignedPin`.
+def entry_compiles(state: SessionState) -> frozenset[AlignmentKey]:
+    """What each pin compiled in the current entry was compiled for
+    (`ENTRY_COMPILES_STATE_KEY`); empty when unset."""
+    return frozenset(
+        AlignmentKey(origin, tuple(options), axis, part_origin, tuple(part_options))
+        for origin, options, axis, part_origin, part_options in state.get(ENTRY_COMPILES_STATE_KEY)
+        or ()
+    )
 
-    An input alignment moved (`DatasetRequirement.aligned_from`) reads the pin compiled
-    from that origin, and a declared whole of `plan` (`DatasetRequirement.whole_of`)
-    the one compiled from its part's pin with its axis left open (`compiled_source`).
-    A whole takes its part's source, read the same way: the part's own compile where
-    alignment moved the part, so its warnings, provenance and `settled` are the
-    compile's, else the part's pin as shown. A compile Search answered with the spec_id of a settled source the planner was
-    shown leaves that source as shown (`stands_as_shown`), so a requirement compiled
-    onto it reads the compile's block, planner axes and warnings here. `None` for any
-    other requirement, or where no such pin or block is held.
+
+def clear_entry_compiles(state: SessionState) -> None:
+    """Open a planner entry: no pin held so far counts as compiled in it."""
+    state[ENTRY_COMPILES_STATE_KEY] = []
+
+
+def compile_key(
+    requirement: DatasetRequirement, requirements: Mapping[str, EvidenceRequirement]
+) -> AlignmentKey | None:
+    """The compile `requirement`'s pin is, read off the plan whose requirements, by id,
+    are `requirements`; `None` for a pin that is its own.
+
+    An input alignment moved reads the compile of its origin on the options it
+    records (`DatasetRequirement.aligned_from`, `DatasetRequirement.aligned_options`).
+    A declared whole (`DatasetRequirement.whole_of`) reads the compile of its part's
+    pin with its axis left open, from the part's own compile where alignment moved
+    the part.
     """
-    pin = requirement.source_spec_id
-    whole = requirement.whole_of
-    part = plan.requirement(whole.part) if whole is not None else None
-    if pin is None:
+    if requirement.source_spec_id is None:
         return None
     if requirement.aligned_from is not None:
-        return compiled_source(state, origin=requirement.aligned_from, spec_id=pin)
-    if whole is not None and isinstance(part, DatasetRequirement) and part.source_spec_id:
-        compiled = compiled_source(
-            state, origin=part.source_spec_id, spec_id=pin, whole_axis=whole.axis
-        )
-        part_source = aligned_source(state, part, plan=plan)
-        if compiled is None or part_source is None:
-            return compiled
-        return part_source.model_copy(update={"block": compiled.block})
-    return None
-
-
-def compiled_source(
-    state: SessionState, *, origin: str, spec_id: str, whole_axis: str | None = None
-) -> PinSource | None:
-    """The source of the pin compiled from `origin` that Search answered as `spec_id`,
-    leaving `whole_axis` open when set, read off the latest such `AlignedPin`.
-
-    It is the source of `origin` as shown (`pin_sources`) holding the compile's block.
-    `None` where no such pin, or no block for it, is held.
-    """
-    held = next(
-        (
-            aligned
-            for aligned in reversed(aligned_pins(state))
-            if (aligned.origin, aligned.spec_id, aligned.whole_axis)
-            == (origin, spec_id, whole_axis)
-        ),
-        None,
+        return AlignmentKey(requirement.aligned_from, requirement.aligned_options)
+    whole = requirement.whole_of
+    part = requirements.get(whole.part) if whole is not None else None
+    if whole is None or not isinstance(part, DatasetRequirement) or part.source_spec_id is None:
+        return None
+    return AlignmentKey(
+        part.source_spec_id,
+        (),
+        whole.axis,
+        part.aligned_from,
+        part.aligned_options if part.aligned_from is not None else (),
     )
-    if held is None:
-        return None
-    parts = held.digest.get("part_digests") or ()
-    block = parts[0].get("spec_block") if len(parts) == 1 else None
-    if block is None:
-        return None
-    shown = pin_sources(state).get(origin) or PinSource()
-    return shown.model_copy(update={"block": block, "earlier_turn": False})
 
 
-def stands_as_shown(sources: Mapping[str, PinSource], spec_id: str) -> bool:
-    """Whether the source the planner was shown as `spec_id` stands as shown when a
-    compile Search answers with that spec_id (`planner.agent.compile_on_basis`,
-    `planner.agent.compile_whole`).
+class HeldSources(NamedTuple):
+    """The sources one read of session state holds for pins, each parsed once:
+    the datasets the planner was shown, by spec_id (`pin_sources`), the pins
+    compiled for a calculation's inputs (`aligned_pins`), by what each was
+    compiled for (`AlignedPin.key`), and which of those the current entry
+    compiled (`entry_compiles`)."""
 
-    It stands when it is settled (`PinSource.settled`): a source a search settled on, a
-    candidate or nearest series the orchestrator fetched, another count only a fetch
-    settled (`PinSource.other_count_of`), or a pin a switch or a search for an
-    unpinned input made. A planner or user pin rests on it, and its source and
-    measure decision stay theirs, while the requirement moved onto the compile reads
-    it through `aligned_source`. A spec_id only offered as a candidate, or not shown,
-    holds no pin of its own, and the compile takes its place, so admission reads the
-    aligned input's pin from the compile (`submission.service.measure_choices`).
-    """
-    shown = sources.get(spec_id)
-    return shown is not None and shown.settled
+    shown: Mapping[str, PinSource]
+    compiled: Mapping[AlignmentKey, AlignedPin]
+    this_entry: frozenset[AlignmentKey] = frozenset()
+
+    @classmethod
+    def of(cls, state: SessionState) -> HeldSources:
+        """The sources `state` holds."""
+        return cls.held(pin_sources(state), aligned_pins(state), this_entry=entry_compiles(state))
+
+    @classmethod
+    def held(
+        cls,
+        shown: Mapping[str, PinSource],
+        aligned: Iterable[AlignedPin],
+        *,
+        this_entry: frozenset[AlignmentKey] = frozenset(),
+    ) -> HeldSources:
+        """`shown` beside the compiles `aligned` holds, the latest for each key, those
+        keyed in `this_entry` compiled in the current entry."""
+        return cls(shown, {pin.key: pin for pin in aligned}, this_entry)
+
+    def entry_compile(self, spec_id: str) -> PinSource | None:
+        """The source of the one compile the current entry holds that Search answered
+        as `spec_id` (`compiled_source`); `None` where it holds none or several."""
+        keys = [
+            key
+            for key in self.this_entry
+            if (held := self.compiled.get(key)) is not None and held.spec_id == spec_id
+        ]
+        return self.compiled_source(keys[0], spec_id) if len(keys) == 1 else None
+
+    def compiled_source(self, key: AlignmentKey, spec_id: str) -> PinSource | None:
+        """The source of the compile made for `key`, where Search answered it as
+        `spec_id`: the source of its origin as shown (`shown`) holding the compile's
+        block. `None` where no such compile, or no block for it, is held."""
+        held = self.compiled.get(key)
+        if held is None or held.spec_id != spec_id or (block := held.block) is None:
+            return None
+        origin = self.shown.get(key.origin) or PinSource()
+        return origin.model_copy(update={"block": block, "earlier_turn": False})
+
+    def identity_source(self, spec_id: str) -> PinSource | None:
+        """A source whose block states `spec_id`'s identity: the dataset shown under it,
+        else a compile Search answered as it, read for the identity alone, which a
+        spec_id hashes and so states the same in every block holding it
+        (`identity_on_record`); `None` where neither is held."""
+        if (shown := self.shown.get(spec_id)) is not None:
+            return shown
+        held = next((pin for pin in self.compiled.values() if pin.spec_id == spec_id), None)
+        return self.compiled_source(held.key, spec_id) if held is not None else None
+
+    def source_at(self, pin: str, key: AlignmentKey | None) -> PinSource | None:
+        """The source of a pin of `pin` that is the compile made for `key`, or its own
+        where `key` is `None`, read as `source_of` reads a requirement's."""
+        compiled = self.compiled_source(key, pin) if key is not None else None
+        return compiled or self.shown.get(pin)
+
+    def compile_of(
+        self, requirement: DatasetRequirement, requirements: Mapping[str, EvidenceRequirement]
+    ) -> PinSource | None:
+        """The source of the compile `requirement`'s pin is (`compile_key`); `None` for
+        a pin that is its own or a compile not held.
+
+        A declared whole takes its part's source (`source_of`), the part's own
+        compile where alignment moved the part, so its warnings, provenance and
+        `settled` are that source's, holding the whole's block.
+        """
+        key = compile_key(requirement, requirements)
+        pin = requirement.source_spec_id
+        if key is None or pin is None:
+            return None
+        compiled = self.compiled_source(key, pin)
+        whole = requirement.whole_of
+        part = requirements.get(whole.part) if whole is not None else None
+        if compiled is None or requirement.aligned_from is not None:
+            return compiled
+        assert isinstance(part, DatasetRequirement)
+        part_source = self.source_of(part, requirements)
+        if part_source is None:
+            return compiled
+        return part_source.model_copy(update={"block": compiled.block, "earlier_turn": False})
+
+    def source_of(
+        self, requirement: DatasetRequirement, requirements: Mapping[str, EvidenceRequirement]
+    ) -> PinSource | None:
+        """The source of `requirement`'s pin; `None` where none is held.
+
+        An input alignment moved (`DatasetRequirement.aligned_from`) or a declared
+        whole (`DatasetRequirement.whole_of`) reads the compile it is
+        (`compile_of`), else the dataset the planner was shown under its pin,
+        which stands for a compile no entry of this session holds, as one stored
+        in an earlier turn's readings is.
+
+        Any other requirement pins as its own. A pin the planner was shown reads
+        that dataset (`shown`), whatever compile Search answered with its
+        spec_id. A pin it was not shown reads the one compile the current entry
+        holds for that spec_id (`entry_compile`), its block and planner marks,
+        since the planner made it, and nothing where the entry holds none or
+        several; a compile from an earlier entry is never read so.
+        """
+        pin = requirement.source_spec_id
+        if pin is None:
+            return None
+        compiled = self.compile_of(requirement, requirements)
+        if compiled is not None:
+            return compiled
+        if pin in self.shown:
+            return self.shown[pin]
+        if requirement.aligned_from is not None or requirement.whole_of is not None:
+            return None
+        return self.entry_compile(pin)
+
+    def by_requirement(self, requirements: Iterable[EvidenceRequirement]) -> dict[str, PinSource]:
+        """The source of each pinned dataset requirement of `requirements` (`source_of`),
+        by requirement id, leaving out one with no source held."""
+        by_id = {requirement.id: requirement for requirement in requirements}
+        return {
+            requirement.id: source
+            for requirement in by_id.values()
+            if isinstance(requirement, DatasetRequirement)
+            and (source := self.source_of(requirement, by_id)) is not None
+        }
+
+
+def pin_source_of(
+    state: SessionState, plan: Plan, requirement: DatasetRequirement
+) -> PinSource | None:
+    """The source of `requirement`'s pin in `plan`, as `state` holds it
+    (`HeldSources.source_of`): the compile alignment made for it, else the dataset
+    the planner was shown under its pin."""
+    by_id = {item.id: item for item in plan.evidence_requirements}
+    return HeldSources.of(state).source_of(requirement, by_id)
 
 
 def dataset_of(identity: Mapping[str, Any]) -> dict[str, Any]:

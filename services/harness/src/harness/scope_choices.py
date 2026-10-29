@@ -440,7 +440,7 @@ class PartScope(StrictModel):
 # `harness.tool_contracts.reading_facts` copies it to the stored reading
 # (`harness.turn_records.SearchReading.planner_axes`), which
 # `carried_entries`' callers read; `submission.service._input_bases` and
-# `submission.service.scope_choice_decisions` read it off the pin's block. A
+# `submission.service.requirement_scope_decisions` read it off the pin's block. A
 # block Search answers afresh carries none, so a switch on the plan card
 # drops the switched axis from it and keeps the others (`harness.graph.switch`).
 PLANNER_AXES_BLOCK_KEY = "_planner_axes"

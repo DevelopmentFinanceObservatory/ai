@@ -52,7 +52,7 @@ import json
 import re
 import typing
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 
 from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
@@ -347,7 +347,7 @@ def plan_words(
     that failed to compile, reads each retrieval off the source it pins
     (`_pinned_sources`): the one the card's plan `shown_as` reads where the
     card's retrieval reads the same, else the one Search answered for its
-    pin (`pinned`, by spec_id). Where `shown_as` is given, a retrieval it
+    pin (`pinned`, by requirement id). Where `shown_as` is given, a retrieval it
     holds with the same naming facets (`_namings`) reads by its name
     there (`_carried_names`), and any other retrieval is named around those
     names. Any other requirement reads by the retrievals it reads
@@ -1024,7 +1024,7 @@ def _pinned_sources(
     the same spec_id, reads the source the card's retrieval was compiled
     from, so the card's names carry (`_carried_names`). Any other pinned
     retrieval reads the source Search answered for its pin (`pinned`, by
-    spec_id). One pinning nothing `pinned` holds reads none."""
+    requirement id). One `pinned` holds nothing for reads none."""
     if plan.workflow is not None:
         return {}
     earlier = _datasets(shown_as) if shown_as is not None else {}
@@ -1037,7 +1037,7 @@ def _pinned_sources(
         )
         source = _selected_source(dataset.id, shown_as) if same and shown_as is not None else None
         if source is None and spec_id is not None:
-            source = pinned.get(spec_id)
+            source = pinned.get(dataset.id)
         if source is not None:
             sources[dataset.id] = source
     return sources
@@ -1243,18 +1243,35 @@ def card_questions(plan: Plan) -> dict[str, str]:
 
 
 def _governed_concepts(plan: Plan, decision: Decision, concepts: Mapping[str, str]) -> list[str]:
-    """The names `concepts` gives the retrievals pinning a source the row of scope
-    decision `decision` stands for (`listed_together`), in the order the plan states them."""
-    pinned = {
-        member.fixes.source_spec_id
-        for member in listed_together(plan, decision.slot)
-        if member.fixes is not None and member.fixes.source_spec_id is not None
+    """The names `concepts` gives the retrievals the row of scope decision `decision`
+    governs (`_row_retrievals`), in the order the plan states them."""
+    governed = {
+        requirement.id
+        for requirement in _row_retrievals(plan, listed_together(plan, decision.slot))
     }
+    return [name for requirement_id, name in concepts.items() if requirement_id in governed]
+
+
+def _row_retrievals(plan: Plan, members: Iterable[Decision]) -> list[DatasetRequirement]:
+    """The retrievals of `plan` a card row standing for the scope decisions `members`
+    governs, in plan order: each pinning as its own a source one of them states, and
+    each alignment compiled one of them for (`planner.plan.DecisionScope.aligned_for`),
+    whose row is its own beside any row of the same spec_id."""
+    pinned: set[str] = set()
+    aligned: set[str] = set()
+    for member in members:
+        if member.scope is not None and member.scope.aligned_for is not None:
+            aligned.add(member.scope.aligned_for)
+        elif member.fixes is not None and member.fixes.source_spec_id is not None:
+            pinned.add(member.fixes.source_spec_id)
     return [
-        name
-        for requirement_id, name in concepts.items()
-        if typing.cast(DatasetRequirement, plan.requirement(requirement_id)).source_spec_id
-        in pinned
+        requirement
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+        and (
+            requirement.id in aligned
+            or (requirement.aligned_from is None and requirement.source_spec_id in pinned)
+        )
     ]
 
 
@@ -1272,30 +1289,28 @@ def listed_together(plan: Plan, slot: str) -> tuple[Decision, ...]:
 def choice_id(plan: Plan, decision: Decision) -> str:
     """The id the plan card gives scope decision `decision`'s row: `"<requirement id>:<axis>"`.
 
-    The requirement is the first of `plan` pinning a source the row stands
-    for (`listed_together`). A switch re-pins requirements and keeps their
+    The requirement is the first of `plan` the row governs (`_row_retrievals` of
+    `listed_together`). A switch re-pins requirements and keeps their
     ids, so the row keeps its id through every switch of the conversation,
     whichever decision of the row is listed. A row whose sources no
     requirement pins keeps Search's own id for the choice.
     """
     assert decision.scope is not None, "only a scope decision has a choice id"
-    pinned = {
-        member.fixes.source_spec_id
-        for member in listed_together(plan, decision.slot) or (decision,)
-        if member.fixes is not None and member.fixes.source_spec_id is not None
-    }
-    return pinned_choice_id(plan, pinned, decision.scope.axis) or decision.scope.choice_id
+    governed = _row_retrievals(plan, listed_together(plan, decision.slot) or (decision,))
+    return f"{governed[0].id}:{decision.scope.axis}" if governed else decision.scope.choice_id
 
 
 def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | None:
     """`"<requirement id>:<axis>"` for the first requirement of `plan` pinning one
-    of `pinned`, the id `choice_id` gives a row standing for those sources;
-    `None` when no requirement pins any."""
+    of `pinned` as its own, the id `choice_id` gives a row standing for those
+    sources (`_row_retrievals`); `None` when no requirement pins any."""
     first = next(
         (
             requirement
             for requirement in plan.evidence_requirements
-            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id in pinned
+            if isinstance(requirement, DatasetRequirement)
+            and requirement.aligned_from is None
+            and requirement.source_spec_id in pinned
         ),
         None,
     )
@@ -1337,14 +1352,23 @@ def _listed_slots(plan: Plan) -> dict[str, str]:
     several sources map to one of them, chosen the same way, when they
     settle the same axis on the same option with the same options, each as
     available as in the others, so the row reads true for every source it
-    stands for. Every other decision maps to its own slot.
+    stands for. A decision read off a compile alignment made for one
+    requirement (`planner.plan.DecisionScope.aligned_for`) shares a row only
+    with others so read, so a row the user settled never stands for an input
+    the planner moved. Every other decision maps to its own slot.
     """
     listed: dict[str, str] = {}
     same_choice: dict[tuple[object, ...], list[Decision]] = {}
     for decision in plan.decisions:
         if is_scope_choice(decision):
             assert decision.scope is not None
-            key = (decision.scope.axis, decision.chosen, decision.options, decision.scope.options)
+            key = (
+                decision.scope.axis,
+                decision.chosen,
+                decision.options,
+                decision.scope.options,
+                decision.scope.aligned_for is None,
+            )
             same_choice.setdefault(key, []).append(decision)
         elif not is_search_pin(decision):
             listed[decision.slot] = decision.slot

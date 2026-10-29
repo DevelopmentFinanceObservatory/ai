@@ -127,19 +127,20 @@ from planner.plan import (
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
     AlignedPin,
+    AlignmentKey,
     AnswerMode,
     AskAnswer,
     DecisionDraft,
     Decline,
     EvidenceRequirement,
     FullHistory,
+    HeldSources,
     PinSource,
     Plan,
     PlanStatus,
     SessionState,
     UnsupportedOperation,
     aligned_pins,
-    compiled_source,
     full_histories,
     full_history,
     identity_on_record,
@@ -156,7 +157,6 @@ from planner.plan import (
     save_plan_rounds,
     save_windowed_pins,
     split_of,
-    stands_as_shown,
 )
 from planner.records import (
     OpenPeriodFault,
@@ -1340,11 +1340,13 @@ def _first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | N
     """The identity a first-year read of `pin` reads; `None` when none is on record.
 
     It is on record as `submission.service.admit` finds it, the discovery
-    log's definitions included, so a pin `propose_plan` admits is read.
+    log's definitions included, so a pin `propose_plan` admits is read, a
+    compile alignment made among them (`planner.plan.HeldSources.identity_source`).
     """
+    source = HeldSources.of(state).identity_source(pin)
     recorded = identity_on_record(
         pin,
-        shown=pin_sources(state),
+        shown={pin: source} if source is not None else {},
         end_open=True,
         definition_lookup=load_log(state).recorded_definition,
     )
@@ -1427,12 +1429,12 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     (`compiler.sources.block_wire_groups`), through data-mcp's
     `resolve_definition`, which stores the definition it answers. One
     resubmit carries every option, so an input moving on the measure basis
-    and the provider scope is compiled once. The answer is shown to the
-    planner as a source of its own (`planner.plan.save_pin_sources`),
-    settled as the pin it was compiled from, unless the planner was shown
-    its spec_id as a settled source, which stands as shown
-    (`planner.plan.stands_as_shown`); the requirement moved onto it reads the
-    compile through `planner.plan.aligned_source`. It is held as a
+    and the provider scope is compiled once. The answer is admission's for
+    the requirement alignment moves onto it, and leaves the datasets the
+    planner was shown (`planner.plan.pin_sources`) as they are, whatever
+    spec_id Search answers: that requirement reads it through
+    `planner.plan.pin_source_of`, as the source of the pin it was compiled
+    from holding the answer's block. It is held as a
     `planner.plan.AlignedPin` recording its origin on that requirement
     (`AlignedPin.records_origin`), with the answer's digest
     (`harness.tool_contracts.resolver_digest`), its block marking those
@@ -1456,8 +1458,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     """
     if realignment.whole_axis is not None:
         return await compile_whole(surface, realignment, state=state)
-    sources = pin_sources(state)
-    source = sources.get(realignment.spec_id)
+    source = pin_sources(state).get(realignment.spec_id)
     block = source.spec_block(realignment.spec_id) if source is not None else None
     scope = part_scope(realignment.spec_id, block)
     choices: dict[str, ScopeChoice] = (
@@ -1521,9 +1522,6 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
         )
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))
-    compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    if not stands_as_shown(sources, spec_id):
-        save_pin_sources(state, {**sources, spec_id: compiled})
     save_aligned_pin(
         state,
         AlignedPin(
@@ -1571,18 +1569,18 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     Search refuses where it cannot hold it, as the other choices are.
     No model call is made. The part is read from its own source: the compile
     alignment moved it onto (`Realignment.part_origin`,
-    `planner.plan.compiled_source`), else its pin's source as shown. The planner
-    is shown the answer as a source of its own (the part's source holding the
-    whole's block), unless its spec_id is a settled source the planner was shown,
-    which stands as shown (`planner.plan.stands_as_shown`), as `compile_on_basis`
-    holds a realigned one. The whole takes its choices
+    `Realignment.part_option_ids`, `planner.plan.HeldSources.source_at`),
+    else its pin's source as shown. The answer is admission's for the whole, as
+    `compile_on_basis`'s is for an input, and leaves the datasets the planner was
+    shown as they are; the whole reads it through `planner.plan.pin_source_of`, as
+    the part's source holding the whole's block. The whole takes its choices
     from its part. Each the whole holds on the part's option carries the
     part's provenance, and the block marks as the planner's
     (`harness.scope_choices.mark_planner_axes`) those of them the part's
     block marks, so the whole reads as settled the way the part was and a
     later search carries what the part's carries. It is held as a
-    `planner.plan.AlignedPin` from the part on that axis, which every
-    whole declaring the part and the axis pins.
+    `planner.plan.AlignedPin` from the part on that axis and the part's own
+    compile, which every whole declaring the part and the axis pins.
 
     Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
     did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` under a cause
@@ -1607,13 +1605,12 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
             whole_id=realignment.requirement_id, part_spec_id=part_pin, reason=reason, cause=cause
         )
 
-    sources = pin_sources(state)
-    compiled = (
-        compiled_source(state, origin=realignment.part_origin, spec_id=part_pin)
+    source = HeldSources.of(state).source_at(
+        part_pin,
+        AlignmentKey(realignment.part_origin, realignment.part_option_ids)
         if realignment.part_origin is not None
-        else None
+        else None,
     )
-    source = compiled or sources.get(part_pin)
     block = source.spec_block(part_pin) if source is not None else None
     scope = part_scope(part_pin, block)
     if source is None or block is None or scope is None or not whole_axis_held(scope, axis):
@@ -1672,9 +1669,6 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     }
     digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
-    whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    if not stands_as_shown(sources, spec_id):
-        save_pin_sources(state, {**sources, spec_id: whole_source})
     save_aligned_pin(
         state,
         AlignedPin(
@@ -1683,6 +1677,8 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
             spec_id=spec_id,
             digest=digest,
             whole_axis=axis,
+            part_origin=realignment.part_origin,
+            part_option_ids=realignment.part_option_ids,
             records_origin=True,
         ),
     )
@@ -2038,7 +2034,7 @@ async def with_source_reads(
     a pin already compiled on a set of options, or a whole already compiled,
     is asked for once, so a refusal naming one
     is answered as it stands, and inputs sharing a pin and a set of options
-    compile it once (`_alignment_key`).
+    compile it once (`submission.service.Realignment.key`).
     """
     while True:
         result = propose()
@@ -2063,11 +2059,8 @@ async def with_source_reads(
                     return refused
             continue
         wanted = realignments_wanted(result)
-        done = {
-            _alignment_key(pin.origin, pin.option_ids, pin.whole_axis)
-            for pin in aligned_pins(state)
-        }
-        keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
+        done = {pin.key for pin in aligned_pins(state)}
+        keys = [item.key for item in wanted]
         if not wanted or any(key in done for key in keys):
             return result
         for item, key in zip(wanted, keys, strict=True):
@@ -2077,17 +2070,6 @@ async def with_source_reads(
             if refused is not None:
                 return refused
             done.add(key)
-
-
-def _alignment_key(
-    spec_id: str, option_ids: Iterable[str], whole_axis: str | None
-) -> tuple[str, tuple[str, ...], str | None]:
-    """The compile that puts the pin `spec_id` on the options `option_ids`, or leaves its choice on `whole_axis` open, as a key.
-
-    The options are sorted and deduplicated, so one compile naming the same
-    options in another order is the same work.
-    """
-    return spec_id, tuple(sorted(set(option_ids))), whole_axis
 
 
 def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:

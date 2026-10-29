@@ -116,6 +116,7 @@ from planner.operations import OperationKind
 from planner.plan import (
     ALIGNED_PINS_STATE_KEY,
     AMENDMENT_ENTRY_STATE_KEY,
+    ENTRY_COMPILES_STATE_KEY,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
@@ -124,13 +125,17 @@ from planner.plan import (
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AlignedPin,
+    AlignmentKey,
     AskBreakdown,
+    DatasetRequirement,
+    HeldSources,
     PinSource,
     Plan,
     PlanStatus,
     SessionState,
     UnsupportedOperation,
     aligned_pins,
+    clear_entry_compiles,
     clear_unsupported,
     current_discovery_time_left,
     cut_user_text,
@@ -147,7 +152,6 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
-    stands_as_shown,
     windowed_pins,
 )
 from planner.records import Severity
@@ -585,6 +589,7 @@ class PlannerSeam:
             for operation in _earned_by_refusal(refusal):
                 record_unsupported(cast(SessionState, ctx.session.state), operation)
             clear_compile_failures(ctx.session.state)
+            clear_entry_compiles(cast(SessionState, ctx.session.state))
             if prior_plan is None and refusal is None and amendment is None:
                 # This shape -- no `prior_plan`, no `refusal`, no
                 # `amendment` -- names a genuine first-draft entry: the
@@ -775,7 +780,8 @@ class PlannerSeam:
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
         # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
-        # `ALIGNED_PINS_STATE_KEY` and `SEARCHED_PINS_STATE_KEY` too.
+        # `ALIGNED_PINS_STATE_KEY`, `ENTRY_COMPILES_STATE_KEY` and
+        # `SEARCHED_PINS_STATE_KEY` too.
         # The declines an ask-the-user resume still owes or may make, the
         # failures it may repeat, the amendment that opened it and the pins
         # compiled for its proposals are this entry's own.
@@ -787,6 +793,7 @@ class PlannerSeam:
             COMPILE_FAILURES_STATE_KEY,
             AMENDMENT_ENTRY_STATE_KEY,
             ALIGNED_PINS_STATE_KEY,
+            ENTRY_COMPILES_STATE_KEY,
             SEARCHED_PINS_STATE_KEY,
         ):
             if key in ctx.session.state:
@@ -1421,48 +1428,59 @@ def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) 
     """How a sentence about `revision`, which did not compile, names its
     requirements (`harness.plan_display.plan_words`): each `prior`, the plan the
     card shows, holds by its name there, and each new one by its own, read off
-    the source Search answered for its pin (`_sources_by_spec_id`)."""
+    the source Search answered for its pin (`_sources_by_requirement`)."""
     if revision is None:
         return plan_display.plan_words(prior)
     return plan_display.plan_words(
-        revision, shown_as=prior, pinned=_sources_by_spec_id(state, revision)
+        revision, shown_as=prior, pinned=_sources_by_requirement(state, revision)
     )
 
 
 def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
-    """Every spec block `state` holds a pin's source in, by spec_id: those of
+    """Every spec block `state` holds a shown dataset in, by spec_id: those of
     the datasets the planner was shown (`pin_sources`), then this turn's
-    searches (`ORCHESTRATOR_SPECS_KEY`), then the pins compiled for a
-    calculation's inputs (`aligned_pins`), each later one in place of an
-    earlier one for its spec_id. A compile Search answered with the spec_id of
-    a settled source the planner was shown leaves that source's block as shown
-    (`planner.plan.stands_as_shown`), as `planner.agent.compile_on_basis` does."""
-    shown = pin_sources(state)
+    searches (`ORCHESTRATOR_SPECS_KEY`), each later one in place of an
+    earlier one for its spec_id. A pin compiled for a calculation's input is
+    read through the requirement it was compiled for
+    (`planner.plan.HeldSources.compile_of`), never by its spec_id."""
     blocks: dict[str, Mapping[str, Any]] = {
         spec_id: block
-        for spec_id, source in shown.items()
+        for spec_id, source in pin_sources(state).items()
         if (block := source.spec_block(spec_id)) is not None
     }
     blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
-    for pin in aligned_pins(state):
-        (part,) = pin.digest["part_digests"]
-        if (block := part.get("spec_block")) is not None and not stands_as_shown(
-            shown, pin.spec_id
-        ):
-            blocks[pin.spec_id] = block
     return blocks
 
 
-def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
-    """The source each spec_id a retrieval of `plan` pins reads, by spec_id,
-    from the block `state` holds for it (`_spec_blocks`). A pin copied over
-    its requirement's window (`planner.plan.windowed_pins`) reads its
-    origin's block. A block not readable as a source is left out, so the
-    retrieval is named by its composed label."""
+def _sources_by_requirement(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
+    """The source each retrieval of `plan` reads, by requirement id: the compile
+    alignment made for it (`planner.plan.HeldSources.compile_of`), else the block
+    `state` holds for its pin (`_spec_blocks`), else the one compile this entry holds
+    for a pin no search showed (`planner.plan.HeldSources.source_of`). A pin copied over its requirement's
+    window (`planner.plan.windowed_pins`) reads its origin's. A block not readable
+    as a source is left out, so the retrieval is named by its composed label."""
     to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
     blocks = _spec_blocks(state)
-    sources = SourceReadings(lambda spec_id: blocks.get(to_origin.get(spec_id, spec_id)))
-    return pinned_sources(plan.evidence_requirements, sources)
+    held = HeldSources.of(state)
+    unwindowed = {
+        requirement.id: requirement.model_copy(update={"source_spec_id": to_origin.get(pin, pin)})
+        if isinstance(requirement, DatasetRequirement)
+        and (pin := requirement.source_spec_id) is not None
+        else requirement
+        for requirement in plan.evidence_requirements
+    }
+    pinned: dict[str, PinSource] = {}
+    for requirement in unwindowed.values():
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+            continue
+        pin = requirement.source_spec_id
+        compiled = held.compile_of(requirement, unwindowed)
+        if compiled is None and pin not in blocks:
+            compiled = held.source_of(requirement, unwindowed)
+        block = compiled.spec_block(pin) if compiled is not None else blocks.get(pin)
+        if block is not None:
+            pinned[requirement.id] = PinSource(block=dict(block))
+    return pinned_sources(unwindowed.values(), SourceReadings(blocks.get, pinned=pinned))
 
 
 def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
@@ -1894,6 +1912,7 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     as the planner's.
     """
     held = aligned_pins(planner_state)
+    held_sources = HeldSources.held(pin_sources(planner_state), held)
     searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]
     if not held and not searched:
         return
@@ -1905,7 +1924,6 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         )
     ]
     stored = {reading.spec_id for reading in readings}
-    sources: SourceReadings | None = None
     for pin in held:
         if pin.spec_id in stored:
             continue
@@ -1915,9 +1933,16 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         digest = copy.deepcopy(pin.digest)
         (part,) = digest["part_digests"]
         if pin.whole_axis is not None:
-            if sources is None:
-                sources = SourceReadings(_spec_blocks(planner_state).get)
-            part["variable"] = _whole_reading_name(pin, part.get("spec_block"), sources=sources)
+            part_source = held_sources.source_at(
+                pin.origin,
+                AlignmentKey(pin.part_origin, pin.part_option_ids)
+                if pin.part_origin is not None
+                else None,
+            )
+            part_block = part_source.spec_block(pin.origin) if part_source is not None else None
+            part["variable"] = _whole_reading_name(
+                pin, part.get("spec_block"), sources=SourceReadings({pin.origin: part_block}.get)
+            )
         elif origin is not None:
             part["variable"] = origin.text
         store_search(
@@ -1944,8 +1969,8 @@ def _whole_reading_name(
     pin: AlignedPin, block: Mapping[str, Any] | None, *, sources: SourceReadings
 ) -> str:
     """The name a declared whole's reading is stored under, read off its own
-    `block` and its part's (`pin.origin` in `sources`, read as a source once
-    however many wholes read it) alone, so it holds
+    `block` and its part's (`pin.origin` in `sources`, the part's own compile where
+    alignment moved it, `AlignedPin.part_origin`) alone, so it holds
     whatever plan the turn ends on. Over every donor or recipient, as the
     plan card names it (`harness.plan_display.source_whole_name`), on the
     sector option the whole's scope holds, else the part's. Over every
@@ -2166,9 +2191,9 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
 
 def _field_line(requirement: dict[str, Any]) -> str:
     """Every field of one requirement but `id`, `kind`, its citation list and the
-    pin alignment moved it from, which `propose_plan` writes and carries itself
-    (`DatasetRequirement.aligned_from`)."""
-    skip = {"id", "kind", "decision_ids", "aligned_from"}
+    compile alignment moved it onto, which `propose_plan` writes and carries itself
+    (`DatasetRequirement.aligned_from`, `DatasetRequirement.aligned_options`)."""
+    skip = {"id", "kind", "decision_ids", "aligned_from", "aligned_options"}
     return " ".join(
         f"{key}={_scalar(value)}" for key, value in requirement.items() if key not in skip
     )

@@ -15,6 +15,7 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface, ToolCallResult, ToolSurface
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
+from harness.plan_display import choice_id, shown_decisions
 from harness.scope_choices import planner_axes
 from planner.plan import (
     ASKS_STATE_KEY,
@@ -26,6 +27,7 @@ from planner.plan import (
     PinSource,
     Plan,
     Reduction,
+    ResolvedBy,
     load_plan,
     pin_sources,
     save_pin_sources,
@@ -199,16 +201,21 @@ class _GrossCompiles:
 
 
 async def _gross_compared_with_net_average(
-    ctx: _FakeToolContext, decision: DecisionFactory, *, warnings: tuple[str, ...] = ()
+    ctx: _FakeToolContext,
+    decision: DecisionFactory,
+    *,
+    warnings: tuple[str, ...] = (),
+    settled: bool = True,
 ) -> None:
     """Propose US total ODA in 2023, its total stated gross, compared with its average
     left on net, both on one DAC1 part, the gross source shown with the search
-    warnings `warnings`. The sides differ by their operation, a sum against a mean,
-    so the net input is aligned on gross, which Search compiles to the gross pin."""
+    warnings `warnings`, settled or only offered as a candidate (`settled`). The
+    sides differ by their operation, a sum against a mean, so the net input is
+    aligned on gross, which Search compiles to the gross pin."""
     save_pin_sources(
         ctx.state,
         {
-            _GROSS["spec_id"]: PinSource(block=_GROSS, settled=True, warnings=warnings),
+            _GROSS["spec_id"]: PinSource(block=_GROSS, settled=settled, warnings=warnings),
             _NET: PinSource(block=_left_on_net(), settled=True),
         },
     )
@@ -319,3 +326,71 @@ async def test_an_aligned_input_reads_its_compiles_warnings_not_the_shown_pins(
 
     assert found["status"] == "definite", found
     assert refused.calls == []
+
+
+async def test_the_card_shows_the_averages_basis_as_the_planners_and_the_totals_as_the_users(
+    decision: DecisionFactory,
+) -> None:
+    """The total's gross basis is the user's, read off the search their words settled,
+    and the average's is the planner's, read off the compile alignment made of its net
+    pin. Each input cites its own basis decision, and the plan card lists two basis
+    rows, each governing its own input."""
+    ctx = _FakeToolContext()
+    await _gross_compared_with_net_average(ctx, decision)
+    plan = cast(Plan, load_plan(ctx.state))
+
+    cited = {
+        rid: [
+            (d.resolved_by, d.scope.aligned_for)
+            for d in plan.decisions
+            if d.slot in plan.requirement(rid).decision_ids
+            and d.scope is not None
+            and d.scope.axis == "measure_basis"
+        ]
+        for rid in ("first", "second")
+    }
+    rows = {
+        choice_id(plan, d): d.resolved_by
+        for d in shown_decisions(plan)
+        if d.scope is not None and d.scope.axis == "measure_basis"
+    }
+
+    assert cited == {
+        "first": [(ResolvedBy.USER, None)],
+        "second": [(ResolvedBy.PLANNER_DEFAULT, "second")],
+    }
+    assert rows == {
+        "first:measure_basis": ResolvedBy.USER,
+        "second:measure_basis": ResolvedBy.PLANNER_DEFAULT,
+    }
+
+
+async def test_a_candidate_pinned_beside_a_compile_on_its_spec_id_reads_as_shown(
+    decision: DecisionFactory,
+) -> None:
+    """The gross source is only offered as a candidate when the planner pins the total
+    to it, and the average's compile answers the same spec_id. The candidate stays as
+    shown, the total reads it with no planner marks and cites no decision of the
+    compile's, and the average reads its compile."""
+    ctx = _FakeToolContext()
+    await _gross_compared_with_net_average(ctx, decision, settled=False)
+    plan = cast(Plan, load_plan(ctx.state))
+
+    blocks = {
+        rid: discovery._resolve_pin_block(
+            ctx, plan=plan, requirement=cast(DatasetRequirement, plan.requirement(rid))
+        )
+        for rid in ("first", "second")
+    }
+    compiled_rows = {
+        d.slot for d in plan.decisions if d.scope is not None and d.scope.aligned_for is not None
+    }
+
+    assert pin_sources(ctx.state)[_GROSS["spec_id"]] == PinSource(block=_GROSS)
+    assert {rid: planner_axes(block) for rid, block in blocks.items()} == {
+        "first": frozenset(),
+        "second": frozenset({"measure_basis"}),
+    }
+    assert compiled_rows
+    assert compiled_rows.isdisjoint(plan.requirement("first").decision_ids)
+    assert compiled_rows <= set(plan.requirement("second").decision_ids)

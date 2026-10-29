@@ -3901,7 +3901,9 @@ def test_namesakes_holding_different_scope_options_are_told_apart_by_the_option(
     caveat = _card_names(
         datasets,
         decisions=[decision()],
-        scope_decisions={pin: [scope] for pin, scope in scopes.items()},
+        scope_decisions={
+            dataset.id: [scopes[pin]] for dataset, pin in zip(datasets, pins, strict=True)
+        },
         sources=SourceReadings(lambda _: None),
     )
     words = plan_words(plan)
@@ -4249,7 +4251,9 @@ def test_a_retrieval_a_revision_repins_is_named_by_searchs_answer_for_its_pin(
         "resolved": {"concept_label": concept} if concept is not None else {},
     }
 
-    words = plan_words(revision, shown_as=prior, pinned={moved: source_from_spec_block(block)})
+    words = plan_words(
+        revision, shown_as=prior, pinned={"us_health_aid_raw": source_from_spec_block(block)}
+    )
 
     assert words.names["us_health_aid_raw"] == name
     assert words.names["us_total_aid_raw"] == "official development assistance"

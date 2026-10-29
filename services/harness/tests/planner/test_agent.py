@@ -107,6 +107,7 @@ from planner.plan import (
     FirstYear,
     FullHistory,
     GrowthRequirement,
+    HeldSources,
     JoinRequirement,
     Period,
     PinSource,
@@ -124,7 +125,7 @@ from planner.plan import (
     WholeOf,
     WindowedPin,
     aligned_pins,
-    aligned_source,
+    clear_entry_compiles,
     clear_unsupported,
     current_discovery_time_left,
     current_recorded_identity,
@@ -136,6 +137,7 @@ from planner.plan import (
     load_plan_rounds,
     open_window,
     pin_slot_moves,
+    pin_source_of,
     pin_sources,
     plan_revision,
     record_optional_decline,
@@ -4958,8 +4960,11 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
         for r in plan.evidence_requirements
         if isinstance(r, DatasetRequirement)
     ] == [("health", HEALTH), ("total", TOTAL_GROSS)]
-    # The compile joins the datasets shown after them, which keep their order.
-    assert list(pin_sources(ctx.state)) == [HEALTH, TOTAL, TOTAL_GROSS]
+    # The datasets shown keep their order, and the compile is read as the total's own.
+    assert list(pin_sources(ctx.state)) == [HEALTH, TOTAL]
+    compiled = pin_source_of(ctx.state, plan, cast(DatasetRequirement, plan.requirement("total")))
+    assert compiled is not None and compiled.spec_block(TOTAL_GROSS) is not None
+    assert cast(Mapping[str, Any], compiled.spec_block(TOTAL_GROSS))["spec_id"] == TOTAL_GROSS
     bases = {
         d.fixes.source_spec_id: d
         for d in plan.decisions
@@ -6581,6 +6586,29 @@ def _pins(ctx: _FakeToolContext) -> list[tuple[str, str | None]]:
     ]
 
 
+def _by_requirement(
+    plan: Plan, by_spec_id: Mapping[str, SelectedSource]
+) -> dict[str, SelectedSource]:
+    """The source `by_spec_id` holds for each dataset requirement's pin in `plan`, by
+    requirement id, as `harness.plan_display.plan_words` reads them."""
+    return {
+        r.id: by_spec_id[r.source_spec_id]
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement) and r.source_spec_id in by_spec_id
+    }
+
+
+def _held_block(ctx: _FakeToolContext, requirement_id: str) -> Mapping[str, Any] | None:
+    """The spec block the plan `ctx` holds reads for `requirement_id`'s pin
+    (`planner.plan.pin_source_of`), `None` where none is held."""
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    requirement = plan.requirement(requirement_id)
+    assert isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+    source = pin_source_of(ctx.state, plan, requirement)
+    return source.spec_block(requirement.source_spec_id) if source is not None else None
+
+
 @pytest.mark.parametrize(
     ("part", "whole", "compiled"),
     [
@@ -6653,7 +6681,10 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
         (_WHOLE, us_2023_block(compiled)["spec_id"]),
     ]
     assert searched_pins(ctx.state) == ()
-    held_source = pin_sources(ctx.state)[us_2023_block(compiled)["spec_id"]]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    held_source = pin_source_of(ctx.state, plan, cast(DatasetRequirement, plan.requirement(_WHOLE)))
+    assert held_source is not None
     assert (held_source.provenance_ref, held_source.provenance_account) == (
         provenance["provenance_ref"],
         provenance["provenance_account"],
@@ -6669,8 +6700,6 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
         for choice in scope["choices"]
         if choice["axis"] != "sector"
     }
-    plan = load_plan(ctx.state)
-    assert plan is not None
     assert [
         d.slot
         for d in plan.decisions
@@ -6730,7 +6759,9 @@ def test_a_declared_whole_of_an_aligned_part_reads_the_parts_compiled_source(
     health = us_2023_block("health")
     origin = us_2023_block("health_inclusive")
     whole_block = us_2023_block("whole")
-    part = _dac_countries("part", health).model_copy(update={"aligned_from": origin["spec_id"]})
+    part = _dac_countries("part", health).model_copy(
+        update={"aligned_from": origin["spec_id"], "aligned_options": ("provider:bilateral",)}
+    )
     whole = _dac_countries("whole", whole_block).model_copy(
         update={"whole_of": WholeOf(part="part", axis="sector"), "entities": part.entities}
     )
@@ -6766,14 +6797,182 @@ def test_a_declared_whole_of_an_aligned_part_reads_the_parts_compiled_source(
             spec_id=whole_block["spec_id"],
             digest={"part_digests": [{"spec_block": whole_block}]},
             whole_axis="sector",
+            part_origin=origin["spec_id"],
+            part_option_ids=("provider:bilateral",),
             records_origin=True,
         ),
     ):
         save_aligned_pin(state, held)
 
-    assert aligned_source(state, whole, plan=plan) == PinSource(
+    assert pin_source_of(state, plan, whole) == PinSource(
         block=whole_block, settled=True, provenance_ref="origin"
     )
+
+
+def test_wholes_of_an_aligned_part_and_a_direct_part_on_one_spec_id_read_their_own_compiles(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid twice on one spec_id: once pinned by the planner as a search
+    showed it, once moved there by alignment from the inclusive figures. Each is the
+    part of its own total over every sector, both answered with one spec_id. Each
+    whole reads the compile made from its own part, its source and block, so the
+    planner's marks on the aligned part's whole never reach the direct part's."""
+    health = us_2023_block("health")
+    origin = us_2023_block("health_inclusive")
+    whole_block = us_2023_block("whole")
+    moved = {**whole_block, "resolved": {**whole_block["resolved"], "concept_label": "moved"}}
+    direct = _dac_countries("direct", health)
+    aligned = _dac_countries("aligned", health).model_copy(
+        update={"aligned_from": origin["spec_id"], "aligned_options": ("provider:bilateral",)}
+    )
+    wholes = [
+        _dac_countries(f"{part.id}_whole", whole_block).model_copy(
+            update={"whole_of": WholeOf(part=part.id, axis="sector"), "entities": part.entities}
+        )
+        for part in (direct, aligned)
+    ]
+    plan = Plan(
+        question="What share of US aid goes to health?",
+        decisions=[decision()],
+        evidence_requirements=[
+            direct,
+            aligned,
+            *wholes,
+            _share("direct", "direct_whole").model_copy(update={"id": "direct_share"}),
+            _share("aligned", "aligned_whole").model_copy(update={"id": "aligned_share"}),
+        ],
+    )
+    state = cast(SessionState, {})
+    save_pin_sources(
+        state,
+        {
+            health["spec_id"]: PinSource(block=health, settled=True, provenance_ref="shown"),
+            origin["spec_id"]: PinSource(block=origin, settled=True, provenance_ref="origin"),
+        },
+    )
+    for held in (
+        AlignedPin(
+            origin=origin["spec_id"],
+            option_ids=("provider:bilateral",),
+            spec_id=health["spec_id"],
+            digest={"part_digests": [{"spec_block": health}]},
+            records_origin=True,
+        ),
+        AlignedPin(
+            origin=health["spec_id"],
+            option_ids=(),
+            spec_id=whole_block["spec_id"],
+            digest={"part_digests": [{"spec_block": whole_block}]},
+            whole_axis="sector",
+            records_origin=True,
+        ),
+        AlignedPin(
+            origin=health["spec_id"],
+            option_ids=(),
+            spec_id=whole_block["spec_id"],
+            digest={"part_digests": [{"spec_block": moved}]},
+            whole_axis="sector",
+            part_origin=origin["spec_id"],
+            part_option_ids=("provider:bilateral",),
+            records_origin=True,
+        ),
+    ):
+        save_aligned_pin(state, held)
+
+    assert [pin_source_of(state, plan, whole) for whole in wholes] == [
+        PinSource(block=whole_block, settled=True, provenance_ref="shown"),
+        PinSource(block=moved, settled=True, provenance_ref="origin"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("shown", "compiles", "earlier", "reads"),
+    [
+        pytest.param(True, 1, False, "shown", id="shown-and-compiled"),
+        pytest.param(False, 1, False, "compiled", id="one-compile-this-entry"),
+        pytest.param(False, 2, False, None, id="several-compiles"),
+        pytest.param(False, 1, True, None, id="earlier-entry"),
+    ],
+)
+def test_a_pin_of_its_own_reads_a_compile_only_where_unshown_and_compiled_once_this_entry(
+    shown: bool, compiles: int, earlier: bool, reads: str | None
+) -> None:
+    """US health aid pinned by the planner as its own on a spec_id a compile of the
+    inclusive figures answered. A pin the planner was shown reads that dataset; one
+    it was not reads the one compile this entry holds for the spec_id, and nothing
+    where the entry holds several, or holds the compile only from an earlier entry
+    (`planner.plan.clear_entry_compiles`)."""
+    health = us_2023_block("health")
+    origin = us_2023_block("health_inclusive")
+    compiled = {**health, "resolved": {**health["resolved"], "concept_label": "compiled"}}
+    state = cast(SessionState, {})
+    save_pin_sources(
+        state,
+        {
+            origin["spec_id"]: PinSource(block=origin, settled=True),
+            **({health["spec_id"]: PinSource(block=health, settled=True)} if shown else {}),
+        },
+    )
+    for options in (("provider:bilateral",), ("measure_basis:gross",))[:compiles]:
+        save_aligned_pin(
+            state,
+            AlignedPin(
+                origin=origin["spec_id"],
+                option_ids=options,
+                spec_id=health["spec_id"],
+                digest={"part_digests": [{"spec_block": compiled}]},
+                records_origin=True,
+            ),
+        )
+    if earlier:
+        clear_entry_compiles(state)
+    own = _dac_countries("own", health)
+
+    source = HeldSources.of(state).source_of(own, {own.id: own})
+
+    blocks = {"shown": health, "compiled": compiled}
+    assert (source.block if source is not None else None) == (
+        blocks[reads] if reads is not None else None
+    )
+
+
+def test_two_compiles_of_one_origin_onto_one_spec_id_are_read_by_their_options() -> None:
+    """The inclusive US health figures compiled on the bilateral scope alone and on
+    the bilateral scope and gross basis, both answered with one spec_id. Each input
+    reads the compile made on the options it records
+    (`DatasetRequirement.aligned_options`), whichever was held last."""
+    health = us_2023_block("health")
+    origin = us_2023_block("health_inclusive")
+    options = (("provider:bilateral",), ("measure_basis:gross", "provider:bilateral"))
+    blocks = [
+        {**health, "resolved": {**health["resolved"], "concept_label": label}}
+        for label in ("bilateral", "bilateral gross")
+    ]
+    inputs = [
+        _dac_countries(f"input_{index}", health).model_copy(
+            update={"aligned_from": origin["spec_id"], "aligned_options": moved}
+        )
+        for index, moved in enumerate(options)
+    ]
+    state = cast(SessionState, {})
+    save_pin_sources(state, {origin["spec_id"]: PinSource(block=origin, settled=True)})
+    for moved, block in zip(options, blocks, strict=True):
+        save_aligned_pin(
+            state,
+            AlignedPin(
+                origin=origin["spec_id"],
+                option_ids=moved,
+                spec_id=health["spec_id"],
+                digest={"part_digests": [{"spec_block": block}]},
+                records_origin=True,
+            ),
+        )
+    held = HeldSources.of(state)
+    by_id = {requirement.id: requirement for requirement in inputs}
+
+    assert [held.source_of(requirement, by_id) for requirement in inputs] == [
+        PinSource(block=block, settled=True) for block in blocks
+    ]
 
 
 @pytest.mark.parametrize(
@@ -7783,7 +7982,7 @@ async def test_a_provider_difference_names_inputs_of_one_concept_as_the_card_doe
     # The card's names before compile, read off the blocks the inputs pin.
     uncompiled = plan.model_copy(update={"translation": None, "workflow": None})
     pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks}
-    names = plan_words(uncompiled, pinned=pinned).names
+    names = plan_words(uncompiled, pinned=_by_requirement(uncompiled, pinned)).names
     subjects = {f"{names[rid][:1].upper()}{names[rid][1:]} counts " for rid in (_PART, _WHOLE)}
     assert len(subjects) == 2, subjects
     for subject in subjects:
@@ -7867,7 +8066,7 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
     ]
     # The revision's card names, read before compile off the blocks the inputs pin.
     uncompiled = plan.model_copy(update={"translation": None, "workflow": None})
-    names = plan_words(uncompiled, pinned=by_spec_id).names
+    names = plan_words(uncompiled, pinned=_by_requirement(uncompiled, by_spec_id)).names
     assert names[_PART] != "health", names
     for requirement_id in (_PART, inclusive):
         name = names[requirement_id]
@@ -7938,7 +8137,7 @@ async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_cou
     assert compiled.workflow is not None, compiled.issues
     plan = plan.with_translation(translation=translation, workflow=compiled.workflow)
     pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks.values()}
-    names = plan_words(plan, pinned=pinned).names
+    names = plan_words(plan, pinned=_by_requirement(plan, pinned)).names
     for requirement_id, block in blocks.items():
         (choice,) = [
             c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "provider"
@@ -8005,7 +8204,7 @@ async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_cou
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat == "bases_differ"]
     pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks.values()}
-    words = plan_words(plan, pinned=pinned)
+    words = plan_words(plan, pinned=_by_requirement(plan, pinned))
     for requirement_id, block in blocks.items():
         (choice,) = [
             c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "measure_basis"
@@ -9384,7 +9583,7 @@ async def test_a_donor_whole_of_an_inclusive_part_is_counted_on_the_scope_search
     assert (provider["option_id"], provider["provenance"]) == ("provider:inclusive", "carried")
     whole_pin = _OPENED_WHOLE["donor"]
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
-    whole_block = pin_sources(ctx.state)[whole_pin].spec_block(whole_pin)
+    whole_block = _held_block(ctx, _WHOLE)
     assert whole_block is not None
     choices = whole_block["resolved"]["scope_choices"]["choices"]
     assert {c["axis"]: (c["active"], c["provenance"]) for c in choices}["provider"] == (
@@ -9739,7 +9938,7 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert result["outcome"] == Outcome.OK.value, result
     whole_pin = surface.recorded["whole"]["spec_id"]
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
-    whole_block = pin_sources(ctx.state)[whole_pin].spec_block(whole_pin)
+    whole_block = _held_block(ctx, _WHOLE)
     assert whole_block is not None
     held = reading_facts(whole_block)["scope"]["dropped_entries"]
     assert [d["entry"]["option_id"] for d in held] == dropped
@@ -9864,9 +10063,8 @@ async def test_a_dac_donor_whole_searchs_answer_compiles(
     plan = load_plan(ctx.state)
     assert plan is not None
     pins = dict(_pins(ctx))
-    shown = pin_sources(ctx.state)
     discovered = {
-        rid: source_from_spec_block(cast(Any, shown[spec_id].spec_block(spec_id)))
+        rid: source_from_spec_block(cast(Any, _held_block(ctx, rid)))
         for rid, spec_id in pins.items()
         if spec_id is not None
     }
@@ -10880,6 +11078,7 @@ def test_two_unpinned_leaves_read_one_series_only_when_they_are_one_leaf(
             stated=False,
             held=submission_service._Origin(block=block, scope=scope),
             reads=reads,
+            stands=submission_service._Moved(block["spec_id"]),
         )
 
     group = submission_service._InputGroup(
