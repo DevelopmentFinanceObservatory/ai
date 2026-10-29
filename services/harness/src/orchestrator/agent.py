@@ -138,9 +138,8 @@ question per choice, all in one call. Do not pick one yourself.
 The count search chose is the first option of the count question, and the
 other counts the result names follow. Label each as the result labels it,
 with the spec_id the result gives it. A part that lists `open_prices` leaves
-its prices open, so prices get a question of their own. Its options are the
-`open_prices` entries in order, the prices search read first. Label each as
-the entry labels it, with the entry's spec_id when it gives one.
+its prices open, so prices get a question of their own, with `prices_of` set
+to the part's spec_id. Its options are then the `open_prices` entries.
 
 When the user picks a reading the result names, fetch its spec_id or name it
 in the plan brief. When they pick prices the result does not name, search

@@ -29,10 +29,12 @@ from harness.graph.state import (
     AskOption,
     AskQuestion,
     PendingAsk,
+    PricedOption,
     ask_candidates,
     ask_questions,
     interrupt_event,
     pending_action,
+    priced_options,
     resume_answers,
 )
 
@@ -103,9 +105,12 @@ _SETTLED = "Each answered choice is settled. Do not ask it again."
 def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     """Put the agent's questions to the user through one clarify interrupt,
     each under its id with its options as candidates (`ask_questions`), and
-    hand the answers back in the options' own words (`answer_replies`). The
-    `PendingAsk` waits under `ORCHESTRATOR_ASKED_KEY` while the interrupt is
-    open, so a resume is told from a fresh entry."""
+    hand the answers back in the options' own words (`answer_replies`). Each
+    prices option carries the part and prices code reads for it
+    (`priced_options`), which the turn's search results do not change while
+    the interrupt is open. The `PendingAsk` waits under
+    `ORCHESTRATOR_ASKED_KEY` while the interrupt is open, so a resume is told
+    from a fresh entry."""
     result = (ctx.resume_inputs or {}).get(CLARIFY_INTERRUPT)
     held = ctx.state.get(ORCHESTRATOR_ASKED_KEY)
     if not (held and result is not None):
@@ -115,7 +120,9 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
             RequestInput(
                 interrupt_id=CLARIFY_INTERRUPT,
                 message=questions[0].question,
-                payload={"questions": ask_questions(questions)},
+                payload={
+                    "questions": ask_questions(questions, priced_options(questions, ctx.state))
+                },
             )
         )
         return
@@ -134,7 +141,7 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
             "can help with."
         )
     else:
-        replies = answer_replies(questions, answers)
+        replies = answer_replies(questions, answers, priced_options(questions, ctx.state))
         closing = _SETTLED
     if len(questions) == 1:
         lines = [f"You asked the user: {questions[0].question}", *filter(None, replies)]
@@ -153,14 +160,21 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     yield Event(output={"status": "Reading your answer", "text": "\n".join([*lines, closing])})
 
 
-def answer_replies(questions: list[AskQuestion], answers: dict[str, dict[str, Any]]) -> list[str]:
+def answer_replies(
+    questions: list[AskQuestion],
+    answers: dict[str, dict[str, Any]],
+    priced: Sequence[Mapping[int, PricedOption]] = (),
+) -> list[str]:
     """What the user answered to each of `questions`, in order, from `answers`
     keyed by question id (`resume_answers`): a pick in the option's own words
     with its spec_id when it carries one, the user's own words, or, for a question
     the user skipped or left unanswered, the first option as the agent's to
-    go on with."""
+    go on with. A pick of constant prices no search listed, an option of
+    `priced` (`priced_options`) in constant prices with no spec_id, asks
+    for one search of its part in those prices."""
     replies = []
     for index, question in enumerate(questions):
+        prices = priced[index] if index < len(priced) else {}
         answer = answers.get(f"q{index + 1}") or {"kind": "skipped"}
         if answer.get("kind") == "text":
             replies.append(f"The user answered in their own words: {answer['text']}")
@@ -169,29 +183,36 @@ def answer_replies(questions: list[AskQuestion], answers: dict[str, dict[str, An
             first = question.options[0].label
             replies.append(f"The user left this to you. Go on with {first}.")
             continue
-        option = _picked(question, answer)
+        place = _picked_place(question, answer)
+        option = question.options[place] if place is not None else None
         if option is None:
             replies.append(f"The user chose: {answer.get('spec_id')}")
         elif option.spec_id:
             replies.append(f"The user chose: {option.label} ({option.spec_id})")
+        elif (stamp := prices.get(place)) is not None and stamp.prices == "constant":
+            replies.append(
+                f"The user chose: {option.label}, which no search listed. Search once for "
+                f"that part ({stamp.part}) in constant prices."
+            )
         else:
             replies.append(f"The user chose: {option.label}")
     return replies
 
 
-def _picked(question: AskQuestion, answer: Mapping[str, Any]) -> AskOption | None:
-    """The option of `question` that `answer` picked by its candidate id
+def _picked_place(question: AskQuestion, answer: Mapping[str, Any]) -> int | None:
+    """The place of the option of `question` that `answer` picked by its candidate id
     (`ask_candidates`); None for an answer that picked none of them."""
     if answer.get("kind") != "option":
         return None
-    options = dict(
-        zip(
-            (candidate["spec_id"] for candidate in ask_candidates(question.options)),
-            question.options,
-            strict=True,
-        )
-    )
-    return options.get(answer.get("spec_id"))
+    ids = [candidate["spec_id"] for candidate in ask_candidates(question.options)]
+    picked = answer.get("spec_id")
+    return ids.index(picked) if picked in ids else None
+
+
+def _picked(question: AskQuestion, answer: Mapping[str, Any]) -> AskOption | None:
+    """The option of `question` that `answer` picked (`_picked_place`)."""
+    place = _picked_place(question, answer)
+    return question.options[place] if place is not None else None
 
 
 # The measure axis that holds a reading's price basis, and each basis in words.

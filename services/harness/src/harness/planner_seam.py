@@ -1173,8 +1173,10 @@ class PlannerSeam:
             # `PlannerSeam.__init__`). The cap bounds the proposals within
             # one entry into the planner, since `PlannerSeam.__call__`
             # resets the count on each entry (see `__call__`); a restart is
-            # refused however fresh that budget is. Stop the planner's turn
-            # here either way.
+            # refused however fresh that budget is. `NOTHING_TO_PLAN` declines
+            # every ask, and `PRICES_UNSERVED` needs a search the planner
+            # cannot make (`submission.prices_choice`). Stop the planner's
+            # turn here in every case.
             tracker.ready_to_break = True
             tracker.refused = tool_response
         elif isinstance(tool_response, dict):

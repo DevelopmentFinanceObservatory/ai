@@ -180,8 +180,8 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternat
     )
     assert (
         "A part that lists `open_prices` leaves its prices open, so prices get a question of "
-        "their own. Its options are the `open_prices` entries in order, the prices search read "
-        "first" in text
+        "their own, with `prices_of` set to the part's spec_id. Its options are then the "
+        "`open_prices` entries" in text
     )
     assert "even when the result lists no `other_prices`" not in text
     assert (

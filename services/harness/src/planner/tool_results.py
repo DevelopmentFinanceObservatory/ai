@@ -96,6 +96,10 @@ class ProblemCode(StrEnum):
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"
+    # The user kept constant prices for a part when the planner asked, and no
+    # series shown serves them, so the entry ends for a search to find one
+    # (`submission.prices_choice`).
+    PRICES_UNSERVED = "prices_unserved"
     # The plan does not state the option the user picked for a decision on
     # the plan card, which the entry replanning for that pick holds
     # (`submission.service._picked_decision`).

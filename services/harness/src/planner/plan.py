@@ -398,6 +398,14 @@ class Entity(StrictModel):
     )
 
 
+class BaseYearUnstatedError(ValueError):
+    """A `Unit` states constant prices with no `base_year`.
+
+    Typed so `propose_plan` answers it with the base year the requirement's
+    source states, where one does (`submission.prices_choice.base_year_refusal`).
+    """
+
+
 # Stated in the frame grammar's own `currency`, `prices` and `base_year`,
 # `current` or `constant`, so a retrieved frame's unit compares to a
 # requirement field by field.
@@ -422,7 +430,7 @@ class Unit(StrictModel):
     @model_validator(mode="after")
     def _base_year_goes_with_constant_prices(self) -> Unit:
         if self.prices == "constant" and self.base_year is None:
-            raise ValueError("constant prices need a base_year")
+            raise BaseYearUnstatedError("constant prices need a base_year")
         if self.prices == "current" and self.base_year is not None:
             raise ValueError("current prices take no base_year")
         return self
@@ -556,6 +564,16 @@ class DecisionFixes(StrictModel):
     limit: Annotated[RankLimit | None, HASHED_WHEN_SET] = Field(
         default=None,
         description="How many places a rank this decision fixes keeps, when it fixes that.",
+    )
+    # Set only on the decision `propose_plan` writes for the prices the user
+    # chose for a part (`submission.prices_choice`): the unit's price basis
+    # alone, so each requirement keeps its own currency and base year. Not a
+    # `FixedField`, so a draft cannot name it, and left out of every dump
+    # while unset.
+    prices: Annotated[Literal["current", "constant"] | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda prices: prices is None,
+        description="The price basis of the unit this decision fixes, when it fixes that alone.",
     )
 
 
@@ -815,7 +833,7 @@ class DecisionDraft(_Choice):
 
     fixes: tuple[FixedField, ...] | None = Field(
         default=None,
-        max_length=len(DecisionFixes.model_fields),
+        max_length=len(DecisionFixes.model_fields.keys() - {"prices"}),
         description=(
             "The requirement fields this decision settles, by name, whenever it settles "
             "what a requirement carries: the period, the unit, the entities, the measure, "
@@ -4018,9 +4036,28 @@ def _check_population_claims_are_cited(
 _EMPTY_STATED = frozenset({"group_by"})
 
 
+# A `DecisionFixes` field a requirement states inside one of its own fields:
+# the price basis of its `unit`.
+_NESTED_FIXES = {"prices": ("unit", "prices")}
+
+
+def _held(requirement: EvidenceRequirement, field: str) -> Any:
+    """The value `requirement` holds for `field`, read inside its own field for a `_NESTED_FIXES` one."""
+    if field not in _NESTED_FIXES:
+        return getattr(requirement, field)
+    outer, inner = _NESTED_FIXES[field]
+    value = getattr(requirement, outer)
+    return getattr(value, inner) if value is not None else None
+
+
+def _declares(requirement: EvidenceRequirement, field: str) -> bool:
+    """Whether `requirement`'s kind states `field`, a `_NESTED_FIXES` one inside its own field."""
+    return _NESTED_FIXES.get(field, (field,))[0] in type(requirement).model_fields
+
+
 def _stated(requirement: EvidenceRequirement, field: str) -> Any:
     """The value `requirement` states for `field`, a field its kind declares, or `None`."""
-    value = getattr(requirement, field)
+    value = _held(requirement, field)
     return None if value == () and field not in _EMPTY_STATED else value
 
 
@@ -4050,16 +4087,15 @@ def bound_fixes(requirement: EvidenceRequirement, decision: Decision) -> dict[st
     """The values `decision.fixes` states that `requirement`, citing it, is held to, by field.
 
     A field the decision leaves unset is left out, and so is one the
-    requirement's kind does not declare and `source_spec_id`
+    requirement's kind does not declare (`_declares`) and `source_spec_id`
     (`_UNCHECKED_FIXES`).
     """
     if decision.fixes is None:
         return {}
-    declared = type(requirement).model_fields
     return {
         field: fixed
         for field, fixed in decision.fixes
-        if fixed is not None and field in declared and field not in _UNCHECKED_FIXES
+        if fixed is not None and _declares(requirement, field) and field not in _UNCHECKED_FIXES
     }
 
 
@@ -4068,7 +4104,7 @@ def fix_disagreements(
 ) -> list[FixDisagreement]:
     """Each value of `bound_fixes` that `requirement` states otherwise, tuples compared as sets (`_same`)."""
     return [
-        FixDisagreement(field, fixed, getattr(requirement, field))
+        FixDisagreement(field, fixed, _held(requirement, field))
         for field, fixed in bound_fixes(requirement, decision).items()
         if not _same(fixed, _stated(requirement, field))
     ]
@@ -6314,7 +6350,8 @@ class DecisionPick(StrictModel):
     decision of the user's every member of C cited, and `cited_by_any` each
     other decision of the user's some member of C cited, which some
     replacing requirement cites. Decisions code writes (`is_code_written`)
-    are left out of both: admission derives their citations. Everything
+    are left out of both, `slot` too when code writes it, as it writes the
+    user's prices: admission derives their citations. Everything
     else on the card stands as the planner wrote it: `kept_requirements`
     holds each other requirement's `requirement_digest` by id, and
     `kept_decisions` the `content_digest` of each decision but `slot` and
@@ -6364,7 +6401,7 @@ class DecisionPick(StrictModel):
             origin_fixes=origin.fixes,
             replaced_readings=tuple(sorted({readings[r.id] for r in requirement_roots(replaced)})),
             replaced_kinds=tuple(sorted({r.kind for r in requirement_roots(replaced)})),
-            cited_by_every=tuple(sorted({slot} | every)),
+            cited_by_every=tuple(sorted(({slot} - code_written) | every)),
             cited_by_any=tuple(sorted((users & some) - every)),
             kept_requirements={
                 r.id: requirement_digest(r, code_written=code_written) for r in kept
@@ -6387,9 +6424,16 @@ def requirement_roots(requirements: Sequence[EvidenceRequirement]) -> list[Evide
 
 def is_code_written(decision: Decision) -> bool:
     """Whether `propose_plan` wrote `decision` itself: a search pin's measure
-    (`is_search_pin`), a scope choice (`Decision.scope`), or a caveat
-    (`Decision.caveat`). Admission rewrites these on every proposal."""
-    return decision.scope is not None or decision.caveat is not None or is_search_pin(decision)
+    (`is_search_pin`), a scope choice (`Decision.scope`), a caveat
+    (`Decision.caveat`), or the prices the user chose for a part, the one
+    decision fixing `DecisionFixes.prices` (`submission.prices_choice`).
+    Admission rewrites these on every proposal."""
+    return (
+        decision.scope is not None
+        or decision.caveat is not None
+        or is_search_pin(decision)
+        or (decision.fixes is not None and decision.fixes.prices is not None)
+    )
 
 
 def content_digest(item: StrictModel) -> str:

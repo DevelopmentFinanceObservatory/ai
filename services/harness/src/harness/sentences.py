@@ -88,7 +88,12 @@ class SeamCode(StrEnum):
 
 # The `propose_plan` refusals that record nothing and end the entry.
 TERMINAL_PROPOSE_CODES = frozenset(
-    {ProblemCode.BUDGET_EXHAUSTED, ProblemCode.QUESTION_FIXED, ProblemCode.NOTHING_TO_PLAN}
+    {
+        ProblemCode.BUDGET_EXHAUSTED,
+        ProblemCode.QUESTION_FIXED,
+        ProblemCode.NOTHING_TO_PLAN,
+        ProblemCode.PRICES_UNSERVED,
+    }
 )
 
 # Clauses more than one vocabulary gives.
@@ -268,8 +273,9 @@ _DECISION_KEPT = (
 # is about by its id ("the plan" when it names none), `at` is " for <about>"
 # or nothing,
 # `why` the reason clause of the referral it ended on, `asks` the declined asks,
-# `unsupported` why a calculation cannot be made, and `rounds`, `tool` and
-# `reference` come straight from the refusal's detail.
+# `unsupported` why a calculation cannot be made, `reading` the series a
+# requirement pins, by its spec_id, `chosen` the prices the user chose, and `rounds`,
+# `tool` and `reference` come straight from the refusal's detail.
 SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
     SeamCode.TURN_MODEL_TIME_SPENT: (
         "This request used all the time it allows the model to work before it finished, so "
@@ -312,6 +318,11 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
     ),
     ProblemCode.NOTHING_TO_PLAN: (
         "This cannot be calculated by this system, so nothing was planned: {asks}."
+    ),
+    ProblemCode.PRICES_UNSERVED: (
+        "The plan reads {reading}, and no series this turn's searches found measures it in "
+        "{chosen}, which the user chose, so nothing was recorded. Search once for {reading} in "
+        "{chosen}."
     ),
     ProblemCode.OPERATION_UNSUPPORTED: (
         "This cannot be calculated as planned{at}, because {unsupported}, so nothing was recorded."
@@ -370,6 +381,7 @@ SEAM_REASONS: Mapping[SeamCode | ProblemCode, str] = {
     ProblemCode.QUESTION_FIXED: "the plan on record answers another question",
     ProblemCode.BUDGET_EXHAUSTED: "this request has used its budget of {rounds} plan drafts",
     ProblemCode.NOTHING_TO_PLAN: "this system cannot calculate what was asked",
+    ProblemCode.PRICES_UNSERVED: "{lead}no series found is in the prices chosen",
     ProblemCode.OPERATION_UNSUPPORTED: "{mixed}",
     ProblemCode.BASES_UNALIGNED: (
         "{lead}the figures the plan combines could not be put on one measure basis and "
@@ -539,6 +551,10 @@ def _fields(detail: Mapping[Any, object], words: PlanWords | None) -> dict[str, 
         "rounds": detail.get("rounds", MAX_PLAN_ROUNDS),
         "tool": detail.get("tool"),
         "reference": detail.get("reference"),
+        "reading": f"the reading {reading}"
+        if isinstance(reading := detail.get("reading") or detail.get("part"), str)
+        else "one reading",
+        "chosen": detail.get("chosen") or "other prices",
     }
 
 
@@ -751,6 +767,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW,
             HarnessCode.NO_SHARED_PERIOD,
             ProblemCode.RUN_WOULD_STOP,
+            ProblemCode.PRICES_UNSERVED,
         }
     ),
     FailureClass.UNITS: frozenset(
@@ -1049,6 +1066,10 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
         "This request used all the plan drafts it allows", "so ask again for a fresh start"
     ),
     ProblemCode.NOTHING_TO_PLAN: FailureText("The system has no calculation for what was asked"),
+    # The orchestrator searches for the prices next, and plans again when it may.
+    ProblemCode.PRICES_UNSERVED: FailureText(
+        "The data found so far is not in the prices you chose", "so a search for them runs next"
+    ),
 }
 
 _NARROW_SCOPE = FailureText(

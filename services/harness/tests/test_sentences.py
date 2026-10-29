@@ -112,6 +112,22 @@ def test_a_repair_referral_reads_the_compile_issue_it_names() -> None:
     assert referral_reason(unmeetable) == REFERRAL_REASONS[unmeetable]
 
 
+def test_a_prices_unserved_sentence_names_the_reading_the_orchestrator_searches() -> None:
+    """The planner cannot search, so the sentence the orchestrator reads names
+    the series the plan pins, by its spec_id, not the part the user priced.
+    Whether it may plan again is `plan_done`'s to say, so the sentence does
+    not promise it."""
+    part, reading = "spec_" + "a" * 32, "spec_" + "b" * 32
+    refused = {"code": ProblemCode.PRICES_UNSERVED, "detail": {"part": part, "reading": reading}}
+
+    sentence = refusal_sentence(refused)
+
+    assert reading in sentence
+    assert part not in sentence
+    assert "plan again" not in sentence
+    assert reading not in refusal_reason(refused)
+
+
 def test_a_plan_not_ready_sentence_carries_the_referral_it_ended_on() -> None:
     text = refusal_sentence(
         {

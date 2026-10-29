@@ -3821,6 +3821,10 @@ _PRICES_QUESTION = {
             [_count_question(SPEC_NET), {"question": "In which prices?", "options": []}],
             "question 'In which prices?' offers no option",
         ),
+        (
+            [{"question": "In which prices?", "prices_of": SPEC_NET}],
+            f"prices {SPEC_NET}, which lists no `open_prices` this turn",
+        ),
     ],
     ids=[
         "offered",
@@ -3832,6 +3836,7 @@ _PRICES_QUESTION = {
         "no_question",
         "four_questions",
         "no_option",
+        "prices_of_no_open_part",
     ],
 )
 async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(

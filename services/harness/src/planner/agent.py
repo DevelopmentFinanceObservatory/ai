@@ -48,8 +48,10 @@ import functools
 import logging
 from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, override
 
+from compiler.evidence import PriceBasis
 from compiler.sources import block_group, party_class, readable_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
@@ -65,6 +67,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
+from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.scope_choices import (
     PROVIDER_AXIS,
     EntitiesBinding,
@@ -78,6 +81,15 @@ from harness.scope_choices import (
 from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
+from submission.prices_choice import (
+    PRICES_BY_LABEL,
+    PRICES_OPTIONS,
+    PRICES_PICKS,
+    PRICES_SLOT_PREFIX,
+    PricesChoice,
+    measure_key,
+    prices_slot,
+)
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
@@ -750,16 +762,236 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
       `candidates`, whose ids are scoped to that question. A `payload` with
       `candidates` and no `questions` holds the one question `q1`.
     """
+    return {
+        question_id: _candidate_ids(candidates)
+        for question_id, candidates in _question_candidates(args).items()
+    }
+
+
+def _question_candidates(args: dict[str, Any]) -> dict[str, Any]:
+    """The raw candidates list of each question an `adk_request_input` call's
+    `args` offers, by question id, read as `_offered_candidates` reads them."""
     candidates = args.get("candidates")
     payload = args.get("payload")
     payload = payload if isinstance(payload, dict) else {}
     if not candidates and payload.get("questions"):
         return {
-            str(question["id"]): _candidate_ids(question.get("candidates"))
+            str(question["id"]): question.get("candidates")
             for question in payload["questions"]
             if isinstance(question, dict) and question.get("id")
         }
-    return {"q1": _candidate_ids(candidates or payload.get("candidates"))}
+    return {"q1": candidates or payload.get("candidates")}
+
+
+def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
+    """The prices the user picked answering `adk_request_input` calls, by the
+    part each prices, read off this session's event history.
+
+    The `ask` node marks each prices option's candidate with its `part` and
+    `prices` (`harness.graph.state.ask_candidates`), so a pick states them
+    whether or not the option carries a spec_id. Each response pairs with the
+    nearest preceding call sharing its `id`, as `_elected_spec_ids` pairs
+    them. A choice stands until the user answers the same question again,
+    a question pricing the same part or another window of its measure
+    (`submission.prices_choice.measure_key`): a pick of other prices
+    replaces it, and any other answer, a skip aside, releases it, so one
+    measure holds one choice however many asks priced it.
+
+    A prices refusal that sends the planner to the user (`detail.part`,
+    `submission.prices_choice`) binds the planner's next ask offering
+    `PRICES_OPTIONS` to its part, and the user's pick there sets the part's
+    prices, marked `asked` so the planner does not ask it again
+    (`submission.prices_choice`). The user's own words there release the
+    part's choice, as they do on the orchestrator's question, and a skip
+    keeps it, marking a constant choice `asked`. A switch of the part's
+    prices row on the plan card (`_prices_switched`) is a new answer for the
+    part, marked `asked` too, while its replan is under way or once the plan
+    on record states it (`_switch_stands`). Any other `propose_plan`
+    response, the plan landing included, clears the refusal, so no later ask
+    of another kind is read as that one. A message the user typed
+    (`_user_message`) releases every choice and clears the refusal, and an
+    amendment of the approval card (`_is_amendment`) releases every choice.
+    An answer to any other question leaves them standing. A Studio turn is
+    one session, so a choice holds for the turn it was made in.
+    """
+    measures = {
+        spec_id: measure_key(block)
+        for spec_id, source in pin_sources(tool_context.state).items()
+        if (block := source.spec_block(spec_id)) is not None
+    }
+    chosen: dict[str, PricesChoice] = {}
+    refused: str | None = None
+    asked: dict[str, str] = {}
+    offered = [dict(option) for option in PRICES_OPTIONS]
+    for step in _session_steps(tool_context):
+        if step.kind == "message":
+            chosen.clear()
+            refused = None
+        elif step.kind == "response":
+            if step.name == PROPOSE_PLAN:
+                refused = _prices_refused(step.body)
+        elif step.kind == "call":
+            if refused is not None and (step.args or {}).get("options") == offered:
+                asked[str(step.call_id)], refused = refused, None
+        elif _is_amendment(dict(step.body)):
+            chosen.clear()
+        elif (switched := _prices_switched(step.body)) is not None:
+            part, basis = switched
+            if _switch_stands(tool_context.state, part, basis):
+                _release_measure(chosen, part, measures)
+                chosen[part] = PricesChoice(basis, asked=True)
+        elif step.call_id in asked:
+            part = asked.pop(step.call_id)
+            answer = _answers(step.body.get("result")).get("q1") or {}
+            basis = PRICES_PICKS.get(str(answer.get("spec_id")))
+            if answer.get("kind") == "option" and basis is not None:
+                _release_measure(chosen, part, measures)
+                chosen[part] = PricesChoice(basis, asked=True)
+            elif _said(answer):
+                _release_measure(chosen, part, measures)
+            elif part in chosen and chosen[part].prices == "constant":
+                chosen[part] = chosen[part]._replace(asked=True)
+        else:
+            _priced_answers(step.args or {}, step.body, chosen, measures)
+    return chosen
+
+
+def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
+    """The part and prices a switch of a part's prices row on the plan card
+    picks (`harness.studio`'s `{"result": {"switch": {"choice_id",
+    "option_id"}}}` answer to the approval card), or `None` for any other answer."""
+    result = body.get("result")
+    switch = result.get("switch") if isinstance(result, dict) else None
+    if not isinstance(switch, dict):
+        return None
+    slot = str(switch.get("choice_id")).removeprefix(DECISION_CHOICE_PREFIX)
+    if not slot.startswith(PRICES_SLOT_PREFIX):
+        return None
+    basis = next(
+        (
+            basis
+            for label, basis in PRICES_BY_LABEL.items()
+            if decision_option_id(label) == switch.get("option_id")
+        ),
+        None,
+    )
+    return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
+
+
+def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
+    """Whether a switch of `part`'s prices row to `basis` holds: its replan is
+    under way (`planner.plan.decision_pick` names the row), or the plan on
+    record states the switched prices. A switch whose replan was refused or
+    stopped holds neither, so the prices stay as the card shows them."""
+    slot = prices_slot(part)
+    pick = decision_pick(state)
+    if pick is not None and pick.slot == slot:
+        return True
+    plan = load_plan(state)
+    label = PricesChoice(basis).label
+    return plan is not None and any(d.slot == slot and d.chosen == label for d in plan.decisions)
+
+
+def _release_measure(
+    chosen: dict[str, PricesChoice], part: str, measures: Mapping[str, str | None]
+) -> None:
+    """Take out of `chosen` the choice for `part` and for every part measuring
+    what it measures (equal `measures`), as a new answer pricing it replaces them."""
+    key = measures.get(part)
+    for priced in [p for p in chosen if p == part or (key is not None and measures.get(p) == key)]:
+        del chosen[priced]
+
+
+def _prices_refused(body: Mapping[str, Any]) -> str | None:
+    """The part a `propose_plan` refusal of the user's prices sending the planner
+    to the user names (`detail.part`), or `None`."""
+    detail = body.get("detail")
+    action = body.get("action")
+    if not (
+        isinstance(detail, dict)
+        and isinstance(action, dict)
+        and action.get("call") == REQUEST_INPUT_FUNCTION_CALL_NAME
+        and str(detail.get("slot")).startswith(PRICES_SLOT_PREFIX)
+    ):
+        return None
+    part = detail.get("part")
+    return part if isinstance(part, str) else None
+
+
+def _priced_answers(
+    args: dict[str, Any],
+    body: Mapping[str, Any],
+    chosen: dict[str, PricesChoice],
+    measures: Mapping[str, str | None],
+) -> None:
+    """Record in `chosen` what one clarify response says of each part its call
+    priced, each answer replacing the choices of its part's measure (`_prices_chosen`)."""
+    answers = _answers(body.get("result"))
+    for question_id, candidates in _question_candidates(args).items():
+        marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
+        answer = answers.get(question_id)
+        if not marked or not isinstance(answer, dict) or not _said(answer):
+            continue
+        part = str(marked[0]["part"])
+        picked = next(
+            (
+                choice
+                for candidate in marked
+                if answer.get("kind") == "option"
+                and candidate.get("spec_id") == answer.get("spec_id")
+                and (choice := PricesChoice.of_candidate(candidate)) is not None
+            ),
+            None,
+        )
+        _release_measure(chosen, part, measures)
+        if picked is not None:
+            chosen[part] = picked
+
+
+class _Step(NamedTuple):
+    """One step of a session's history, as the readers of what the user answered walk it.
+
+    `message` is a message the user typed (`_user_message`). `call` is an
+    `adk_request_input` call, with its id and `args`. `answer` is a response
+    to one, with its id, the `args` of the nearest preceding call sharing
+    that id (`None` when none precedes it) and the response body. `response`
+    is any other tool's response, with its `name` and body.
+    """
+
+    kind: Literal["message", "call", "answer", "response"]
+    call_id: str | None = None
+    args: dict[str, Any] | None = None
+    body: Mapping[str, Any] = MappingProxyType({})
+    name: str | None = None
+
+
+def _session_steps(tool_context: ToolContext) -> Iterator[_Step]:
+    """The steps of `tool_context`'s session history, in event order (`_Step`)."""
+    calls: dict[str, dict[str, Any]] = {}
+    for event in tool_context.session.events:
+        if not (event.content and event.content.parts):
+            continue
+        if _user_message(event):
+            yield _Step("message")
+            continue
+        for part in event.content.parts:
+            call = part.function_call
+            if (
+                call is not None
+                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+                and call.id is not None
+            ):
+                calls[call.id] = call.args or {}
+                yield _Step("call", call.id, call.args or {})
+                continue
+            response = part.function_response
+            if response is None:
+                continue
+            body = response.response or {}
+            if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
+                yield _Step("answer", response.id, calls.get(response.id or ""), body)
+            else:
+                yield _Step("response", body=body, name=response.name)
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:
@@ -786,24 +1018,9 @@ def _picks(result: object, offered: dict[str, frozenset[str]]) -> tuple[str, ...
 
 def _answered_calls(tool_context: ToolContext) -> Iterator[tuple[dict[str, Any], object]]:
     """Each interrupt answer with the nearest preceding call sharing its id."""
-    calls: dict[str, dict[str, Any]] = {}
-    for event in tool_context.session.events:
-        if not (event.content and event.content.parts):
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if (
-                call is not None
-                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-                and call.id is not None
-            ):
-                calls[call.id] = call.args or {}
-                continue
-            response = part.function_response
-            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
-                continue
-            if response.id in calls:
-                yield calls[response.id], (response.response or {}).get("result")
+    for step in _session_steps(tool_context):
+        if step.kind == "answer" and step.args is not None:
+            yield step.args, step.body.get("result")
 
 
 def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
@@ -1162,7 +1379,7 @@ class ToolContextSession:
     The state is the call's own. What the user was asked and answered is
     read off the session's event history (`_elected_spec_ids`,
     `_answers_since_referral`, `_combination_picks`,
-    `_user_spoke_since_recorded`). Recording an admitted
+    `_user_spoke_since_recorded`, `_prices_chosen`). Recording an admitted
     plan writes its windowed pins, the plan, its round count, and clears the
     referral the new proposal supersedes.
     """
@@ -1189,6 +1406,10 @@ class ToolContextSession:
     def user_spoke_since(self, version: int) -> bool:
         """`_user_spoke_since_recorded` over the call's session."""
         return _user_spoke_since_recorded(self.tool_context, version)
+
+    def prices_chosen(self) -> dict[str, PricesChoice]:
+        """`_prices_chosen` over the call's session."""
+        return _prices_chosen(self.tool_context)
 
     def decision_pick(self) -> DecisionPick | None:
         """The pick on the plan card the call's planner entry holds (`planner.plan.decision_pick`)."""
@@ -2301,15 +2522,16 @@ def build_planner_tools(
                 `{"spec_id": ..., "label": ...}` -- `label` is the
                 candidate's own `sentence`, not invented text. Omit it for
                 a referral that carries none.
-            options: The `options` a `combination_unasked` refusal's action
-                carries, unchanged. Omit it otherwise.
+            options: The `options` a refusal's action carries, unchanged.
+                Omit it otherwise.
             recommended_spec_id: The candidate you favour, when you favour
                 one -- must name one of `candidates`.
             rationale: Why you favour it, for the user to read, when
                 `recommended_spec_id` is given.
         """
         del message, rationale  # carried through to the wire frame, not read back here
-        if options and (candidates or options != [dict(o) for o in COMBINATION_OPTIONS]):
+        fixed = ([dict(o) for o in COMBINATION_OPTIONS], [dict(o) for o in PRICES_OPTIONS])
+        if options and (candidates or options not in fixed):
             return problem(
                 ProblemCode.INVALID_ARGUMENTS,
                 "`options` must be the ones a refusal's action carries, unchanged, "

@@ -98,6 +98,7 @@ from planner.plan import (
     dataset_of,
     frame_shapes,
     inputs_of,
+    is_code_written,
     is_scope_choice,
     is_search_pin,
     side_entities,
@@ -1221,17 +1222,35 @@ def card_questions(plan: Plan) -> dict[str, str]:
     Where another row settles the same axis, as for two sources Search
     offers different options on, each adds the inputs it governs, named as
     the card's labels name them (`_concepts` of `shown_plan`, so a rolling
-    copy never numbers its origin): "Basis: health". Any other
-    row asks the planner's question (`card_decision_text`).
+    copy never numbers its origin): "Basis: health". Where the plan
+    holds the user's prices for several parts (`DecisionFixes.prices`,
+    `submission.prices_choice`), each such row names the inputs citing it
+    the same way: "Prices: health". Any other row asks the planner's
+    question (`card_decision_text`).
     """
     rows = [decision for decision in shown_decisions(plan) if decision.caveat is None]
     axes = Counter(decision.scope.axis for decision in rows if decision.scope is not None)
+    priced = {
+        decision.slot
+        for decision in rows
+        if decision.fixes is not None and decision.fixes.prices is not None
+    }
     concepts = (
-        _concepts(shown_plan(plan)).names if any(count > 1 for count in axes.values()) else {}
+        _concepts(shown_plan(plan)).names
+        if any(count > 1 for count in axes.values()) or len(priced) > 1
+        else {}
     )
     questions: dict[str, str] = {}
     for decision in rows:
         name = CHOICE_NAMES.get(decision.scope.axis) if decision.scope is not None else None
+        citing = [
+            label
+            for requirement_id, label in concepts.items()
+            if decision.slot in plan.requirement(requirement_id).decision_ids
+        ]
+        if len(priced) > 1 and decision.slot in priced and citing:
+            questions[decision.slot] = f"Prices: {_joined(citing)}"
+            continue
         if name is None:
             questions[decision.slot] = card_decision_text(
                 decision.description, plan, decision=decision
@@ -1302,17 +1321,17 @@ def switchable_decision(decision: Decision) -> bool:
     """Whether the card offers `decision`'s other options as a switch.
 
     A decision the planner wrote that settles requirement fields (`fixes`)
-    is switchable. A switch of it replans with the user's pick held. The
-    decisions `propose_plan` writes are not: a search pin's measure
-    (`planner.plan.is_search_pin`) and a scope choice switch through Search
-    (`choice_id`), and one qualifying the answer (`Decision.caveat`) reaches
-    the card only as a caveat.
+    is switchable. A switch of it replans with the user's pick held. So is
+    the prices the user chose for a part (`DecisionFixes.prices`): a switch
+    of it is a new answer to the part's prices question
+    (`planner.agent._prices_chosen`). The other decisions `propose_plan`
+    writes (`planner.plan.is_code_written`) are not: a search pin's measure
+    and a scope choice switch through Search (`choice_id`), and one
+    qualifying the answer (`Decision.caveat`) reaches the card only as a
+    caveat.
     """
-    return (
-        decision.fixes is not None
-        and decision.scope is None
-        and decision.caveat is None
-        and not is_search_pin(decision)
+    return decision.fixes is not None and (
+        decision.fixes.prices is not None or not is_code_written(decision)
     )
 
 

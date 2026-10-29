@@ -26,6 +26,7 @@ from planner.operations import (
 )
 from planner.parties import PartyRole
 from planner.plan import (
+    _NESTED_FIXES,
     CUT_MARKER,
     MAX_ACROSS_WORDS,
     MAX_DECISION_DESCRIPTION_CHARS,
@@ -1073,7 +1074,12 @@ def test_a_calculation_the_question_states_outright_cites_no_decision(
 
 
 def test_a_draft_names_every_field_a_decision_fixes_but_the_pin() -> None:
-    assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {"source_spec_id"}
+    # Code alone writes the pin and the user's prices for a part
+    # (`submission.prices_choice`).
+    assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {
+        "source_spec_id",
+        "prices",
+    }
 
 
 @pytest.mark.parametrize(
@@ -4682,7 +4688,9 @@ def test_every_decision_fixes_field_is_declared_by_a_requirement_class() -> None
         for name in cls.model_fields
     }
 
-    undeclared = sorted(set(DecisionFixes.model_fields) - requirement_field_names)
+    # A nested field is held inside the requirement field it names first.
+    held = {_NESTED_FIXES.get(name, (name,))[0] for name in DecisionFixes.model_fields}
+    undeclared = sorted(held - requirement_field_names)
 
     assert undeclared == []
 

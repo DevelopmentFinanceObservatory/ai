@@ -232,6 +232,14 @@ from translator.discovery import (
 from translator.referral import USER_DECIDES, Referral, ReferralKind, load_referral
 from translator.tool import authored_answer
 
+from submission.prices_choice import (
+    PRICES_SLOT_PREFIX,
+    Parts,
+    PricesChoice,
+    base_year_refusal,
+    prices_decisions,
+)
+
 # What a combination ask asks about: the `sum_of` requirement's id and the
 # datasets its sides read (`_sum_datasets`).
 type Combination = tuple[str, frozenset[str]]
@@ -292,6 +300,10 @@ class SessionView(Protocol):
 
     def user_spoke_since(self, version: int) -> bool:
         """Whether the user has said anything (an answer, an amendment, a new message) since plan `version` was recorded."""
+        ...
+
+    def prices_chosen(self) -> Mapping[str, PricesChoice]:
+        """The prices the user picked answering an ask, by the part each prices, until released."""
         ...
 
     def decision_pick(self) -> DecisionPick | None:
@@ -459,7 +471,15 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             }
         )
     except ValidationError as exc:
-        return _invalid_data(exc, proposer)
+        shown = pin_sources(view.state)
+        readings = SourceReadings.of_shown(shown)
+        return base_year_refusal(
+            exc,
+            proposal.evidence_requirements,
+            choices=view.prices_chosen(),
+            parts=Parts.of_shown(shown, readings.get, readings.block),
+            propose=proposer.call,
+        ) or _invalid_data(exc, proposer)
     reads_user_words = reads_user_words or amendment_entry(view.state)
     question = proposal.question
     answer_mode = proposal.answer_mode
@@ -609,6 +629,27 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
     )
+    priced = prices_decisions(
+        view.prices_chosen(),
+        evidence_requirements,
+        requirements_after,
+        parts=Parts.of_shown(
+            pins,
+            sources.get,
+            sources.block,
+            aligned={pin.spec_id: pin.origin for pin in aligned_pins(view.state)},
+        ),
+        propose=proposer.call,
+    )
+    if isinstance(priced, dict):
+        return priced
+    prices, evidence_requirements = priced
+    if prices:
+        priced_slots = {decision.slot for decision in prices}
+        settled = [*(d for d in settled if d.slot not in priced_slots), *prices]
+        requirements_after = _requirements_after(
+            previous, evidence_requirements, removed_evidence_requirements
+        )
     read = full_histories(view.state)
     definition_lookup = load_log(view.state).recorded_definition
     settled = [
@@ -859,8 +900,9 @@ def _slot_code_writes(slot: str) -> bool:
     """Whether `slot` has the form of a decision `propose_plan` writes itself.
 
     Those are a pin's measure and scope decisions (`search_pin_slot`,
-    `scope_choice_slot`), and the decisions a compiled whole or a calculation
-    whose inputs differ on an aligned axis states (`_whole_slot`, `_DIFFERENCES`).
+    `scope_choice_slot`), the decisions a compiled whole or a calculation
+    whose inputs differ on an aligned axis states (`_whole_slot`, `_DIFFERENCES`),
+    and the prices the user chose for a part (`submission.prices_choice.prices_slot`).
     """
     return slot.startswith(
         (
@@ -868,6 +910,7 @@ def _slot_code_writes(slot: str) -> bool:
             *(scope_choice_slot("", axis) for axis in get_args(ScopeAxis)),
             _whole_slot(""),
             *(difference.prefix for difference in _DIFFERENCES.values()),
+            PRICES_SLOT_PREFIX,
         )
     )
 
