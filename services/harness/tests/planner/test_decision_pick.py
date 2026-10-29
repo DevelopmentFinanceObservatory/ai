@@ -960,6 +960,43 @@ def test_a_pick_replacing_a_shares_input_keeps_the_share_whatever_admission_deri
     assert result["outcome"] == Outcome.OK.value, result
 
 
+def test_the_picked_share_proposed_with_no_pick_held_is_refused() -> None:
+    """The plan the pick above records, US total ODA as a share of itself, proposed
+    by the planner with no pick held: nothing the user chose put the sides on one
+    series, so the share is refused for the planner to redraft."""
+    part = Decision(
+        slot="part",
+        description="Which figure leads the share.",
+        options=["US multilateral ODA", "another figure"],
+        chosen="another figure",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(measure="another figure"),
+    )
+    measure = part.model_copy(
+        update={"slot": "measure", "options": ["a", "b"], "chosen": "a", "fixes": None}
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_TOTAL)
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, part]),
+        evidence_requirements=[
+            _dac_countries("first", _US_TOTAL).model_copy(
+                update={"measure": "another figure", "decision_ids": ("measure", "part")}
+            ),
+            _dac_countries("second", _US_TOTAL),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
+    assert load_plan(ctx.state) is None
+
+
 # A ranking decision whose options differ only in how many donors it keeps.
 RANKING = Decision(
     slot="donor_scope",
