@@ -36,7 +36,8 @@ def decision_pick(
     spec_id to the pin it copies, what the replan for it may change and what
     it must keep (`DecisionPick.on_card`): the origin every proposal of the
     replan is held against. `None` when `choice_id` names no switchable
-    planner decision of `plan`, or `option_id` none of its options.
+    planner decision of `plan`, or `option_id` none of its options or the
+    one it has chosen, so that switch does not apply.
     """
     if not is_decision_choice(choice_id):
         return None
@@ -45,6 +46,6 @@ def decision_pick(
     if decision is None or decision.fixes is None or not switchable_decision(decision):
         return None
     option = next((o for o in decision.options if decision_option_id(o) == option_id), None)
-    if option is None:
+    if option is None or option == decision.chosen:
         return None
     return DecisionPick.on_card(unwindowed(authored(plan), to_origin), slot=slot, chosen=option)

@@ -456,8 +456,9 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
             return
         # A switch moves a scope choice and approves nothing: the `switch`
         # node revises the plan in code and offers it here again. A row it
-        # cannot find, such as a planner decision the plan dropped, it
-        # offers back unchanged with `switch_failed`.
+        # cannot find, such as a planner decision the plan dropped or one
+        # switched to the option it already has, it offers back unchanged
+        # with `switch_failed`.
         yield Event(output={"switch": switch}, route="switch")
         return
     key: Any = plan_revision(plan)

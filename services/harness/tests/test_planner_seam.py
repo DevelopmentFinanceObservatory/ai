@@ -2123,8 +2123,8 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
 _PICKED = DecisionPick(
     slot="donor_scope",
     chosen="the top 10 donors",
-    origin_chosen="the DAC total",
-    origin_reading="0" * 64,
+    replaced_readings=("0" * 64,),
+    cited=("donor_scope",),
     kept_requirements={},
     kept_decisions={},
 )
@@ -2161,7 +2161,8 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
         "Change only that decision and the requirements that cite it. Carry every other "
         "requirement, with its id, its content and its citations, and every other decision "
         "exactly as the plan card has them. Keep the id of any replaced requirement that "
-        "another requirement reads.\n" in asked
+        "another requirement reads. Cite that decision, and every decision of the user's "
+        "that the replaced requirements cited, from each requirement you add.\n" in asked
     )
     assert "The user asks for this change" not in asked
     assert refused is not None and amended is not None

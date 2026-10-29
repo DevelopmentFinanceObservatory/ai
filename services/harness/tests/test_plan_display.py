@@ -4594,13 +4594,14 @@ def _fixing_measure(plan: Plan) -> Plan:
 def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it() -> None:
     """The row `decision/measure`'s option for a label picks that label, with
     the decision as the plan states it. A row or option the card does not
-    offer picks nothing."""
+    offer picks nothing, and nor does the option the decision has chosen."""
     unfixed = scripted_plan("kenya life expectancy", spec_id=None)
     plan = _fixing_measure(unfixed)
     (measure,) = plan.decisions
     birth, healthy = measure.options
     assert (birth, healthy) == ("life expectancy at birth", "healthy life expectancy")
     assert measure.fixes is not None
+    assert measure.chosen == birth
 
     picks = [
         decision_pick(plan, choice_id=choice, option_id=option, to_origin={})
@@ -4616,7 +4617,7 @@ def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it()
 
     assert picks == [
         DecisionPick.on_card(plan, slot="measure", chosen=healthy),
-        DecisionPick.on_card(plan, slot="measure", chosen=birth),
+        None,
         None,
         None,
         None,

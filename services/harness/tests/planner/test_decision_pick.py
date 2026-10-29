@@ -17,15 +17,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from analysis_mcp.server import mcp as analysis_mcp
+from compiler.compile import compile_plan
+from compiler.sources import source_from_spec_block
+from compiler.surface import McpSurface
+from data_mcp.server import mcp as data_mcp
 from google.adk.events import EventActions
 from harness.decision_pick import decision_pick
 from harness.plan_display import decision_option_id
+from harness.studio_state import _turn_identities
 from planner.agent import build_planner_tools
 from planner.plan import (
     ASKS_STATE_KEY,
+    AggregateRequirement,
     AnswerMode,
     DatasetRequirement,
     Decision,
@@ -35,14 +42,29 @@ from planner.plan import (
     RankRequirement,
     ResolvedBy,
     Unit,
+    current_recorded_identity,
     load_plan,
     save_decision_pick,
+    windowed_pins,
 )
-from planner.records import RankAmong, RankDirection, Reduction
+from planner.records import GroupBy, RankAmong, RankDirection, Reduction
 from planner.tool_results import Outcome, ProblemCode
+from translator.mechanical import build_translation
 
 from ..decision_drafts import drafts
 from ..session_events import response_event
+from .test_agent import (
+    _FRANCE_KENYA,
+    _GROSS,
+    _US_MULTILATERAL,
+    _US_TOTAL,
+    _dac_countries,
+    _FakeToolContext,
+    _share,
+    _show_block,
+    _show_blocks,
+    _tools_by_name,
+)
 
 DAC_TOTAL = "spec_" + "d" * 32
 EVERY_DONOR = "spec_" + "e" * 32
@@ -200,19 +222,21 @@ def test_a_pick_that_changes_the_plans_shape_is_admitted_as_the_users(
 
 
 @pytest.mark.parametrize(
-    ("patch", "stated"),
+    ("patch", "stated", "kept"),
     [
-        pytest.param({"decisions": [DONOR_SCOPE]}, "the DAC total", id="restated"),
-        pytest.param({"decisions": []}, "the DAC total", id="carried"),
-        pytest.param({"removed_decisions": ["donor_scope"]}, None, id="removed"),
+        pytest.param({"decisions": [DONOR_SCOPE]}, "the DAC total", "dac", id="restated"),
+        pytest.param({"decisions": []}, "the DAC total", "dac", id="carried"),
+        pytest.param({"removed_decisions": ["donor_scope"]}, None, "dac", id="removed"),
         pytest.param(
             {"decisions": [DONOR_SCOPE.model_copy(update={"chosen": "the top 10 donors"})]},
             "the top 10 donors",
+            "dac",
             id="relabelled-over-the-same-requirements",
         ),
         pytest.param(
             {"decisions": [RELABELLED_WIDER]},
             "the top 10 donors",
+            "dac",
             id="relabelled-listing-more-fields",
         ),
         pytest.param(
@@ -221,17 +245,28 @@ def test_a_pick_that_changes_the_plans_shape_is_admitted_as_the_users(
                 "renamed": True,
             },
             "the top 10 donors",
+            "dac_total",
             id="relabelled-over-the-same-requirement-renamed",
+        ),
+        pytest.param(
+            {
+                "decisions": [DONOR_SCOPE.model_copy(update={"chosen": "the top 10 donors"})],
+                "extra": True,
+            },
+            "the top 10 donors",
+            "dac",
+            id="superset-of-the-card",
         ),
     ],
 )
 def test_a_plan_that_does_not_state_the_pick_is_refused(
-    decision: Callable[..., Decision], patch: dict[str, Any], stated: str | None
+    decision: Callable[..., Decision], patch: dict[str, Any], stated: str | None, kept: str
 ) -> None:
     """A plan carrying or restating the DAC total, or dropping the decision,
     is refused. So is the DAC total under the picked label, however many
-    fields the decision lists and whatever the requirement is called: what
-    the requirements citing it read is unchanged."""
+    fields the decision lists, whatever the requirement is called, and
+    whatever it adds beside it: a requirement still reads what the DAC total
+    read, and the refusal names it."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
     _pick_top_ten(ctx)
@@ -240,6 +275,17 @@ def test_a_plan_that_does_not_state_the_pick_is_refused(
         if "removed_decisions" in patch
         else [_dac_total().model_copy(update={"id": "dac_total"})]
         if patch.get("renamed")
+        else [
+            _dac_total(),
+            _dac_total().model_copy(
+                update={
+                    "id": "dac_2020",
+                    "period": Period(start=2020, end=2020),
+                    "decision_ids": ("measure", "donor_scope"),
+                }
+            ),
+        ]
+        if patch.get("extra")
         else [_dac_total()]
     )
 
@@ -258,7 +304,7 @@ def test_a_plan_that_does_not_state_the_pick_is_refused(
         "slot": "donor_scope",
         "chosen": "the top 10 donors",
         "stated": stated,
-        "kept": None,
+        "kept": kept,
     }
     recorded = load_plan(ctx.state)
     assert recorded is not None and recorded.version == first["version"]
@@ -267,18 +313,20 @@ def test_a_plan_that_does_not_state_the_pick_is_refused(
 def test_a_restated_pick_its_requirements_fix_nothing_of_is_refused_saying_so(
     decision: Callable[..., Decision],
 ) -> None:
-    """The plan states the picked option, cited only by the DAC total, which
-    states neither a rank's limit nor what it ranks among: the decision fixes
-    nothing, and the refusal says the requirements citing it fix none of
-    what it names."""
+    """The plan states the picked option, cited only by the donors to Kenya,
+    which state neither a rank's limit nor what it ranks among: the decision
+    fixes nothing, and the refusal says the requirements citing it fix none
+    of what it names."""
     ctx = _context()
     first = _recorded_dac_total(ctx, decision)
     _pick_top_ten(ctx)
+    aid, _ = _year_kept(YEAR)
 
     result = _propose_plan(
         ctx,
         decisions=drafts([TOP_TEN]),
-        evidence_requirements=[_dac_total()],
+        evidence_requirements=[aid],
+        removed_evidence_requirements=["dac"],
         amends_version=first["version"],
     )
 
@@ -287,9 +335,15 @@ def test_a_restated_pick_its_requirements_fix_nothing_of_is_refused_saying_so(
 
 
 def _year_kept(period: Period) -> list[Any]:
-    """`_ranked_donors` with the donors read over `period` under the user's year decision."""
+    """`_ranked_donors` with the donors read over `period`, each requirement
+    citing the picked decision and the user's year, as the DAC total did."""
     aid, top = _ranked_donors()
-    return [aid.model_copy(update={"decision_ids": ("measure", "year"), "period": period}), top]
+    return [
+        aid.model_copy(
+            update={"decision_ids": ("measure", "donor_scope", "year"), "period": period}
+        ),
+        top.model_copy(update={"decision_ids": ("donor_scope", "year")}),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -686,3 +740,381 @@ def test_a_pick_replan_keeping_the_rest_of_the_card_is_admitted(
     plan = load_plan(ctx.state)
     assert plan is not None
     assert sorted(r.id for r in plan.evidence_requirements) == ["aid", "dac_prior", "top"]
+
+
+def test_a_replacing_requirement_cites_the_users_decisions_the_replaced_ones_cited(
+    decision: Callable[..., Decision],
+) -> None:
+    """The user's year is cited by the DAC total and by the gross total the
+    pick leaves alone. A replan whose donors read 2022 without citing the
+    year is refused, naming the donors, though the year still stands on the
+    gross total."""
+    ctx = _context()
+    gross = _dac_total().model_copy(
+        update={"id": "gross", "decision_ids": ("measure", "year"), "measure": "gross ODA"}
+    )
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), DONOR_SCOPE, USER_YEAR]),
+        evidence_requirements=[_dac_total(), gross],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    _pick_top_ten(ctx)
+    aid, top = _year_kept(Period(start=2022, end=2022))
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=[
+            aid.model_copy(update={"decision_ids": ("measure", "donor_scope")}),
+            top,
+        ],
+        removed_evidence_requirements=["dac"],
+        amends_version=first["version"],
+    )
+
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value, result
+    assert result["detail"]["kept"] == "aid"
+    assert "leaves decision 'year' uncited on 'aid'" in result["message"]
+
+
+def test_a_landed_pick_can_be_picked_back(decision: Callable[..., Decision]) -> None:
+    """The top 10 donors replace the DAC total, and the user then picks the
+    DAC total back on the new card. Every requirement the first replan added
+    cites the pick, so the second replaces them all and is admitted."""
+    ctx = _context()
+    first = _recorded_dac_total(ctx, decision)
+    _pick_top_ten(ctx)
+    ranked = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=_year_kept(YEAR),
+        removed_evidence_requirements=["dac"],
+        amends_version=first["version"],
+    )
+    assert ranked["outcome"] == Outcome.OK.value, ranked
+    card = load_plan(ctx.state)
+    assert card is not None
+    back = decision_pick(
+        card,
+        choice_id="decision/donor_scope",
+        option_id=decision_option_id("the DAC total"),
+        to_origin={},
+    )
+    assert back is not None
+    save_decision_pick(ctx.state, back)
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([DONOR_SCOPE]),
+        evidence_requirements=[_dac_total()],
+        removed_evidence_requirements=["aid", "top"],
+        amends_version=ranked["version"],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [r.id for r in plan.evidence_requirements] == ["dac"]
+
+
+def test_a_contradicted_decision_is_named_not_the_kept_requirement_it_sits_on(
+    decision: Callable[..., Decision],
+) -> None:
+    """The planner's prices decision is cited by the DAC total and by the
+    2021 total the pick leaves alone. Donors read at constant prices under it
+    are refused naming the prices decision, which the replan contradicted,
+    and not the 2021 total, which it never touched."""
+    ctx = _context()
+    prices = Decision(
+        slot="prices",
+        description="Which prices the figures are in.",
+        options=["current", "constant"],
+        chosen="current",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="Current prices are the default.",
+        fixes=DecisionFixes(unit=USD),
+    )
+    first = _propose_plan(
+        ctx,
+        question="how much aid does Kenya get",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), DONOR_SCOPE, USER_YEAR, prices]),
+        evidence_requirements=[
+            _dac_total().model_copy(
+                update={"decision_ids": ("measure", "donor_scope", "year", "prices")}
+            ),
+            _prior_total().model_copy(update={"decision_ids": ("measure", "prices")}),
+        ],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    _pick_top_ten(ctx)
+    aid, top = _year_kept(YEAR)
+    constant = Unit(currency="USD", prices="constant", base_year=2022)
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts([TOP_TEN]),
+        evidence_requirements=[
+            aid.model_copy(
+                update={"decision_ids": (*aid.decision_ids, "prices"), "unit": constant}
+            ),
+            top,
+        ],
+        removed_evidence_requirements=["dac"],
+        amends_version=first["version"],
+    )
+
+    assert result["code"] == ProblemCode.USER_PICK_NOT_HELD.value, result
+    assert result["detail"]["kept"] == "prices"
+
+
+def test_a_pick_replacing_a_shares_input_keeps_the_share_whatever_admission_derives_for_it() -> (
+    None
+):
+    """The card shares US multilateral ODA over the US total, and admission
+    gave the share a caveat that its inputs count different providers. A pick
+    replacing the numerator, under its own id, with the US total leaves the
+    share as the planner wrote it, and is admitted though admission drops
+    the caveat it derived."""
+    measure = Decision(
+        slot="measure",
+        description="What the share measures.",
+        options=["a", "b"],
+        chosen="a",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+    )
+    first = _dac_countries("first", _US_MULTILATERAL)
+    part = Decision(
+        slot="part",
+        description="Which figure leads the share.",
+        options=[first.measure, "another figure"],
+        chosen=first.measure,
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=DecisionFixes(measure=first.measure),
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
+    propose = _tools_by_name()["propose_plan"].func
+    card = propose(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([measure, part]),
+        evidence_requirements=[
+            first.model_copy(update={"decision_ids": ("measure", "part")}),
+            _dac_countries("second", _US_TOTAL),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+    assert card["outcome"] == Outcome.OK.value, card
+    shown = load_plan(ctx.state)
+    assert shown is not None
+    assert any(d.caveat is not None for d in shown.decisions)
+    pick = decision_pick(
+        shown,
+        choice_id="decision/part",
+        option_id=decision_option_id("another figure"),
+        to_origin={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+
+    result = propose(
+        amends_version=card["version"],
+        decisions=drafts(
+            [
+                part.model_copy(
+                    update={
+                        "chosen": "another figure",
+                        "fixes": DecisionFixes(measure="another figure"),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[
+            _dac_countries("first", _US_TOTAL).model_copy(
+                update={"measure": "another figure", "decision_ids": ("measure", "part")}
+            )
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+# A ranking decision whose options differ only in how many donors it keeps.
+RANKING = Decision(
+    slot="donor_scope",
+    description="How many of the largest donors to rank.",
+    options=["the top 10 donors", "the top 5 donors"],
+    chosen="the top 10 donors",
+    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+    rationale="Ten donors cover most of the aid.",
+    fixes=DecisionFixes(limit=10, among=RankAmong.POPULATION),
+)
+
+
+def test_a_pick_keeping_part_of_what_it_replaces_unchanged_is_admitted(
+    decision: Callable[..., Decision],
+) -> None:
+    """The top 10 donors become the top 5: the donors the ranking reads stay
+    as they were and only the ranking's limit moves. Part of what the card's
+    requirements citing the pick read survives, and the replan is admitted."""
+    ctx = _context()
+    first = _propose_plan(
+        ctx,
+        question="who gives Kenya the most aid",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision(), RANKING, USER_YEAR]),
+        evidence_requirements=_year_kept(YEAR),
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    card = load_plan(ctx.state)
+    assert card is not None
+    pick = decision_pick(
+        card,
+        choice_id="decision/donor_scope",
+        option_id=decision_option_id("the top 5 donors"),
+        to_origin={},
+    )
+    assert pick is not None
+    save_decision_pick(ctx.state, pick)
+    aid, top = _year_kept(YEAR)
+
+    result = _propose_plan(
+        ctx,
+        decisions=drafts(
+            [
+                RANKING.model_copy(
+                    update={
+                        "chosen": "the top 5 donors",
+                        "fixes": DecisionFixes(limit=5, among=RankAmong.POPULATION),
+                    }
+                )
+            ]
+        ),
+        evidence_requirements=[aid, top.model_copy(update={"limit": 5})],
+        amends_version=first["version"],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    picked = next(d for d in plan.decisions if d.slot == "donor_scope")
+    assert (picked.chosen, picked.fixes) == (
+        "the top 5 donors",
+        DecisionFixes(limit=5, among=RankAmong.POPULATION),
+    )
+    assert next(r for r in plan.evidence_requirements if r.id == "aid") == aid
+
+
+async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compiles(
+    decision: Callable[..., Decision],
+) -> None:
+    """France's aid to Kenya, pinned to Search's answer and recorded over the
+    plan's years as a windowed copy, is summed by year under a planner
+    decision. Picking the average replaces the sum with one citing the
+    user's year as the sum did, though it states no period: the year and the pin settle as
+    they were, and the plan still translates and compiles."""
+    shape = Decision(
+        slot="shape",
+        description="How to combine each year's flows.",
+        options=["the yearly sum", "the yearly average"],
+        chosen="the yearly sum",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="A sum is the usual reading.",
+        fixes=DecisionFixes(reduction=Reduction.SUM),
+    )
+    year = USER_YEAR.model_copy(
+        update={
+            "options": ["2015-2024", "2020-2024"],
+            "chosen": "2015-2024",
+            "fixes": DecisionFixes(period=Period(start=2015, end=2024)),
+        }
+    )
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=("measure", "year"),
+        measure="official development assistance",
+        entities=(Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")),
+        period=Period(start=2015, end=2024),
+        unit=USD,
+        source_spec_id=_GROSS,
+    )
+    total = AggregateRequirement(
+        id="total",
+        decision_ids=("shape", "year"),
+        input_id="aid",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    propose = _tools_by_name()["propose_plan"].func
+    token = current_recorded_identity.set(_turn_identities({_GROSS: _FRANCE_KENYA}, ()).get)
+    try:
+        card = propose(
+            question="how much aid does France give Kenya",
+            answer_mode=AnswerMode.COMPUTED,
+            decisions=drafts([decision(), shape, year]),
+            evidence_requirements=[aid, total],
+            tool_context=ctx,
+        )
+        assert card["outcome"] == Outcome.OK.value, card
+        (copy,) = windowed_pins(ctx.state).values()
+        shown = load_plan(ctx.state)
+        assert shown is not None
+        settled_year = next(d for d in shown.decisions if d.slot == "year")
+        pick = decision_pick(
+            shown,
+            choice_id="decision/shape",
+            option_id=decision_option_id("the yearly average"),
+            to_origin={copy.spec_id: copy.windowed_from},
+        )
+        assert pick is not None
+        assert pick.cited == ("shape", "year")
+        save_decision_pick(ctx.state, pick)
+
+        result = propose(
+            amends_version=card["version"],
+            decisions=drafts(
+                [
+                    shape.model_copy(
+                        update={
+                            "chosen": "the yearly average",
+                            "fixes": DecisionFixes(reduction=Reduction.MEAN),
+                        }
+                    )
+                ]
+            ),
+            evidence_requirements=[total.model_copy(update={"reduction": Reduction.MEAN})],
+            tool_context=ctx,
+        )
+    finally:
+        current_recorded_identity.reset(token)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    decisions = {d.slot: d for d in plan.decisions}
+    assert decisions["year"] == settled_year
+    assert decisions["shape"].fixes == DecisionFixes(reduction=Reduction.MEAN)
+    requirements = {r.id: r for r in plan.evidence_requirements}
+    assert requirements["total"].decision_ids == ("shape", "year")
+    assert requirements["aid"].source_spec_id == copy.spec_id  # type: ignore[union-attr]
+    source = source_from_spec_block(cast(Any, {**_FRANCE_KENYA, "spec_id": copy.spec_id}))
+    tools = await McpSurface(
+        sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
+    ).list_tools()
+    compiled = compile_plan(
+        plan=plan,
+        translation=build_translation(plan, {"aid": copy.spec_id}),
+        schemas={tool.name: tool for tool in tools},
+        discovered={"aid": source},
+    )
+    assert compiled.workflow is not None, compiled.issues

@@ -6300,22 +6300,22 @@ class DecisionPick(StrictModel):
     decision under `slot`, exactly as the decision's `options` states it,
     with the scope the replan for it may change.
 
-    `origin_chosen` is that decision's `chosen` as the card showed it when
-    the user picked. The card's requirements citing `slot` are the ones the
-    replan may replace: `origin_reading` is what they read
-    (`requirements_reading`). Everything else on the card stands:
-    `kept_requirements` holds each other requirement's `content_digest` by
-    id, and `kept_decisions` each decision's other than `slot` that the user
-    made or a kept requirement cites, by slot. Every proposal of the replan
-    is held against them (`submission.service._picked_decision`), so no
-    proposal can change the rest of the plan or return the old one under
-    the picked label. Built by `on_card`.
+    Call C the card's requirements citing `slot`. The replan replaces them:
+    `replaced_readings` holds what each read (`requirement_readings`), and
+    `cited` the decisions every replacing requirement cites, `slot` and each
+    decision of the user's a member of C cited. Everything else on the card
+    stands as the planner wrote it: `kept_requirements` holds each other
+    requirement's `requirement_digest` by id, and `kept_decisions` the
+    `content_digest` of each decision but `slot` and those code writes
+    (`is_code_written`) that the user made or a kept requirement cites, by
+    slot. Every proposal of the replan is held against them
+    (`submission.service._outside_pick`). Built by `on_card`.
     """
 
     slot: str
     chosen: str
-    origin_chosen: str
-    origin_reading: str
+    replaced_readings: tuple[str, ...]
+    cited: tuple[str, ...]
     kept_requirements: dict[str, str]
     kept_decisions: dict[str, str]
 
@@ -6327,21 +6327,38 @@ class DecisionPick(StrictModel):
         windowed copy's pin moved back to the pin it copies, as admission
         reads the plan a proposal amends.
         """
-        replaced = [r.id for r in card.evidence_requirements if slot in r.decision_ids]
-        kept = [r for r in card.evidence_requirements if r.id not in replaced]
-        cited = {cited for requirement in kept for cited in requirement.decision_ids}
+        requirements = card.evidence_requirements
+        replaced = [r for r in requirements if slot in r.decision_ids]
+        kept = [r for r in requirements if slot not in r.decision_ids]
+        readings = requirement_readings(requirements)
+        users = {d.slot for d in card.decisions if d.resolved_by is ResolvedBy.USER}
+        cited_by_kept = {cited for requirement in kept for cited in requirement.decision_ids}
+        code_written = {d.slot for d in card.decisions if is_code_written(d)}
         return cls(
             slot=slot,
             chosen=chosen,
-            origin_chosen=next(d.chosen for d in card.decisions if d.slot == slot),
-            origin_reading=requirements_reading(card.evidence_requirements, replaced),
-            kept_requirements={r.id: content_digest(r) for r in kept},
+            replaced_readings=tuple(sorted({readings[r.id] for r in replaced})),
+            cited=tuple(
+                sorted({slot} | (users & {cited for r in replaced for cited in r.decision_ids}))
+            ),
+            kept_requirements={
+                r.id: requirement_digest(r, code_written=code_written) for r in kept
+            },
             kept_decisions={
                 d.slot: content_digest(d)
                 for d in card.decisions
-                if d.slot != slot and (d.resolved_by is ResolvedBy.USER or d.slot in cited)
+                if d.slot != slot
+                and d.slot not in code_written
+                and (d.slot in users or d.slot in cited_by_kept)
             },
         )
+
+
+def is_code_written(decision: Decision) -> bool:
+    """Whether `propose_plan` wrote `decision` itself: a search pin's measure
+    (`is_search_pin`), a scope choice (`Decision.scope`), or a caveat
+    (`Decision.caveat`). Admission rewrites these on every proposal."""
+    return decision.scope is not None or decision.caveat is not None or is_search_pin(decision)
 
 
 def content_digest(item: StrictModel) -> str:
@@ -6349,16 +6366,25 @@ def content_digest(item: StrictModel) -> str:
     return _digest(item.model_dump(mode="json"))
 
 
-def requirements_reading(requirements: Sequence[EvidenceRequirement], ids: Collection[str]) -> str:
-    """The digest of what the requirements of `requirements` under `ids` read, as a set.
+def requirement_digest(requirement: EvidenceRequirement, *, code_written: Collection[str]) -> str:
+    """The `content_digest` of `requirement` less its citations of the decisions
+    under `code_written`, which admission derives itself."""
+    content = requirement.model_dump(mode="json")
+    content["decision_ids"] = [
+        slot for slot in requirement.decision_ids if slot not in code_written
+    ]
+    return _digest(content)
+
+
+def requirement_readings(requirements: Sequence[EvidenceRequirement]) -> dict[str, str]:
+    """The digest of what each of `requirements` reads, by id.
 
     Each requirement enters as its content less `id` and `decision_ids`,
     with every input it reads (`inputs_of`) standing for that input's own
-    content, read the same way. So the digest moves only when the set reads
-    something else: renaming a requirement, citing other decisions from it,
-    or stating one reading twice leaves it as it was. `requirements` must
-    not read one another in a cycle. Canonical JSON (RFC 8785) under
-    SHA-256, as `plan_revision`.
+    reading. So a digest moves only when the requirement, or one under it,
+    reads something else: renaming one or citing other decisions from it
+    leaves it as it was. `requirements` must not read one another in a
+    cycle. Canonical JSON (RFC 8785) under SHA-256, as `plan_revision`.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
     digests: dict[str, str] = {}
@@ -6378,7 +6404,7 @@ def requirements_reading(requirements: Sequence[EvidenceRequirement], ids: Colle
             )
         return digests[requirement.id]
 
-    return _digest(sorted({digest(by_id[requirement_id]) for requirement_id in ids}))
+    return {requirement.id: digest(requirement) for requirement in requirements}
 
 
 def _digest(content: dict[str, Any] | list[str]) -> str:

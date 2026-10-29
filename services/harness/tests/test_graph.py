@@ -1854,6 +1854,27 @@ async def test_a_planner_decisions_pick_replans_with_the_pick_held(
     assert state.get(PICK_REPLAN_KEY) is None
 
 
+async def test_a_switch_to_the_option_a_planner_decision_has_offers_the_plan_unchanged(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A switch of a planner decision's row to the option it already has
+    does not apply: the planner is not called again, and the card offers the
+    plan on record with `switch_failed`, as for an option it does not offer."""
+    plan = _pickable_plan(schemas=real_schemas)
+    seam = _ReplanSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    switch = {"choice_id": "decision/window", "option_id": decision_option_id("2015-2024")}
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": switch})
+
+    assert len(seam.calls) == 1
+    offered = _output_of(events, "switch")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"]["choice_id"] == "decision/window"
+    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
+
+
 @pytest.mark.parametrize(
     ("code", "final", "reported", "retryable"),
     [
