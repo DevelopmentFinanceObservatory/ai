@@ -323,7 +323,7 @@ def approve(
         yield interrupt_event(
             RequestInput(
                 interrupt_id=APPROVE_INTERRUPT,
-                message="Approve this plan before anything is retrieved?",
+                message="Approve this plan to run it? Its data may already be loading.",
                 payload=node_input,
             )
         )

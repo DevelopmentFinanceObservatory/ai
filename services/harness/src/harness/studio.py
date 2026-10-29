@@ -1702,10 +1702,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
 
         if body.decision is InterruptDecision.REJECT:
-            # The plan is declined and the turn ends; nothing was computed.
+            # The plan is declined and the turn ends; nothing was computed. Its
+            # early retrievals, if any, are left to finish or lapse.
             # The paused ADK invocation is abandoned in its per-turn session.
             async def _rejected() -> AsyncGenerator[Any]:
-                text = "Plan rejected; nothing was retrieved or computed."
+                text = "Plan rejected."
                 conversation.close_turn(final_text=text)
                 yield MessageComplete(
                     event="message.complete",
