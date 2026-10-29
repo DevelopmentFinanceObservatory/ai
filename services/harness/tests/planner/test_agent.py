@@ -12013,6 +12013,61 @@ def test_current_prices_move_a_constant_net_pin_to_the_net_count(
     assert refused["detail"]["pin"] == _NET
 
 
+@pytest.mark.parametrize("net_priced", [True, False], ids=["both-priced", "net-unpriced"])
+def test_a_gross_part_and_a_net_part_each_hold_their_own_prices(
+    requirement: Callable[..., DatasetRequirement], net_priced: bool
+) -> None:
+    """Two searches gave a gross part and a net part of one flow, the net one
+    over other years, with a constant series of each shown. The user chose
+    constant prices for gross and current for net, or priced gross alone. Each
+    requirement reads only its own part, so the plan lands with the net part
+    in current prices and no gross decision on it."""
+    net_part, net_constant = "spec_" + "9" * 32, "spec_" + "d" * 32
+    net = _counted_net(copy.deepcopy(_FRANCE_KENYA))
+    net["spec_id"] = net["definition"]["spec_id"] = net_part
+    net["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start": 2010,
+        "end": 2022,
+    }
+    net["resolved"]["alternative_measures"] = []
+    found_net = _counted_net(_constant_block())
+    found_net["spec_id"] = found_net["definition"]["spec_id"] = net_constant
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, _FRANCE_KENYA, net, _constant_block(), found_net)
+    shown = pin_sources(ctx.state)
+    sources = _shown_readings(ctx)
+    choices = {_GROSS: PricesChoice("constant", _CONSTANT_GROSS)}
+    if net_priced:
+        choices[net_part] = PricesChoice("current")
+    gross_reqt = requirement(
+        id="gross",
+        source_spec_id=_CONSTANT_GROSS,
+        unit=Unit(currency="USD", prices="constant", base_year=2023),
+    )
+    net_reqt = requirement(
+        id="net", source_spec_id=net_part, unit=Unit(currency="USD", prices="current")
+    )
+
+    landed = prices_decisions(
+        choices,
+        [gross_reqt, net_reqt],
+        [gross_reqt, net_reqt],
+        parts=Parts.of_shown(shown, sources.get, sources.block),
+        propose="propose_plan",
+    )
+
+    assert isinstance(landed, tuple), landed
+    cited = {
+        reqt.id: {slot for slot in reqt.decision_ids if slot.startswith("user_prices_")}
+        for reqt in landed[1]
+    }
+    assert cited == {
+        "gross": {f"user_prices_{_GROSS}"},
+        "net": {f"user_prices_{net_part}"} if net_priced else set(),
+    }
+
+
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
     """A prices refusal sent the planner to the user, and the user then typed
     a message, which releases every choice. A later ask offering
@@ -12443,15 +12498,24 @@ def test_one_prices_choice_fixes_the_price_basis_alone(
     units: tuple[Unit, Unit],
 ) -> None:
     """One prices choice for a part, and two requirements reading the part in
-    different currencies or base years: the plan honours the choice, so it lands."""
+    different currencies or base years, the other count fetched in euros among
+    them: the plan honours the choice, so it lands."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(
         ctx,
         _priced_block(_GROSS, "CurrencyUSD", "USD", offers=(_CONSTANT_GROSS, _CONSTANT_2015)),
-        _priced_block(_NET, "CurrencyEUR", "EUR"),
         _priced_block(_CONSTANT_GROSS, "ConstantUSD_2023", "USD"),
         _priced_block(_CONSTANT_2015, "ConstantUSD_2015", "USD"),
+    )
+    save_pin_sources(
+        ctx.state,
+        {
+            **pin_sources(ctx.state),
+            _NET: PinSource(
+                block=_priced_block(_NET, "CurrencyEUR", "EUR"), settled=True, other_count_of=_GROSS
+            ),
+        },
     )
     ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS, pick=pick)
     first, second = (

@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, Literal, NamedTuple
 
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
@@ -41,6 +42,7 @@ from planner.plan import (
     Decision,
     DecisionFixes,
     EvidenceRequirement,
+    PinSource,
     ResolvedBy,
     Unit,
 )
@@ -106,20 +108,48 @@ class Parts:
     """What the prices rules read of the datasets on record.
 
     `source_of` and `block_of` answer a spec_id's source and block, `None`
-    when none is held. `shown` is every spec_id the planner was shown.
-    `aligned` maps each pin alignment compiled to the pin it was compiled
-    from (`submission.service.AlignedPin`).
+    when none is held. `shown` is every spec_id the planner was shown, and
+    `searched` those a search settled on as readings of their own, not
+    fetched as another count of one (`of_shown`); `None` reads every shown
+    series so. `aligned` maps each pin alignment compiled to the pin it was
+    compiled from (`submission.service.AlignedPin`).
 
     A part's series are the part, each series its block offers in its place,
     another count or other prices, and each shown series measuring what one
     of those measures in the part's currency, in any prices (`same_measure`),
-    such as one a later search found.
+    such as one a later search found, each less any series another reading
+    owns (`owner_of`).
     """
 
     source_of: Callable[[str], SelectedSource | None]
     block_of: Callable[[str], Mapping[str, Any] | None]
     shown: Collection[str] = ()
     aligned: Mapping[str, str] | None = None
+    searched: Collection[str] | None = None
+
+    @classmethod
+    def of_shown(
+        cls,
+        shown: Mapping[str, PinSource],
+        source_of: Callable[[str], SelectedSource | None],
+        block_of: Callable[[str], Mapping[str, Any] | None],
+        *,
+        aligned: Mapping[str, str] | None = None,
+    ) -> Parts:
+        """The parts of the datasets `shown` to the planner, read through
+        `source_of` and `block_of`: each settled one is a reading of its own
+        unless it was fetched as another count of one (`PinSource.other_count_of`)."""
+        return cls(
+            source_of,
+            block_of,
+            shown=shown.keys(),
+            aligned=aligned,
+            searched=[
+                spec_id
+                for spec_id, source in shown.items()
+                if source.settled and source.other_count_of is None
+            ],
+        )
 
     def origin_of(self, pin: str | None) -> str | None:
         """The pin as the planner wrote it, before alignment moved it: each
@@ -158,19 +188,56 @@ class Parts:
         ]
 
     def series(self, part: str) -> frozenset[str]:
-        """Every series `part` offers (`offered`), and every shown series measuring
-        what one of those measures in the part's own currency (`same_measure`)."""
-        currency = self.unit_of(part).currency
-        offered = self.offered(part)
+        """`part` and every series it reaches (`_reached`) that no other reading
+        owns (`owner_of`)."""
         return frozenset(
-            {*offered, *(found for one in offered for found in self.same_measure(one, currency))}
+            {part, *(one for one in self._reached(part) if self.owner_of(one) in (part, None))}
         )
+
+    def _reached(self, reading: str) -> list[str]:
+        """Every series `reading` offers (`offered`), and every shown series
+        measuring what one of those measures in its own currency (`same_measure`)."""
+        currency = self.unit_of(reading).currency
+        offered = self.offered(reading)
+        return [*offered, *(found for one in offered for found in self.same_measure(one, currency))]
+
+    def _own(self, reading: str) -> list[str]:
+        """The series measuring what `reading` itself measures: those its block
+        offers in other prices (axis `unit`), and every shown series measuring
+        the same in its currency, any window or prices (`same_measure`)."""
+        return [
+            *(one for one in self.offered(reading) if self.unit_offered(reading, one)),
+            *self.same_measure(reading, self.unit_of(reading).currency),
+        ]
+
+    @cached_property
+    def _readings(self) -> tuple[str, ...]:
+        """The series a search settled on (`searched`) not in constant prices:
+        each its own part whether or not the user priced it. A constant series
+        is one found for a reading's prices."""
+        searched = self.shown if self.searched is None else self.searched
+        return tuple(one for one in searched if self.unit_of(one).prices != "constant")
+
+    def owner_of(self, spec_id: str) -> str | None:
+        """The one reading whose part `spec_id` belongs to: itself when it is a
+        reading, else the reading measuring what it measures (`_own`), else the
+        first reading reaching it through another count it offers
+        (`_reached`); `None` when no reading reaches it. So a gross part and a
+        net part of one flow pair never claim each other's series."""
+        if spec_id in self._readings:
+            return spec_id
+        for claims in (self._own, self._reached):
+            owner = next((one for one in self._readings if spec_id in claims(one)), None)
+            if owner is not None:
+                return owner
+        return None
 
     def current_of(self, part: str, pin: str) -> str | None:
         """The series of `part` measuring what `pin` measures in current prices:
         the part when its block offers `pin` as its count in other prices, else
-        the part or the count it offers whose identity, prices left out
-        (`_priceless`), equals the pin's; `None` when none does."""
+        the part or the count it offers, and no other reading owns
+        (`owner_of`), whose identity, prices left out (`_priceless`), equals
+        the pin's; `None` when none does."""
         if self.unit_offered(part, pin):
             return part
         wanted = _priceless(self.definition_of(pin))
@@ -180,7 +247,9 @@ class Parts:
             (
                 one
                 for one in self.offered(part, counts_only=True)
-                if one != pin and _priceless(self.definition_of(one)) == wanted
+                if one != pin
+                and self.owner_of(one) in (part, None)
+                and _priceless(self.definition_of(one)) == wanted
             ),
             None,
         )
@@ -218,17 +287,27 @@ class Parts:
             return []
         return [
             spec_id
-            for spec_id in self.shown
+            for spec_id, identity in self._identities.items()
             if spec_id != series
-            and _priceless(self.block_of(spec_id)) == wanted
+            and identity == wanted
             and self.unit_of(spec_id).currency == currency
         ]
 
-    def constant_found(self, series: str, currency: str | None) -> tuple[str, UnitReading] | None:
-        """A shown series measuring what `series` measures in `currency` at constant
-        prices of a stated base year (`same_measure`), such as one a later search
-        found, with its unit; `None` when none is shown."""
+    @cached_property
+    def _identities(self) -> dict[str, dict[str, Any] | None]:
+        """Each shown series' identity with its prices left out (`_priceless`)."""
+        return {spec_id: _priceless(self.block_of(spec_id)) for spec_id in self.shown}
+
+    def constant_found(
+        self, series: str, currency: str | None, *, part: str
+    ) -> tuple[str, UnitReading] | None:
+        """A shown series of `part` (`series`) measuring what `series` measures
+        in `currency` at constant prices of a stated base year (`same_measure`),
+        such as one a later search found, with its unit; `None` when none is shown."""
+        held = self.series(part)
         for spec_id in self.same_measure(series, currency):
+            if spec_id not in held:
+                continue
             reading = self.unit_of(spec_id)
             if reading.prices == "constant" and reading.base_year is not None:
                 return spec_id, reading
@@ -315,8 +394,8 @@ def _constant_series(
 ) -> tuple[str, int] | None:
     """The series in constant prices a requirement pinning `pin` moves to, with
     its base year: the one the user picked, when `pin` is the part itself, else
-    one a search found measuring what `pin` measures in `currency`
-    (`Parts.constant_found`)."""
+    one of the part's series a search found measuring what `pin` measures in
+    `currency` (`Parts.constant_found`)."""
     reading = parts.unit_of(choice.spec_id) if choice.spec_id is not None else UnitReading()
     if (
         pin == part
@@ -325,7 +404,7 @@ def _constant_series(
         and reading.base_year is not None
     ):
         return choice.spec_id, reading.base_year
-    found = parts.constant_found(pin, currency)
+    found = parts.constant_found(pin, currency, part=part)
     if found is None or found[1].base_year is None:
         return None
     return found[0], found[1].base_year

@@ -464,7 +464,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             exc,
             proposal.evidence_requirements,
             choices=view.prices_chosen(),
-            parts=Parts(readings.get, readings.block, shown=shown.keys()),
+            parts=Parts.of_shown(shown, readings.get, readings.block),
             propose=proposer.call,
         ) or _invalid_data(exc, proposer)
     reads_user_words = reads_user_words or amendment_entry(view.state)
@@ -602,10 +602,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         view.prices_chosen(),
         evidence_requirements,
         requirements_after,
-        parts=Parts(
+        parts=Parts.of_shown(
+            pins,
             sources.get,
             sources.block,
-            shown=pins.keys(),
             aligned={pin.spec_id: pin.origin for pin in aligned_pins(view.state)},
         ),
         propose=proposer.call,
