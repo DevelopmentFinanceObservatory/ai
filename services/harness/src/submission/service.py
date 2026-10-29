@@ -149,6 +149,7 @@ from planner.plan import (
     check_acyclic,
     check_wholes_span_their_totals,
     compile_key,
+    copy_origins,
     cut_user_text,
     dataset_roots,
     exact_codes,
@@ -516,6 +517,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     # The source of each requirement's own pin, a compile alignment made for it
     # read as that requirement's alone (`planner.plan.HeldSources.source_of`).
     pinned = held.by_requirement(aligned_after)
+    # The plan this call amends reads its own pins, which this call may have moved.
+    previous_sources = (
+        sources.with_pinned(held.by_requirement(previous.evidence_requirements))
+        if previous is not None
+        else None
+    )
     sources = sources.with_pinned(pinned)
     measures = measure_choices(
         pins,
@@ -722,6 +729,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         reads_user_words=reads_user_words,
         proposer=proposer,
         sources=sources,
+        previous_sources=previous_sources,
     )
     if blocked is not None:
         return blocked
@@ -2066,7 +2074,12 @@ def _sum_datasets(
 
 
 def _combination_unasked(
-    plan: Plan, view: SessionView, *, previous: Plan | None, sources: SourceReadings
+    plan: Plan,
+    view: SessionView,
+    *,
+    previous: Plan | None,
+    sources: SourceReadings,
+    previous_sources: SourceReadings | None,
 ) -> dict[str, object] | None:
     """Return the refusal for a `sum_of` of two datasets the user was not asked to combine, or `None`.
 
@@ -2093,7 +2106,9 @@ def _combination_unasked(
     over the same datasets and citing the same `user` decisions to add
     them, was checked when `previous` was recorded and keeps its sum,
     unless some combination ask in this session was answered with anything
-    but `COMBINE_OPTION`. The refusal's action carries the `COMBINATION_OPTIONS`
+    but `COMBINE_OPTION`. `previous` is read through `previous_sources`, the
+    sources admission holds for its own requirements, since a requirement this
+    call re-pins keeps its id. The refusal's action carries the `COMBINATION_OPTIONS`
     the ask offers, so the user picks one of them and the planner phrases
     only the question, and its `detail` names the sum and its datasets,
     which is what the ask that follows asks about.
@@ -2112,9 +2127,10 @@ def _combination_unasked(
         if (
             consent
             and previous is not None
+            and previous_sources is not None
             and not declined
             and requirement in previous.evidence_requirements
-            and _sum_datasets(previous, requirement, view, sources).datasets == datasets
+            and _sum_datasets(previous, requirement, view, previous_sources).datasets == datasets
             and _consenting_decisions(previous, requirement) == consent
         ):
             continue
@@ -2366,6 +2382,7 @@ def _unrecordable(
     reads_user_words: bool,
     proposer: Proposer,
     sources: SourceReadings,
+    previous_sources: SourceReadings | None,
 ) -> dict[str, object] | None:
     """Return the refusal for a built plan `propose_plan` may not record, or `None`.
 
@@ -2408,7 +2425,9 @@ def _unrecordable(
         or _entity_dcid_unoffered(stated, referral, previous)
         or _entity_dcid_unpicked(stated, referral, view, previous)
         or _choice_not_offered(stated, referral, view)
-        or _combination_unasked(stated, view, previous=previous, sources=sources)
+        or _combination_unasked(
+            stated, view, previous=previous, sources=sources, previous_sources=previous_sources
+        )
         or _decline_unearned(plan, previous, view)
         or _breakdown_decline_unearned(stated, view, sources)
         or _decline_missing(plan, view, proposer)
@@ -3111,7 +3130,8 @@ def _window_pins(
     after the plan. `shown` are the datasets the planner was shown this
     entry (`planner.plan.pin_sources`), and `requirement_sources` the source admission holds
     for each requirement's pin, by requirement id, which a requirement it
-    holds reads in place of `shown`. A pinned one needs an identity on
+    holds reads in place of `shown`. A rolling copy (`planner.plan.RollingCopy`)
+    reads the source of the requirement it copies, whose pin it shares. A pinned one needs an identity on
     record (`identity_on_record`). An unpinned one is searched for from its
     first year on (`translator.discovery`), and Search answers with a
     definition that has no end year; plan validation refuses one the plan
@@ -3134,6 +3154,7 @@ def _window_pins(
             has no identity on record.
     """
     whole_history = split_of(plan).whole_history
+    origins = copy_origins(plan.rolling_copies)
     pinning: dict[str, str] = {}
     copies: dict[str, WindowedPin | None] = {}
     for requirement in plan.evidence_requirements:
@@ -3141,7 +3162,9 @@ def _window_pins(
             continue
         pin = requirement.source_spec_id
         source = (
-            requirement_sources.get(requirement.id) if requirement_sources is not None else None
+            requirement_sources.get(origins.get(requirement.id, requirement.id))
+            if requirement_sources is not None
+            else None
         )
         recorded = (
             identity_on_record(
@@ -3688,7 +3711,10 @@ def _scope_decisions(
     decision, is swept and not counted. The count never falls short of the
     plan's own, so the cap never refuses. One `previous` records as Search's
     default is restated when Search now says otherwise, unless this call
-    states its slot; a user's stands. Code writes the decisions of `wholes`
+    states its slot; a user's stands, except on a requirement alignment moved onto
+    another compile than `previous` records for it (`_compile_moved`): its slots
+    (`planner.plan.DecisionScope.aligned_for`) name the requirement, not the
+    compile, so each is restated off the compile it now reads. Code writes the decisions of `wholes`
     and `calculations`, so a decision of this call's on one of their slots is
     dropped and code's is written or kept.
 
@@ -3722,6 +3748,7 @@ def _scope_decisions(
     known = {decision.slot: decision for decision in (*carried, *decisions)}
     stated = {decision.slot for decision in decisions}
     restated = {requirement.id for requirement in evidence_requirements}
+    moved = _compile_moved(evidence_requirements, previous)
     # A calculation the plan carries states its decisions again too, since an
     # input re-pinned under it can change what they say.
     own_count = len(evidence_requirements)
@@ -3809,7 +3836,14 @@ def _scope_decisions(
                 written.append(derived)
             elif (
                 standing != derived
-                and standing.resolved_by is ResolvedBy.PLANNER_DEFAULT
+                and (
+                    standing.resolved_by is ResolvedBy.PLANNER_DEFAULT
+                    or (
+                        requirement.id in moved
+                        and derived.scope is not None
+                        and derived.scope.aligned_for == requirement.id
+                    )
+                )
                 and derived.slot not in stated
             ):
                 known[derived.slot] = derived
@@ -3821,6 +3855,28 @@ def _scope_decisions(
         elif index < own_count:
             patched.append(requirement)
     return [*decisions, *written], patched
+
+
+def _compile_moved(
+    evidence_requirements: Iterable[EvidenceRequirement], previous: Plan | None
+) -> frozenset[str]:
+    """The ids of the requirements of `evidence_requirements` alignment put on a
+    compile (`DatasetRequirement.aligned_from`) other than the one, if any, `previous`
+    records for the requirement under that id: another pin, origin or options."""
+    before = {
+        requirement.id: requirement
+        for requirement in (previous.evidence_requirements if previous is not None else ())
+        if isinstance(requirement, DatasetRequirement)
+    }
+    return frozenset(
+        requirement.id
+        for requirement in evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.aligned_from is not None
+        and (earlier := before.get(requirement.id)) is not None
+        and (earlier.source_spec_id, earlier.aligned_from, earlier.aligned_options)
+        != (requirement.source_spec_id, requirement.aligned_from, requirement.aligned_options)
+    )
 
 
 # The identity slots whose bound code makes a part a sector or restricted

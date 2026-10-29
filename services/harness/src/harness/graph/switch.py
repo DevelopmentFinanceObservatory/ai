@@ -9,9 +9,12 @@ It posts the scope's base identity with its entries and the switch
 `resolve_definition` (`translator.discovery.resolve_definition`), which
 registers the identity they compile to. The
 plan is then revised by the planner seam with no model call
-(`harness.graph.seams.PlannerModel.revise`): each requirement pinning a
-switched source pins the compiled one, the decisions follow their pins,
-and the plan compiles again. The node stores each new reading, so later
+(`harness.graph.seams.PlannerModel.revise`): each requirement a switched
+row is for pins the compiled source, the decisions follow their pins, and
+the plan compiles again. A row read off the compile alignment made for one
+requirement (`planner.plan.DecisionScope.aligned_for`) is for that
+requirement alone, and a row of a source as pinned is for each requirement
+pinning it as its own. The node stores each new reading, so later
 searches carry the switch, and offers the revised plan back to `approve`
 with what else moved (`harness.scope_choices.moved_choices`).
 
@@ -59,9 +62,12 @@ from google.adk import Context, Event
 from planner.plan import (
     DatasetRequirement,
     Decision,
+    EvidenceRequirement,
+    HeldSources,
     PinSource,
     SessionState,
     authored,
+    compile_key,
     earlier_block,
     exact_codes,
     is_scope_choice,
@@ -312,69 +318,76 @@ async def _switched_plan(
     state = cast(SessionState, ctx.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
     readings = _readings(ctx)
+    by_id = {requirement.id: requirement for requirement in authored(plan).evidence_requirements}
     targets = [
-        (pin, reading, scope, choice)
+        _target(decision, requirements=by_id, to_origin=to_origin, readings=readings)
         for decision in listed_together(plan, clicked.slot)
-        for pin, reading, scope, choice in [
-            _target(decision, to_origin=to_origin, readings=readings)
-        ]
     ]
     label = next(
-        (option.label for option in targets[0][3].options if option.option_id == option_id),
+        (option.label for option in targets[0].choice.options if option.option_id == option_id),
         option_id,
     )
-    if any(not any(o.option_id == option_id for o in choice.options) for *_, choice in targets):
+    if any(not any(o.option_id == option_id for o in t.choice.options) for t in targets):
         raise SwitchFailedError(
             f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
         )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
+    held = HeldSources.of(state)
     switched = await asyncio.gather(
         *(
             _resubmit(
                 surface,
-                pin=pin,
-                reading=reading,
-                scope=scope,
+                pin=target.pin,
+                reading=target.reading,
+                scope=target.reading_scope,
                 entries=[
                     entry.model_dump(mode="json", exclude_none=True)
-                    for entry in switch_entries(scope, choice=choice, option_id=option_id)
+                    for entry in switch_entries(
+                        target.reading_scope, choice=target.choice, option_id=option_id
+                    )
                 ],
-                block=specs.get(pin)
-                or _source_block(sources.get(pin), pin)
-                or _compiled_block(state, reading, pin),
+                block=specs.get(target.pin)
+                or _source_block(sources.get(target.pin), target.pin)
+                or _compiled_block(state, target.reading, target.pin),
                 label=label,
             )
-            for pin, reading, scope, choice in targets
+            for target in targets
         )
     )
-    moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
     save_pin_sources(
         state,
         {
             **sources,
             **{
-                item.spec_id: _pin_source(sources.get(item.pin), digest, item.reading)
-                for item, digest in zip(switched, digests, strict=True)
+                item.spec_id: _pin_source(
+                    target.replaced(sources, held, by_id), digest, item.reading
+                )
+                for target, item, digest in zip(targets, switched, digests, strict=True)
             },
         },
     )
     codes = {
         item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
     }
+    moved_to = {
+        requirement.id: item.spec_id
+        for target, item in zip(targets, switched, strict=True)
+        for requirement in target.requirements
+    }
     requirements = [
-        repinned(requirement, moved_to[origin], codes[moved_to[origin]]).model_dump(mode="json")
-        for requirement in authored(plan).evidence_requirements
-        if isinstance(requirement, DatasetRequirement)
-        and (origin := to_origin.get(requirement.source_spec_id or "", requirement.source_spec_id))
-        in moved_to
+        repinned(requirement, moved_to[requirement.id], codes[moved_to[requirement.id]]).model_dump(
+            mode="json"
+        )
+        for requirement in by_id.values()
+        if isinstance(requirement, DatasetRequirement) and requirement.id in moved_to
     ]
     revised = await planner.revise(
         ctx=ctx,
         prior_plan=plan.model_dump(mode="json"),
         evidence_requirements=requirements,
-        inherits={new: old for old, new in moved_to.items()},
+        inherits={item.spec_id: item.pin for item in switched},
     )
     if "plan" not in revised:
         refused = revised.get("refused") or {}
@@ -473,17 +486,63 @@ def _readings(ctx: Context) -> list[SearchReading]:
     return readings
 
 
+@dataclass(frozen=True)
+class _Target:
+    """What the switch of one scope decision moves: the requirements its row is for,
+    the pin they state, the newest reading of that pin for them with a scope, that
+    scope and the choice on the decision's axis. `aligned` says the decision was read
+    off the compile alignment made for its one requirement
+    (`planner.plan.DecisionScope.aligned_for`)."""
+
+    requirements: tuple[DatasetRequirement, ...]
+    pin: str
+    reading: SearchReading
+    reading_scope: PartScope
+    choice: ScopeChoice
+    aligned: bool
+
+    def replaced(
+        self,
+        shown: Mapping[str, PinSource],
+        held: HeldSources,
+        requirements: Mapping[str, EvidenceRequirement],
+    ) -> PinSource | None:
+        """The source the switched dataset replaces: the compile an aligned
+        requirement reads (`planner.plan.HeldSources.compile_of`), else the dataset
+        shown under the pin (`shown`)."""
+        if not self.aligned:
+            return shown.get(self.pin)
+        return next(
+            (
+                source
+                for requirement in self.requirements
+                if (source := held.compile_of(requirement, requirements)) is not None
+            ),
+            None,
+        )
+
+
 def _target(
     decision: Decision,
     *,
+    requirements: Mapping[str, EvidenceRequirement],
     to_origin: Mapping[str, str],
     readings: Sequence[SearchReading],
-) -> tuple[str, SearchReading, PartScope, ScopeChoice]:
-    """The pin `decision` states, the newest reading of it with a scope, that scope and the choice on the decision's axis.
+) -> _Target:
+    """What the switch of `decision` moves, of the plan whose requirements, by id, are
+    `requirements`.
+
+    A decision read off the compile alignment made for one requirement
+    (`planner.plan.DecisionScope.aligned_for`) moves that requirement alone and
+    reads the reading of that compile (`SearchReading.compiled_from`). Any other
+    moves each requirement pinning its source as its own, reading a reading of the
+    pin that is no compile made for an aligned requirement, so a switch of the
+    user's row on a spec_id leaves an input alignment moved onto a compile of the
+    same spec_id where it was, and the reverse.
 
     Raises:
         SwitchFailedError: If `decision` is no scope decision, or no stored
-            reading of its pin holds the choice.
+            reading of its pin for its requirements holds the choice.
     """
     if not is_scope_choice(decision) or decision.fixes is None or decision.scope is None:
         raise SwitchFailedError(
@@ -491,12 +550,34 @@ def _target(
         )
     pinned = decision.fixes.source_spec_id or ""
     pin = to_origin.get(pinned, pinned)
+    datasets = [r for r in requirements.values() if isinstance(r, DatasetRequirement)]
+    aligned_for = decision.scope.aligned_for
+    # The compiles the target's reading must be one of (`aligned`), or none of.
+    aligned = aligned_for is not None
+    if aligned:
+        moves = tuple(r for r in datasets if r.id == aligned_for)
+        compiles = {key for r in moves if (key := compile_key(r, requirements)) is not None}
+    else:
+        moves = tuple(
+            r
+            for r in datasets
+            if r.aligned_from is None
+            and to_origin.get(r.source_spec_id or "", r.source_spec_id) == pin
+        )
+        compiles = {
+            key
+            for r in datasets
+            if r.aligned_from is not None and (key := compile_key(r, requirements)) is not None
+        }
     for reading in readings:
         if reading.spec_id != pin or reading.scope is None:
             continue
+        key = reading.compiled_from.key if reading.compiled_from is not None else None
+        if (key in compiles) is not aligned:
+            continue
         choice = next((c for c in reading.scope.choices if c.axis == decision.scope.axis), None)
         if choice is not None:
-            return pin, reading, reading.scope, choice
+            return _Target(moves, pin, reading, reading.scope, choice, aligned)
     raise SwitchFailedError(
         "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
     )

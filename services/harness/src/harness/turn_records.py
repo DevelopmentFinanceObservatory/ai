@@ -675,11 +675,13 @@ class CompiledBlock(StrictModel):
     """The spec block of one compile alignment made for a calculation's input, which
     Search answered as `spec_id`, kept apart from the blocks of the datasets
     searches returned (`harness.graph.state.ORCHESTRATOR_COMPILED_SPECS_KEY`), so
-    no pin of `spec_id` as the planner's own reads it."""
+    no pin of `spec_id` as the planner's own reads it. `warnings` are the warning
+    codes of Search's answer for the compile (`planner.plan.AlignedPin.warnings`)."""
 
     compiled_from: CompiledFrom
     spec_id: str
     block: dict[str, Any]
+    warnings: tuple[str, ...] = Field(default=(), exclude_if=lambda warnings: not warnings)
 
 
 # The reading statuses whose own spec_id a search settled on: a `definite`

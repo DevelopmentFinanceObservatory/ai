@@ -3416,6 +3416,36 @@ def test_a_recorded_split_is_its_own_split_and_reverses_to_the_model_plan(
     assert authored(recorded).evidence_requirements == plan.evidence_requirements
 
 
+def test_a_rolling_copy_reads_the_source_admission_holds_for_the_requirement_it_copies(
+    decision: Callable[..., Decision],
+) -> None:
+    """Admission holds the source of 'aid' by its id, as it holds a compile alignment
+    made for it, which the planner was never shown. `top` reads 'aid_history', a copy
+    of 'aid' over every year with an id of its own: it reads the source held for
+    'aid', so both pin the dataset over their own open windows."""
+    recorded = _recorded(
+        _model_plan(
+            [_open(period=_SINCE_2015), _TOP],
+            [decision(), POPULATION],
+            asks=_BESIDE_A_SERIES,
+            answered=_SERIES_AND_TOP,
+        )
+    )
+
+    windowed, minted = _window_pins(recorded, requirement_sources={"aid": _SHOWN_OPEN[_OPEN_SPEC]})
+
+    pins = {
+        requirement.id: requirement.source_spec_id
+        for requirement in windowed.evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+    }
+    windows = {copy.spec_id: copy.identity["requested_window"] for copy in minted}
+    assert {requirement_id: windows.get(pin) for requirement_id, pin in pins.items()} == {
+        "aid": {"kind": "range", "start_year": 2015},
+        "aid_history": {"kind": "range", "start_year": 1990},
+    }
+
+
 def test_a_recorded_plan_whose_copies_are_not_its_split_is_refused(
     decision: Callable[..., Decision],
 ) -> None:

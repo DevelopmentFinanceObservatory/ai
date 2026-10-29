@@ -6261,6 +6261,22 @@ class AlignedPin(StrictModel):
         parts = self.digest.get("part_digests") or ()
         return parts[0].get("spec_block") if len(parts) == 1 else None
 
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The warning codes of Search's answer for its one part (`warning_codes`), none
+        where it holds no one part."""
+        parts = self.digest.get("part_digests") or ()
+        return warning_codes(parts[0].get("warnings")) if len(parts) == 1 else ()
+
+
+def warning_codes(warnings: object) -> tuple[str, ...]:
+    """The `code` of each warning dict in `warnings`, a list as a search part's digest
+    holds it."""
+    if not isinstance(warnings, list):
+        return ()
+    codes = (warning.get("code") for warning in warnings if isinstance(warning, dict))
+    return tuple(str(code) for code in codes if code)
+
 
 class AlignmentKey(NamedTuple):
     """What one compile was made for (`AlignedPin.key`): the pin `origin` on the options
@@ -6403,16 +6419,29 @@ class HeldSources(NamedTuple):
         `spec_id`: the source of its origin as shown (`shown`) holding the compile's
         block. The block is the held pin's (`compiled`), else, where this session
         holds no pin for `key`, the one an earlier turn stored for that compile
-        (`earlier_compile`). `None` where neither holds one."""
+        (`earlier_compile`). `None` where neither holds one.
+
+        Its warnings are the origin's, since the compile restates the origin's
+        identity, and those of Search's answer for the compile where the held pin
+        states them (`AlignedPin.warnings`).
+        """
         held = self.compiled.get(key)
         if held is None:
-            block = earlier_compile(key, spec_id)
+            block, warnings = earlier_compile(key, spec_id), ()
+        elif held.spec_id == spec_id:
+            block, warnings = held.block, held.warnings
         else:
-            block = held.block if held.spec_id == spec_id else None
+            block, warnings = None, ()
         if block is None:
             return None
         origin = self.shown.get(key.origin) or PinSource()
-        return origin.model_copy(update={"block": block, "earlier_turn": False})
+        return origin.model_copy(
+            update={
+                "block": block,
+                "earlier_turn": False,
+                "warnings": tuple(dict.fromkeys((*origin.warnings, *warnings))),
+            }
+        )
 
     def identity_source(self, spec_id: str) -> PinSource | None:
         """A source whose block states `spec_id`'s identity: the dataset shown under it,

@@ -137,6 +137,7 @@ from planner.plan import (
     aligned_pins,
     clear_entry_compiles,
     clear_unsupported,
+    compile_key,
     current_discovery_time_left,
     cut_user_text,
     discovery_time_left,
@@ -153,6 +154,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    warning_codes,
     windowed_pins,
 )
 from planner.records import Severity
@@ -1462,12 +1464,15 @@ def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
 
 
 def _sources_by_requirement(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
-    """The source each retrieval of `plan` reads, by requirement id: the compile
-    alignment made for it (`planner.plan.HeldSources.compile_of`), else the block
-    `state` holds for its pin (`_spec_blocks`), else the one compile this entry holds
-    for a pin no search showed (`planner.plan.HeldSources.source_of`). A pin copied over its requirement's
-    window (`planner.plan.windowed_pins`) reads its origin's. A block not readable
-    as a source is left out, so the retrieval is named by its composed label."""
+    """The source each retrieval of `plan` reads, by requirement id. A retrieval
+    whose pin is a compile (`planner.plan.compile_key`), an input alignment moved or
+    a declared whole, reads that compile (`planner.plan.HeldSources.compile_of`)
+    and nothing where it is not held. Any other reads the block `state` holds for
+    its pin (`_spec_blocks`), else the one compile this entry holds for a pin no
+    search showed (`planner.plan.HeldSources.source_of`). A pin copied over its
+    requirement's window (`planner.plan.windowed_pins`) reads its origin's. A block
+    not readable as a source is left out, so the retrieval is named by its composed
+    label."""
     to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
     blocks = _spec_blocks(state)
     held = HeldSources.of(state)
@@ -1483,10 +1488,11 @@ def _sources_by_requirement(state: SessionState, plan: Plan) -> dict[str, Select
         if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
             continue
         pin = requirement.source_spec_id
-        compiled = held.compile_of(requirement, unwindowed)
-        if compiled is None and pin not in blocks:
-            compiled = held.source_of(requirement, unwindowed)
-        block = compiled.spec_block(pin) if compiled is not None else blocks.get(pin)
+        if compile_key(requirement, unwindowed) is None and pin in blocks:
+            block = blocks[pin]
+        else:
+            source = held.source_of(requirement, unwindowed)
+            block = source.spec_block(pin) if source is not None else None
         if block is not None:
             pinned[requirement.id] = PinSource(block=dict(block))
     return pinned_sources(unwindowed.values(), SourceReadings(blocks.get, pinned=pinned))
@@ -1945,7 +1951,11 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
         if pin.spec_id in stored:
             if (block := pin.block) is not None:
                 save_compiled_block(
-                    cast(SessionState, ctx.state), compiled_from, pin.spec_id, block
+                    cast(SessionState, ctx.state),
+                    compiled_from,
+                    pin.spec_id,
+                    block,
+                    warnings=pin.warnings,
                 )
             continue
         origin = next(
@@ -2076,21 +2086,13 @@ def _reading_pin_sources(
             provenance_ref=reading.provenance_ref if reading else None,
             provenance_account=reading.provenance_account if reading else None,
             block=None if from_earlier else blocks.get(spec_id),
-            warnings=_warning_codes(warnings.get(spec_id)),
+            warnings=warning_codes(warnings.get(spec_id)),
             settled=spec_id in elected or spec_id in counts_of,
             earlier_turn=from_earlier,
             other_count_of=None if spec_id in elected else counts_of.get(spec_id),
             asked_roles=tuple(reading.asked_roles) if reading else (),
         )
     return sources
-
-
-def _warning_codes(warnings: object) -> tuple[str, ...]:
-    """The `code` of each warning dict in `warnings`, a list as search returns it."""
-    if not isinstance(warnings, list):
-        return ()
-    codes = (warning.get("code") for warning in warnings if isinstance(warning, dict))
-    return tuple(str(code) for code in codes if code)
 
 
 def _as_authored(plan: Plan | None) -> dict[str, Any] | None:

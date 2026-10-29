@@ -23,7 +23,14 @@ from data_mcp.search_tool import MAX_PARTS
 from google.adk import Context, Event
 from google.adk.events import RequestInput
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
-from planner.plan import AlignmentKey, AskBreakdown, SessionState, earlier_compile, stored_plan
+from planner.plan import (
+    AlignmentKey,
+    AskBreakdown,
+    SessionState,
+    earlier_compile,
+    stored_plan,
+    warning_codes,
+)
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
 
@@ -406,7 +413,7 @@ def store_search(
     (`harness.turn_records.open_prices`).
 
     A digest of a compile alignment made (`compiled_from`) stores each part's
-    own block and its warnings by the compile alone (`save_compiled_block`),
+    own block and its warning codes by the compile alone (`save_compiled_block`),
     never by its spec_id, and each part's reading records the compile
     (`SearchReading.compiled_from`).
     """
@@ -441,7 +448,13 @@ def store_search(
         if compiled_from is not None:
             facts["compiled_from"] = compiled_from.model_dump(mode="json")
             if (own := blocks.pop(part.get("spec_id") or "", None)) is not None:
-                save_compiled_block(state, compiled_from, part["spec_id"], own)
+                save_compiled_block(
+                    state,
+                    compiled_from,
+                    part["spec_id"],
+                    own,
+                    warnings=warning_codes(reading.get("warnings")),
+                )
         specs.update(blocks)
         spec_warnings.update(dict.fromkeys(blocks, reading.get("warnings") or []))
         if asked:
@@ -462,12 +475,19 @@ def store_search(
 
 
 def save_compiled_block(
-    state: SessionState, compiled_from: CompiledFrom, spec_id: str, block: Mapping[str, Any]
+    state: SessionState,
+    compiled_from: CompiledFrom,
+    spec_id: str,
+    block: Mapping[str, Any],
+    *,
+    warnings: tuple[str, ...],
 ) -> None:
-    """Keep `block` as this turn's block of the compile made for `compiled_from` that
-    Search answered as `spec_id` (`ORCHESTRATOR_COMPILED_SPECS_KEY`), in place of one
-    kept for the same."""
-    entry = CompiledBlock(compiled_from=compiled_from, spec_id=spec_id, block=dict(block))
+    """Keep `block` and the warning codes `warnings` of Search's answer as this turn's
+    of the compile made for `compiled_from` that Search answered as `spec_id`
+    (`ORCHESTRATOR_COMPILED_SPECS_KEY`), in place of one kept for the same."""
+    entry = CompiledBlock(
+        compiled_from=compiled_from, spec_id=spec_id, block=dict(block), warnings=warnings
+    )
     kept = [
         raw
         for raw in state.get(ORCHESTRATOR_COMPILED_SPECS_KEY) or ()

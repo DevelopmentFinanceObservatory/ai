@@ -87,7 +87,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
-from harness.turn_records import CompiledFrom, SearchReading, part_name
+from harness.turn_records import CompiledBlock, CompiledFrom, SearchReading, part_name
 from harness.wiring import handing_back_planner_failures
 from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
@@ -1623,12 +1623,12 @@ async def test_a_later_turn_renders_and_pins_an_earlier_turns_reading(
     assert pin_sources(state)[SPEC].spec_block(SPEC) == block
 
 
-def _turn_compiling_the_total() -> dict[str, Any]:
+def _turn_compiling_the_total(*, warnings: tuple[str, ...] = ()) -> dict[str, Any]:
     """The session state of a turn that compiled the US total on gross disbursements
     for a share and stored the compile as a reading of the total's words
     (`store_aligned_readings`), the compile's block marking its basis as the
-    planner's. The planner's state and the turn's are one session's, as in the
-    graph."""
+    planner's and Search's answer for it warning `warnings`. The planner's state
+    and the turn's are one session's, as in the graph."""
     origin = SearchReading.model_validate(
         {"text": "US total ODA", "status": "definite", "spec_id": TOTAL, "asked_roles": ["donor"]}
     )
@@ -1652,6 +1652,9 @@ def _turn_compiling_the_total() -> dict[str, Any]:
                         "status": "definite",
                         "spec_id": TOTAL_GROSS,
                         "spec_block": {**gross, PLANNER_AXES_BLOCK_KEY: ["measure_basis"]},
+                        "warnings": [
+                            {"code": code, "severity": "warn", "message": code} for code in warnings
+                        ],
                     }
                 ]
             },
@@ -1705,6 +1708,24 @@ def test_a_compile_in_this_turn_is_read_by_its_requirement_alone(requirement: An
             TOTAL_GROSS,
         )
     ) == {"measure_basis"}
+
+
+def test_a_compile_is_read_with_its_own_warnings_and_keeps_them(requirement: Any) -> None:
+    """Search answers the compile of the total with a blocking warning its origin's
+    search did not carry. The requirement aligned onto the compile reads the
+    compile's warning beside its origin's, and the compile's kept block keeps it."""
+    state = _turn_compiling_the_total(warnings=("time_text_not_parsed",))
+    save_pin_sources(
+        cast(SessionState, state), {TOTAL: PinSource(warnings=("role_scope_defaulted",))}
+    )
+    by_id = _direct_and_aligned(requirement)
+
+    compiled = HeldSources.of(cast(SessionState, state)).source_of(by_id["aligned"], by_id)
+
+    assert compiled is not None
+    assert compiled.warnings == ("role_scope_defaulted", "time_text_not_parsed")
+    (kept,) = state[ORCHESTRATOR_COMPILED_SPECS_KEY]
+    assert CompiledBlock.model_validate(kept).warnings == ("time_text_not_parsed",)
 
 
 async def test_a_compile_from_an_earlier_turn_is_read_by_its_requirement_alone(
@@ -5288,28 +5309,31 @@ def test_a_declared_whole_with_no_block_is_named_by_its_axis_with_no_warning(
     assert (named, caplog.records) == ("all donors", [])
 
 
+@pytest.mark.parametrize("held", [True, False], ids=["compile-held", "compile-not-held"])
 @pytest.mark.parametrize("settled", [True, False], ids=["settled", "candidate"])
 def test_a_compiled_pin_shown_by_a_search_is_read_by_the_requirement_it_was_compiled_for(
-    requirement: Any, settled: bool
+    requirement: Any, settled: bool, held: bool
 ) -> None:
     """A compile Search answered with a spec_id the planner was shown, settled or only
     offered as a candidate. The shown source keeps its block for the spec_id, so a
     requirement pinning it as its own reads it; the requirement alignment moved onto
-    the compile reads the compile's block (`planner.plan.HeldSources`)."""
+    the compile reads the compile's block (`planner.plan.HeldSources`), and no source
+    where the compile is not held, never the shown dataset's."""
     shown = {"spec_id": TOTAL, "resolved": {"concept_label": "shown"}}
     compiled = {"spec_id": TOTAL, "resolved": {"concept_label": "compiled"}}
     state: dict[str, Any] = {}
     save_pin_sources(cast(SessionState, state), {TOTAL: PinSource(block=shown, settled=settled)})
-    save_aligned_pin(
-        cast(SessionState, state),
-        AlignedPin(
-            origin=HEALTH,
-            option_ids=("measure_basis:gross",),
-            spec_id=TOTAL,
-            digest={"part_digests": [{"spec_block": compiled}]},
-            records_origin=True,
-        ),
-    )
+    if held:
+        save_aligned_pin(
+            cast(SessionState, state),
+            AlignedPin(
+                origin=HEALTH,
+                option_ids=("measure_basis:gross",),
+                spec_id=TOTAL,
+                digest={"part_digests": [{"spec_block": compiled}]},
+                records_origin=True,
+            ),
+        )
     plan = Plan.model_construct(
         evidence_requirements=(
             requirement(id="direct", source_spec_id=TOTAL),
@@ -5328,7 +5352,7 @@ def test_a_compiled_pin_shown_by_a_search_is_read_by_the_requirement_it_was_comp
     assert blocks[TOTAL] == shown
     assert {rid: source.concept_label for rid, source in sources.items()} == {
         "direct": "shown",
-        "aligned": "compiled",
+        **({"aligned": "compiled"} if held else {}),
     }
 
 
@@ -5603,10 +5627,22 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
             and d.fixes.source_spec_id == TOTAL_GROSS
         ]
         readings = switch._readings(ctx)
-        pin, reading, scope, choice = switch._target(row, to_origin={}, readings=readings)
+        target = switch._target(
+            row,
+            requirements={r.id: r for r in revised.evidence_requirements},
+            to_origin={},
+            readings=readings,
+        )
+        reading = target.reading
         return {
             "stored": [(r.spec_id, r.planner_axes) for r in readings],
-            "target": [pin, reading.text, list(reading.asked_roles), scope.id, choice.active],
+            "target": [
+                target.pin,
+                reading.text,
+                list(reading.asked_roles),
+                target.reading_scope.id,
+                target.choice.active,
+            ],
             "carried": _search_context(cast(SessionState, ctx.state)).carried_entries,
         }
 

@@ -100,6 +100,7 @@ from harness.graph.switch import (
     SWITCH_STOP,
     SwitchFailedError,
 )
+from harness.plan_display import choice_id as row_choice_id
 from harness.planner_seam import PlannerSeam, store_aligned_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
@@ -108,7 +109,7 @@ from harness.seeds import stale_reason
 from harness.settings import Settings
 from harness.studio_translate import _node_name
 from harness.tool_contracts import HarnessCode, reading_facts
-from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
+from harness.turn_records import CHIP_STALE_NOTE, CompiledFrom, SearchReading, basis_line
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -132,6 +133,7 @@ from planner.plan import (
     plan_revision,
     repinned,
     save_aligned_pin,
+    scope_choice_slot,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -3563,6 +3565,110 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered
     assert offered["revision"] == plan_revision(revised)
+
+
+# The origin alignment compiled `_switch_plan_with_an_aligned_input`'s input from.
+_ALIGNED_ORIGIN = "spec_" + "a" * 32
+
+
+class _RecordingPlanner:
+    """A `PlannerModel` whose revision records its arguments and refuses."""
+
+    def __init__(self) -> None:
+        self.revisions: list[dict[str, Any]] = []
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        self.revisions.append(kwargs)
+        return {"refused": {"code": "plan_not_ready", "reason": "recorded"}}
+
+
+@pytest.mark.parametrize("row", ["own", "aligned"])
+async def test_a_switch_moves_only_the_requirements_its_row_is_for(
+    real_schemas: list[ToolSchema], row: str
+) -> None:
+    """The plan pins the US health aid source as the user's own and holds an input
+    alignment moved onto a compile Search answered with the same spec_id, each with
+    its own row. A switch of either row posts that row's reading, the compile's for
+    the aligned row, and re-pins the requirement that row is for alone."""
+    scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    _, envelope = _switched_answer(scope)
+    plan = _scoped_plan(pin, scope, schemas=real_schemas)
+    (own,) = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
+    own_decisions = [d for d in plan.decisions if d.scope is not None]
+    aligned_decisions = [
+        d.model_copy(
+            update={
+                "slot": scope_choice_slot(pin, d.scope.axis, aligned_for="aligned"),
+                "scope": d.scope.model_copy(update={"aligned_for": "aligned"}),
+            }
+        )
+        for d in own_decisions
+        if d.scope is not None
+    ]
+    aligned = own.model_copy(
+        update={
+            "id": "aligned",
+            "aligned_from": _ALIGNED_ORIGIN,
+            "aligned_options": ("measure_basis:gross",),
+            "decision_ids": tuple(d.slot for d in aligned_decisions),
+        }
+    )
+    plan = plan.model_copy(
+        update={
+            "decisions": (*plan.decisions, *aligned_decisions),
+            "evidence_requirements": (*plan.evidence_requirements, aligned),
+        }
+    )
+    compiled_scope = copy.deepcopy(scope)
+    compiled_scope["entries"] = compiled_scope["entries"][:1]
+    readings = [
+        SearchReading.from_part(
+            {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
+        ),
+        SearchReading.from_part(
+            {
+                "variable": "health aid",
+                "status": "definite",
+                "spec_id": pin,
+                "scope": compiled_scope,
+                "compiled_from": CompiledFrom(
+                    origin=_ALIGNED_ORIGIN, option_ids=("measure_basis:gross",)
+                ).model_dump(mode="json"),
+            }
+        ),
+    ]
+    search = SearchStub(answer={scope["id"]: envelope})
+    planner = _RecordingPlanner()
+    ctx = SimpleNamespace(
+        state={ORCHESTRATOR_SEARCHES_KEY: [r.model_dump(mode="json") for r in readings]}
+    )
+    (clicked,) = [
+        d
+        for d in plan.decisions
+        if d.scope is not None
+        and d.scope.axis == "sector"
+        and (d.scope.aligned_for is not None) == (row == "aligned")
+    ]
+
+    with pytest.raises(SwitchFailedError, match="recorded"):
+        await switch_module._switched_plan(
+            cast(Any, ctx),
+            plan,
+            choice_id=row_choice_id(plan, clicked),
+            option_id="sector:120+130",
+            planner=cast(Any, planner),
+            surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+        )
+
+    (posted,) = search.posted
+    (entry,) = posted["input"]["entries"]
+    read = scope if row == "own" else compiled_scope
+    assert entry["scope_entries"][:-1] == read["entries"][1:]
+    (revision,) = planner.revisions
+    assert [r["id"] for r in revision["evidence_requirements"]] == [
+        own.id if row == "own" else "aligned"
+    ]
 
 
 _AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}

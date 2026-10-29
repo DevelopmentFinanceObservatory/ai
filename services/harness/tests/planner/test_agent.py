@@ -100,6 +100,7 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     DecisionFixes,
+    DecisionScope,
     Decline,
     Entity,
     EvidenceRequirement,
@@ -117,6 +118,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    ScopeOptionState,
     SessionState,
     ShareOfRequirement,
     SumOfRequirement,
@@ -1810,7 +1812,11 @@ def test_a_sum_of_two_datasets_needs_the_users_decision(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        plan,
+        ToolContextSession(ctx),
+        previous=None,
+        sources=_shown_readings(ctx),
+        previous_sources=None,
     )
 
     if refused:
@@ -1988,7 +1994,11 @@ def test_a_users_decision_to_combine_two_datasets_needs_their_pick(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        plan,
+        ToolContextSession(ctx),
+        previous=None,
+        sources=_shown_readings(ctx),
+        previous_sources=None,
     )
 
     if traced:
@@ -2019,7 +2029,11 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        plan,
+        ToolContextSession(ctx),
+        previous=None,
+        sources=_shown_readings(ctx),
+        previous_sources=None,
     )
 
     assert result is not None
@@ -2099,7 +2113,11 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
     previous = None
     if route == "pick":
         refusal = _combination_unasked(
-            first, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+            first,
+            ToolContextSession(ctx),
+            previous=None,
+            sources=_shown_readings(ctx),
+            previous_sources=None,
         )
         assert refusal is not None
         detail = refusal["detail"]
@@ -2112,7 +2130,11 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
         previous = first
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=previous, sources=_shown_readings(ctx)
+        plan,
+        ToolContextSession(ctx),
+        previous=previous,
+        sources=_shown_readings(ctx),
+        previous_sources=_shown_readings(ctx),
     )
 
     assert (result is not None) is refused
@@ -2210,7 +2232,11 @@ def test_a_sum_carried_from_an_earlier_plan_keeps_its_sum_without_a_new_pick(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=previous_of(recorded), sources=_shown_readings(ctx)
+        plan,
+        ToolContextSession(ctx),
+        previous=previous_of(recorded),
+        sources=_shown_readings(ctx),
+        previous_sources=_shown_readings(ctx),
     )
 
     assert (result is not None) is refused
@@ -2264,6 +2290,65 @@ def test_propose_plan_refuses_a_patch_summing_two_datasets_on_a_users_source_pic
     recorded = load_plan(ctx.state)
     assert recorded is not None
     assert recorded.version == 1
+
+
+def test_propose_plan_reads_a_carried_sum_s_earlier_datasets_off_the_plan_it_amends(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+) -> None:
+    # The user agreed to add aid and debt. The amendment re-pins `debt`, under
+    # the same id, to a third dataset: the earlier plan's sum read IDS, so the
+    # sum now adds a pair the user was never asked about.
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    ctx.session.events.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
+    summed = _sum_of_two_sources(
+        ctx,
+        datasets=(DAC2A, IDS),
+        resolved_by=ResolvedBy.USER,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+    first = tools["propose_plan"].func(
+        question=summed.question,
+        answer_mode=summed.answer_mode,
+        decisions=drafts(summed.decisions),
+        evidence_requirements=list(summed.evidence_requirements),
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    other = "provenance/IMFWorldEconomicOutlook"
+    other_spec = spec_id_for(canonicalize({**_GHANA_DEBT_IDENTITY, "dataset": "Ghana's flows"}))
+    save_pin_sources(
+        ctx.state,
+        {
+            **pin_sources(ctx.state),
+            other_spec: PinSource(
+                block={
+                    "spec_id": other_spec,
+                    "resolved": {
+                        "rendered_sentence": other_spec,
+                        "facets": {"provenance": {"ref": other, "account": None}},
+                    },
+                },
+                settled=True,
+            ),
+        },
+    )
+    debt = summed.requirement("debt").model_copy(update={"source_spec_id": other_spec})
+
+    result = tools["propose_plan"].func(
+        answer_mode=summed.answer_mode,
+        decisions=[],
+        evidence_requirements=[debt],
+        amends_version=1,
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.COMBINATION_UNASKED.value, result
+    assert result["detail"] == {"requirement_id": "net_flows", "datasets": sorted([DAC2A, other])}
 
 
 # --- question_fixed ------------------------------------------------------------------
@@ -8600,6 +8685,86 @@ def test_a_requirement_restated_with_another_meaning_on_its_compile_reads_it_as_
             _US_MULTILATERAL["spec_id"],
             None,
         )
+
+
+@pytest.mark.parametrize(
+    ("options", "pin", "restated"),
+    [
+        pytest.param(("provider:bilateral",), SPEC_GHANA_AID, False, id="same-compile"),
+        pytest.param(
+            ("measure_basis:gross", "provider:bilateral"),
+            SPEC_GHANA_AID,
+            True,
+            id="another-compile-on-one-spec-id",
+        ),
+        pytest.param(("provider:bilateral",), SPEC_GHANA_DEBT, True, id="another-pin"),
+    ],
+)
+def test_a_users_row_on_an_aligned_input_is_restated_off_the_compile_it_moves_to(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    options: tuple[str, ...],
+    pin: str,
+    restated: bool,
+) -> None:
+    """The input's sector row names the input, whatever compile it reads, and the user
+    chose its sector. On the compile it was aligned onto, the row stands as the user
+    made it. Moved onto another compile, the row is read off that compile: its
+    options are the new compile's, and the row carried from the earlier one is not
+    cited again."""
+
+    def row(spec_id: str, labels: tuple[str, ...]) -> Decision:
+        return Decision(
+            slot=scope_choice_slot(spec_id, "sector", aligned_for="aid"),
+            description="Which sector codes the figures count.",
+            options=labels,
+            chosen=labels[0],
+            resolved_by=ResolvedBy.USER,
+            rationale="The user chose health on the plan.",
+            fixes=DecisionFixes(source_spec_id=spec_id),
+            scope=DecisionScope(
+                choice_id="sector",
+                axis="sector",
+                provenance="explicit",
+                aligned_for="aid",
+                options=tuple(
+                    ScopeOptionState(option_id=f"sector:{label}", status="available")
+                    for label in labels
+                ),
+            ),
+        )
+
+    origin = "spec_" + "0" * 32
+    aligned = requirement(
+        id="aid",
+        source_spec_id=SPEC_GHANA_AID,
+        aligned_from=origin,
+        aligned_options=("provider:bilateral",),
+    )
+    carried = row(SPEC_GHANA_AID, ("health", "education"))
+    previous = Plan(
+        question="q",
+        decisions=[decision(), carried],
+        evidence_requirements=[
+            aligned.model_copy(update={"decision_ids": ("measure", carried.slot)})
+        ],
+    )
+    moved = aligned.model_copy(update={"source_spec_id": pin, "aligned_options": options})
+    derived = row(pin, ("health", "education", "water"))
+
+    decisions, requirements = submission_service._scope_decisions(
+        [],
+        [moved],
+        previous=previous,
+        scopes={"aid": (derived,)},
+        wholes={},
+        calculations={},
+        removed=(),
+    )
+
+    assert decisions == ([derived] if restated else [])
+    (cited,) = requirements
+    assert cited.decision_ids == ("measure", derived.slot)
 
 
 @pytest.mark.parametrize(
@@ -16168,7 +16333,11 @@ def test_prior_translator_provider_sources_remain_summable(decision, pinning_dec
     )
     assert (
         _combination_unasked(
-            plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+            plan,
+            ToolContextSession(ctx),
+            previous=None,
+            sources=_shown_readings(ctx),
+            previous_sources=None,
         )
         is None
     )
