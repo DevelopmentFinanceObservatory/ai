@@ -26,17 +26,17 @@ The job finds a block as any object carrying `_bound_refs`, a key only
 app's session state, so it reaches every place a block is held.
 
 Each mapping entry `text: refs` becomes `BoundEntity(identity=text,
-text=text, role=None, refs=refs)`. The mapping kept neither the row's pinned
-`dcid` nor its stated `name` nor its `role_text`, and no other field of the
-block holds them, so `identity` takes the documented fallback, the text, and
-`role` is unstated. `compiler.evidence.bound_refs_of` then finds the row by
-its text, case-folded, with any role fitting, which is how the mapping was
-read. An entry's refs are its strings, read with the reader of that release
-(`compiler.sources._strings`); an entry with none was read as no entry and
-is dropped, and so is one whose text is empty, which no entity name
-matches. A mapping left with no entry removes the key, as a block whose part
-bound nothing is written. A list is left alone. A converted block is kept
-only when `source_from_spec_block` reads it. A block that cannot be
+text=text, role=None, refs=refs)` (`compiler.sources.bound_rows`). The
+mapping kept neither the row's pinned `dcid` nor its stated `name` nor its
+`role_text`, and no other field of the block holds them, so `identity` takes
+the documented fallback, the text, and `role` is unstated.
+`compiler.evidence.bound_refs_of` then finds the row by its text,
+case-folded, with any role fitting, which is how the mapping was read. An
+entry's refs are the strings of its list; an entry with none was read as no
+entry and is dropped, and so is one whose text is empty, which no entity
+name matches. A mapping left with no entry removes the key, as a block whose
+part bound nothing is written. A list is left alone. A converted block is
+kept only when `source_from_spec_block` reads it. A block that cannot be
 converted, or whose conversion raises, is left as it is and reported with
 its reason, and the run goes on.
 
@@ -85,12 +85,11 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from compiler.sources import _strings, source_from_spec_block
+from compiler.sources import bound_rows, source_from_spec_block
 from google.adk.sessions import DatabaseSessionService
 
 # The `sessions` table, whose columns ADK's v0 and v1 schemas share.
 from google.adk.sessions.schemas.v1 import StorageSession
-from planner.workflow import BoundEntity
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -152,16 +151,10 @@ def migrate_block(block: Mapping[str, Any]) -> BlockResult:
     if not isinstance(raw, Mapping):
         return BlockResult(Outcome.UNCONVERTIBLE, block, error=TypeError.__name__)
     try:
-        rows: list[dict[str, Any]] = []
-        for text, refs in raw.items():
-            if text and (strings := _strings(refs)):
-                row = BoundEntity(
-                    identity=text, text=text, role=None, refs=tuple(dict.fromkeys(strings))
-                )
-                rows.append(row.model_dump(mode="json"))
+        rows = bound_rows(raw)
         converted = {key: value for key, value in block.items() if key != "_bound_refs"}
         if rows:
-            converted["_bound_refs"] = rows
+            converted["_bound_refs"] = [row.model_dump(mode="json") for row in rows]
         source_from_spec_block(converted)
     except Exception as exc:
         # Any failure on one block is reported, so a run always reaches its report.
