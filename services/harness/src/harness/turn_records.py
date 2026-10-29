@@ -1167,11 +1167,17 @@ def basis_line(
     `_used_readings` reads it; its newest reading speaks for it. Each
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
-    clauses are the same share them; otherwise each part's clauses follow
-    its name (`part_name`):
+    clauses are the same share them. Otherwise the clauses every part
+    holds come first, in the first part's order, and each part's other
+    clauses follow its name (`part_name`). Parts left with the same other
+    clauses share one name list; a part left with none goes unnamed:
 
         Counted as: health incl. population and reproductive health
         (CRS 120 + 130) · Africa incl. regional buckets · gross disbursements.
+
+        Counted as: gross disbursements, current USD · bilateral plus
+        imputed multilateral, 2023; health: health incl. population and
+        reproductive health (CRS 120 + 130).
 
         Counted as: "health aid": ... · ...; "education aid": ... · ....
 
@@ -1192,16 +1198,20 @@ def basis_line(
             )
     if not parts:
         return None
-    if len(parts) == 1:
-        return f"{_BASIS_LEAD}{_CLAUSE_JOIN.join(next(iter(parts)))}."
-    return (
-        _BASIS_LEAD
-        + "; ".join(
-            f"{' and '.join(names)}: {_CLAUSE_JOIN.join(clauses)}"
-            for clauses, names in parts.items()
-        )
-        + "."
-    )
+    first, *others = parts
+    shared = tuple(clause for clause in first if all(clause in other for other in others))
+    # Parts grouped again by the clauses they hold beyond the shared ones.
+    remainders: dict[tuple[str, ...], list[str]] = {}
+    for clauses, names in parts.items():
+        remainder = tuple(clause for clause in clauses if clause not in shared)
+        if remainder:
+            remainders.setdefault(remainder, []).extend(names)
+    pieces = [_CLAUSE_JOIN.join(shared)] if shared else []
+    pieces += [
+        f"{' and '.join(names)}: {_CLAUSE_JOIN.join(remainder)}"
+        for remainder, names in remainders.items()
+    ]
+    return f"{_BASIS_LEAD}{'; '.join(pieces)}."
 
 
 # The order chips take by axis, and how many an answer offers.

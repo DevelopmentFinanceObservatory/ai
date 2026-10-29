@@ -74,10 +74,13 @@ async def _until(condition: Callable[[], bool], *, seconds: float = 15.0) -> Non
 
 @contextmanager
 def _abandoned_streams() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
-    """Yield a function returning the `_sse_stream` generators the event loop
-    has taken over for closing: a generator dropped while suspended is handed
-    to the loop, which closes it later on a task of its own. Only generators
-    first iterated inside the block are seen."""
+    """Yield a function returning the response generators the event loop has
+    taken over for closing: a generator dropped while suspended is handed to
+    the loop, which closes it later on a task of its own. The loop takes over
+    only the response's outermost generator: `_sse_stream` when a test serves
+    it bare, `StudioRunner._settling` when a Studio route wraps it, in which
+    case `_settling` closes `_sse_stream` itself on the loop's task. Only
+    generators first iterated inside the block are seen."""
     hooks = sys.get_asyncgen_hooks()
     handed_over: list[AsyncGeneratorType] = []
 
@@ -88,7 +91,8 @@ def _abandoned_streams() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
 
     sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=finalizer)
     try:
-        yield lambda: [g for g in handed_over if g.ag_code is _sse_stream.__code__]
+        responses = (_sse_stream.__code__, StudioRunner._settling.__code__)
+        yield lambda: [g for g in handed_over if g.ag_code in responses]
     finally:
         sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=hooks.finalizer)
 

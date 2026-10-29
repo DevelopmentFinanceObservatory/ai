@@ -21,10 +21,11 @@ from google.adk.tools import FunctionTool
 from google.adk.workflow import START, BaseNode, Edge, Workflow, node
 
 from harness.conversation import current_conversation_id
+from harness.early_mint import EarlyMints
 from harness.graph.execute import execute_node
 from harness.graph.orchestrate import ask, orchestrate_node, route
 from harness.graph.plan_done import plan_done_node
-from harness.graph.planning import approve, plan_start, planner_node
+from harness.graph.planning import approve_node, plan_start, planner_node
 from harness.graph.resume import run_resumer
 from harness.graph.seams import (
     Executor,
@@ -119,6 +120,7 @@ def create_root_workflow(
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
+    early_mints: EarlyMints | None = None,
 ) -> Workflow:
     """Build the root workflow with its external seams injected.
 
@@ -149,7 +151,9 @@ def create_root_workflow(
     keyword of the same name). `fetch_series_stats` and `label_refs` are
     that same call's own keywords: the real signed-URL fetch and graph name
     lookup by default, injectable for a caller whose `tool_surface` is
-    itself fully virtualised.
+    itself fully virtualised. `early_mints` starts each card's retrievals
+    when the `approve` node offers it (`harness.early_mint`); with `None`
+    nothing is fetched before approval.
     """
     ledger = (
         run_ledger
@@ -185,7 +189,7 @@ def create_root_workflow(
     seed_n = node(receive_seeds, name="seed")
     orchestrate_n = node(orchestrate, name="orchestrate", rerun_on_resume=True)
     ask_n = node(ask, name="ask", rerun_on_resume=True)
-    approve_n = node(approve, name="approve", rerun_on_resume=True)
+    approve_n = node(approve_node(early_mints=early_mints), name="approve", rerun_on_resume=True)
     execute_n = node(execute, name="execute")
     plan_done_n = node(plan_done, name="plan_done")
     switch_n = node(

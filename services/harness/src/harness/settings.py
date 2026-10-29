@@ -258,6 +258,12 @@ class Settings(BaseServiceSettings):
     # create_root_workflow(max_concurrent_steps=...)`); a wave wider than
     # this queues at the point of call rather than opening every call at once.
     executor_max_concurrent_steps: int = Field(default=4, ge=1)
+    # Whether each card's retrievals are sent before the user approves it
+    # (`EARLY_MINT`, `harness.early_mint`), and how long the stream that
+    # carried the card waits for those calls before it closes
+    # (`EARLY_MINT_WAIT_S`).
+    early_mint: bool = True
+    early_mint_wait_s: float = Field(default=3.0, gt=0, allow_inf_nan=False)
     # The combined server's limits for outside callers; see the class docstring.
     combined_mcp_requests_per_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     combined_mcp_burst: int = Field(default=20, ge=1)
