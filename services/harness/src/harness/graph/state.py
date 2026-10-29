@@ -17,7 +17,7 @@ from collections.abc import (
     Sequence,
 )
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
 from google.adk import Context, Event
@@ -123,8 +123,7 @@ def interrupt_event(request: RequestInput) -> Event:
 
 
 class AskOption(BaseModel):
-    """One answer `ask_user` offers: its wording, for a count or prices its
-    spec_id, and for prices which prices they are."""
+    """One answer `ask_user` offers: its wording and, for a count or prices, its spec_id."""
 
     label: str = Field(description="the answer as the user reads it")
     spec_id: str | None = Field(
@@ -132,12 +131,6 @@ class AskOption(BaseModel):
         description=(
             "for a count or prices the result names, the spec_id it gives that reading; "
             "leave it out for any other answer"
-        ),
-    )
-    prices: Literal["current", "constant"] | None = Field(
-        default=None,
-        description=(
-            "for an `open_prices` entry, the entry's `prices`; leave it out for any other answer"
         ),
     )
 
@@ -190,30 +183,48 @@ class PendingPlan(BaseModel):
     asks_across_years: list[int] = []
 
 
-def ask_candidates(options: list[AskOption]) -> list[dict[str, str]]:
+class PricedOption(NamedTuple):
+    """The prices an `ask_user` option offers, as code reads them off the turn's
+    search results (`harness.graph.orchestrate.priced_options`): `part`, the
+    spec_id of the reading whose `open_prices` the option is one of, and
+    `prices`, `current` or `constant`."""
+
+    part: str
+    prices: Literal["current", "constant"]
+
+
+def ask_candidates(
+    options: list[AskOption], priced: Mapping[int, PricedOption] | None = None
+) -> list[dict[str, str]]:
     """One question's options as the clarify interrupt's candidates: a count
     under its own spec_id, so a pick returns it, and any other answer under
-    `o{n}`, its place in the question's list. A prices option carries its
-    `prices`, which the planner reads off the answered interrupt
-    (`planner.agent._prices_chosen`)."""
+    `o{n}`, its place in the question's list. An option of `priced`, by
+    place, carries its `part` and `prices`, which the planner reads off the
+    answered interrupt (`planner.agent._prices_chosen`)."""
+    priced = priced or {}
     return [
         {
             "spec_id": option.spec_id or f"o{index + 1}",
             "label": option.label,
-            **({"prices": option.prices} if option.prices is not None else {}),
+            **(priced[index]._asdict() if index in priced else {}),
         }
         for index, option in enumerate(options)
     ]
 
 
-def ask_questions(questions: list[AskQuestion]) -> list[dict[str, Any]]:
+def ask_questions(
+    questions: list[AskQuestion], priced: Sequence[Mapping[int, PricedOption]] = ()
+) -> list[dict[str, Any]]:
     """`PendingAsk.questions` as the clarify interrupt's payload entries: each
-    under `q{n}`, its place in the call, with its candidates (`ask_candidates`)."""
+    under `q{n}`, its place in the call, with its candidates (`ask_candidates`),
+    each question's priced options read from `priced` by place."""
     return [
         {
             "id": f"q{index + 1}",
             "question": question.question,
-            "candidates": ask_candidates(question.options),
+            "candidates": ask_candidates(
+                question.options, priced[index] if index < len(priced) else None
+            ),
         }
         for index, question in enumerate(questions)
     ]

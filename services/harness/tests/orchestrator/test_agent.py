@@ -185,8 +185,8 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternat
     )
     assert "even when the result lists no `other_prices`" not in text
     assert (
-        "When the answer asks for a search, search with that unit on the part, and put the "
-        "count they chose, if any, in `variable`" in text
+        "When they pick prices the result does not name, search again with that unit on the "
+        "part, and put the count they chose, if any, in `variable`" in text
     )
     assert (
         "A request that adds or combines measures from different sources, such as aid and debt, "

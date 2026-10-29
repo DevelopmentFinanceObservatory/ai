@@ -140,12 +140,12 @@ other counts the result names follow. Label each as the result labels it,
 with the spec_id the result gives it. A part that lists `open_prices` leaves
 its prices open, so prices get a question of their own. Its options are the
 `open_prices` entries in order, the prices search read first. Label each as
-the entry labels it, with the entry's `prices` and, when it gives one, its
-spec_id.
+the entry labels it, with the entry's spec_id when it gives one.
 
-When the user picks a reading with a spec_id, fetch it or name it in the plan
-brief. When the answer asks for a search, search with that unit on the part,
-and put the count they chose, if any, in `variable`.
+When the user picks a reading the result names, fetch its spec_id or name it
+in the plan brief. When they pick prices the result does not name, search
+again with that unit on the part, and put the count they chose, if any, in
+`variable`.
 
 A request that adds or combines measures from different sources, such as aid
 and debt, goes to plan straight after search, without ask_user. The planner

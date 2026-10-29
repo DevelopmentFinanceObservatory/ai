@@ -492,14 +492,15 @@ requirement citing it is refused as `user_decision_dropped`, and one changing
 its `chosen`, `resolved_by` or `fixes`, or citing it from a requirement that
 states another value, as `user_decision_contradicted`. Both point at
 `adk_request_input`. Once the user has spoken, their decisions go the way a
-planner's do. The prices the user picks answering the orchestrator's prices
-question are their decision too (`submission.prices_choice`): `propose_plan`
-writes it under `user_prices`, fixing the unit of each dataset requirement that
-states a unit or pins a source in a currency, and refuses a plan leaving that
-unit out or stating other prices. A unit in constant prices with no base year
-is refused naming the base year its pinned source or the series the user picked
-states. With neither, the planner asks the user whether to go on in current
-prices.
+planner's do. The prices the user picks for a part, a search reading whose
+prices were open, answering the orchestrator's prices question are their
+decision too (`submission.prices_choice`): `propose_plan` writes one per part,
+fixing the price basis alone (`DecisionFixes.prices`), cited by each dataset
+requirement pinning the part's series or one it offers. It refuses such a
+requirement that leaves its unit out, states other prices, or pins a series in
+other prices, naming the unit with its own pin's base year, or the series of
+the part to pin. With neither, the planner asks the user whether to go on in
+the other prices.
 
 **A period can follow the newest data.** A growth, a rank and a period threshold state their years as the plan read them, and a `rolling` field beside the years says which of them are relative to the newest year the data holds (`planner.records.RelativePeriod`, an offset of 0 or less from `latest`). Every rule that compares years reads the stated years. A relative period needs `period_end_open` on each dataset requirement it rests on, and `propose_plan` pins such a requirement to its dataset over a range with no end year (`_window_pins`, `planner.plan.period_window`), which apis ends at the current year at every mint. The range starts at the requirement's own first year when only ends roll. When a start rolls, the newest year the data holds can sit behind the one the plan read, so the rolling-start readers read the dataset whole, from the first year the dataset holds (`planner.plan.full_history`, read from a Search answer over no window, kept in `Plan.first_years`), and every other step keeps the range from the requirement's own first year. Search answers a question that names years over those years, so when no answer on record is over no window `propose_plan` reads the pinned identity over no window itself, with one `resolve_definition` call through the planner's tool surface (`read_full_history`), and holds the answer in session state for the turn (`planner.plan.full_histories`). That window is read for its first year and never retrieved. An unpinned requirement whose start is fixed stays unpinned, and the translator searches for it from that year on. `propose_plan` refuses with `detail.issue` `rolling_needs_open_period` when a dataset is closed (`dataset_closed`), has no identity on record where it needs one (`no_source_on_record`), or has no first year because the read did not complete or stated none (`first_year_read_failed`), `rolling_years_disagree` when rolling years that one run counts from one newest year, in one step or in steps one result reads (`planner.plan.rolling_groups`), less their offsets, give different newest years or one after the last year of a dataset they rest on (its `period`, the years Search found it over), `rolling_years_run_out` when a first year that follows the newest data meets a fixed last year (`planner.shapes.years_run_out`), or newer data takes a growth window's first or last year out of its input (`planner.shapes.growth_endpoint_leaves`), `rolling_side_unanchored` when a two-sided step pairs a side whose years follow the newest year with a side open to each series' own newest year that the newest year is not read over (`planner.shapes.anchor_misses`), since the run reads the newest year over the datasets the rolling steps counting from it reach (`planner.plan.anchored_over`, `compiler.rolling.anchor_groups`), so the open side's dataset can lag it, and a rolling bound on a step reading both sides reads it over both, `rolling_exclusion` when a filter's `ne` follows the newest data or reads a dataset stating `period_end_open`, where newer data can make the removed year the one a step reads (the years before the newest are `lte` with `rolling` at offset -1), and `rolling_frame_too_large` when Search counted more rows in the whole history than data-mcp's `max_frame_rows`.
 

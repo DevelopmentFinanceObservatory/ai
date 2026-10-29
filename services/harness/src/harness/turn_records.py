@@ -939,9 +939,9 @@ def open_prices(
     the part's `other_prices` offers (`harness.tool_contracts.measure_choice`)
     follows with its spec_id, or constant prices with none when search
     offers no other prices. Every option names its `prices`, `current` or
-    `constant`, which the option of the user's question carries
-    (`harness.graph.state.AskOption.prices`), so their pick reaches the plan
-    as the user's decision (`submission.prices_choice`).
+    `constant`, which the `ask` node marks on the option of the user's
+    prices question (`harness.graph.orchestrate.priced_options`), so their
+    pick reaches the plan as the user's decision (`submission.prices_choice`).
     """
     if not isinstance(window, Mapping) or window.get("start") == window.get("end"):
         return []

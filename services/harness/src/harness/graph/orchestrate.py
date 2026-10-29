@@ -12,29 +12,33 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from google.adk import Context, Event
 from google.adk.agents import LlmAgent
 from google.adk.events import RequestInput
 from google.genai import types
+from planner.plan import SessionState
 
 from harness.graph.state import (
     CLARIFY_INTERRUPT,
     ORCHESTRATOR_ASKED_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_STATUS_FAILURE_KEY,
     ORCHESTRATOR_STATUS_KEY,
     AskOption,
     AskQuestion,
     PendingAsk,
+    PricedOption,
     ask_candidates,
     ask_questions,
     interrupt_event,
     pending_action,
     resume_answers,
 )
+from harness.turn_records import SearchReading, open_prices
 
 
 def orchestrate_node(*, orchestrator: LlmAgent) -> Callable[[Context, Any], AsyncIterator[Event]]:
@@ -103,9 +107,12 @@ _SETTLED = "Each answered choice is settled. Do not ask it again."
 def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     """Put the agent's questions to the user through one clarify interrupt,
     each under its id with its options as candidates (`ask_questions`), and
-    hand the answers back in the options' own words (`answer_replies`). The
-    `PendingAsk` waits under `ORCHESTRATOR_ASKED_KEY` while the interrupt is
-    open, so a resume is told from a fresh entry."""
+    hand the answers back in the options' own words (`answer_replies`). Each
+    prices option carries the part and prices code reads for it
+    (`priced_options`), which the turn's search results do not change while
+    the interrupt is open. The `PendingAsk` waits under
+    `ORCHESTRATOR_ASKED_KEY` while the interrupt is open, so a resume is told
+    from a fresh entry."""
     result = (ctx.resume_inputs or {}).get(CLARIFY_INTERRUPT)
     held = ctx.state.get(ORCHESTRATOR_ASKED_KEY)
     if not (held and result is not None):
@@ -115,7 +122,9 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
             RequestInput(
                 interrupt_id=CLARIFY_INTERRUPT,
                 message=questions[0].question,
-                payload={"questions": ask_questions(questions)},
+                payload={
+                    "questions": ask_questions(questions, priced_options(questions, ctx.state))
+                },
             )
         )
         return
@@ -134,7 +143,7 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
             "can help with."
         )
     else:
-        replies = answer_replies(questions, answers)
+        replies = answer_replies(questions, answers, priced_options(questions, ctx.state))
         closing = _SETTLED
     if len(questions) == 1:
         lines = [f"You asked the user: {questions[0].question}", *filter(None, replies)]
@@ -153,15 +162,21 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     yield Event(output={"status": "Reading your answer", "text": "\n".join([*lines, closing])})
 
 
-def answer_replies(questions: list[AskQuestion], answers: dict[str, dict[str, Any]]) -> list[str]:
+def answer_replies(
+    questions: list[AskQuestion],
+    answers: dict[str, dict[str, Any]],
+    priced: Sequence[Mapping[int, PricedOption]] = (),
+) -> list[str]:
     """What the user answered to each of `questions`, in order, from `answers`
     keyed by question id (`resume_answers`): a pick in the option's own words
     with its spec_id when it carries one, the user's own words, or, for a question
     the user skipped or left unanswered, the first option as the agent's to
-    go on with. A pick of constant prices no search listed, an option with
-    `prices` and no spec_id, asks for one search in those prices."""
+    go on with. A pick of constant prices no search listed, an option of
+    `priced` (`priced_options`) in constant prices with no spec_id, asks
+    for one search of its part in those prices."""
     replies = []
     for index, question in enumerate(questions):
+        prices = priced[index] if index < len(priced) else {}
         answer = answers.get(f"q{index + 1}") or {"kind": "skipped"}
         if answer.get("kind") == "text":
             replies.append(f"The user answered in their own words: {answer['text']}")
@@ -175,14 +190,26 @@ def answer_replies(questions: list[AskQuestion], answers: dict[str, dict[str, An
             replies.append(f"The user chose: {answer.get('spec_id')}")
         elif option.spec_id:
             replies.append(f"The user chose: {option.label} ({option.spec_id})")
-        elif option.prices == "constant":
+        elif (
+            stamp := prices.get(_candidate_ids(question).index(option_id(answer)))
+        ) is not None and stamp.prices == "constant":
             replies.append(
-                f"The user chose: {option.label}, which no search listed. Search once for that "
-                "part in constant prices."
+                f"The user chose: {option.label}, which no search listed. Search once for "
+                f"that part ({stamp.part}) in constant prices."
             )
         else:
             replies.append(f"The user chose: {option.label}")
     return replies
+
+
+def option_id(answer: Mapping[str, Any]) -> str:
+    """The candidate id an option answer picked."""
+    return str(answer.get("spec_id"))
+
+
+def _candidate_ids(question: AskQuestion) -> list[str]:
+    """The candidate id of each of `question`'s options, in order (`ask_candidates`)."""
+    return [candidate["spec_id"] for candidate in ask_candidates(question.options)]
 
 
 def _picked(question: AskQuestion, answer: Mapping[str, Any]) -> AskOption | None:
@@ -190,19 +217,92 @@ def _picked(question: AskQuestion, answer: Mapping[str, Any]) -> AskOption | Non
     (`ask_candidates`); None for an answer that picked none of them."""
     if answer.get("kind") != "option":
         return None
-    options = dict(
-        zip(
-            (candidate["spec_id"] for candidate in ask_candidates(question.options)),
-            question.options,
-            strict=True,
-        )
-    )
+    options = dict(zip(_candidate_ids(question), question.options, strict=True))
     return options.get(answer.get("spec_id"))
 
 
 # The measure axis that holds a reading's price basis, and each basis in words.
 _PRICE_AXIS = "measurementQualifier"
 _PRICES = {"Nominal": "current prices", "RealValue": "constant prices"}
+_BASES: dict[str, Literal["current", "constant"]] = {"Nominal": "current", "RealValue": "constant"}
+
+
+def priced_options(
+    questions: list[AskQuestion], state: SessionState
+) -> list[dict[int, PricedOption]]:
+    """For each of `questions`, the place of each option offering prices, with
+    the part it prices and the prices, read off the turn's search results.
+
+    A part is a reading whose prices are open (`harness.turn_records.
+    open_prices`, over the readings of `ORCHESTRATOR_SEARCHES_KEY` and the
+    blocks of `ORCHESTRATOR_SPECS_KEY`). An option prices a part when it
+    carries the spec_id of one of the part's entries, or carries no spec_id
+    and is labelled as an entry carrying none is, case aside. An option
+    carrying the spec_id of another prices a search block offers (axis
+    `unit`) prices that block at its `measurementQualifier`. A question
+    prices one part, the one every such option of it can price; a question
+    whose options could price several parts, or none, has none.
+    """
+    parts = _open_parts(state)
+    offers = _offers(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    priced: list[dict[int, PricedOption]] = []
+    for question in questions:
+        found = [_option_parts(option, parts, offers) for option in question.options]
+        shared = set.intersection(*(set(f) for f in found if f)) if any(found) else set()
+        part = next(iter(shared)) if len(shared) == 1 else None
+        priced.append(
+            {}
+            if part is None
+            else {
+                index: PricedOption(part, options[part])
+                for index, options in enumerate(found)
+                if part in options
+            }
+        )
+    return priced
+
+
+def _open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
+    """The `open_prices` entries of each reading of the turn whose prices are open, by its spec_id."""
+    specs = state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    parts: dict[str, list[dict[str, Any]]] = {}
+    for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or ():
+        reading = SearchReading.model_validate(stored)
+        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
+        if block is None or reading.spec_id is None:
+            continue
+        entries = open_prices(
+            block,
+            window=reading.window.model_dump() if reading.window is not None else None,
+            other_prices=[offer.model_dump() for offer in reading.other_prices],
+        )
+        if entries:
+            parts[reading.spec_id] = entries
+    return parts
+
+
+def _option_parts(
+    option: AskOption,
+    parts: Mapping[str, list[dict[str, Any]]],
+    offers: Mapping[str, _Offer],
+) -> dict[str, Literal["current", "constant"]]:
+    """Each part `option` can price, with the prices it offers (`priced_options`)."""
+    found: dict[str, Literal["current", "constant"]] = {}
+    label = option.label.strip().casefold()
+    for part, entries in parts.items():
+        for entry in entries:
+            if (
+                entry.get("spec_id") == option.spec_id
+                if option.spec_id is not None
+                else "spec_id" not in entry and entry["label"].casefold() == label
+            ):
+                found[part] = entry["prices"]
+    offer = offers.get(option.spec_id) if option.spec_id is not None else None
+    if not found and offer is not None and offer.axis == "unit":
+        basis = _BASES.get(offer.values.get(_PRICE_AXIS) or "")
+        if basis is not None:
+            found[offer.block] = basis
+    return found
 
 
 @dataclass(frozen=True)

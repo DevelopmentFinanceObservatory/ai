@@ -30,6 +30,7 @@ from harness import plan_display
 from harness.conversation import current_conversation_id
 from harness.graph import execute as execute_module
 from harness.graph import plan_done as plan_done_module
+from harness.graph.orchestrate import priced_options
 from harness.graph.plan_done import (
     HandBack,
     StepSummary,
@@ -57,6 +58,7 @@ from harness.graph.state import (
     AskQuestion,
     GraphState,
     PendingAsk,
+    PricedOption,
     ask_questions,
     pending_action,
 )
@@ -69,7 +71,7 @@ from harness.sentences import DECLINE_REASONS
 from harness.settings import Settings
 from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
-from harness.turn_records import PlanAsk, PlanRecord
+from harness.turn_records import PlanAsk, PlanRecord, SearchReading, WindowReading
 from harness.wiring import handing_back_planner_failures
 from planner.agent import ToolContextSession
 from planner.plan import (
@@ -247,8 +249,7 @@ _GROSS, _NET = "spec_" + "a" * 32, "spec_" + "c" * 32
             [
                 "1. How should aid be counted? The user left this to you. Go on with "
                 "gross disbursements.",
-                "2. In which prices? The user chose: Constant 2023 US dollars, which no search "
-                "listed. Search once for that part in constant prices.",
+                "2. In which prices? The user chose: Constant 2023 US dollars",
                 _SETTLED,
             ],
         ),
@@ -290,8 +291,8 @@ async def test_several_questions_pause_together_and_each_answer_is_handed_back(
                 {
                     "question": "In which prices?",
                     "options": [
-                        {"label": "Current US dollars", "prices": "current"},
-                        {"label": "Constant 2023 US dollars", "prices": "constant"},
+                        {"label": "Current US dollars"},
+                        {"label": "Constant 2023 US dollars"},
                     ],
                 },
             ],
@@ -316,8 +317,8 @@ async def test_several_questions_pause_together_and_each_answer_is_handed_back(
             "id": "q2",
             "question": "In which prices?",
             "candidates": [
-                {"spec_id": "o1", "label": "Current US dollars", "prices": "current"},
-                {"spec_id": "o2", "label": "Constant 2023 US dollars", "prices": "constant"},
+                {"spec_id": "o1", "label": "Current US dollars"},
+                {"spec_id": "o2", "label": "Constant 2023 US dollars"},
             ],
         },
     ]
@@ -372,6 +373,115 @@ def _france_kenya_with_constant_prices(*, net_qualifier: str) -> dict[str, Any]:
         {**constant, "label": "constant prices", "axis": "unit"},
     ]
     return block
+
+
+def _open_reading(spec_id: str) -> dict[str, Any]:
+    """A `definite` reading of `spec_id` over 2018 to 2022, as `store_search` keeps it."""
+    return SearchReading(
+        text=None,
+        status="definite",
+        spec_id=spec_id,
+        window=WindowReading(start=2018, end=2022, source="requested"),
+    ).model_dump(mode="json")
+
+
+_USD_BLOCK_UNIT = {
+    "basis": "fallback",
+    "ref": "CurrencyUSD",
+    "label": "US Dollar",
+    "currency": "USD",
+}
+
+
+def _usd_block(spec_id: str) -> dict[str, Any]:
+    """A spec block in current US dollars, so its prices are open over several years."""
+    return {"spec_id": spec_id, "resolved": {"facets": {"unit": _USD_BLOCK_UNIT}}}
+
+
+async def test_a_prices_question_is_marked_with_its_part_and_prices_in_code():
+    """The model labels the prices options as `open_prices` does and copies
+    nothing else: the `ask` node marks each with the part it prices and its
+    prices, and a pick of constant prices no search listed asks for a search
+    of that part."""
+    runner, model = orchestrator_runner(
+        call(
+            "ask_user",
+            questions=[
+                {
+                    "question": "In which prices?",
+                    "options": [{"label": "current prices"}, {"label": "constant prices"}],
+                }
+            ],
+        ),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(
+        runner,
+        **{
+            ORCHESTRATOR_SPECS_KEY: {_GROSS: _usd_block(_GROSS)},
+            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_GROSS)],
+        },
+    )
+
+    pause = single_pause(await run_turn(runner, types.UserContent("Aid to Kenya, 2018-2022?")))
+    assert pause.args["payload"]["questions"][0]["candidates"] == [
+        {"spec_id": "o1", "label": "current prices", "part": _GROSS, "prices": "current"},
+        {"spec_id": "o2", "label": "constant prices", "part": _GROSS, "prices": "constant"},
+    ]
+    reply = create_request_input_response(pause.id, {"result": {"spec_id": "o2"}})
+    await run_turn(runner, types.Content(role="user", parts=[reply]))
+
+    assert (
+        f"The user chose: constant prices, which no search listed. Search once for that part "
+        f"({_GROSS}) in constant prices." in request_text(model.requests[-1])
+    )
+
+
+_OTHER = "spec_" + "b" * 32
+
+
+@pytest.mark.parametrize(
+    ("parts", "options", "expected"),
+    [
+        (
+            [_GROSS, _OTHER],
+            [{"label": "Current prices"}, {"label": "constant prices"}],
+            {},
+        ),
+        (
+            [_GROSS],
+            [{"label": "Current US dollars"}, {"label": "constant prices"}],
+            {1: PricedOption(_GROSS, "constant")},
+        ),
+        ([_GROSS], [{"label": "Either"}, {"label": "Neither"}], {}),
+    ],
+    ids=["two-parts-alike", "one-label-matches", "no-prices"],
+)
+def test_a_prices_option_is_read_off_the_turn_s_open_prices(
+    parts: list[str], options: list[dict[str, str]], expected: dict[int, PricedOption]
+):
+    """An option prices a part only where code can tell which: a question
+    whose options could price either of two parts prices neither."""
+    state = {
+        ORCHESTRATOR_SPECS_KEY: {part: _usd_block(part) for part in parts},
+        ORCHESTRATOR_SEARCHES_KEY: [_open_reading(part) for part in parts],
+    }
+    question = AskQuestion(question="In which prices?", options=options)
+
+    assert priced_options([question], state) == [expected]
+
+
+def test_a_prices_option_carrying_another_prices_spec_id_prices_the_block_offering_it():
+    """An option carrying the spec_id a block offers as its count in other
+    prices prices that block, at the offer's `measurementQualifier`."""
+    block = _france_kenya_with_constant_prices(net_qualifier="Nominal")
+    state = {ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: block}, ORCHESTRATOR_SEARCHES_KEY: []}
+    question = AskQuestion(
+        question="In which prices?",
+        options=[{"label": "Constant US dollars", "spec_id": _FK_CONSTANT}],
+    )
+
+    assert priced_options([question], state) == [{0: PricedOption(_FK_GROSS, "constant")}]
 
 
 _COUNT_AND_PRICES = [

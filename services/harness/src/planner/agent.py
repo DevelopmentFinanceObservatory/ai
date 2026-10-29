@@ -48,7 +48,8 @@ import functools
 import logging
 from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, override
 
 from compiler.sources import block_group, party_class, readable_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
@@ -78,7 +79,7 @@ from harness.scope_choices import (
 from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
-from submission.prices_choice import PricesChoice
+from submission.prices_choice import PRICES_SLOT_PREFIX, PricesChoice
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
@@ -770,27 +771,106 @@ def _question_candidates(args: dict[str, Any]) -> dict[str, Any]:
     return {"q1": candidates or payload.get("candidates")}
 
 
-def _prices_chosen(tool_context: ToolContext) -> PricesChoice | None:
-    """The prices the user picked answering an `adk_request_input` call, read
-    off this session's event history; `None` once they say anything after it.
+def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
+    """The prices the user picked answering `adk_request_input` calls, by the
+    part each prices, read off this session's event history.
 
-    A prices option carries its `prices` on its candidate
-    (`harness.graph.state.ask_candidates`), so a pick of it states the
-    prices whether or not the option carries a spec_id. Each response pairs
-    with the nearest preceding call sharing its `id`, as `_elected_spec_ids`
-    pairs them. A later answer (`_is_answer`) picking no prices, an
-    amendment of the approval card (`_is_amendment`) or a message the user
-    typed (`_user_message`) releases the pick, as it releases every user
-    decision (`_user_spoke_since_recorded`). A Studio turn is one session,
-    so a pick holds for the turn it was made in.
+    The `ask` node marks each prices option's candidate with its `part` and
+    `prices` (`harness.graph.state.ask_candidates`), so a pick states them
+    whether or not the option carries a spec_id. Each response pairs with the
+    nearest preceding call sharing its `id`, as `_elected_spec_ids` pairs
+    them. A choice stands until the user answers the same question again,
+    a question pricing the same part: a pick of other prices replaces it,
+    and any other answer, a skip aside, releases it. The planner's own ask
+    after a refusal of a part's prices (`detail.part`, `submission.
+    prices_choice`) is that question too, so any answer to it releases the
+    part. A message the user typed (`_user_message`) or an amendment of the
+    approval card (`_is_amendment`) releases every choice. An answer to any
+    other question leaves them standing. A Studio turn is one session, so a
+    choice holds for the turn it was made in.
     """
-    offered: dict[str, dict[str, Any]] = {}
-    chosen: PricesChoice | None = None
+    chosen: dict[str, PricesChoice] = {}
+    refused: str | None = None
+    asked: dict[str, str] = {}
+    for step in _session_steps(tool_context):
+        if step.kind == "message":
+            chosen.clear()
+        elif step.kind == "response":
+            refused = _prices_refused(step.body) or refused
+        elif step.kind == "call":
+            if refused is not None and step.call_id is not None:
+                asked[step.call_id], refused = refused, None
+        elif _is_amendment(body := dict(step.body)):
+            chosen.clear()
+        elif step.call_id in asked:
+            if _is_answer(body):
+                chosen.pop(asked.pop(step.call_id), None)
+        else:
+            _priced_answers(step.args or {}, step.body, chosen)
+    return chosen
+
+
+def _prices_refused(body: Mapping[str, Any]) -> str | None:
+    """The part a `propose_plan` refusal of the user's prices names (`detail.part`), or `None`."""
+    detail = body.get("detail")
+    slot = detail.get("slot") if isinstance(detail, dict) else None
+    if not (isinstance(slot, str) and slot.startswith(PRICES_SLOT_PREFIX)):
+        return None
+    part = detail.get("part") if isinstance(detail, dict) else None
+    return part if isinstance(part, str) else None
+
+
+def _priced_answers(
+    args: dict[str, Any], body: Mapping[str, Any], chosen: dict[str, PricesChoice]
+) -> None:
+    """Record in `chosen` what one clarify response says of each part its call priced (`_prices_chosen`)."""
+    answers = _answers(body.get("result"))
+    for question_id, candidates in _question_candidates(args).items():
+        marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
+        answer = answers.get(question_id)
+        if not marked or not isinstance(answer, dict) or not _said(answer):
+            continue
+        part = str(marked[0]["part"])
+        picked = next(
+            (
+                choice
+                for candidate in marked
+                if answer.get("kind") == "option"
+                and candidate.get("spec_id") == answer.get("spec_id")
+                and (choice := PricesChoice.of_candidate(candidate)) is not None
+            ),
+            None,
+        )
+        if picked is None:
+            chosen.pop(part, None)
+        else:
+            chosen[part] = picked
+
+
+class _Step(NamedTuple):
+    """One step of a session's history, as the readers of what the user answered walk it.
+
+    `message` is a message the user typed (`_user_message`). `call` is an
+    `adk_request_input` call, with its id. `answer` is a response to one,
+    with its id, the `args` of the nearest preceding call sharing that id
+    (`None` when none precedes it) and the response body. `response` is any
+    other tool's response, with its body.
+    """
+
+    kind: Literal["message", "call", "answer", "response"]
+    call_id: str | None = None
+    args: dict[str, Any] | None = None
+    body: Mapping[str, Any] = MappingProxyType({})
+
+
+def _session_steps(tool_context: ToolContext) -> Iterator[_Step]:
+    """The steps of `tool_context`'s session history, in event order (`_Step`)."""
+    calls: dict[str, dict[str, Any]] = {}
     for event in tool_context.session.events:
         if not (event.content and event.content.parts):
             continue
         if _user_message(event):
-            chosen = None
+            yield _Step("message")
             continue
         for part in event.content.parts:
             call = part.function_call
@@ -799,26 +879,17 @@ def _prices_chosen(tool_context: ToolContext) -> PricesChoice | None:
                 and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
                 and call.id is not None
             ):
-                offered[call.id] = _question_candidates(call.args or {})
+                calls[call.id] = call.args or {}
+                yield _Step("call", call.id, call.args or {})
                 continue
             response = part.function_response
-            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
+            if response is None:
                 continue
             body = response.response or {}
-            if not (_is_answer(body) or _is_amendment(body)):
-                continue
-            questions = offered.get(response.id or "", {})
-            picks = [
-                choice
-                for question_id, answer in _answers(body.get("result")).items()
-                if isinstance(answer, dict) and answer.get("kind") == "option"
-                for candidate in questions.get(question_id) or ()
-                if isinstance(candidate, dict)
-                and candidate.get("spec_id") == answer.get("spec_id")
-                and (choice := PricesChoice.of_candidate(candidate)) is not None
-            ]
-            chosen = picks[-1] if picks else None
-    return chosen
+            if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
+                yield _Step("answer", response.id, calls.get(response.id or ""), body)
+            else:
+                yield _Step("response", body=body)
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:
@@ -845,24 +916,9 @@ def _picks(result: object, offered: dict[str, frozenset[str]]) -> tuple[str, ...
 
 def _answered_calls(tool_context: ToolContext) -> Iterator[tuple[dict[str, Any], object]]:
     """Each interrupt answer with the nearest preceding call sharing its id."""
-    calls: dict[str, dict[str, Any]] = {}
-    for event in tool_context.session.events:
-        if not (event.content and event.content.parts):
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if (
-                call is not None
-                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-                and call.id is not None
-            ):
-                calls[call.id] = call.args or {}
-                continue
-            response = part.function_response
-            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
-                continue
-            if response.id in calls:
-                yield calls[response.id], (response.response or {}).get("result")
+    for step in _session_steps(tool_context):
+        if step.kind == "answer" and step.args is not None:
+            yield step.args, step.body.get("result")
 
 
 def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
@@ -1249,7 +1305,7 @@ class ToolContextSession:
         """`_user_spoke_since_recorded` over the call's session."""
         return _user_spoke_since_recorded(self.tool_context, version)
 
-    def prices_chosen(self) -> PricesChoice | None:
+    def prices_chosen(self) -> dict[str, PricesChoice]:
         """`_prices_chosen` over the call's session."""
         return _prices_chosen(self.tool_context)
 
