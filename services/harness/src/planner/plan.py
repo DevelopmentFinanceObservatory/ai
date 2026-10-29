@@ -788,12 +788,29 @@ def pin_slot_moves(origin: str, target: str) -> dict[str, str]:
 
     The measure decision's (`search_pin_slot`) and one scope decision's per
     axis (`scope_choice_slot`), so a moved pin renames every decision code
-    wrote for it and every citation of one.
+    wrote for it and every citation of one. A scope choice read off an
+    alignment's compile is named for its requirement, not its pin, so it has
+    no entry here and keeps its slot (`moved_pin_slot`).
     """
     moves = {search_pin_slot(origin): search_pin_slot(target)}
     for axis in get_args(ScopeAxis):
         moves[scope_choice_slot(origin, axis)] = scope_choice_slot(target, axis)
     return moves
+
+
+def moved_pin_slot(decision: Decision, target: str) -> str:
+    """The slot `decision`, one `propose_plan` wrote for its pin (`is_search_pin`,
+    `is_scope_choice`), takes once that pin moves to `target`.
+
+    A scope choice read off the compile alignment made for one requirement
+    (`DecisionScope.aligned_for`) names that requirement, whatever pin it fixes,
+    so it keeps its slot (`scope_choice_slot`).
+    """
+    if decision.scope is not None:
+        return scope_choice_slot(
+            target, decision.scope.axis, aligned_for=decision.scope.aligned_for
+        )
+    return search_pin_slot(target)
 
 
 # The name of each `DecisionFixes` field a `DecisionDraft` may list.
@@ -4348,6 +4365,15 @@ class Plan(StrictModel):
     status: PlanStatus = PlanStatus.DRAFT
     approved_revision: str | None = None
     approved_at: Annotated[datetime | None, HASHED_WHEN_SET] = None
+    # Set on every plan `propose_plan` admits (`submission.service.admit`) and on a
+    # stored plan `migrate_stored_origins` has migrated: each requirement alignment
+    # moved onto a compile records its origin itself (`DatasetRequirement.aligned_from`).
+    # A plan without it was stored before requirements recorded their origins. Code
+    # writes it: the planner's schema and the plan digest leave it out, and so does
+    # `plan_revision`, since it changes nothing a user reviews.
+    records_origins: Annotated[SkipJsonSchema[bool], HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda marked: not marked
+    )
 
     @field_validator("question")
     @classmethod
@@ -4821,13 +4847,16 @@ def plan_revision(plan: Plan) -> str:
     Covers everything a user reviews -- question, decisions, requirements,
     translation, workflow, version -- and leaves out `status`,
     `approved_revision` and `approved_at`, so approving a revision does not
-    change the value that was approved. A `HASHED_WHEN_SET` field enters once it holds
+    change the value that was approved, and `records_origins`, which code
+    sets on recording a plan. A `HASHED_WHEN_SET` field enters once it holds
     something other than its default (`common.hashed_fields.revision_content`), so
     a plan saved without the field keeps its revision. Canonical JSON
     (RFC 8785) under SHA-256, the same discipline the data services use for
     their own identities.
     """
-    content = revision_content(plan, exclude={"status", "approved_revision", "approved_at"})
+    content = revision_content(
+        plan, exclude={"status", "approved_revision", "approved_at", "records_origins"}
+    )
     return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
@@ -6297,13 +6326,6 @@ class AlignedPin(StrictModel):
     A compile is admission's answer for the requirements it was compiled for,
     read through `pin_source_of`, and is not among the sources the planner
     was shown (`pin_sources`), whatever spec_id Search answered.
-
-    `records_origin` is set on every pin `planner.agent.compile_on_basis` and
-    `planner.agent.compile_whole` hold: the requirement alignment moves onto it
-    records its origin itself (`DatasetRequirement.aligned_from`). A stored pin
-    without it was held beside a plan whose requirements record no origin;
-    `migrate_stored_origins` writes those origins onto the plan once, when a
-    planner entry loads it, and sets it on every such pin.
     """
 
     origin: str
@@ -6313,7 +6335,6 @@ class AlignedPin(StrictModel):
     whole_axis: str | None = None
     part_origin: str | None = None
     part_option_ids: tuple[str, ...] = ()
-    records_origin: bool = False
 
     @property
     def key(self) -> AlignmentKey:
@@ -6603,64 +6624,64 @@ def pin_source_of(
 
 
 def migrate_stored_origins(state: SessionState) -> None:
-    """Write once onto the plan `state` holds the origins its stored form left to its
-    aligned pins, and mark every such pin (`stored_origins`).
+    """Write onto the plan `state` holds the origins its stored form left to the
+    aligned pins held beside it (`stored_origins`), when the plan does not record
+    origins (`Plan.records_origins`).
 
-    A planner entry calls this when it loads the plan. Nothing changes where
-    every pin `state` holds records its origin (`AlignedPin.records_origin`), so a
-    second call, or an origin the planner has since dropped, infers nothing.
+    A planner entry calls this whenever it seeds a plan. A plan that records
+    origins is left as it is, so an origin the planner has since dropped stays
+    dropped. One that does not was stored before requirements recorded their
+    origins, and is migrated every time it is seeded, to the same result.
     """
-    held = aligned_pins(state)
-    if all(pin.records_origin for pin in held):
-        return
     plan = load_plan(state)
+    if plan is None or plan.records_origins:
+        return
+    held = aligned_pins(state)
     to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
-    migrated, marked = stored_origins(plan, held, to_origin=to_origin)
-    if migrated is not None and migrated is not plan:
-        save_plan(state, migrated)
-    state[ALIGNED_PINS_STATE_KEY] = [pin.model_dump(mode="json") for pin in marked]
+    migrated, parts = stored_origins(plan, held, to_origin=to_origin)
+    save_plan(state, migrated)
+    if parts != tuple(held):
+        state[ALIGNED_PINS_STATE_KEY] = [pin.model_dump(mode="json") for pin in parts]
 
 
 def stored_origins(
-    plan: Plan | None, held: Sequence[AlignedPin], *, to_origin: Mapping[str, str]
-) -> tuple[Plan | None, tuple[AlignedPin, ...]]:
-    """`plan` with each input an aligned pin of the stored form moved recording that
-    compile, and `held` with every pin of that form marked as recording its origin.
+    plan: Plan, held: Sequence[AlignedPin], *, to_origin: Mapping[str, str]
+) -> tuple[Plan, tuple[AlignedPin, ...]]:
+    """`plan`, stored before requirements recorded their origins, with each input
+    an aligned pin moved recording that compile and the plan marked as recording
+    origins (`Plan.records_origins`), and `held` with each declared whole's pin
+    naming the compile of its part.
 
-    A pin of the stored form (`AlignedPin.records_origin` unset) was held beside a
-    plan that pins an aligned input to the compile alone and records no origin on
-    any requirement. An input of `plan` as the model wrote it (`authored`), its
-    windowed pin read as the pin it copies (`to_origin`), pinning the spec_id of
-    exactly one such compile (not a declared whole's) is given its origin and
-    options (`DatasetRequirement.aligned_from`, `DatasetRequirement.aligned_options`)
-    where no other requirement pins that spec_id, since one that does may hold it
-    as its own, and none pins the origin, which an input pinned to the compile
-    directly beside its origin's own requirement would. Each copy of that input
-    (`Plan.rolling_copies`) records the same. A plan already recording an origin
-    is left as it is.
+    Such a plan pins an aligned input to the compile alone. An input of `plan`
+    as the model wrote it (`authored`), its windowed pin read as the pin it
+    copies (`to_origin`), pinning the spec_id of exactly one compile of `held`
+    (not a declared whole's) is given its origin and options
+    (`DatasetRequirement.aligned_from`, `DatasetRequirement.aligned_options`)
+    where no other requirement pins that spec_id, since one that does may hold
+    it as its own, and none pins the origin, which an input pinned to the
+    compile directly beside its origin's own requirement would. Each copy of
+    that input (`Plan.rolling_copies`) records the same. A plan already
+    recording an origin is only marked.
 
-    A declared whole's pin of that form compiled over such an input's pin then
+    A declared whole's pin naming no part compiled over such an input's pin then
     names that input's compile as its part's (`AlignedPin.part_origin`,
     `AlignedPin.part_option_ids`), as `compile_key` reads it.
 
-    Both fields enter `plan_revision` once set (`HASHED_WHEN_SET`), so a plan given
-    an origin takes a new revision, and one given none keeps its own. The plan
-    this writes is the planner's working copy, which the entry then amends; the
-    record the user approves is not rewritten.
+    The origin fields enter `plan_revision` once set (`HASHED_WHEN_SET`), so a
+    plan given an origin takes a new revision, and one given none keeps its own.
+    The plan this writes is the planner's working copy, which the entry then
+    amends; the record the user approves is not rewritten.
     """
-    inferred = _inferred_origins(plan, held, to_origin=to_origin) if plan is not None else {}
+    inferred = _inferred_origins(plan, held, to_origin=to_origin)
     moved_at = dict(inferred.values())
-    marked = tuple(
-        pin
-        if pin.records_origin
-        else pin.model_copy(update={"records_origin": True, **_part_compile(pin, moved_at)})
+    parts = tuple(
+        pin.model_copy(update=update) if (update := _part_compile(pin, moved_at)) else pin
         for pin in held
     )
-    if plan is None or not inferred:
-        return plan, marked
     copies = copy_origins(plan.rolling_copies)
     return plan.model_copy(
         update={
+            "records_origins": True,
             "evidence_requirements": tuple(
                 requirement.model_copy(
                     update={"aligned_from": moved[1][0], "aligned_options": moved[1][1]}
@@ -6668,9 +6689,9 @@ def stored_origins(
                 if (moved := inferred.get(copies.get(requirement.id, requirement.id))) is not None
                 else requirement
                 for requirement in plan.evidence_requirements
-            )
+            ),
         }
-    ), marked
+    ), parts
 
 
 def _inferred_origins(
@@ -6680,7 +6701,7 @@ def _inferred_origins(
     pin, and the origin and options of the compile it pins."""
     origins: dict[str, set[tuple[str, tuple[str, ...]]]] = {}
     for pin in held:
-        if pin.whole_axis is None and not pin.records_origin:
+        if pin.whole_axis is None:
             origins.setdefault(pin.spec_id, set()).add((pin.origin, pin.option_ids))
     datasets = [
         requirement
@@ -6707,10 +6728,14 @@ def _inferred_origins(
 def _part_compile(
     pin: AlignedPin, moved_at: Mapping[str, tuple[str, tuple[str, ...]]]
 ) -> dict[str, Any]:
-    """The part fields of a declared whole's `pin` compiled over the pin of an input
-    `moved_at` gives an origin and options, by that pin (`AlignedPin.part_origin`,
-    `AlignedPin.part_option_ids`); none for any other pin."""
-    if pin.whole_axis is None or (moved := moved_at.get(pin.origin)) is None:
+    """The part fields of a declared whole's `pin`, naming no part, compiled over the
+    pin of an input `moved_at` gives an origin and options, by that pin
+    (`AlignedPin.part_origin`, `AlignedPin.part_option_ids`); none for any other pin."""
+    if (
+        pin.whole_axis is None
+        or pin.part_origin is not None
+        or (moved := moved_at.get(pin.origin)) is None
+    ):
         return {}
     return {"part_origin": moved[0], "part_option_ids": moved[1]}
 

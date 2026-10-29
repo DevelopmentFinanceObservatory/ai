@@ -7191,7 +7191,6 @@ def test_a_declared_whole_of_an_aligned_part_reads_the_parts_compiled_source(
             option_ids=("provider:bilateral",),
             spec_id=health["spec_id"],
             digest={"part_digests": [{"spec_block": health}]},
-            records_origin=True,
         ),
         AlignedPin(
             origin=health["spec_id"],
@@ -7201,7 +7200,6 @@ def test_a_declared_whole_of_an_aligned_part_reads_the_parts_compiled_source(
             whole_axis="sector",
             part_origin=origin["spec_id"],
             part_option_ids=("provider:bilateral",),
-            records_origin=True,
         ),
     ):
         save_aligned_pin(state, held)
@@ -7258,7 +7256,6 @@ def test_wholes_of_an_aligned_part_and_a_direct_part_on_one_spec_id_read_their_o
             option_ids=("provider:bilateral",),
             spec_id=health["spec_id"],
             digest={"part_digests": [{"spec_block": health}]},
-            records_origin=True,
         ),
         AlignedPin(
             origin=health["spec_id"],
@@ -7266,7 +7263,6 @@ def test_wholes_of_an_aligned_part_and_a_direct_part_on_one_spec_id_read_their_o
             spec_id=whole_block["spec_id"],
             digest={"part_digests": [{"spec_block": whole_block}]},
             whole_axis="sector",
-            records_origin=True,
         ),
         AlignedPin(
             origin=health["spec_id"],
@@ -7276,7 +7272,6 @@ def test_wholes_of_an_aligned_part_and_a_direct_part_on_one_spec_id_read_their_o
             whole_axis="sector",
             part_origin=origin["spec_id"],
             part_option_ids=("provider:bilateral",),
-            records_origin=True,
         ),
     ):
         save_aligned_pin(state, held)
@@ -7323,7 +7318,6 @@ def test_a_pin_of_its_own_reads_a_compile_only_where_unshown_and_compiled_once_t
                 option_ids=options,
                 spec_id=health["spec_id"],
                 digest={"part_digests": [{"spec_block": compiled}]},
-                records_origin=True,
             ),
         )
     if earlier:
@@ -7366,7 +7360,6 @@ def test_two_compiles_of_one_origin_onto_one_spec_id_are_read_by_their_options()
                 option_ids=moved,
                 spec_id=health["spec_id"],
                 digest={"part_digests": [{"spec_block": block}]},
-                records_origin=True,
             ),
         )
     held = HeldSources.of(state)
@@ -8985,9 +8978,9 @@ def test_a_requirement_restated_with_another_meaning_on_its_compile_reads_it_as_
     """The comparison above moved the US total onto DAC1's multilateral row. The amended
     plan restates that input on the same pin as US multilateral ODA, a measure of its
     own: it no longer asks for the total, so it records no origin and reads the row as
-    its own pin. Proposed once more as it stands, it still records none: the held
-    compile records its origin on the requirement (`AlignedPin.records_origin`), so
-    nothing infers the total back from it."""
+    its own pin. Proposed once more as it stands, it still records none: the plan
+    records origins (`Plan.records_origins`), so nothing infers the total back from
+    the held compile."""
     ctx = _FakeToolContext()
     france = _another_part(_US_MULTILATERAL)
     _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL, france)
@@ -8998,7 +8991,6 @@ def test_a_requirement_restated_with_another_meaning_on_its_compile_reads_it_as_
             option_ids=("provider:multilateral",),
             spec_id=_US_MULTILATERAL["spec_id"],
             digest={},
-            records_origin=True,
         ),
     )
     propose = _tools_by_name()["propose_plan"].func
@@ -9143,7 +9135,6 @@ def test_a_requirement_restated_with_a_field_alignment_cleared_keeps_its_origin(
             option_ids=("provider:multilateral",),
             spec_id=_US_MULTILATERAL["spec_id"],
             digest={},
-            records_origin=True,
         ),
     )
     propose = _tools_by_name()["propose_plan"].func
@@ -9223,13 +9214,13 @@ def test_a_stored_plan_recording_no_origin_and_its_aligned_pin_load_translate_an
     """`fixtures/aligned_total_plan_stored.json` holds the session state the comparison
     above leaves in the stored form whose requirements record no origin
     (`DatasetRequirement.aligned_from`): the plan, its total moved onto the
-    multilateral row, and that compile held as an `AlignedPin` stating no
-    `records_origin`, which loads as unset. Both load, the plan keeps the revision
+    multilateral row, and that compile held as an `AlignedPin`, the plan stating no
+    `records_origins`, which loads as unset. Both load, the plan keeps the revision
     it was stored under, and it translates with each requirement on its stored pin.
 
-    The entry that loads it writes the total's origin onto the plan once
-    (`migrate_stored_origins`), which gives it a new revision, and marks the pin; a
-    second load changes nothing. Amended into the share of US ODA going to
+    The entry that loads it writes the total's origin onto the plan
+    (`migrate_stored_origins`), which gives it a new revision and marks it; a second
+    load changes nothing. Amended into the share of US ODA going to
     multilaterals, US multilateral ODA pinned to that row directly, the total reads
     its recorded origin and goes back to its own pin, so the share does not divide
     one series by itself."""
@@ -9249,7 +9240,7 @@ def test_a_stored_plan_recording_no_origin_and_its_aligned_pin_load_translate_an
     assert [(pin.origin, pin.spec_id) for pin in held] == [
         (_US_TOTAL["spec_id"], _US_MULTILATERAL["spec_id"])
     ]
-    assert [pin.records_origin for pin in held] == [False]
+    assert not plan.records_origins
     pins = {
         requirement.id: requirement.source_spec_id
         for requirement in plan.evidence_requirements
@@ -9279,7 +9270,7 @@ def test_a_stored_plan_recording_no_origin_and_its_aligned_pin_load_translate_an
         ("provider:multilateral",),
     )
     assert plan_revision(migrated) != recorded["revision"]
-    assert [pin.records_origin for pin in aligned_pins(ctx.state)] == [True]
+    assert migrated.records_origins
     migrate_stored_origins(ctx.state)
     assert load_plan(ctx.state) == migrated
 
@@ -9310,8 +9301,9 @@ def test_an_origin_dropped_after_a_stored_plan_migrates_is_not_inferred_again(
 ) -> None:
     """The stored comparison above, loaded once so its total records its origin. The
     planner then restates the total on the multilateral row as US multilateral ODA, a
-    measure of its own, dropping the origin. A later entry loads that plan: the pin
-    it came from is marked, so nothing gives the total its origin back."""
+    measure of its own, dropping the origin. A later entry loads that plan: it is
+    marked as recording origins (`Plan.records_origins`), so nothing gives the total
+    its origin back."""
     recorded = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "aligned_total_plan_stored.json").read_text()
     )
@@ -9377,18 +9369,20 @@ def test_a_stored_wholes_pin_names_the_compile_its_migrated_part_records() -> No
         AlignedPin(origin=plain, option_ids=(), spec_id=whole, digest={}, whole_axis="donor"),
     )
 
-    migrated, marked = stored_origins(plan, held, to_origin={})
+    migrated, parts = stored_origins(plan, held, to_origin={})
 
     assert migrated is not None
     by_id = {requirement.id: requirement for requirement in migrated.evidence_requirements}
-    assert [(pin.part_origin, pin.part_option_ids, pin.records_origin) for pin in marked] == [
-        (None, (), True),
-        (health, ("provider:inclusive",), True),
-        (None, (), True),
+    assert [(pin.part_origin, pin.part_option_ids) for pin in parts] == [
+        (None, ()),
+        (health, ("provider:inclusive",)),
+        (None, ()),
     ]
     restated = by_id[_WHOLE]
     assert isinstance(restated, DatasetRequirement)
-    assert compile_key(restated, by_id) == marked[1].key
+    assert compile_key(restated, by_id) == parts[1].key
+    assert migrated.records_origins
+    assert stored_origins(plan, parts, to_origin={}) == (migrated, parts)
 
 
 async def test_a_comparison_with_a_total_stating_no_provider_scope_keeps_both_datasets(

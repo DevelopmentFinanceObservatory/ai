@@ -1667,7 +1667,6 @@ def _turn_compiling_the_total(*, warnings: tuple[str, ...] = ()) -> dict[str, An
                     }
                 ]
             },
-            records_origin=True,
         ),
     )
     planner_seam.store_aligned_readings(
@@ -1790,8 +1789,7 @@ async def test_an_entry_seeded_with_a_stored_plan_recording_no_origin_migrates_i
     """`fixtures/aligned_total_plan_stored.json`: a comparison stored with its total
     moved onto the multilateral row and no origin recorded, the compile held as a pin
     of the stored form. An entry the graph seeds with that plan writes the total's
-    origin onto the plan it drafts from and marks the pin
-    (`planner.plan.migrate_stored_origins`)."""
+    origin onto the plan it drafts from (`planner.plan.migrate_stored_origins`)."""
     recorded = json.loads(
         (Path(__file__).parent / "fixtures" / "aligned_total_plan_stored.json").read_text()
     )
@@ -1824,7 +1822,96 @@ async def test_an_entry_seeded_with_a_stored_plan_recording_no_origin_migrates_i
         pin["origin"],
         tuple(pin["option_ids"]),
     )
-    assert [marked["records_origin"] for marked in state[ALIGNED_PINS_STATE_KEY]] == [True]
+
+
+async def test_a_stored_plan_migrated_before_a_planner_ask_keeps_its_origin_on_the_resume() -> None:
+    """The stored comparison above, seeded into an entry whose planner asks the user a
+    question and pauses. The answer resumes the entry, which the graph seeds with the
+    same stored plan: the entry drafts from the plan it migrated before the pause, and
+    the total still records its origin."""
+    recorded = json.loads(
+        (Path(__file__).parent / "fixtures" / "aligned_total_plan_stored.json").read_text()
+    )
+    stored = recorded["state"]
+    (held,) = stored[ALIGNED_PINS_STATE_KEY]
+    pin = {
+        **held,
+        "digest": {"part_digests": [{"status": "definite", "spec_id": held["spec_id"]}]},
+    }
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[[("adk_request_input", {"message": "Which year?", "candidates": []})]]
+    )
+    harness = _SeamHarness({ALIGNED_PINS_STATE_KEY: [pin]})
+    entry = {
+        "question": stored[PLAN_STATE_KEY]["question"],
+        "prior_plan": stored[PLAN_STATE_KEY],
+        "readings": [],
+    }
+
+    paused = await harness.run(seam, **entry)
+    assert paused is None, "the ask should pause this call, not resolve it"
+    migrated = load_plan(await harness.state())
+    assert migrated is not None
+    interrupt_id = _pending_ask_interrupt_id(await harness.events())
+    answer = types.Content(
+        role="user",
+        parts=[create_request_input_response(interrupt_id, {"result": {"text": "2019"}})],
+    )
+    await harness.run(seam, new_message=answer, **entry)
+    plan = load_plan(await harness.state())
+
+    assert plan == migrated
+    second = plan.requirement("second")
+    assert isinstance(second, DatasetRequirement)
+    assert (second.aligned_from, second.aligned_options) == (
+        pin["origin"],
+        tuple(pin["option_ids"]),
+    )
+
+
+async def test_an_origin_the_planner_dropped_stays_dropped_on_the_next_entry() -> None:
+    """The stored comparison above, migrated by the entry the graph seeds with it. The
+    planner then restates the total as a measure of its own, dropping its origin, and
+    the graph records that plan. The next entry, seeded with it, leaves it as it is:
+    the plan records origins (`planner.plan.Plan.records_origins`), so nothing gives
+    the total its origin back from the compile still held."""
+    recorded = json.loads(
+        (Path(__file__).parent / "fixtures" / "aligned_total_plan_stored.json").read_text()
+    )
+    stored = recorded["state"]
+    (held,) = stored[ALIGNED_PINS_STATE_KEY]
+    pin = {
+        **held,
+        "digest": {"part_digests": [{"status": "definite", "spec_id": held["spec_id"]}]},
+    }
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=[])
+    harness = _SeamHarness({ALIGNED_PINS_STATE_KEY: [pin]})
+    question = stored[PLAN_STATE_KEY]["question"]
+    await harness.run(seam, question=question, prior_plan=stored[PLAN_STATE_KEY], readings=[])
+    migrated = load_plan(await harness.state())
+    assert migrated is not None and migrated.records_origins
+    second = migrated.requirement("second")
+    assert isinstance(second, DatasetRequirement) and second.aligned_from is not None
+    dropped = migrated.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                requirement.model_copy(
+                    update={"aligned_from": None, "aligned_options": (), "measure": "US multilateral ODA"}
+                )
+                if requirement.id == "second"
+                else requirement
+                for requirement in migrated.evidence_requirements
+            )
+        }
+    )
+
+    await harness.run(
+        seam, question=question, prior_plan=dropped.model_dump(mode="json"), readings=[]
+    )
+
+    assert load_plan(await harness.state()) == dropped
 
 
 async def test_the_newest_reading_of_a_spec_id_wins_across_turns(
@@ -3229,22 +3316,22 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
 
     The planner proposes the plan again, whose translation refers
     `unsupported_ask`, then asks the user through `adk_request_input` and
-    pauses. The answer resumes the same model turn: the next generation reads
-    the answer off the session and `propose_plan` passes the referral guard
-    as version 2. The `unsupported_ask` decline it owes survives the resume,
+    pauses. The answer resumes the same model turn on the draft the proposal
+    recorded: the next generation reads the answer off the session and
+    `propose_plan` passes the referral guard amending version 2 as version 3. The `unsupported_ask` decline it owes survives the resume,
     so the amendment carries it. The amendment's translation refers again,
     so the entry ends with no plan ready.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
     seam = _translator_seam(responses={"search": _UNSUPPORTED_SEARCH_RESPONSE})
-    # The resumed entry seeds the planner from `prior_plan` again, so the
-    # amendment patches the seeded version.
+    # The resumed entry keeps the draft the proposal before the ask recorded, so
+    # the amendment patches that version.
     amend = [
         (
             "propose_plan",
             {
                 "question": draft.question,
-                "amends_version": draft.version,
+                "amends_version": draft.version + 1,
                 "decisions": [draft.decisions[0].model_dump(mode="json")],
                 "evidence_requirements": [],
                 "declined": [{"ask": draft.question, "code": "unsupported_ask"}],
@@ -3286,7 +3373,7 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
         if part.function_response is not None and part.function_response.name == "propose_plan"
     ]
     assert [(p or {}).get("outcome") for p in proposals] == ["ok", "ok"], proposals
-    assert (proposals[1] or {})["version"] == draft.version + 1
+    assert (proposals[1] or {})["version"] == draft.version + 2
 
 
 _CONGO_ROWS = [{"text": "Congo", "role": "donor"}, {"text": "Congo", "role": "recipient"}]
@@ -5340,7 +5427,6 @@ def test_a_compiled_pin_shown_by_a_search_is_read_by_the_requirement_it_was_comp
                 option_ids=("measure_basis:gross",),
                 spec_id=TOTAL,
                 digest={"part_digests": [{"spec_block": compiled}]},
-                records_origin=True,
             ),
         )
     plan = Plan.model_construct(

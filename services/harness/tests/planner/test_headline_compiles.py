@@ -17,6 +17,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from harness.plan_display import choice_id, shown_decisions
 from harness.scope_choices import planner_axes
+from harness.turn_records import RecordedIdentity
 from planner.plan import (
     ASKS_STATE_KEY,
     AnswerMode,
@@ -28,9 +29,11 @@ from planner.plan import (
     Plan,
     Reduction,
     ResolvedBy,
+    definitions_on_record,
     load_plan,
     pin_sources,
     save_pin_sources,
+    scope_choice_slot,
 )
 from planner.tool_results import Outcome
 from planner.workflow import ToolId, Workflow
@@ -206,12 +209,14 @@ async def _gross_compared_with_net_average(
     *,
     warnings: tuple[str, ...] = (),
     settled: bool = True,
+    year: int = 2023,
 ) -> None:
-    """Propose US total ODA in 2023, its total stated gross, compared with its average
+    """Propose US total ODA in `year`, its total stated gross, compared with its average
     left on net, both on one DAC1 part, the gross source shown with the search
     warnings `warnings`, settled or only offered as a candidate (`settled`). The
     sides differ by their operation, a sum against a mean, so the net input is
-    aligned on gross, which Search compiles to the gross pin."""
+    aligned on gross, which Search compiles to the gross pin. Search answered both
+    sources over 2023, so another year moves each pin to a copy over that year."""
     save_pin_sources(
         ctx.state,
         {
@@ -219,7 +224,7 @@ async def _gross_compared_with_net_average(
             _NET: PinSource(block=_left_on_net(), settled=True),
         },
     )
-    question = "How does US gross ODA in 2023 compare with its average?"
+    question = f"How does US gross ODA in {year} compare with its average?"
     ctx.state[ASKS_STATE_KEY] = [question]
     surface = _GrossCompiles()
 
@@ -229,7 +234,7 @@ async def _gross_compared_with_net_average(
             decision_ids=["measure"],
             measure="US total ODA",
             entities=[Entity(name="United States of America", role="donor")],
-            period=Period(start=2023, end=2023),
+            period=Period(start=year, end=year),
             source_spec_id=pin,
         )
 
@@ -249,6 +254,8 @@ async def _gross_compared_with_net_average(
     )
     assert result["outcome"] == Outcome.OK.value, result
     assert len(surface.calls) == 1
+    if year != 2023:
+        return
     assert [
         (r.id, r.source_spec_id, r.aligned_from)
         for r in cast(Plan, load_plan(ctx.state)).evidence_requirements
@@ -394,3 +401,26 @@ async def test_a_candidate_pinned_beside_a_compile_on_its_spec_id_reads_as_shown
     assert compiled_rows
     assert compiled_rows.isdisjoint(plan.requirement("first").decision_ids)
     assert compiled_rows <= set(plan.requirement("second").decision_ids)
+
+
+async def test_an_aligned_input_asked_over_another_year_keeps_its_rows_on_the_moved_pin(
+    decision: DecisionFactory,
+) -> None:
+    """The comparison above asked for 2022, Search having answered both sources over
+    2023. Each pin moves to a copy over 2022 (`submission.service._window_pins`).
+    The average's basis row names the average, whatever pin its compile answered, so
+    it keeps its slot and fixes the moved pin, and the average still cites it."""
+    ctx = _FakeToolContext()
+    recorded = RecordedIdentity(identity=_GROSS["definition"]["identity"])
+    with definitions_on_record({_GROSS["spec_id"]: recorded}):
+        await _gross_compared_with_net_average(ctx, decision, year=2022)
+    plan = cast(Plan, load_plan(ctx.state))
+
+    second = cast(DatasetRequirement, plan.requirement("second"))
+    (row,) = [d for d in plan.decisions if d.scope is not None and d.scope.aligned_for == "second"]
+
+    assert second.source_spec_id not in (_GROSS["spec_id"], None)
+    assert second.aligned_from == _NET
+    assert row.slot == scope_choice_slot(_NET, "measure_basis", aligned_for="second")
+    assert row.fixes is not None and row.fixes.source_spec_id == second.source_spec_id
+    assert row.slot in second.decision_ids

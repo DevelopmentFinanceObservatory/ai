@@ -209,7 +209,6 @@ async def test_a_whole_of_an_aligned_part_reads_the_part_from_its_compile() -> N
             option_ids=("provider:bilateral",),
             spec_id=part["spec_id"],
             digest=digest,
-            records_origin=True,
         ),
     )
 

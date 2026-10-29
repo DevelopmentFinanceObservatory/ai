@@ -178,6 +178,7 @@ from planner.plan import (
     load_reduction_refused_asks,
     load_terminal_declines,
     load_unsupported,
+    moved_pin_slot,
     open_window,
     period_licences_held,
     period_window,
@@ -755,13 +756,15 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         return blocked
     # The plan keeps the first years its split reads. A plan reading no
     # whole history carries no `first_years`, so they leave its
-    # `plan_revision` unchanged.
+    # `plan_revision` unchanged. Every requirement alignment moved records its
+    # origin, which the plan says (`Plan.records_origins`).
     whole = set(split_of(plan).first_years_read)
     plan = plan.model_copy(
         update={
             "first_years": tuple(
                 entry for entry in plan.first_years if entry.requirement_id in whole
-            )
+            ),
+            "records_origins": True,
         }
     )
     # The copies this plan pins. A copy that only a replaced plan pinned is
@@ -2955,7 +2958,7 @@ def _repinned(
     decision `propose_plan` wrote for a pin, a search pin's
     (`planner.plan.is_search_pin`) or a scope choice's
     (`planner.plan.is_scope_choice`), to the one its moved pin takes
-    (`planner.plan.pin_slot_moves`): that decision is rewritten for its new
+    (`planner.plan.moved_pin_slot`): that decision is rewritten for its new
     pin, and every citation of it cites the new slot, so it stays one code
     wrote. A measure choice (`MeasureChoice`) keeps its options, and a scope
     choice its choice and options, since each reads the same over any period.
@@ -3336,9 +3339,7 @@ def _window_pins(
         if len(pinned) == 1 and pinned != {pin}:
             decision_pins[decision.slot] = next(iter(pinned))
             if is_search_pin(decision) or is_scope_choice(decision):
-                slots[decision.slot] = pin_slot_moves(pin, decision_pins[decision.slot])[
-                    decision.slot
-                ]
+                slots[decision.slot] = moved_pin_slot(decision, decision_pins[decision.slot])
     requirement_pins = {
         requirement_id: copy.spec_id for requirement_id, copy in copies.items() if copy is not None
     }

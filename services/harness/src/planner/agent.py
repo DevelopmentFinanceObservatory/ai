@@ -1448,8 +1448,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     spec_id Search answers: that requirement reads it through
     `planner.plan.pin_source_of`, as the source of the pin it was compiled
     from holding the answer's block. It is held as a
-    `planner.plan.AlignedPin` recording its origin on that requirement
-    (`AlignedPin.records_origin`), with the answer's digest
+    `planner.plan.AlignedPin`, the requirement recording its origin
+    (`DatasetRequirement.aligned_from`), with the answer's digest
     (`harness.tool_contracts.resolver_digest`), its block marking those
     axes as the planner's, beside any axis the origin's block marks
     (`harness.scope_choices.mark_planner_axes`), so the next proposal pins
@@ -1546,7 +1546,6 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                 option_ids=realignment.option_ids,
                 spec_id=spec_id,
                 digest=digest,
-                records_origin=True,
             ),
         )
 
@@ -1706,7 +1705,6 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
                 whole_axis=axis,
                 part_origin=realignment.part_origin,
                 part_option_ids=realignment.part_option_ids,
-                records_origin=True,
             ),
         )
 

@@ -547,10 +547,12 @@ class PlannerSeam:
         # them. The first message renders them.
         #
         # `propose_plan` amends from the graph's record, not whatever this
-        # session's own drafting key already holds, reseeded every call --
-        # unconditionally, regardless of `fresh` below: this is tool
-        # bookkeeping `propose_plan` reads, not message content, so it stays
-        # exactly as it was before the fresh/continuing split.
+        # session's own drafting key already holds, reseeded on every entry,
+        # regardless of `fresh` below: this is tool bookkeeping `propose_plan`
+        # reads, not message content. A resume after the planner's own ask is
+        # no new entry: it carries the same `prior_plan` the paused call did,
+        # so it seeds nothing over the draft that call left, which the
+        # planner's calls before the ask built on.
         #
         # Written through `ctx.session.state`, not `ctx.state`, and so is
         # every other write in this method: `ctx.state[key] = value` records
@@ -572,12 +574,14 @@ class PlannerSeam:
         # eventually carries is never older than what `ctx.run_node` itself
         # already produced.
         seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
-        if seeded is not None:
+        drafted = load_plan(cast(SessionState, ctx.session.state))
+        if seeded is not None and not (ctx.resume_inputs and drafted is not None):
             save_plan(cast(SessionState, ctx.session.state), seeded)
-        # A plan stored before its requirements recorded their origins takes them
-        # from the pins held beside it, once (`migrate_stored_origins`). The
-        # message renders no origin (`_plan_context`), so `seeded` serves it as
-        # the graph passed it.
+        # A plan stored before its requirements recorded their origins
+        # (`Plan.records_origins` unset) takes them from the pins held beside it
+        # (`migrate_stored_origins`); a plan recording them is left as it is. The
+        # message renders neither (`_plan_context`), so `seeded` serves it as the
+        # graph passed it.
         migrate_stored_origins(cast(SessionState, ctx.session.state))
         if not ctx.resume_inputs:
             # One `__call__` is one entry into the planner, EXCEPT when it
@@ -2233,10 +2237,11 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         "evidence_requirements",
         "translation",
         "workflow",
-        # Code writes both (`Plan.rolling_copies`, `Plan.first_years`), so the
-        # digest leaves them out.
+        # Code writes these (`Plan.rolling_copies`, `Plan.first_years`,
+        # `Plan.records_origins`), so the digest leaves them out.
         "rolling_copies",
         "first_years",
+        "records_origins",
     }
     lines.extend(f"{key}: {_scalar(prior_plan[key])}" for key in sorted(set(prior_plan) - known))
     return "\n".join(lines) + "\n"
