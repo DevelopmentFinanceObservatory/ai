@@ -619,7 +619,7 @@ def _target(
 
     Raises:
         SwitchFailedError: If `decision` is neither, no stored reading of its
-            pin holds what the switch reads, or the compile is no longer held.
+            pin holds what the switch reads, or no compile is held for it.
     """
     gone = SwitchFailedError("That choice is no longer on the plan.", code=SCOPE_CHOICE_NOT_APPLIED)
     if decision.fixes is None or decision.scope is None:

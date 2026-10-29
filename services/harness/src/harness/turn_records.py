@@ -1256,8 +1256,8 @@ def basis_line(
     `_used_readings` reads it; its newest reading speaks for it. A compile
     alignment moved inputs onto speaks through its plan source's
     `PlanSource.aligned_basis`, the newest plan's, unless a reading of its
-    own does; the stated pin's reading does not, since its choices on the
-    moved axes name the basis the compile left. Each
+    own does. The stated pin's reading does not speak for it, since its
+    choices on the moved axes name the basis the compile left. Each
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
     clauses are the same share them. Otherwise the clauses every part

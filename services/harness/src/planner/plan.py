@@ -6419,10 +6419,10 @@ def compiled_pin(state: SessionState, entry: AlignedInput) -> AlignedPin | None:
 def aligned_entry(
     requirement: EvidenceRequirement, held: Mapping[str, AlignedInput]
 ) -> AlignedInput | None:
-    """The record of `held` pinning `requirement` to a compiled pin, while it is
-    still pinned there; `None` where its pin is the planner's own. A declared
-    whole restated on its compile with no `whole_of` is no whole: the planner
-    pins that compile directly, as any plain requirement can."""
+    """The record of `held` pinning `requirement` to a compiled pin, when the
+    requirement pins that compile. `None` where its pin is the planner's own,
+    as for a declared whole restated on its compile without `whole_of`, which
+    is a plain requirement the planner pins to that compile directly."""
     entry = held.get(requirement.id)
     if (
         entry is None

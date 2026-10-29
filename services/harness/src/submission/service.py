@@ -512,7 +512,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     previous, rounds = resolved
     held_copies = windowed_pins(view.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
-    # Alignments are the plan's this call amends; a fresh plan states its own pins.
+    # Alignments belong to the plan this call amends. A fresh plan states its own pins.
     held_alignments = alignments(view.state) if previous is not None else {}
     if to_origin:
         _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
@@ -604,14 +604,14 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     if isinstance(realigned, dict):
         return realigned
     evidence_requirements, targets = realigned
-    # A carried input alignment moved before is restated too, so one it no longer
-    # moves has its decisions derived again on the pin it states.
+    # A carried input alignment is restated too, so an input it does not move this
+    # call has its decisions derived on the pin it states.
     own = {requirement.id for requirement in evidence_requirements}
     evidence_requirements = [
         *evidence_requirements,
         *(r for r in written if r.id in held_alignments and r.id not in own),
     ]
-    # Every requirement pinned as stated, each search's pin taken; the
+    # Every requirement is pinned as stated, each search's pin taken. The
     # decisions below change citations alone, and the requirements alignment
     # moves are pinned to their compiles once every decision is derived.
     aligned_after = _requirements_after(
@@ -3045,7 +3045,7 @@ def _aligned_requirements(
 ) -> list[EvidenceRequirement]:
     """`requirements` with each one `entries` names pinned to its compile, the source
     fields it stated cleared (`planner.plan.repinned`) by the codes the compile's
-    block on record (`on_record`) is exactly. Only the requirement moves: the
+    block on record (`on_record`) is exactly. Only the requirement moves. The
     decisions it cites stay on the pin it states."""
     return [
         repinned(requirement, entry.spec_id, exact_codes(_pin_block(entry.spec_id, on_record)))
@@ -3397,8 +3397,8 @@ def _window_pins(
     slots: dict[str, str] = {}
     for decision in plan.decisions:
         pin = decision.fixes.source_spec_id if decision.fixes is not None else None
-        # An axis alignment moved for one requirement fixes the pin it states,
-        # not the compile it reads (`_moved_axis_decisions`).
+        # An axis alignment moved for one requirement fixes the pin it states
+        # (`_moved_axis_decisions`).
         if pin is None or pin not in origins or _moved_for_one(decision):
             continue
         pinned = targets.get(decision.slot, set())
@@ -3929,7 +3929,7 @@ def _scope_decisions(
                 # A declared whole states no scope row, and only a declared
                 # whole states the whole's decision.
                 or (decision.caveat == "derived_whole") == (requirement.whole_of is None)
-                # A moved input's own pin no longer settles the axis it moves on.
+                # A moved input's own pin does not settle the axis it moves on.
                 or (decision.scope is not None and decision.scope.axis in moved_axes(requirement))
             )
         )
@@ -4652,7 +4652,7 @@ def _aligned_bases(
     An input already on its options keeps its pin. Another takes the pin
     compiled from its pin on the options it moves to, one per axis
     (`aligned`), and the requirement is restated, appended when only the
-    plan this call amends states it, still on the pin it states: `admit`
+    plan this call amends states it, on the pin it states. `admit`
     derives its decisions there and pins it to the compile last. An input
     with no such compile yet answers `BASES_UNALIGNED`, naming each to
     compile with every option it moves to (`Realignment`). `planner.agent.with_source_reads`
@@ -4661,6 +4661,7 @@ def _aligned_bases(
     answers `PROVIDERS_UNALIGNED` (`_providers_unaligned`); the same on the
     measure basis, and an input two calculations want on different options
     of one axis, answer `OPERATION_UNSUPPORTED`.
+
     Returns the requirements, each search's pin taken, and the compile
     each input or whole moves to (`AlignedPin`), by requirement id.
 

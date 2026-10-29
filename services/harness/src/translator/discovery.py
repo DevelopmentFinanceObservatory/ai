@@ -2498,7 +2498,7 @@ async def _recorded_source(
 def _resolve_pin_block(
     tool_context: ToolContext, *, plan: Plan, requirement: DatasetRequirement
 ) -> Mapping[str, object] | None:
-    """The spec block of the dataset `requirement` pins, when the planner was shown it or admission compiled it; `None` otherwise.
+    """The spec block of the dataset `requirement` pins, when the planner was shown it or admission compiled it, else `None`.
 
     A requirement admission pinned to a compile (`planner.plan.alignments`)
     reads the block Search answered the compile with

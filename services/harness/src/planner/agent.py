@@ -1673,11 +1673,11 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     `planner.plan.AlignedPin` with the answer's digest
     (`harness.tool_contracts.resolver_digest`), its block marking those
     axes as the planner's, beside any axis the origin's block marks
-    (`harness.scope_choices.mark_planner_axes`), and nowhere else: the
-    datasets the planner was shown (`planner.plan.pin_sources`) are left as
-    shown, so a requirement pinning the answer's spec_id directly takes none
-    of the origin's `planner.plan.PinSource` fields (settled, warnings, asked
-    roles, provenance ref). Where it was not shown that spec_id it reads the
+    (`harness.scope_choices.mark_planner_axes`). The datasets the planner was
+    shown (`planner.plan.pin_sources`) are left as shown, so a requirement
+    pinning the answer's spec_id directly takes none of the origin's
+    `planner.plan.PinSource` fields (settled, warnings, asked roles,
+    provenance ref). Where it was not shown that spec_id it reads the
     compile's block (`planner.plan.held_sources`), choice provenance and
     planner marks included. The next proposal pins the input to it
     (`submission.service.admit`).
@@ -1819,8 +1819,8 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     block marks, so the whole reads as settled the way the part was and a
     later search carries what the part's carries. It is held as a
     `planner.plan.AlignedPin` from the part on that axis, which every
-    whole declaring the part and the axis pins, and nowhere else, as
-    `compile_on_basis` holds one.
+    whole declaring the part and the axis pins. Like a compile from
+    `compile_on_basis`, it is held there alone.
 
     `state` is read; the writes are made when the read returned is applied
     (`SourceRead`). It answers `None` once the pin is held,
