@@ -7,7 +7,15 @@ and that source's stored scope (`harness.turn_records.SearchReading.scope`).
 It posts the scope's base identity with its entries and the switch
 (`harness.scope_choices.switch_entries`) through data-mcp's
 `resolve_definition` (`translator.discovery.resolve_definition`), which
-registers the identity they compile to. The
+registers the identity they compile to. That answer is the switched pin.
+The plan pins it, and its reading and pin source state the dataset over
+the years the question asked for. Admission finds it on record
+(`planner.plan.definitions_on_record`), so where the plan reads it over a
+window of its own, admission copies it over that window
+(`submission.service._window_pins`) and the translation resolves the copy.
+The turn keeps Search's answers
+(`translator.discovery.resolving_once`), so a switch repeating one the
+turn made posts nothing. The
 plan is then revised by the planner seam with no model call
 (`harness.graph.seams.PlannerModel.revise`): each requirement pinning a
 switched source pins the compiled one, the decisions follow their pins,
@@ -53,17 +61,22 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from compiler.sources import block_groups
+from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
+from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
+from google.adk.workflow._errors import NodeInterruptedError
+from planner.agent import run_together
 from planner.plan import (
     DatasetRequirement,
     Decision,
     PinSource,
     SessionState,
     authored,
+    definitions_on_record,
     earlier_block,
     exact_codes,
+    identity_on_record,
     is_scope_choice,
     pin_sources,
     plan_revision,
@@ -73,9 +86,16 @@ from planner.plan import (
 )
 from planner.plan import Plan as PlannerPlan
 from planner.tool_results import ProblemCode
+from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
-from translator.discovery import DefinitionNotResolvedError, resolve_definition
+from translator.discovery import (
+    RESOLVED_STATE_PREFIX,
+    DefinitionNotResolvedError,
+    resolve_definition,
+    resolving_once,
+)
 
+from harness.decision_pick import picks_the_chosen_option
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
@@ -118,7 +138,9 @@ _RETRYABLE_REVISION_CODES = frozenset(
 )
 
 # The state the planner seam and the translator keep while drafting, which a
-# revision that fails leaves as it found.
+# revision that fails leaves as it found. The parts Search answered this turn
+# (`RESOLVED_STATE_PREFIX`) are not drafting state. Each holds whatever the
+# switch's outcome, so a failed switch keeps them.
 _DRAFTING_PREFIXES = ("planner:", "translator:")
 # The other state a revision writes, which a switch that fails or is stopped
 # puts back too: the plan, and the readings `store_search` stores for the
@@ -203,43 +225,56 @@ def switch_node(
         # ends on any other error leaves as it found.
         before = _restorable_state(ctx)
         try:
-            output = await _unless_stopped(
-                ctx,
-                _switched_plan(
+            # A `resolve_definition` call this turn already made is served its
+            # answer (`translator.discovery.resolving_once`).
+            with resolving_once(cast(SessionState, ctx.state)):
+                output = await _unless_stopped(
                     ctx,
-                    plan,
-                    choice_id=choice_id,
-                    option_id=option_id,
-                    planner=planner,
-                    surface=definition_surface,
-                ),
-            )
+                    _switched_plan(
+                        ctx,
+                        plan,
+                        choice_id=choice_id,
+                        option_id=option_id,
+                        planner=planner,
+                        surface=definition_surface,
+                    ),
+                )
         except SwitchFailedError as exc:
             _restore(ctx, before)
-            logger.info(
-                "plan switch not applied: choice_id=%s option_id=%s code=%s",
-                choice_id,
-                option_id,
-                exc.code,
-            )
-            output = {
-                **plan.model_dump(mode="json"),
-                "summary": exc.reason,
-                "revision": plan_revision(plan),
-                "switch_failed": {
-                    "choice_id": choice_id,
-                    "option_id": option_id,
-                    "code": exc.code,
-                    "reason": exc.reason,
-                    "retryable": exc.retryable,
-                },
-            }
+            output = switch_failed_offer(plan, choice_id=choice_id, option_id=option_id, error=exc)
         except BaseException:
             _restore(ctx, before)
             raise
         yield Event(output=output, route="offer")
 
     return switch
+
+
+def switch_failed_offer(
+    plan: PlannerPlan, *, choice_id: str, option_id: str, error: SwitchFailedError
+) -> dict[str, Any]:
+    """The `approve` payload offering `plan` unchanged after the switch of row
+    `choice_id` to option `option_id` failed with `error`: `switch_failed`
+    names the row, the option, the code, the sentence saying why and
+    whether the same switch can succeed if asked again."""
+    logger.info(
+        "plan switch not applied: choice_id=%s option_id=%s code=%s",
+        choice_id,
+        option_id,
+        error.code,
+    )
+    return {
+        **plan.model_dump(mode="json"),
+        "summary": error.reason,
+        "revision": plan_revision(plan),
+        "switch_failed": {
+            "choice_id": choice_id,
+            "option_id": option_id,
+            "code": error.code,
+            "reason": error.reason,
+            "retryable": error.retryable,
+        },
+    }
 
 
 async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> dict[str, Any]:
@@ -250,11 +285,15 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
     raises included, ends stopped, as does one that finishes in the same wait
     as the Stop. The `switch` node puts the state it wrote back, so the plan
     stands unchanged. A cancellation of the node itself,
-    while the revision unwinds, still cancels the node.
+    while the revision unwinds, still cancels the node. A revision that
+    paused on a question to the user (`NodeInterruptedError`) stays paused
+    though the Stop came in the same wait: ADK has streamed the question, so
+    the node run ends as that pause and offers no plan beside it.
 
     Raises:
         SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
             the switch, else as `revision` raises it.
+        NodeInterruptedError: When `revision` paused on a question.
     """
     stop = SWITCH_STOP.get()
     running = asyncio.ensure_future(revision)
@@ -276,7 +315,10 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
             await asyncio.wait(unfinished)
     if running in finished and stopped not in finished and not running.cancelled():
         return running.result()
-    if not running.cancelled() and (error := running.exception()) is not None:
+    error = None if running.cancelled() else running.exception()
+    if isinstance(error, NodeInterruptedError):
+        raise error
+    if error is not None:
         logger.info("stopped plan switch raised: %r", error)
     raise SwitchFailedError(
         "You stopped this change, so the plan is as it was.",
@@ -299,6 +341,10 @@ async def _switched_plan(
     Raises:
         SwitchFailedError: If the switch cannot be applied, with the note to show.
     """
+    if picks_the_chosen_option(plan, choice_id=choice_id, option_id=option_id):
+        raise SwitchFailedError(
+            "That choice is already on the plan.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
     clicked = chosen_scope_decision(plan, choice_id)
     if clicked is None or clicked.scope is None:
         raise SwitchFailedError(
@@ -325,22 +371,27 @@ async def _switched_plan(
         )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
-    switched = await asyncio.gather(
-        *(
-            _resubmit(
-                surface,
-                pin=pin,
-                reading=reading,
-                scope=scope,
-                entries=[
-                    entry.model_dump(mode="json", exclude_none=True)
-                    for entry in switch_entries(scope, choice=choice, option_id=option_id)
-                ],
-                block=specs.get(pin) or _source_block(sources.get(pin), pin),
-                label=label,
-            )
-            for pin, reading, scope, choice in targets
+    posts = [
+        (
+            pin,
+            reading,
+            scope,
+            switch_entries(scope, choice=choice, option_id=option_id),
+            _groups(reading, specs.get(pin) or _source_block(sources.get(pin), pin), pin=pin),
         )
+        for pin, reading, scope, choice in targets
+    ]
+    switched = await run_together(
+        _resubmit(
+            surface,
+            pin=pin,
+            reading=reading,
+            scope=scope,
+            entries=entries,
+            groups=groups,
+            label=label,
+        )
+        for pin, reading, scope, entries, groups in posts
     )
     moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
@@ -354,6 +405,12 @@ async def _switched_plan(
             },
         },
     )
+    shown = pin_sources(state)
+    on_record = {
+        item.spec_id: recorded
+        for item in switched
+        if (recorded := identity_on_record(item.spec_id, shown=shown, end_open=True)) is not None
+    }
     codes = {
         item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
     }
@@ -364,12 +421,15 @@ async def _switched_plan(
         and (origin := to_origin.get(requirement.source_spec_id or "", requirement.source_spec_id))
         in moved_to
     ]
-    revised = await planner.revise(
-        ctx=ctx,
-        prior_plan=plan.model_dump(mode="json"),
-        evidence_requirements=requirements,
-        inherits={new: old for old, new in moved_to.items()},
-    )
+    # Admission finds each switched dataset on record, so it copies the dataset
+    # over the plan's years.
+    with definitions_on_record(on_record):
+        revised = await planner.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=requirements,
+            inherits={new: old for old, new in moved_to.items()},
+        )
     if "plan" not in revised:
         refused = revised.get("refused") or {}
         logger.warning("plan switch not revised: %s", refused)
@@ -501,25 +561,61 @@ def _source_block(source: PinSource | None, pin: str) -> Mapping[str, Any] | Non
     return source.spec_block(pin) if source is not None else None
 
 
+def _groups(
+    reading: SearchReading, block: Mapping[str, Any] | None, *, pin: str
+) -> tuple[ResolvedGroup, ...]:
+    """The entity groups a switch of `reading`, pinned as `pin`, posts beside the part,
+    as every resubmit posts them (`compiler.sources.wire_groups`), so Search names
+    them again.
+
+    They are `block`'s groups, read for what the resubmit posts alone
+    (`compiler.sources.readable_wire_groups`), where `block` is at hand and names
+    sets that read, else the groups `reading` was resolved with
+    (`SearchReading.entity_groups`) where those read, else none where `block`
+    reads and names none.
+
+    Raises:
+        SwitchFailedError: If neither reads: what `block`'s groups post is not
+            readable or there is no `block`, and `reading`'s were not readable when
+            it was stored (`SearchReading.entity_groups_unreadable`) or, beside a
+            block naming sets, it holds none, since the switch would post the part
+            without them.
+    """
+    groups = readable_wire_groups(block) if block is not None else None
+    # A block naming no sets says nothing of the reading's, so readable stored sets
+    # stand. A block whose sets do not read falls back only to stored sets that
+    # do: an empty stored tuple beside it would post the part without them.
+    stored_stands = not reading.entity_groups_unreadable and (
+        groups is not None or block is None or bool(reading.entity_groups)
+    )
+    if not groups and stored_stands:
+        groups = reading.entity_groups
+    if groups is None:
+        logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
+        raise SwitchFailedError(
+            "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
+    return tuple(groups)
+
+
 async def _resubmit(
     surface: ToolSurface,
     *,
     pin: str,
     reading: SearchReading,
     scope: PartScope,
-    entries: list[dict[str, Any]],
-    block: Mapping[str, Any] | None,
+    entries: Sequence[ScopeEntry],
+    groups: Sequence[ResolvedGroup],
     label: str,
 ) -> _Switched:
     """Post `scope`'s base identity with `entries` through data-mcp's `resolve_definition`.
 
-    The same resubmit a compile on another basis posts
+    `scope` is the reading's, and `entries` the switch's (`switch_entries`). The same
+    resubmit a compile on another basis posts
     (`planner.agent.compile_on_basis`), through
     `translator.discovery.resolve_definition`: the part's entity groups
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
-    so Search names them again. They are the groups `reading` was resolved
-    with (`SearchReading.entity_groups`), or `block`'s for a reading stored
-    without them.
+    so Search names them again (`_groups`).
 
     Raises:
         SwitchFailedError: If the call does not complete, Search refuses it,
@@ -530,8 +626,8 @@ async def _resubmit(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=reading.entity_groups or (block_groups(block) if block is not None else ()),
-            scope_entries=entries,
+            groups=groups,
+            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
         )
     except DefinitionNotResolvedError as exc:
         logger.info("plan switch not compiled: pin=%s code=%s: %s", pin, exc.code, exc)
@@ -612,9 +708,10 @@ def _pin_source(
 
 def _restorable_state(ctx: Context) -> dict[str, Any]:
     """A copy of the state a switch that fails, is stopped or raises puts back:
-    the drafting state (`_DRAFTING_PREFIXES`) and `_RESTORED_KEYS`."""
+    the drafting state (`_DRAFTING_PREFIXES`, less `RESOLVED_STATE_PREFIX`) and
+    `_RESTORED_KEYS`."""
     state = ctx.state.to_dict()
-    kept = {key: value for key, value in state.items() if key.startswith(_DRAFTING_PREFIXES)}
+    kept = {key: value for key, value in state.items() if _drafting(key)}
     kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}
     return json.loads(json.dumps(kept))
 
@@ -622,10 +719,15 @@ def _restorable_state(ctx: Context) -> dict[str, Any]:
 def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
     """Put the state back as `before` holds it, clearing any drafting key written since."""
     for key in ctx.state.to_dict():
-        if key.startswith(_DRAFTING_PREFIXES) and key not in before:
+        if _drafting(key) and key not in before:
             ctx.state[key] = None
     for key, value in before.items():
         ctx.state[key] = value
+
+
+def _drafting(key: str) -> bool:
+    """Whether `key` is drafting state a failed switch puts back (`_DRAFTING_PREFIXES`)."""
+    return key.startswith(_DRAFTING_PREFIXES) and not key.startswith(RESOLVED_STATE_PREFIX)
 
 
 async def apply_stored_choice(
@@ -692,11 +794,12 @@ async def apply_stored_choice(
             pin=pin,
             reading=reading,
             scope=reading.scope,
-            entries=[
-                entry.model_dump(mode="json", exclude_none=True)
-                for entry in switch_entries(reading.scope, choice=choice, option_id=option_id)
-            ],
-            block=(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
+            entries=switch_entries(reading.scope, choice=choice, option_id=option_id),
+            groups=_groups(
+                reading,
+                (ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
+                pin=pin,
+            ),
             label=label,
         )
     except SwitchFailedError as exc:

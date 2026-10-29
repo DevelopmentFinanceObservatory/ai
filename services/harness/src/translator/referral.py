@@ -84,7 +84,7 @@ translator handed the plan back without it riding along on the plan itself.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 from enum import StrEnum
 
 from compiler.compile import CompileIssueCode
@@ -237,7 +237,9 @@ class WithheldSource(StrictModel):
     dropped: tuple[str, ...] = Field(min_length=1)
 
 
-def dropped_scope(held: SelectedSource, found: SelectedSource) -> tuple[str, ...]:
+def dropped_scope(
+    held: SelectedSource, found: SelectedSource, *, columns: Collection[str] | None = None
+) -> tuple[str, ...]:
     """The scope `held`, a pinned dataset's source, holds on each role column that `found` drops.
 
     A column `held` closes, by binding entities on it or naming a group on
@@ -246,13 +248,15 @@ def dropped_scope(held: SelectedSource, found: SelectedSource) -> tuple[str, ...
     members only as a group and `found` names no group of that label there.
     A column `held` leaves open is never dropped: a source that closes it
     narrows the population to what the requirement names. Empty when `found`
-    keeps the scope on every column.
+    keeps the scope on every column. `columns`, when given, are the only
+    columns judged.
     """
     found_open = {axis.column: axis.member_count for axis in found.open_entity_axes or ()}
     held_open = {axis.column for axis in held.open_entity_axes or ()}
     closed = {entity.role for entity in held.entities} | {group.role for group in held.groups}
     dropped: list[str] = []
-    for column in sorted(closed - held_open):
+    judged = closed - held_open if columns is None else (closed - held_open) & set(columns)
+    for column in sorted(judged):
         refs = {entity.ref for entity in held.entities if entity.role == column}
         group = next((group for group in held.groups if group.role == column), None)
         if group is not None:
@@ -299,7 +303,7 @@ def closing_group(held: SelectedSource, across: str) -> str | None:
     return next(iter(labels)) if len(labels) == 1 else None
 
 
-def scope_repair(held: SelectedSource, across: str) -> str | None:
+def scope_repair(held: SelectedSource, across: str, *, members: bool = False) -> str | None:
     """The change to a requirement that restates the scope `held` keeps on the side the `across` word opens, or `None`.
 
     `held` is a pinned dataset's source set aside because it holds that side
@@ -307,8 +311,10 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
     requirement can name that member under the side's `PARTY_ROLES` word and
     drop the word from `across`, which brings the pinned source's scope back.
     Several named members, or a word naming no single role, give `None`.
-    The repair leaves one member on the side, so it answers only a plan whose
+    The repair leaves one member on the side, so it answers a plan whose
     readers sum the side away (`translator.discovery.DiscoveryLog.scope_kept`).
+    With `members`, for a plan whose readers rank over the side, only a group
+    is named, for its members, so the rank orders them.
     """
     role = party_role(across)
     side = flow_side(across)
@@ -316,11 +322,32 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
         return None
     groups = {group.label for group in held.groups if flow_side(group.role) == side}
     entities = {entity.label for entity in held.entities if flow_side(entity.role) == side}
-    labels = groups or entities
+    labels = groups if members else groups or entities
     if len(labels) != 1:
         return None
     (label,) = labels
-    return f"name {label!r} as {role} in `entities` and drop {across!r} from `across`"
+    named = "with `members: true` " if members else ""
+    return f"name {label!r} as {role} in `entities` {named}and drop {across!r} from `across`"
+
+
+def kept_scope_repair(kept: Sequence[Mapping[str, object]]) -> str | None:
+    """The change to a requirement that names each party in `kept`, or `None` when `kept` is empty.
+
+    `kept` are the `search` entities a pin, set aside for leaving open the
+    side a named entity sits on, holds its other sides to
+    (`translator.discovery._kept_scope`): each with its `text`, its `role`
+    and, for a group read as its members, `members`. Naming each in the
+    requirement's `entities` under its role brings the pinned source's
+    scope back, as Kenya named recipient does for "Japan's ODA to Kenya".
+    """
+    return (
+        "; ".join(
+            f"name {party['text']!r} as {party['role']} in `entities`"
+            + (" with `members: true`" if party.get("members") else "")
+            for party in kept
+        )
+        or None
+    )
 
 
 class StalePin(StrictModel):
@@ -328,7 +355,8 @@ class StalePin(StrictModel):
 
     `withheld` are the sources found that drop the scope its pinned source
     held (`WithheldSource`), which it may not pin, and `repair` the change
-    to the requirement that keeps that scope (`scope_repair`), when one does.
+    to the requirement that keeps that scope (`scope_repair`,
+    `kept_scope_repair`), when one does.
     """
 
     requirement_id: Identifier

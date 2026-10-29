@@ -4,17 +4,17 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 152692,
-      "system_instruction_chars": 19875,
-      "declaration_total_chars": 40856,
+      "total_chars": 153066,
+      "system_instruction_chars": 20138,
+      "declaration_total_chars": 40967,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 36803
+          "chars": 36936
         },
         {
           "name": "adk_request_input",
-          "chars": 2091
+          "chars": 2069
         },
         {
           "name": "get_skill_file",
@@ -49,17 +49,17 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 186264,
-      "system_instruction_chars": 19875,
-      "declaration_total_chars": 40856,
+      "total_chars": 186638,
+      "system_instruction_chars": 20138,
+      "declaration_total_chars": 40967,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 36803
+          "chars": 36936
         },
         {
           "name": "adk_request_input",
-          "chars": 2091
+          "chars": 2069
         },
         {
           "name": "get_skill_file",
@@ -104,17 +104,17 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 187584,
-      "system_instruction_chars": 19875,
-      "declaration_total_chars": 40856,
+      "total_chars": 187958,
+      "system_instruction_chars": 20138,
+      "declaration_total_chars": 40967,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 36803
+          "chars": 36936
         },
         {
           "name": "adk_request_input",
-          "chars": 2091
+          "chars": 2069
         },
         {
           "name": "get_skill_file",
@@ -169,17 +169,17 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 70821,
-      "system_instruction_chars": 19875,
-      "declaration_total_chars": 40856,
+      "total_chars": 71195,
+      "system_instruction_chars": 20138,
+      "declaration_total_chars": 40967,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 36803
+          "chars": 36936
         },
         {
           "name": "adk_request_input",
-          "chars": 2091
+          "chars": 2069
         },
         {
           "name": "get_skill_file",
@@ -214,17 +214,17 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 104393,
-      "system_instruction_chars": 19875,
-      "declaration_total_chars": 40856,
+      "total_chars": 104767,
+      "system_instruction_chars": 20138,
+      "declaration_total_chars": 40967,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 36803
+          "chars": 36936
         },
         {
           "name": "adk_request_input",
-          "chars": 2091
+          "chars": 2069
         },
         {
           "name": "get_skill_file",
@@ -269,17 +269,17 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 106254,
-      "system_instruction_chars": 19875,
-      "declaration_total_chars": 40856,
+      "total_chars": 106628,
+      "system_instruction_chars": 20138,
+      "declaration_total_chars": 40967,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 36803
+          "chars": 36936
         },
         {
           "name": "adk_request_input",
-          "chars": 2091
+          "chars": 2069
         },
         {
           "name": "get_skill_file",

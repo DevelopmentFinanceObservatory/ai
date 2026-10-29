@@ -34,6 +34,7 @@ these bodies -- see `harness.auth`.
 from __future__ import annotations
 
 import json
+import logging
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast, get_args
 
@@ -45,8 +46,13 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
     model_validator,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _WireModel(BaseModel):
@@ -629,39 +635,87 @@ MAX_SEED_GROUP_LABEL_CHARS = 120
 # `common.place_type.PartyClass`.
 MAX_SEED_PARTY_CLASSES = len(get_args(PartyClass))
 
+# The most members a set's `members` lists, and residual labels its `left_out` names,
+# as apis bounds `EntityGroup.members` and `EntityGroup.left_out`.
+MAX_SEED_GROUP_MEMBERS = 1024
+MAX_SEED_GROUP_LEFT_OUT = 64
+
+# The most characters a set's dcid may span, its `ref`, `entity_type`, `total`,
+# `group_id` and each of its `members`, as apis bounds every identity string
+# (`search.models.identity.IdentityString`).
+MAX_SEED_GROUP_DCID_CHARS = 1024
+
+# One dcid a set names or lists.
+SeedGroupDcid = Annotated[str, Field(max_length=MAX_SEED_GROUP_DCID_CHARS)]
+
+
+def _unposted(default: object) -> WrapValidator:
+    """Read a set's field a resubmit does not post, `default` with a warning where
+    it does not parse, so the field and not the set is lost."""
+
+    def read(value: object, handler: ValidatorFunctionWrapHandler, info: ValidationInfo) -> object:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            logger.warning(
+                "seed set field dropped: field=%s errors=%s",
+                info.field_name,
+                sorted({error["type"] for error in exc.errors()}),
+            )
+            return default
+
+    return WrapValidator(read)
+
 
 class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
-    `total` is the published total party the role bound for the set, absent
-    when it bound the members (`planner.workflow.ResolvedGroup.total`).
-    `whole_of` names the classes of party that total, or the set of totals the
-    role bound, holds in full, absent for any other set
-    (`planner.workflow.ResolvedGroup.whole_of`). `side_classes` names the classes
-    of party, totals aside, the dataset publishes on that set's side, absent for
-    any other set and from a Search that predates it
-    (`planner.workflow.ResolvedGroup.side_classes`). The
-    members are apis' `EntityGroup` fields, and any other key is refused,
+    The members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
+    The seed's resubmit (`harness.seeds.resolve_seed`) posts each set's `label`
+    and its `ref` or `group_id` on its role (`compiler.sources.wire_groups`), and
+    those are held as `compiler.sources.block_wire_groups` reads them, each to the
+    bound apis sets on it: a set failing one is not one Search would take.
+    Every other field is read to its own type and bound and falls back to its
+    default where it does not parse (`_unposted`), since the set posts the same
+    without it; a residual label in `left_out`, which apis does not bound, is
+    held only by the seed's byte cap (`MAX_SEED_SPEC_BYTES`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
-    ref: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
-    entity_type: str | None = Field(
+    ref: SeedGroupDcid | None = Field(default=None, min_length=1)
+    group_id: SeedGroupDcid | None = Field(
         default=None,
-        max_length=MAX_SEED_TEXT_CHARS,
-        exclude_if=lambda entity_type: entity_type is None,
+        min_length=1,
+        exclude_if=lambda group_id: group_id is None,
     )
-    total: str | None = Field(
-        default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
+    entity_type: Annotated[SeedGroupDcid | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda entity_type: entity_type is None
     )
-    whole_of: tuple[PartyClass, ...] = Field(
+    total: Annotated[SeedGroupDcid | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda total: total is None
+    )
+    whole_of: Annotated[tuple[PartyClass, ...], _unposted(())] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
-    side_classes: tuple[PartyClass, ...] = Field(
+    side_classes: Annotated[tuple[PartyClass, ...], _unposted(())] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
+    )
+    members: Annotated[tuple[SeedGroupDcid, ...], _unposted(())] = Field(
+        default=(), max_length=MAX_SEED_GROUP_MEMBERS, exclude_if=lambda members: not members
+    )
+    holds_multilaterals: Annotated[bool | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda holds: holds is None
+    )
+    left_out: Annotated[tuple[str, ...] | None, _unposted(None)] = Field(
+        default=None,
+        max_length=MAX_SEED_GROUP_LEFT_OUT,
+        exclude_if=lambda labels: labels is None,
+    )
+    sum_differs: Annotated[bool, _unposted(False)] = Field(
+        default=False, exclude_if=lambda differs: not differs
     )
 
 
@@ -672,9 +726,9 @@ class SeedSpec(BaseModel):
     The website posts the block as Search served it. `entity_groups` is read
     from its `resolved.entity_groups`, so the seed's resubmit posts the sets
     beside the identity and Search, which keeps only a set the graph
-    confirms, names them again. Only a set on a role the identity binds, with
-    a name Search would take, is kept; any other is dropped and the seed
-    stands without it, as `compiler.sources` drops a nameless one. A set
+    confirms, names them again. Only a set on a role the identity binds, whose
+    posted name and node Search would take, is kept; any other is dropped and
+    the seed stands without it, as `compiler.sources` drops a nameless one. A set
     carrying a key `SeedEntityGroup` does not know refuses the seed. Every other member, the rest of `resolved`
     among them, is dropped as the block is read, so nothing
     in the harness reads it from the browser: `harness.graph`'s `seed` node
@@ -719,6 +773,16 @@ class SeedSpec(BaseModel):
                     raise ValueError(
                         f"resolved.entity_groups.{role} carries unknown keys {unknown}"
                     ) from exc
+                # Only the fields a resubmit posts can fail a set (`SeedEntityGroup`),
+                # each to apis' bound, so a set failing here is one Search would not
+                # take on a resubmit; the seed stands without it.
+                label = group.get("label") if isinstance(group, dict) else None
+                logger.warning(
+                    "seed set dropped: role=%s label=%r errors=%s",
+                    role,
+                    label[:MAX_SEED_GROUP_LABEL_CHARS] if isinstance(label, str) else None,
+                    sorted({error["type"] for error in exc.errors()}),
+                )
                 continue
         return {**data, "entity_groups": groups or None}
 
@@ -952,8 +1016,8 @@ class InterruptResponse(_WireModel):
     payload: str | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
-    # A plan's `switch`: the scope choice, the option it moves to, and the
-    # revision of the plan the user switched on. An `approve` may carry the
+    # A plan's `switch`: the scope choice or planner decision, the option it
+    # moves to, and the revision of the plan the user switched on. An `approve` may carry the
     # revision alone.
     choice_id: str | None = Field(default=None, min_length=1)
     option_id: str | None = Field(default=None, min_length=1)
@@ -1127,9 +1191,10 @@ class DecisionResolvedBy(StrEnum):
 
 
 class PlanDecisionOption(_WireModel):
-    """One option of a scope choice on the plan card: `reason` says, in a
+    """One option of a switchable choice on the plan card: `reason` says, in a
     reader's words, why a partial or unavailable option is limited, and
-    `years` are the years a partial option covers."""
+    `years` are the years a partial option covers. A planner decision's
+    options are all available, with neither."""
 
     option_id: str
     label: str
@@ -1142,12 +1207,17 @@ class PlanDecision(_WireModel):
     """One choice made on the user's behalf, with its alternatives and a
     one-line reason -- what makes the plan reviewable.
 
-    A decision stating how Search counted a source carries the scope
-    choice's id (`choice_id`), its active option (`active_option_id`) and
-    every option (`options`), all three together. One without `choice_id`
-    is a planner decision. `choice_id` is `"<requirement id>:<axis>"`
-    (`harness.plan_display.choice_id`), the same on every plan of the
-    conversation that shows the choice, switches included.
+    A decision the user can switch carries its row's id (`choice_id`), its
+    active option (`active_option_id`) and every option (`options`), all
+    three together. A decision stating how Search counted a source has
+    `choice_id` `"<requirement id>:<axis>"` (`harness.plan_display.
+    choice_id`), the same on every plan of the conversation that shows the
+    choice, switches included. A planner decision that settles requirement
+    fields (`harness.plan_display.switchable_decision`) has `choice_id`
+    `"decision/<slot>"` and option ids derived from each option's label
+    (`harness.plan_display.decision_option_id`), the same on every plan
+    that offers that label.
+    A decision without `choice_id` cannot be switched.
     """
 
     id: str
@@ -1180,7 +1250,8 @@ class PlanAction(StrEnum):
     AMEND = "amend"
     REJECT = "reject"
     # Listed only when some decision has a `choice_id` with an option other
-    # than its active one that is available or partial.
+    # than its active one that is available or partial: a scope choice or a
+    # planner decision.
     SWITCH = "switch"
 
 
@@ -1244,9 +1315,10 @@ class PlanSwitchFailed(_WireModel):
 
 class PlanProposed(_WireModel):
     """The plan awaiting approval. The run is genuinely paused: nothing is
-    retrieved or computed until an interrupt.response arrives, and this
-    frame is terminal for its SSE response (delta 1 -- resume arrives as a
-    new stream from POST /api/studio/interrupt)."""
+    computed until an interrupt.response arrives (the plan's data may
+    already be loading), and this frame is terminal for its SSE response
+    (delta 1 -- resume arrives as a new stream from POST
+    /api/studio/interrupt)."""
 
     event: Literal["plan.proposed"]
     seq: int = Field(ge=0)

@@ -177,7 +177,7 @@ def test_digest_caps_an_oversized_warning_key_value_and_unit() -> None:
     assert long_value not in digest
     unit_line = next(line for line in digest.splitlines() if line.startswith("unit: "))
     assert len(unit_line) < len(long_value)
-    group_line = next(line for line in digest.splitlines() if "n=1" in line)
+    group_line = next(line for line in digest.splitlines() if "1 row]" in line)
     assert len(group_line) < len(long_value)
     warning_line = next(line for line in digest.splitlines() if line.startswith("  - "))
     assert len(warning_line) < len(long_value)
@@ -292,8 +292,8 @@ def test_labelled_digest_shows_a_groups_window_only_when_it_covers_less() -> Non
     )
     lines = {line.split(" [")[0].strip(): line for line in digest.splitlines() if " [" in line}
     assert "every row's time_period is 2018/2022" in digest
-    assert "[2018..2020, n=3]" in lines["reporter=dcid:GBR"]
-    assert "[n=5]" in lines["reporter=dcid:USA"]
+    assert "[2018..2020, 3 rows]" in lines["reporter=dcid:GBR"]
+    assert "[5 rows]" in lines["reporter=dcid:USA"]
 
 
 def test_digest_never_mentions_frame_or_rows_attributes() -> None:

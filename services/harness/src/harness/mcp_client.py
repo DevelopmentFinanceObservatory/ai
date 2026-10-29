@@ -115,6 +115,11 @@ from compiler.surface import (
     deliver_progress,
     mcp_progress_handler,
 )
+from data_mcp.mint_admission import (
+    BACKGROUND_ADMISSION,
+    MINT_ADMISSION_META_KEY,
+    background_outcome,
+)
 from data_mcp.mint_recovery import DatasetVersions, recover_mint_record
 from data_mcp.search_result import SEARCH_CONTEXT_META_KEY, SEARCH_ENVELOPE_META_KEY
 from data_mcp.search_tool import SearchContext
@@ -805,6 +810,37 @@ class McpExecutor:
                     ) from exc
                 return outcome
         return outcome
+
+    async def get_data_in_background(self, args: dict[str, Any]) -> str:
+        """One `get_data` call with `args`, its mint marked background, and the
+        outcome as a word (`data_mcp.mint_admission.background_outcome`):
+        data-mcp's `"minted"`, `"queued"`, `"posted"` or `"joined"` (a POST of
+        the same request was already open), `"declined"` when apis had no room
+        for it, or another refusal's code. data-mcp answers `"posted"` as soon as the mint POST is
+        written out, so apis' own answer, a decline included, mostly arrives
+        after this returns; data-mcp logs it (`background mint answered`).
+
+        The mark rides the request `_meta` (`data_mcp.mint_admission`), so apis
+        admits the mint only while it has room and declines it at once
+        otherwise, and data-mcp answers once the mint POST has been written
+        out, keeping the POST itself open until apis answers. Sent
+        once, without `_retried`, and nothing is
+        written to the provenance store: the call only warms the frame
+        execution will ask for (`harness.early_mint`). A failed call raises, as
+        `_call_held` does.
+        """
+        client = await self._get_data_clients.get()
+        try:
+            result = await _call_held(
+                self._get_data_clients,
+                client,
+                "get_data",
+                args,
+                meta={MINT_ADMISSION_META_KEY: BACKGROUND_ADMISSION},
+            )
+        finally:
+            await self._get_data_clients.release(client)
+        return background_outcome(result.structured_content)
 
     async def _admitted_write(self, args: dict[str, Any]) -> AdmittedWrite:
         """The arguments to send for a `write_component` call, under the rules

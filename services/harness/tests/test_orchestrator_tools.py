@@ -283,6 +283,14 @@ def test_no_rule_is_stated_in_both_the_instruction_and_a_tool_declaration():
     assert not any(shared.values()), shared
 
 
+def test_a_search_for_names_an_earlier_turn_listed_states_their_side():
+    """Search refuses a part whose names carry no role (`role_not_resolved`). The search
+    declaration has every name an earlier turn listed sent with its side, and the
+    instruction has a refused part sent again with roles before any other retry."""
+    assert "`role_not_resolved`" in _declarations()["search"]
+    assert "role_not_resolved" in INSTRUCTION
+
+
 def test_no_tool_declaration_names_the_implementation_behind_it():
     named = {
         name: found
@@ -3957,6 +3965,10 @@ _PRICES_QUESTION = {
             [_count_question(SPEC_NET), {"question": "In which prices?", "options": []}],
             "question 'In which prices?' offers no option",
         ),
+        (
+            [{"question": "In which prices?", "prices_of": SPEC_NET}],
+            f"prices {SPEC_NET}, which lists no `open_prices` this turn",
+        ),
     ],
     ids=[
         "offered",
@@ -3968,6 +3980,7 @@ _PRICES_QUESTION = {
         "no_question",
         "four_questions",
         "no_option",
+        "prices_of_no_open_part",
     ],
 )
 async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(

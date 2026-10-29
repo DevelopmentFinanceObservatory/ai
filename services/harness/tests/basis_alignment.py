@@ -4,6 +4,7 @@ inputs on one basis (`submission.service._aligned_bases`)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -148,6 +149,12 @@ _PROVIDER_LABELS = {
     "provider:bilateral": "bilateral aid only",
     "provider:inclusive": "bilateral plus imputed multilateral aid",
 }
+# The labels of the scopes a published DAC1 total holds, offered beside
+# `_PROVIDER_LABELS` on a block holding one active.
+_PUBLISHED_PROVIDER_LABELS = {
+    "provider:contributions": "bilateral plus core contributions to multilaterals",
+    "provider:multilateral": "core contributions to multilaterals",
+}
 
 
 def provider_block(
@@ -161,7 +168,12 @@ def provider_block(
 ) -> dict[str, Any]:
     """`basis_block` counted gross by default as `basis`, carrying a provider
     choice counted as `active` by `provenance`, its bilateral option `bilateral`,
-    as dfo-apis writes the provider axis (`ProviderBinding`)."""
+    as dfo-apis writes the provider axis (`ProviderBinding`). It offers the
+    bilateral and inclusive scopes, and `active` beside them where it is a
+    published total's (`_PUBLISHED_PROVIDER_LABELS`)."""
+    labels = {**_PROVIDER_LABELS}
+    if active in _PUBLISHED_PROVIDER_LABELS:
+        labels[active] = _PUBLISHED_PROVIDER_LABELS[active]
     block = basis_block(spec_id, narrow=narrow, active=basis)
     scope = block["resolved"]["scope_choices"]
     scope["choices"].append(
@@ -182,7 +194,7 @@ def provider_block(
                         else {"status": "available", "detail": {}}
                     ),
                 }
-                for option_id, label in _PROVIDER_LABELS.items()
+                for option_id, label in labels.items()
             ],
         }
     )
@@ -309,6 +321,30 @@ def dac1_with_contributions() -> dict[str, Any]:
     return block
 
 
+def dac1_multilateral() -> dict[str, Any]:
+    """`dac1_with_contributions` read as DAC1 multilateral ODA, as dfo-apis gives
+    that total: core contributions to multilaterals alone held, an option binding
+    the `dac1AidType` slot to aid type 2000 in place of a provider scope."""
+    block = dac1_with_contributions()
+    choice = block["resolved"]["scope_choices"]["choices"][-1]
+    choice["rule"] = "multilateral_total"
+    choice["active"] = "provider:multilateral"
+    choice["options"].append(
+        {
+            "option_id": "provider:multilateral",
+            "label": "core contributions to multilaterals",
+            "binding": {
+                "kind": "slot",
+                "slot": "dac1AidType",
+                "state": "value",
+                "refs": ["DAC1AidType2000"],
+            },
+            "availability": {"status": "available", "detail": {}},
+        }
+    )
+    return block
+
+
 def total_without_bilateral() -> dict[str, Any]:
     """`dac1_with_contributions` with its bilateral option unavailable
     (`provider_not_offered`): a published total counting core contributions to
@@ -378,3 +414,31 @@ class WholeCompiles:
             ]
             scope["choices"] = [{**sector, "id": f"{scope['id']}:sector"}, *scope["choices"]]
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+class Overlapping:
+    """`surface` with each call held open for a moment, recording in `most` the
+    most calls it had open at once, so a test can tell calls made together from
+    calls made one after another."""
+
+    def __init__(self, surface: Any) -> None:
+        self.surface = surface
+        self.open = 0
+        self.most = 0
+
+    async def list_tools(self) -> list[Any]:
+        return await self.surface.list_tools()
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        self.open += 1
+        self.most = max(self.most, self.open)
+        try:
+            # Long enough for every call started in the same step to open.
+            await asyncio.sleep(0.01)
+            return await self.surface.call_tool(
+                tool=tool, arguments=arguments, on_progress=on_progress
+            )
+        finally:
+            self.open -= 1

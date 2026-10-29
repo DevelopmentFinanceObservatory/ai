@@ -108,6 +108,7 @@ import rfc8785
 from common.hashed_fields import revision_content
 from compiler.evidence import (
     named_members,
+    named_on_open_axes,
     named_refs,
     open_axes_for,
     source_requirement_matches,
@@ -136,7 +137,7 @@ from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
-from planner.parties import across_party, flow_side, party_role
+from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
     DatasetRequirement,
@@ -144,12 +145,14 @@ from planner.plan import (
     Plan,
     PlanStatus,
     QuotientRequirement,
+    RankRequirement,
     SessionState,
     ShareOfRequirement,
     Unit,
     authored,
     dataset_of,
     discovery_time_left,
+    frame_shapes,
     identity_on_record,
     inputs_of,
     load_plan,
@@ -182,6 +185,7 @@ from translator.referral import (
     WithheldSource,
     closing_group,
     dropped_scope,
+    kept_scope_repair,
     scope_repair,
 )
 
@@ -289,10 +293,11 @@ class DiscoveryRecord(StrictModel):
     (`calls`/`requirement_calls` count only `search`). It carries
     `status == DEFINITE` and one `spec_ids` entry. A `pin` record with no
     `status` and one `spec_ids` entry records the pin's source read and set
-    aside, because it holds closed the side the requirement's `across` asks for every member of: no
+    aside, because it holds closed the side the requirement's `across` asks for every member of,
+    or leaves open the side an entity the requirement names sits on: no
     retrieval may take it, and the sources the fresh search finds in its
-    place are offered only when they keep its scope or a reader reads that
-    side per member (`DiscoveryLog.scope_kept`).
+    place are offered only when they keep its scope or, for a closed `across`
+    side, a reader reads that side per member (`DiscoveryLog.scope_kept`).
 
     `tool == "resolve"` records the graph resolve of the requirement's
     entity names that match no label of its one `spec_ids` source
@@ -367,6 +372,26 @@ class ScopeKept(NamedTuple):
     offered: tuple[SelectedSource, ...]
     withheld: tuple[WithheldSource, ...] = ()
     repair: str | None = None
+
+
+def _split_by_scope(
+    held: SelectedSource,
+    sources: Sequence[SelectedSource],
+    *,
+    columns: Collection[str] | None = None,
+) -> ScopeKept:
+    """`sources` offered where they keep the scope `held` holds, withheld where they drop it (`translator.referral.dropped_scope`).
+
+    `columns`, when given, are the only role columns the scope is judged on.
+    """
+    offered: list[SelectedSource] = []
+    withheld: list[WithheldSource] = []
+    for source in sources:
+        if dropped := dropped_scope(held, source, columns=columns):
+            withheld.append(WithheldSource(source=source, dropped=dropped))
+        else:
+            offered.append(source)
+    return ScopeKept(offered=tuple(offered), withheld=tuple(withheld))
 
 
 class _RecordedSourceDefinition(NamedTuple):
@@ -577,7 +602,8 @@ class DiscoveryLog(StrictModel):
         """`sources`, found in place of `requirement`'s pin in `plan`, split into those a referral offers and those it withholds.
 
         The pin's source was set aside (`set_aside_pin`) because it holds
-        closed a side `across` asks for every member of. When every
+        closed a side `across` asks for every member of, or because it leaves
+        open the side a named entity sits on. In the first case, when every
         requirement of `plan` reading `requirement` sums that side away
         (`_sums_its_sides_away`), the pin's scope is the figure the plan asks
         for: a source that drops it (`translator.referral.dropped_scope`) is
@@ -586,11 +612,27 @@ class DiscoveryLog(StrictModel):
         the user named as a share's whole, as G7 in "Germany's share of G7
         ODA", is that case.
 
+        A plan whose every reader ranks over that side, where the pin holds
+        it to the members of one group (`_ranks_its_group_members`), keeps
+        the scope too: "the largest DAC donors" ranks the DAC members, and a
+        source holding every provider open would rank providers outside the
+        group. Its repair names the group for its members.
+
+        A pin set aside because it leaves open the side an entity the
+        requirement names sits on (`named_open_pin`) keeps its scope on the
+        sides `_kept_columns` keeps, whatever reads the requirement: the
+        sides it holds closed that the requirement names no party on, less
+        those that would divide a numerator's own parties by themselves. A
+        source that drops the scope there is withheld, and the repair names
+        those parties in the requirement's `entities` (`_kept_scope`,
+        `translator.referral.kept_scope_repair`). With no side kept, every
+        source is offered.
+
         The pin gives way, and every source is offered, the same sources a
-        search with the pin dropped finds, in two cases. A reader other than
-        such a sum, such as a rank or a filter, reads the side per member, and
-        naming the pin's scope would leave one member where the reader needs
-        every one `across` asks for. A sum that a share_of or quotient_of
+        search with the pin dropped finds, in two cases. Any other reader,
+        such as a filter or a rank over a side held to one member, reads the
+        side per member, and naming the pin's scope would leave one member
+        where the reader needs every one `across` asks for. A sum that a share_of or quotient_of
         divides by, where the pin binds that side to the numerator's own
         members alone (`_divides_its_member_by_itself`), would divide the
         member by itself: "the United States' share of ODA to Kenya" with its
@@ -598,22 +640,38 @@ class DiscoveryLog(StrictModel):
         source set aside, every source is offered too.
         """
         held = self.set_aside_pin(requirement_revision(requirement), requirement.id)
-        if (
-            held is None
-            or not _sums_its_sides_away(plan, requirement.id)
-            or _divides_its_member_by_itself(plan, requirement, held)
-        ):
+        if held is None:
             return ScopeKept(offered=tuple(sources))
-        offered: list[SelectedSource] = []
-        withheld: list[WithheldSource] = []
-        for source in sources:
-            if dropped := dropped_scope(held, source):
-                withheld.append(WithheldSource(source=source, dropped=dropped))
-            else:
-                offered.append(source)
-        repairs = [repair for word in requirement.across if (repair := scope_repair(held, word))]
-        repair = "; ".join(repairs) if withheld and repairs else None
-        return ScopeKept(offered=tuple(offered), withheld=tuple(withheld), repair=repair)
+        if not _holds_closed(requirement, held):
+            columns = _kept_columns(plan, requirement, held)
+            kept = _split_by_scope(held, sources, columns=columns)
+            if not kept.withheld:
+                return kept
+            return kept._replace(repair=kept_scope_repair(_kept_scope(plan, requirement, held)))
+        if _divides_its_member_by_itself(plan, requirement, held):
+            return ScopeKept(offered=tuple(sources))
+        summed = _sums_its_sides_away(plan, requirement.id)
+        if not summed and not _ranks_its_group_members(plan, requirement, held):
+            return ScopeKept(offered=tuple(sources))
+        kept = _split_by_scope(held, sources)
+        repairs = [
+            repair
+            for word in requirement.across
+            if (repair := scope_repair(held, word, members=not summed))
+        ]
+        repair = "; ".join(repairs) if kept.withheld and repairs else None
+        return kept._replace(repair=repair)
+
+    def named_open_pin(self, requirement: DatasetRequirement) -> SelectedSource | None:
+        """The pin's source set aside for `requirement` because it leaves open the side a name sits on, or `None`.
+
+        That is a source `set_aside_pin` gives that holds closed no side
+        `across` asks for (`_holds_closed`), which `_source_from_resolve_pin`
+        sets aside only for an entity it binds none of
+        (`compiler.evidence.named_on_open_axes`).
+        """
+        held = self.set_aside_pin(requirement_revision(requirement), requirement.id)
+        return None if held is None or _holds_closed(requirement, held) else held
 
     def recorded_source(self, spec_id: str) -> SelectedSource | None:
         """The source a record of this log last named `spec_id` with, or `None` when none did."""
@@ -1099,7 +1157,9 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
     (RFC 8785) under SHA-256, the same discipline `plan_revision` uses for the
     whole plan: stable across an edit to a different requirement or a
     decision, and changed exactly when this requirement's own searched
-    content or pin changes.
+    content or pin changes. The `kept` parties `search_part` adds for a pin
+    set aside are not covered, since they follow from the pin's source, which
+    `source_spec_id` fixes, and from the plan's readers (`_kept_columns`).
     """
     content = revision_content(
         requirement, include={"measure", "entities", "period", "unit", "source_spec_id"}
@@ -1210,7 +1270,12 @@ def _unit_phrase(unit: Unit) -> str:
     return f"current {unit.currency}"
 
 
-def search_part(requirement: DatasetRequirement, variable: str) -> dict[str, object]:
+def search_part(
+    requirement: DatasetRequirement,
+    variable: str,
+    *,
+    kept: Sequence[Mapping[str, object]] = (),
+) -> dict[str, object]:
     """One `search` part, built from `requirement`'s own fields plus `variable`.
 
     Sends the named entities, and the side of a flow `across` covers as an
@@ -1230,8 +1295,11 @@ def search_part(requirement: DatasetRequirement, variable: str) -> dict[str, obj
 
     An entity with a `dcid` sends it beside its words, so search binds that
     graph node and keeps two entities written alike apart.
+
+    `kept` are entities sent after the requirement's own, the parties a
+    pin set aside holds its other sides to (`_kept_scope`).
     """
-    entities = []
+    entities: list[Mapping[str, object]] = []
     for entity in requirement.entities:
         sent: dict[str, object] = {"text": entity.name}
         if entity.dcid is not None:
@@ -1241,6 +1309,7 @@ def search_part(requirement: DatasetRequirement, variable: str) -> dict[str, obj
         if entity.members:
             sent["members"] = True
         entities.append(sent)
+    entities.extend(kept)
     part: dict[str, object] = {"variable": variable}
     if entities:
         part["entities"] = entities
@@ -1264,6 +1333,68 @@ def search_part(requirement: DatasetRequirement, variable: str) -> dict[str, obj
     if requirement.source_code is not None:
         part["source_code"] = requirement.source_code
     return part
+
+
+def _kept_columns(
+    plan: Plan, requirement: DatasetRequirement, held: SelectedSource
+) -> frozenset[str]:
+    """The role columns whose scope `held`, a pin set aside, keeps for `requirement` in `plan`.
+
+    `held` was set aside because it leaves open the side an entity
+    `requirement` names sits on (`DiscoveryLog.named_open_pin`). A column it
+    keeps is one it closes, by binding entities or naming a group there, on a
+    side of a flow `requirement` names no entity on. A side the requirement
+    names a party on is the requirement's own, so Japan named out of the donors
+    the pin binds asks for Japan alone. A side where a share or quotient
+    dividing by `requirement` has its numerator name every party `held`
+    binds there (`_sides_dividing_by_itself`) is not kept either, since
+    keeping it would divide those parties by themselves. `_kept_scope` and
+    `DiscoveryLog.scope_kept` both read this.
+    """
+    open_columns = {axis.column for axis in held.open_entity_axes or ()}
+    named = {flow_side(entity.role) for entity in requirement.entities if entity.role is not None}
+    closed = {
+        column: side
+        for column in {entity.role for entity in held.entities}
+        | {group.role for group in held.groups}
+        if column not in open_columns
+        and (side := flow_side(column)) is not None
+        and side not in named
+    }
+    dividing = _sides_dividing_by_itself(plan, requirement, held, set(closed.values()))
+    return frozenset(column for column, side in closed.items() if side not in dividing)
+
+
+def _kept_scope(
+    plan: Plan, requirement: DatasetRequirement, held: SelectedSource
+) -> list[dict[str, object]]:
+    """The parties `held`, a pin set aside, holds its kept columns to (`_kept_columns`), as `search` entities.
+
+    A search sent without them may answer a source that drops them, as
+    Japan's aid to every recipient for "Japan's ODA" pinned to every donor's
+    aid to Kenya. A group goes as its label, asking for its members unless
+    `held` binds its published total (`ResolvedGroup.reads_total`); an
+    entity goes as its label and its graph node.
+    """
+    columns = _kept_columns(plan, requirement, held)
+    kept: list[dict[str, object]] = []
+    grouped: set[str] = set()
+    for group in held.groups:
+        if group.role not in columns or (role := party_role(group.role)) is None:
+            continue
+        grouped.add(group.role)
+        sent: dict[str, object] = {"text": group.label, "role": role}
+        if not group.reads_total:
+            sent["members"] = True
+        kept.append(sent)
+    kept.extend(
+        {"text": entity.label, "dcid": entity.ref, "role": role}
+        for entity in held.entities
+        if entity.role in columns
+        and entity.role not in grouped
+        and (role := party_role(entity.role)) is not None
+    )
+    return kept
 
 
 def requirement_open_roles(requirement: DatasetRequirement) -> list[str]:
@@ -2014,46 +2145,139 @@ def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
     )
 
 
-class ResolvedAnswers:
-    """The `resolve_definition` answers one translation has had, by arguments.
+# The prefix of the key each part Search answered a `resolve_definition` call
+# of the turn with is stored under, followed by the sha256 of the call's
+# arguments (`resolving_once`). A Studio turn is one ADK session
+# (`harness.studio`), so the parts last the turn: every invocation of it (the
+# first message, each plan card switch, the approval) is served what an
+# earlier one was answered, on any instance, and the next turn starts empty.
+# A part is written once, when it is resolved. A switch that fails or is
+# stopped keeps them: `harness.graph.switch._restore` puts back the drafting
+# state without them, so the parts Search answered meanwhile stay.
+RESOLVED_STATE_PREFIX = "translator:resolved:"
 
-    `translator.tool.build_translate`'s translation opens one
-    (`resolving_once`), so the group rewrite (`name_pinned_groups`) and
-    discovery after it read a pin's identity off one call. An answer is kept
-    whatever it says, a refusal included; a call that did not complete is
-    not kept, so the next asks again. Concurrent callers with the same
-    arguments wait on the first.
+
+def _answered_part(answer: ToolCallResult) -> Mapping[str, Any] | None:
+    """The first part of the Search envelope `answer` carries, or `None` when it carries none."""
+    envelope = (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
+    parts = envelope.get("parts") if isinstance(envelope, Mapping) else None
+    if not isinstance(parts, list) or not parts or not isinstance(parts[0], Mapping):
+        return None
+    return cast(Mapping[str, Any], parts[0])
+
+
+# A call of one invocation, as the tool called and its arguments as RFC 8785 JSON.
+type _CallKey = tuple[ToolId, bytes]
+
+
+class _Invocation:
+    """The answers of one invocation (`resolving_once`), by tool and arguments.
+
+    `answers` holds every answer the invocation had, a refusal included,
+    unless it is one the same call can escape later (`refusal_retryable`),
+    which only a `resolve_definition` call in a block opened to keep them
+    holds (`_Resolving.retryable`). A call that did not complete is not
+    kept. Concurrent callers with the same tool and arguments wait on the
+    first.
     """
 
     def __init__(self) -> None:
-        self._answers: dict[bytes, ToolCallResult] = {}
-        self._locks: dict[bytes, asyncio.Lock] = {}
-
-    async def answer(
-        self, key: bytes, call: Callable[[], Awaitable[ToolCallResult]]
-    ) -> ToolCallResult:
-        """The answer kept under `key`, or `call`'s, kept once it completes."""
-        async with self._locks.setdefault(key, asyncio.Lock()):
-            if key not in self._answers:
-                self._answers[key] = await call()
-            return self._answers[key]
+        self.answers: dict[_CallKey, ToolCallResult] = {}
+        self.locks: dict[_CallKey, asyncio.Lock] = {}
 
 
-# The `ResolvedAnswers` of the translation the current call runs in; unset outside one.
-current_resolved_answers: ContextVar[ResolvedAnswers | None] = ContextVar(
-    "resolved_answers", default=None
-)
+class _Resolving(NamedTuple):
+    """The invocation a call runs in, the session state its parts are read from and
+    written to, and the retryable `resolve_definition` refusals its own block met,
+    `None` for a block that keeps none."""
+
+    invocation: _Invocation
+    state: SessionState | None
+    retryable: dict[_CallKey, ToolCallResult] | None
+
+
+_current_resolving: ContextVar[_Resolving | None] = ContextVar("resolving", default=None)
 
 
 @contextmanager
-def resolving_once() -> Iterator[ResolvedAnswers]:
-    """Serve each identity `resolve_definition` is asked for once, inside the block."""
-    answers = ResolvedAnswers()
-    token = current_resolved_answers.set(answers)
+def resolving_once(
+    state: SessionState | None = None, *, keep_retryable: bool = False
+) -> Iterator[None]:
+    """Ask Search each `resolve_definition` and `search` call once an invocation, inside the block.
+
+    Search answers and refusals are kept for the invocation alone; only a
+    `definite` `resolve_definition` part is kept in session state, for the turn.
+
+    The outermost block opens the invocation's answers (`_Invocation`), and
+    a block inside it shares them, so concurrent identical calls anywhere in
+    the invocation wait on the first (`answered_once`). A `resolve_definition`
+    call whose part the turn's session state holds (`RESOLVED_STATE_PREFIX`)
+    is served that part and not made; data-mcp stored its definition when it
+    first answered, so the run's `get_data` finds it. Each `definite` part
+    Search answers it with is stored in `state`, or, with none given, in the
+    state the enclosing block uses. A refusal is kept for the invocation
+    alone, so the next invocation asks again. One the same call can escape
+    later (`refusal_retryable`) is kept only by a block opened with
+    `keep_retryable`, for that block alone, and only for `resolve_definition`.
+    A translation opens one, so its group rewrite and discovery share a
+    Search outage. The planner entry and a plan card switch keep none, so a
+    proposal answered "propose it again" asks Search again when proposed
+    again.
+    """
+    outer = _current_resolving.get()
+    invocation = outer.invocation if outer is not None else _Invocation()
+    if state is None and outer is not None:
+        state = outer.state
+    token = _current_resolving.set(_Resolving(invocation, state, {} if keep_retryable else None))
     try:
-        yield answers
+        yield
     finally:
-        current_resolved_answers.reset(token)
+        _current_resolving.reset(token)
+
+
+def _resolved_key(arguments: Mapping[str, object]) -> str:
+    """The session state key the part a `resolve_definition` call with `arguments` answered is stored under."""
+    return RESOLVED_STATE_PREFIX + hashlib.sha256(rfc8785.dumps(dict(arguments))).hexdigest()
+
+
+async def answered_once(
+    tool: ToolId, arguments: Mapping[str, object], call: Callable[[], Awaitable[ToolCallResult]]
+) -> ToolCallResult:
+    """`call`'s answer, the call of `tool` with `arguments`, or the one the turn holds for it (`resolving_once`).
+
+    Outside `resolving_once` the call is made.
+    """
+    resolving = _current_resolving.get()
+    if resolving is None:
+        return await call()
+    invocation, state, retryable = resolving
+    key = (tool, rfc8785.dumps(dict(arguments)))
+    stored_key = _resolved_key(arguments) if tool == RESOLVE_DEFINITION else None
+    async with invocation.locks.setdefault(key, asyncio.Lock()):
+        kept = invocation.answers.get(key)
+        if kept is None and retryable is not None:
+            kept = retryable.get(key)
+        if kept is not None:
+            return kept
+        stored = state.get(stored_key) if state is not None and stored_key is not None else None
+        if isinstance(stored, Mapping):
+            return ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [stored]}}
+            )
+        answer = await call()
+        if not (answer.is_error and refusal_retryable(answer)):
+            invocation.answers[key] = answer
+        elif stored_key is not None and retryable is not None:
+            retryable[key] = answer
+        part = None if answer.is_error else _answered_part(answer)
+        if (
+            state is not None
+            and stored_key is not None
+            and part is not None
+            and part.get("status") == "definite"
+        ):
+            state[stored_key] = part
+        return answer
 
 
 def refusal_retryable(answer: ToolCallResult) -> bool:
@@ -2076,8 +2300,8 @@ async def resolve_definition(
 ) -> Mapping[str, Any]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`.
 
-    Inside `resolving_once` an identity already answered is served that
-    answer (`ResolvedAnswers`).
+    Inside `resolving_once` a call the turn already made is served its
+    answer.
 
     `groups`, the sets a role's places were asked for as, are posted beside
     the identity (`compiler.sources.wire_groups`), so Search names them again.
@@ -2113,12 +2337,8 @@ async def resolve_definition(
             surface, tool=RESOLVE_DEFINITION, arguments=arguments, keep_when_cut=True
         )
 
-    answers = current_resolved_answers.get()
     try:
-        if answers is None:
-            answer = await call()
-        else:
-            answer = await answers.answer(rfc8785.dumps(arguments), call)
+        answer = await answered_once(RESOLVE_DEFINITION, arguments, call)
     except ToolSurfaceUnavailableError as exc:
         raise DefinitionNotResolvedError(
             str(exc), retryable=True, not_issued=isinstance(exc, NoTimeLeftError)
@@ -2137,11 +2357,10 @@ async def resolve_definition(
             refused=True,
             code=code,
         )
-    envelope = (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
-    parts = envelope.get("parts") if isinstance(envelope, Mapping) else None
-    if not isinstance(parts, list) or not parts or not isinstance(parts[0], Mapping):
+    part = _answered_part(answer)
+    if part is None:
         raise DefinitionNotResolvedError("Search returns nothing for it", retryable=False)
-    return cast(Mapping[str, Any], parts[0])
+    return part
 
 
 class PartFault(StrEnum):
@@ -2356,6 +2575,18 @@ async def _source_from_resolve_pin(
     withheld from the referral when every reader sums the side away
     (`DiscoveryLog.scope_kept`).
 
+    A source that leaves open the side an entity `requirement` names sits on,
+    and so binds none of those names (`compiler.evidence.named_on_open_axes`),
+    is not honoured either. It is recorded as set aside too, and the fresh
+    `search` sends the names with their roles, beside the parties the source
+    holds its other sides to (`_kept_scope`), so the source it finds binds
+    the names and keeps the pin's scope, and the plan approved holds the
+    entities its run resolves. "ODA of the United States and Germany" pinned
+    to a source holding every donor open is that case. A source found in its
+    place that drops the scope is withheld whatever reads the requirement
+    (`DiscoveryLog.scope_kept`), so "Japan's ODA to Kenya" pinned to every
+    donor's aid to Kenya may not take Japan's aid to every recipient.
+
     When none of the readers above holds the pin's source, the source a
     search recorded for its `spec_id` (`DiscoveryLog.recorded_source`) is
     read for that check alone, so a pin of a source the translator found
@@ -2372,10 +2603,15 @@ async def _source_from_resolve_pin(
     if read is None or isinstance(read, dict):
         return read
     source, honoured = read
-    holds_closed = _holds_closed(requirement, source)
-    if not honoured and not holds_closed:
+    if _holds_closed(requirement, source):
+        reason = f"it holds closed a side `across` {list(requirement.across)!r} asks for"
+    elif unbound := named_on_open_axes(requirement, source):
+        reason = f"it leaves open the side {[entity.name for entity in unbound]!r} sit on"
+    elif not honoured:
         return None
-    if holds_closed:
+    else:
+        reason = None
+    if reason is not None:
         set_aside = DiscoveryRecord(
             revision=plan_revision(plan),
             tool="pin",
@@ -2383,7 +2619,7 @@ async def _source_from_resolve_pin(
             requirement_key=requirement_revision(requirement),
             spec_ids=(source.spec_id,),
             variable_sent=requirement.measure,
-            detail=f"set aside: it holds closed a side `across` {list(requirement.across)!r} asks for",
+            detail=f"set aside: {reason}",
         )
         async with discovery_lock(tool_context.state):
             log = load_log(tool_context.state)
@@ -2505,7 +2741,9 @@ async def name_pinned_groups(
     that. A named group is read as the pinned source binds it, as its
     members or as its published total (`compiler.evidence.named_members`),
     and every reader sums the side away, so either reading gives the
-    group's figure. A side held to named
+    group's figure. Where every reader ranks over the side instead, the
+    group is named for its members, so the rank orders the members the pin
+    held. A side held to named
     members alone is left as it is: widening it changes the scope, which the
     planner decides (`DiscoveryLog.scope_kept`). So is the total a share or
     quotient divides by when the group is the numerator's own
@@ -2521,12 +2759,13 @@ async def name_pinned_groups(
 
     The side turns from open to named, so a requirement is rewritten only
     when every requirement reading it sums that side away
-    (`_summed_by_every_reader`), and only when the plan still validates with
-    it rewritten: a decision the requirement cites may fix its `across` or
+    (`_summed_by_every_reader`) or ranks over it (`_ranked_sides`), which
+    then reads the group's members, and only when the plan still validates
+    with it rewritten: a decision the requirement cites may fix its `across` or
     `entities`. A requirement left as it is, with the reason logged, takes
     discovery's set-aside path, and its referral withholds the sources that
-    drop the pin's scope only when every reader sums the side away
-    (`DiscoveryLog.scope_kept`).
+    drop the pin's scope only when every reader sums the side away or ranks
+    the members of a group the pin holds it to (`DiscoveryLog.scope_kept`).
 
     The draft is saved in place, at its version, so the plan the user
     approves names the group. A pin whose source is honoured is recorded
@@ -2584,6 +2823,24 @@ def _origin_id(plan: Plan, requirement_id: str) -> str:
     return origin.get(requirement_id, requirement_id)
 
 
+def _ranks_its_group_members(
+    plan: Plan, requirement: DatasetRequirement, held: SelectedSource
+) -> bool:
+    """Whether every reader of `requirement` ranks over a side `held` holds to the members of one group.
+
+    Judged on the plan as the model wrote it (`authored`), as
+    `_sums_its_sides_away` judges it. The group is the one `_group_named`
+    names for its members on an `across` word of that side.
+    """
+    ranked = _ranked_sides(authored(plan), _origin_id(plan, requirement.id))
+    return any(
+        flow_side(word) in ranked
+        and (role := party_role(word)) is not None
+        and _group_named(held, word, role, members=True) is not None
+        for word in requirement.across
+    )
+
+
 def _sums_its_sides_away(plan: Plan, requirement_id: str) -> bool:
     """Whether every reader of `requirement_id` in `plan` sums its sides away (`_summed_by_every_reader`).
 
@@ -2615,16 +2872,31 @@ def _divides_its_member_by_itself(
     Judged on the plan as the model wrote it (`authored`), as
     `_sums_its_sides_away` judges it.
     """
+    sides = {side for word in requirement.across if (side := flow_side(word)) is not None}
+    return bool(_sides_dividing_by_itself(plan, requirement, pinned, sides))
+
+
+def _sides_dividing_by_itself(
+    plan: Plan, requirement: DatasetRequirement, pinned: SelectedSource, sides: Collection[FlowSide]
+) -> frozenset[FlowSide]:
+    """The `sides` on which `pinned` binds only parties a numerator dividing by `requirement` names.
+
+    The rule `_divides_its_member_by_itself` states, side by side: a
+    share_of or quotient_of of `plan` reading `requirement` as its
+    denominator (`_dividers`) whose numerator names, by graph ref
+    (`compiler.evidence.named_refs`), every entity `pinned` binds on the
+    side. Judged on the plan as the model wrote it (`authored`).
+    """
     written = authored(plan)
     by_id = {item.id: item for item in written.evidence_requirements}
-    sides = {side for word in requirement.across if (side := flow_side(word)) is not None}
+    found: set[FlowSide] = set()
     for divider in _dividers(written, _origin_id(plan, requirement.id)):
         members = named_refs(side_entities(by_id, divider.numerator), pinned)
         for side in sides:
             bound = {entity.ref for entity in pinned.entities if flow_side(entity.role) == side}
             if bound and bound <= members:
-                return True
-    return False
+                found.add(side)
+    return frozenset(found)
 
 
 def _dividers(
@@ -2658,6 +2930,66 @@ def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
         for reader in plan.evidence_requirements
         if requirement_id in inputs_of(reader)
     )
+
+
+def _ranked_sides(plan: Plan, requirement_id: str) -> frozenset[FlowSide]:
+    """The sides of a flow every requirement reading `requirement_id` ranks over, empty unless each is such a rank.
+
+    A rank orders the members of its `axis` side one by one, whether that
+    side is open or names a group's members, so naming the group a pin holds
+    the side to ranks the members the pin held. A rank stating no `axis`
+    ranks over its input's one role (`planner.plan.frame_shapes`), which
+    that role's side stands for. Empty when nothing reads `requirement_id`,
+    or when a reader is not a rank, or ranks over a role naming no side of a
+    flow.
+    """
+    sides: set[FlowSide] = set()
+    for reader in plan.evidence_requirements:
+        if requirement_id not in inputs_of(reader):
+            continue
+        if not isinstance(reader, RankRequirement):
+            return frozenset()
+        axis = reader.axis if reader.axis is not None else _sole_role(plan, reader.input_id)
+        if axis is None or (side := flow_side(axis)) is None:
+            return frozenset()
+        sides.add(side)
+    return frozenset(sides)
+
+
+def _sole_role(plan: Plan, requirement_id: str) -> str | None:
+    """The role of the one role dimension `requirement_id`'s frame carries in `plan`, or `None`.
+
+    `None` when the frame carries several roles or none, or its one role
+    names an entity with no role.
+    """
+    shape = frame_shapes(plan).get(requirement_id)
+    if shape is None or len(shape.roles) != 1:
+        return None
+    return shape.roles[0].role
+
+
+def _group_named(source: SelectedSource, word: str, role: str, *, members: bool) -> Entity | None:
+    """The entity naming the one group `source` holds the `across` word's side to, or `None`.
+
+    The group is `translator.referral.closing_group`'s. Named whole, it is
+    met by the source under either reading (`compiler.evidence.named_members`).
+    Named for its `members`, it is met only where the source binds the
+    members, so a group the source binds as a published total
+    (`ResolvedGroup.reads_total`) gives `None`.
+    """
+    label = closing_group(source, word)
+    if label is None:
+        return None
+    if not members:
+        return Entity(name=label, role=role)
+    side = flow_side(word)
+    if any(
+        group.reads_total
+        for group in source.groups
+        if group.label == label and flow_side(group.role) == side
+    ):
+        return None
+    return Entity(name=label, role=role, members=True)
 
 
 def _with_groups_named(
@@ -2700,16 +3032,26 @@ async def _groups_named(
     `_pin_source` takes it.
 
     One group per `across` word whose side the pin's source holds to one
-    group (`translator.referral.closing_group`). `None` when a requirement
-    reading it keeps the sides apart (`_summed_by_every_reader`), when a
+    group (`_group_named`). A plan whose every reader ranks the requirement
+    over that side (`_ranked_sides`) names the group's members
+    (`Entity.members`), so "the largest DAC donors" pinned to the DAC
+    members ranks those members and no other provider. `None` when a
+    requirement reading it keeps the sides apart otherwise (neither
+    `_summed_by_every_reader` nor `_ranked_sides`), when a
     share or quotient divides by it and the pin's source binds the side to
     the numerator's own members alone (`_divides_its_member_by_itself`), as
     in "G7's share of ODA to Kenya" with the total pinned to G7, or when
     the pin's source cannot be read, leaves every side `across` asks for
     open, or holds none of them to one group.
     """
-    roles = [(word, role) for word in requirement.across if (role := party_role(word))]
-    if not roles or not _summed_by_every_reader(plan, requirement.id):
+    summed = _summed_by_every_reader(plan, requirement.id)
+    ranked = frozenset() if summed else _ranked_sides(plan, requirement.id)
+    roles = [
+        (word, role)
+        for word in requirement.across
+        if (role := party_role(word)) and (summed or flow_side(word) in ranked)
+    ]
+    if not roles:
         return None
     read = await _pin_source(
         tool_context, plan=plan, requirement=requirement, first_year=first_year, surface=surface
@@ -2722,9 +3064,9 @@ async def _groups_named(
     ):
         return None
     groups = tuple(
-        NamedGroup(requirement.id, Entity(name=label, role=role), word)
+        NamedGroup(requirement.id, entity, word)
         for word, role in roles
-        if (label := closing_group(source, word)) is not None
+        if (entity := _group_named(source, word, role, members=not summed)) is not None
     )
     if not groups:
         return None
@@ -2896,7 +3238,12 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         plan, requirement, revision, key = started
 
         variable = requirement.measure
-        part = search_part(requirement, variable)
+        held = load_log(tool_context.state).named_open_pin(requirement)
+        part = search_part(
+            requirement,
+            variable,
+            kept=() if held is None else _kept_scope(plan, requirement, held),
+        )
 
         async def _finish(
             record: DiscoveryRecord, sources: Sequence[SelectedSource] = ()

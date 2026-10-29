@@ -19,6 +19,7 @@ with the producer.
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from enum import StrEnum
 from typing import cast
@@ -47,6 +48,8 @@ from planner.workflow import (
     SelectedSource,
 )
 from pydantic import JsonValue, TypeAdapter
+
+logger = logging.getLogger(__name__)
 
 # The `coverage.kind` under which `search` reports a real series window.
 EXACT_COVERAGE = "exact"
@@ -370,7 +373,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, the counts of its members and how many it serves, the label,
-    size and digest of the binding its `shape` states, entities and the named
+    size and digest of the binding its `shape` states, the concept it counts
+    and the tables it is published in, entities and the named
     sets it binds, the measure it elected and the others it offers, the entity
     axes it leaves open, unit (or that it varies per series), provenance and
     its account, the publisher codes it is exactly (`exact_codes`), the
@@ -405,6 +409,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             confidence=_text(resolved.get("confidence")),
             has_data=_flag(coverage.get("has_data")),
             measure_label=_text(shape.get("label")),
+            concept_label=block_concept_label(block),
+            published_tables=_text(resolved.get("published_tables")),
             elected_measure=_elected_measure(resolved),
             stat_var_member_count=_count(stat_vars.get("member_count")),
             stat_var_member_count_exact=_flag(stat_vars.get("member_count_exact")),
@@ -440,6 +446,17 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
         # pydantic's ValidationError is a ValueError too, so one clause covers
         # a malformed field and a missing one alike.
         raise ValueError(f"the spec block is not usable as a source: {exc}") from exc
+
+
+def readable_source(block: Mapping[str, object]) -> SelectedSource | None:
+    """The source `block` states (`source_from_spec_block`), `None` with a warning
+    logged where it is not usable as one, for a caller that names or labels by the
+    source and falls back to other words without it."""
+    try:
+        return source_from_spec_block(block)
+    except ValueError as exc:
+        logger.warning("spec block %s is not readable as a source: %s", block.get("spec_id"), exc)
+        return None
 
 
 def _exact_codes(stat_vars: Mapping[str, object]) -> tuple[str, ...]:
@@ -567,14 +584,31 @@ def entity_scopes_disjoint(left: SelectedSource, right: SelectedSource) -> bool:
     return False
 
 
+def is_country(ref: str) -> bool:
+    """Whether the resolved party `ref` is a country: its dcid is under `country/`,
+    as Search's own catalogue counts countries. Search's `entity_type` is the
+    graph's type of the node and is absent where the graph states none, so it is
+    not read."""
+    return ref.startswith(_COUNTRY_PREFIX)
+
+
+def party_class(ref: str) -> PartyClass | None:
+    """The class of party (`PartyClass`) the resolved party `ref` is of, where its ref
+    shows it: `official` for a country (`is_country`), since Search's code index
+    classes a private provider by its OECD private donor code, none of which names a
+    country, and every other party it does not total or count as a residual as
+    official. `None` for any other party, whose class only Search's index states."""
+    return "official" if is_country(ref) else None
+
+
 def countries_apart(left: Collection[str], right: Collection[str]) -> bool:
     """Whether two sets of entity refs bound on one role name rows that never meet:
-    both name countries alone, at least one each, and none in common. A region
-    holds countries, so a ref that is no country proves nothing."""
+    both name countries alone (`is_country`), at least one each, and none in
+    common. A region holds countries, so a ref that is no country proves nothing."""
     return (
         bool(left)
         and bool(right)
-        and all(ref.startswith(_COUNTRY_PREFIX) for ref in (*left, *right))
+        and all(is_country(ref) for ref in (*left, *right))
         and set(left).isdisjoint(right)
     )
 
@@ -815,19 +849,31 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     return StatVarReading.SEPARATE
 
 
-def stat_var_reading(source: SelectedSource, requested: StatVarReading | None) -> SelectedSource:
-    """`source` stating how its retrieval reads it, and who said so.
+def stat_var_reading_of(
+    source: SelectedSource, requested: StatVarReading | None
+) -> StatVarReading | None:
+    """How a retrieval of `source` reads its StatVars, `requested` the requirement's reading.
 
-    A source binding one StatVar has no reading. A family takes the
-    requirement's `requested` reading when it states one, and
-    `default_reading` otherwise.
+    A source binding one StatVar has no reading. A family takes `requested`
+    when it states one, and `default_reading` otherwise.
     """
     if not is_family(source):
-        reading, set_by = None, None
-    elif requested is not None:
-        reading, set_by = requested, ReadingSetBy.PLAN
-    else:
-        reading, set_by = default_reading(source), ReadingSetBy.RULE
+        return None
+    return requested if requested is not None else default_reading(source)
+
+
+def stat_var_reading(source: SelectedSource, requested: StatVarReading | None) -> SelectedSource:
+    """`source` stating how its retrieval reads it (`stat_var_reading_of`), and who
+    said so: the plan where it stated the reading, the rule where `default_reading`
+    settled it."""
+    reading = stat_var_reading_of(source, requested)
+    set_by = (
+        None
+        if reading is None
+        else ReadingSetBy.PLAN
+        if requested is not None
+        else ReadingSetBy.RULE
+    )
     return source.model_copy(
         update={"stat_var_reading": reading, "stat_var_reading_set_by": set_by}
     )
@@ -878,12 +924,21 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     """The named sets `resolved.entity_groups` states, each keyed by the role column it fills.
 
     A group stating no name names nothing a requirement can ask for, so it is
-    left out rather than failing the block. `total` is the published total
+    left out rather than failing the block. `group_id` is the membership
+    registry's id for a set the graph holds no node for. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
     `whole_of` is the classes of party a whole-population total holds, or a
     union of such totals, absent for any other set. `side_classes` is the
     classes of party, totals aside, the dataset publishes on such a set's side,
-    absent for any other set and from a Search that predates it. A class outside
+    absent for any other set and from a Search that predates it. `members` are
+    the parties a bound total holds where Search lists them. `left_out` and
+    `sum_differs` are, for a set read as its members, the residuals its
+    published total counts that the members leave out, which Search sends only
+    where there are some, and whether the source publishes its own figure for
+    it, which Search sends only where it does.
+    `holds_multilaterals` is whether a donor set read as a total or a whole
+    population holds a multilateral organisation, absent where Search states
+    nothing. A class outside
     `common.place_type.PartyClass` fails the block.
     """
     found = []
@@ -895,9 +950,14 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     role=role,
                     label=label,
                     ref=_text(group.get("ref")),
+                    group_id=_text(group.get("group_id")),
                     total=_text(group.get("total")),
                     whole_of=_party_classes(group.get("whole_of")),
                     side_classes=_party_classes(group.get("side_classes")),
+                    members=tuple(_strings(group.get("members"))),
+                    left_out=tuple(_strings(group.get("left_out"))),
+                    sum_differs=_flag(group.get("sum_differs")) is True,
+                    holds_multilaterals=_flag(group.get("holds_multilaterals")),
                 )
             )
     return tuple(found)
@@ -982,9 +1042,119 @@ def _axis_values(values: object) -> dict[str, str | None]:
     }
 
 
+def block_concept_label(block: Mapping[str, object] | None) -> str | None:
+    """What Search says a spec block's series count (`resolved.concept_label`), `None`
+    when it states none (`SelectedSource.concept_label`)."""
+    return _text(_mapping(_mapping(block).get("resolved")).get("concept_label"))
+
+
 def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
-    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`)."""
+    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`).
+
+    Raises:
+        ValueError: When a set it reads is not readable, as one naming a class
+            of party outside `PartyClass`.
+    """
     return _groups(_mapping(_mapping(block.get("resolved")).get("entity_groups")))
+
+
+def block_group(block: Mapping[str, object], role: str) -> ResolvedGroup | None:
+    """The named set a spec block's `resolved.entity_groups` states on the role column
+    `role` (`block_groups`), `None` where it states none there or the set names nothing.
+    A set on another role is not read, so one there that is not readable does not
+    hide this one.
+
+    Raises:
+        ValueError: When the set on `role` is not readable, as one naming a class
+            of party outside `PartyClass`.
+    """
+    groups = _mapping(_mapping(block.get("resolved")).get("entity_groups"))
+    if role not in groups:
+        return None
+    return next(iter(_groups({role: groups[role]})), None)
+
+
+def block_wire_groups(
+    block: Mapping[str, object], *, leaving_out: str | None = None
+) -> tuple[ResolvedGroup, ...]:
+    """The named sets a spec block's `resolved.entity_groups` states, each holding only
+    what a resubmit posts of it (`wire_groups`): its role, `label`, `ref` and
+    `group_id`, skipping the set on the role column `leaving_out`. Every other field
+    keeps its default and is not read, so a set naming a class of party outside
+    `PartyClass` still reads here. A set stating no label is skipped, as
+    `block_groups` skips it: it names nothing a resubmit can post. What this
+    returns is for `wire_groups` alone.
+
+    Raises:
+        ValueError: When a labelled set's posted identity is not readable:
+            `entity_groups` is not an object, or a set is not one, or states a `ref`
+            or `group_id` that is not text. A resubmit posted without that set can
+            bind another population.
+    """
+    raw = _mapping(block.get("resolved")).get("entity_groups")
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"entity_groups is not an object: {raw!r}")
+    found = []
+    for role, held in cast(Mapping[str, object], raw).items():
+        if role == leaving_out:
+            continue
+        if not isinstance(held, Mapping):
+            raise ValueError(f"the set on {role!r} is not an object: {held!r}")
+        group = cast(Mapping[str, object], held)
+        if (label := _text(group.get("label"))) is None:
+            continue
+        found.append(
+            ResolvedGroup(
+                role=role,
+                label=label,
+                ref=_optional_text(group, "ref", role=role),
+                group_id=_optional_text(group, "group_id", role=role),
+            )
+        )
+    return tuple(found)
+
+
+def readable_wire_groups(
+    block: Mapping[str, object], *, leaving_out: str | None = None
+) -> tuple[ResolvedGroup, ...] | None:
+    """What a resubmit posts of each named set `block` states (`block_wire_groups`),
+    skipping the set on the role column `leaving_out`, `None` with a warning logged
+    where that is not readable. A caller refuses the resubmit on `None`, since a
+    definition posted without its sets can bind another population."""
+    try:
+        return block_wire_groups(block, leaving_out=leaving_out)
+    except ValueError as exc:
+        logger.warning("posted named sets of %s are not readable: %s", block.get("spec_id"), exc)
+        return None
+
+
+def _optional_text(group: Mapping[str, object], key: str, *, role: str) -> str | None:
+    """`group[key]`, `None` where it is absent, null or empty, as `_groups` reads it,
+    `group` the set on `role`.
+
+    Raises:
+        ValueError: When it is anything but text.
+    """
+    value = group.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"the set on {role!r} states a {key} that is not text: {value!r}")
+    return _text(value)
+
+
+def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | None:
+    """The named sets `block` states (`block_groups`), `None` with a warning logged
+    where they are not readable, as a set naming a class of party outside
+    `PartyClass`, for a caller that reads them and goes on without. A resubmit
+    posts only each set's identity (`readable_wire_groups`) and refuses where that is
+    not readable, since a definition posted without its sets can bind another
+    population."""
+    try:
+        return block_groups(block)
+    except ValueError as exc:
+        logger.warning("named sets of %s are not readable: %s", block.get("spec_id"), exc)
+        return None
 
 
 def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, JsonValue]]:
@@ -1087,27 +1257,50 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     """The sentence saying an answer reads `group` as its members, or `None` when it binds the total.
 
     `answer` is how the answer reads the members, `None` when the column
-    the group sits on is not known. An answer combining a flow side's
-    members leaves out what the source allocates to the group and to no
-    single member ("Africa, regional"), which only the group's total counts.
+    the group sits on is not known. An answer combining the members leaves
+    out the residuals Search says the group's total counts beside them
+    (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"), named
+    as Search names them (`_left_out`). Where Search names none, as for a
+    set with no published total, the sentence names none.
+    Where Search says the source publishes its own figure for the group
+    (`ResolvedGroup.sum_differs`), a second sentence says that figure can
+    differ, after every answer's sentence but `EACH`'s, so the residuals' list
+    ends with the first.
     """
     if group.reads_total:
         return None
-    if answer is None:
-        return (
-            f"The figures for {group.label} are its members' figures, not a total the source "
-            "publishes for the group."
-        )
-    if answer is MembersAnswer.EACH:
-        return f"The figures for {group.label} are its members' figures, each on its own."
-    left_out = (
-        " and leaves out amounts the data allocates to no single country"
-        if group.role in FLOW_ROLE_COLUMNS
+    published = (
+        f" The source publishes its own figure for {group.label}, "
+        "which can differ from one built from its members."
+        if group.sum_differs
         else ""
     )
-    if answer is MembersAnswer.SUMMED:
-        return f"The figure for {group.label} adds up its members' figures{left_out}."
-    return f"The figure for {group.label} is computed from its members' figures{left_out}."
+    if answer is None:
+        return f"The figures for {group.label} come from its members' figures.{published}"
+    if answer is MembersAnswer.EACH:
+        return f"The figures for {group.label} are its members' figures, each on its own."
+    built = "adds up" if answer is MembersAnswer.SUMMED else "is computed from"
+    return (
+        f"The figure for {group.label} {built} its members' figures{_left_out(group)}.{published}"
+    )
+
+
+def _left_out(group: ResolvedGroup) -> str:
+    """The clause naming what `group`'s members leave out of its published total,
+    empty where Search names nothing left out (`ResolvedGroup.left_out`).
+
+    On the recipient side the residuals are the money the data allocates to no
+    single country ("Africa, unallocated by country (DAC)"); on any other side
+    they are named as what the group's total counts beside its members.
+    """
+    if not group.left_out:
+        return ""
+    what = (
+        "what the data allocates to no single country"
+        if group.role == "destination"
+        else f"what the source's total for {group.label} counts beside them"
+    )
+    return f" and leaves out {what}: " + "; ".join(group.left_out)
 
 
 def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
@@ -1115,10 +1308,16 @@ def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
     for a resubmit to post beside the identity they stand for (`_groups`).
 
     `total` is not posted. Search recomputes it from what the role binds,
-    and a server that predates the field refuses it.
+    and a server that predates the field refuses it. `group_id` is posted
+    where set: a set the graph holds no node for, read as its members, is
+    kept only through it, with the total its dataset publishes for it.
     """
     return {
-        group.role: {"label": group.label, **({"ref": group.ref} if group.ref else {})}
+        group.role: {
+            "label": group.label,
+            **({"ref": group.ref} if group.ref else {}),
+            **({"group_id": group.group_id} if group.group_id else {}),
+        }
         for group in groups
     }
 

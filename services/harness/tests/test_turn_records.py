@@ -1101,21 +1101,57 @@ def test_a_plan_reading_a_windowed_copy_uses_the_reading_it_was_copied_from() ->
     assert basis_line([searched], specs={}, plans=[unmapped.model_dump(mode="json")]) is None
 
 
-def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause() -> None:
-    def ghana(**active: str) -> dict[str, Any]:
-        part = _example_part("health aid to Ghana", **active)
-        return {**part, "spec_id": "spec_ghana"}
+_HEALTH_ALL = "health (CRS 120) and population and reproductive health (CRS 130)"
 
-    alike = [_fetched(_example_part()), _fetched(ghana())]
-    differ = [_fetched(_example_part()), _fetched(ghana(sector="sector:120"))]
 
-    assert basis_line(alike, specs={}, plans=[]) == _EXAMPLE_LINE
-    assert basis_line(differ, specs={}, plans=[]) == (
-        'Counted as: "health aid": health (CRS 120) and population and reproductive health '
-        "(CRS 130) · Africa incl. regional buckets · gross disbursements, current USD; "
-        '"health aid to Ghana": health (CRS 120) · Africa incl. regional buckets · '
-        "gross disbursements, current USD."
-    )
+def _named_part(variable: str, **active: str) -> dict[str, Any]:
+    """`_example_part` under its own spec_id, named `variable`."""
+    return {**_example_part(variable, **active), "spec_id": f"spec_{variable}"}
+
+
+@pytest.mark.parametrize(
+    ("others", "line"),
+    [
+        pytest.param([{}], _EXAMPLE_LINE, id="alike"),
+        pytest.param(
+            [{"sector": "sector:120"}],
+            "Counted as: Africa incl. regional buckets · gross disbursements, current USD; "
+            f'"health aid": {_HEALTH_ALL}; "health aid to Ghana": health (CRS 120).',
+            id="shared-clauses-once",
+        ),
+        pytest.param(
+            [{"sector": "sector:120"}, {"sector": "sector:120"}],
+            "Counted as: Africa incl. regional buckets · gross disbursements, current USD; "
+            f'"health aid": {_HEALTH_ALL}; '
+            '"health aid to Ghana" and "health aid to Kenya": health (CRS 120).',
+            id="same-remainder-shares-names",
+        ),
+        pytest.param(
+            [
+                {
+                    "sector": "sector:120",
+                    "region": "region:members_only",
+                    "measure_basis": "measure_basis:net",
+                }
+            ],
+            f'Counted as: "health aid": {_HEALTH_ALL} · Africa incl. regional buckets · '
+            'gross disbursements, current USD; "health aid to Ghana": health (CRS 120) · '
+            "Africa's countries only · net disbursements.",
+            id="no-shared-clause",
+        ),
+    ],
+)
+def test_parts_state_the_clauses_they_share_once_and_each_names_its_own(
+    others: list[dict[str, str]], line: str
+) -> None:
+    """Health aid beside aid to Ghana, then Kenya, each counted on `others`."""
+    places = ("health aid to Ghana", "health aid to Kenya")
+    readings = [_fetched(_example_part())] + [
+        _fetched(_named_part(place, **active))
+        for place, active in zip(places, others, strict=False)
+    ]
+
+    assert basis_line(readings, specs={}, plans=[]) == line
 
 
 def _composite_manifest(identity: dict[str, Any], **periods: list[list[int]]) -> dict[str, Any]:
@@ -1231,28 +1267,34 @@ def test_the_basis_line_states_a_composite_frame_from_its_served_components(
 
 
 @pytest.mark.parametrize(
-    ("contributions", "clause"),
+    ("published", "clause"),
     [
-        (False, "bilateral aid only"),
-        (True, f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+        (None, "bilateral aid only"),
+        ("contributions", f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+        ("multilateral", f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
     ],
-    ids=["bilateral-the-only-other", "a-contributions-total-offered-too"],
+    ids=[
+        "bilateral-the-only-other",
+        "a-contributions-total-offered-too",
+        "a-multilateral-total-offered-too",
+    ],
 )
 def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else_fits(
-    contributions: bool, clause: str
+    published: str | None, clause: str
 ) -> None:
     """An inclusive choice served with no imputed component: the figures are
     bilateral flows alone or a published total counting core contributions to
-    multilaterals, which the record does not tell apart. With only a
-    bilateral option besides, they read as it; with a contributions option
-    offered too, the choice says the figures differ from it."""
+    multilaterals, with or without bilateral flows, which the record does not
+    tell apart. With only a bilateral option besides, they read as it; with
+    such a total's option offered too, the choice says the figures differ
+    from it."""
     choice = copy.deepcopy(_INCLUSIVE)
-    if contributions:
+    if published is not None:
         choice["options"].append(
             {
-                "option_id": "provider:contributions",
-                "label": "with core contributions to multilaterals",
-                "binding": {"kind": "provider", "scope": "contributions"},
+                "option_id": f"provider:{published}",
+                "label": "core contributions to multilaterals",
+                "binding": {"kind": "provider", "scope": published},
                 "availability": {"status": "available"},
             }
         )
@@ -1269,13 +1311,14 @@ def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else
 
 def _total_block(spec_id: str, netting: str) -> dict[str, Any]:
     """The spec block Search returns for US ODA counted on `netting`, with
-    the label it names the measure by, as dfo-apis writes it."""
+    the labels it names the measure and the concept by, as dfo-apis writes it."""
     label = f"{netting.lower()} disbursements (official development assistance)"
     return {
         "spec_id": spec_id,
         "resolved": {
             "measure_label": f"{netting.lower()} disbursements",
             "shape": {"label": label},
+            "concept_label": "official development assistance",
         },
     }
 
@@ -1310,19 +1353,27 @@ def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_s
     specs = {"spec_total": _total_block("spec_total", "Net" if switched else "Gross")}
     readings = [_fetched(_example_part(sector="sector:120")), _fetched(total)]
 
+    basis = "net disbursements" if switched else "gross disbursements, current USD"
+    shared = "Africa incl. regional buckets" + ("" if switched else f" · {basis}")
+    health_own = " · gross disbursements, current USD" if switched else ""
+    total_own = f" · {basis}" if switched else ""
     assert basis_line(readings, specs=specs, plans=[]) == (
-        'Counted as: "health aid": health (CRS 120) · Africa incl. regional buckets · '
-        f"gross disbursements, current USD; {total_name}: health (CRS 120) and population "
-        "and reproductive health (CRS 130) · Africa incl. regional buckets · "
-        + ("net disbursements." if switched else "gross disbursements, current USD.")
+        f'Counted as: {shared}; "health aid": health (CRS 120){health_own}; '
+        f"{total_name}: {_HEALTH_ALL}{total_own}."
     )
 
 
-def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept() -> None:
-    """A share of health aid in all official development assistance. The total
-    was compiled again from its basis choice, so Search's label for its block
-    names it, "gross disbursements (official development assistance)": the
-    concept alone, since its measure is one of its clauses."""
+_BEFORE_CONCEPTS = {
+    "measure_label": "gross disbursements",
+    "shape": {"label": "gross disbursements (official development assistance)"},
+}
+
+
+def _health_share_basis_line(resolved: dict[str, object], *, total_region: bool = False) -> str:
+    """The basis line of a share of health aid in all official development
+    assistance, whose total was compiled again from its basis choice and so
+    is named by Search's names for its block, `resolved`. With `total_region`
+    the total keeps its region choice, a clause of its own that names it."""
     health = _example_part(sector="sector:120+130")
     scope = health["scope"]
     scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
@@ -1338,8 +1389,9 @@ def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
     total = _example_part("ODA gross disbursements")
     total["spec_id"] = "spec_total"
     total_scope = total["scope"]
-    total_scope["choices"] = [c for c in total_scope["choices"] if c["axis"] == "measure_basis"]
-    (basis,) = total_scope["choices"]
+    kept = ("measure_basis", "region") if total_region else ("measure_basis",)
+    total_scope["choices"] = [c for c in total_scope["choices"] if c["axis"] in kept]
+    basis = next(c for c in total_scope["choices"] if c["axis"] == "measure_basis")
     total_scope["entries"] = [
         {
             "axis": "measure_basis",
@@ -1348,20 +1400,55 @@ def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept(
             "origin": {"kind": "choice", "choice_id": basis["id"]},
         }
     ]
-    specs = {
-        "spec_total": {
-            "spec_id": "spec_total",
-            "resolved": {
-                "measure_label": "gross disbursements",
-                "shape": {"label": "gross disbursements (official development assistance)"},
-            },
-        }
-    }
+    specs = {"spec_total": {"spec_id": "spec_total", "resolved": resolved}}
+    return basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[])
 
-    assert basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[]) == (
-        'Counted as: "health aid": health incl. population and reproductive health '
-        "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
-        "official development assistance: gross disbursements, current USD."
+
+_HEALTH_CLAUSES = (
+    "Counted as: gross disbursements, current USD; "
+    '"health aid": health incl. population and reproductive health '
+    "(CRS 120 + 130) \u00b7 bilateral flows only"
+)
+
+
+@pytest.mark.parametrize(
+    "resolved",
+    [
+        pytest.param(
+            {**_BEFORE_CONCEPTS, "concept_label": "official development assistance"},
+            id="concept",
+        ),
+        pytest.param(_BEFORE_CONCEPTS, id="no-concept"),
+    ],
+)
+def test_the_basis_line_reads_each_clause_once_and_leaves_out_a_part_with_none_of_its_own(
+    resolved: dict[str, object],
+) -> None:
+    """A share of health aid in all official development assistance, the
+    total counted on the basis health aid shares. The basis reads once, and
+    the total, left with no clause of its own, goes unnamed."""
+    assert _health_share_basis_line(resolved) == f"{_HEALTH_CLAUSES}."
+
+
+def test_the_basis_line_names_a_total_by_its_concept() -> None:
+    """The same share, the total also counted on a region. The total was
+    compiled again from its basis choice, so Search's names for its block
+    name it: its `concept_label`, which states no measure, since its measure is
+    one of the shared clauses."""
+    resolved = {**_BEFORE_CONCEPTS, "concept_label": "official development assistance"}
+
+    assert _health_share_basis_line(resolved, total_region=True) == (
+        f"{_HEALTH_CLAUSES}; official development assistance: Africa incl. regional buckets."
+    )
+
+
+def test_a_total_from_a_search_stating_no_concept_is_named_by_searchs_label_as_written() -> None:
+    """The same share from a Search that sends no `concept_label`: the total is
+    named by its shape label as Search composed it, measure included, so the
+    measure reads in the name and again in the shared clauses."""
+    assert _health_share_basis_line(_BEFORE_CONCEPTS, total_region=True) == (
+        f"{_HEALTH_CLAUSES}; gross disbursements (official development assistance): "
+        "Africa incl. regional buckets."
     )
 
 

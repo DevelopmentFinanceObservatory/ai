@@ -9,9 +9,12 @@ same year, which `executor.run._Run._check_anchor_held` lets through.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,7 +22,7 @@ from compiler.compile import CompileIssueCode
 from compiler.sources import DiscoveryStatus
 from compiler.surface import ToolCallResult, ToolSchema
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
-from executor.outcomes import Accepted
+from executor.outcomes import Accepted, RefusalKind
 from executor.run import execute_approved_plan
 from harness.plan_display import step_rows
 from planner.plan import (
@@ -220,14 +223,85 @@ async def test_a_translation_states_its_rolling_years_from_the_newest_year_the_d
     card = {row["id"]: row["description"] for row in step_rows(stored)}
     assert f"from {window[0]} to {window[1]}, following the newest year" in str(card["growth"])
     assert [name for name, _ in surface.calls] == ["get_data", "resolve_anchor"]
+    # The compile and the read each list the surface.
+    assert surface.listed == 2
 
     _script_analysis(surface, stored)
     _, outcome = await execute_approved_plan(stored.approve(at=datetime.now(UTC)), surface=surface)
 
     assert isinstance(outcome, Accepted), outcome
     assert [anchor.period for anchor in outcome.anchors] == [newest]
+    # The run lists the surface and reads the newest year again for itself.
+    assert surface.listed == 3
+    assert [name for name, _ in surface.calls].count("resolve_anchor") == 2
     ((_, sent),) = [call for call in surface.calls if call[0] == "growth"]
     assert (sent["window_start"], sent["window_end"]) == tuple(str(year) for year in window)
+
+
+@pytest.mark.parametrize(
+    ("moved", "restated"),
+    [(False, False), (False, True), (True, False)],
+    ids=["as-it-was", "restated", "requirement-moved"],
+)
+async def test_a_translation_again_stands_on_the_read_of_a_group_left_as_it_was(
+    rolling_draft: Callable[..., Plan],
+    source: Callable[..., SelectedSource],
+    manifest: Callable[..., dict[str, Any]],
+    real_schemas: list[ToolSchema],
+    moved: bool,
+    restated: bool,
+) -> None:
+    """A switch or an amendment translates the draft again. A group whose retrievals and
+    requirement are as they were reads as the earlier read did, with no retrieval and no
+    `resolve_anchor`, and so does the translated plan amended, its years restated from
+    the newest year the first read found. One whose requirement moved reads again."""
+    draft = rolling_draft()
+    context = _Context(draft, source())
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok(manifest())], "resolve_anchor": [_anchor("2023")]},
+    )
+    first = await _propose(context, surface)
+    translated = context.plan()
+    listed_first = surface.listed
+
+    if moved:
+        again = rolling_draft(period=Period(start=2016, end=2024))
+    elif restated:
+        again = translated.amend(evidence_requirements=[])
+    else:
+        again = draft
+    context.state[PLAN_STATE_KEY] = again.model_dump_json()
+    if moved:
+        context.specs = {"annual_debt_service": source().spec_id}
+        save_log(
+            context.state,
+            load_log(context.state).with_record(
+                DiscoveryRecord(
+                    revision=plan_revision(again),
+                    tool="search",
+                    requirement_id="annual_debt_service",
+                    requirement_key=requirement_revision(again.evidence_requirements[0]),
+                    status=DiscoveryStatus.DEFINITE,
+                    spec_ids=(source().spec_id,),
+                ),
+                (source(),),
+            ),
+        )
+    second = await _propose(context, surface)
+
+    assert second["outcome"] == "ok", second
+    # The restated plan states the years the first read found, so none move again.
+    assert second.get("restated") == (None if restated else first.get("restated"))
+    reads = [name for name, _ in surface.calls]
+    assert reads == ["get_data", "resolve_anchor"] * (2 if moved else 1)
+    # A read standing wholly on the earlier one lists no surface for the run.
+    assert surface.listed - listed_first == listed_first - (0 if moved else 1)
+    if restated:
+        assert context.plan().workflow == translated.workflow
+    elif not moved:
+        assert second == first
+        assert context.plan() == translated
 
 
 async def test_a_restatement_a_plan_rule_refuses_goes_back_as_a_compile_issue_naming_the_year(
@@ -256,6 +330,43 @@ async def test_a_restatement_a_plan_rule_refuses_goes_back_as_a_compile_issue_na
     assert "2023" in issue["reason"]
     assert answer["action"]["arguments"]["kind"] == ReferralKind.REQUIREMENT_NEEDS_REPAIR.value
     assert answer["action"]["arguments"]["constraint"] == CompileIssueCode.ROLLING_ANCHOR_BEHIND
+    assert context.plan() == draft
+
+
+class _ChangingSurface(ScriptedSurface):
+    """A `ScriptedSurface` whose `get_data` takes other arguments from its second listing on."""
+
+    async def list_tools(self) -> list[ToolSchema]:
+        listed = await super().list_tools()
+        if self.listed == 1:
+            return listed
+        return [
+            schema.model_copy(update={"parameters": {"type": "object", "properties": {}}})
+            if schema.name == "get_data"
+            else schema
+            for schema in listed
+        ]
+
+
+async def test_a_tool_changed_after_the_compile_stops_the_newest_year_read(
+    rolling_draft: Callable[..., Plan],
+    source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The newest-year read lists the surface itself, so a tool that changed since
+    the compile listed it stops the read before any retrieval, as it stops the run."""
+    draft = rolling_draft()
+    context = _Context(draft, source())
+    surface = _ChangingSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok({})], "resolve_anchor": [_anchor("2024")]},
+    )
+
+    answer = await _propose(context, surface)
+
+    assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
+    assert answer["action"]["arguments"]["stop_code"] == RefusalKind.SURFACE_CHANGED.value
+    assert surface.calls == []
     assert context.plan() == draft
 
 
@@ -333,7 +444,7 @@ async def test_a_rolling_step_reading_a_left_out_entity_alone_stops_the_translat
     assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
     detail = answer["detail"]
     assert (detail["code"], detail["step_id"], detail["requirement_id"]) == (
-        "entity_missing",
+        "entity_no_series",
         "newest",
         "annual_debt_service",
     )
@@ -344,6 +455,63 @@ async def test_a_rolling_step_reading_a_left_out_entity_alone_stops_the_translat
     )
     assert [name for name, _ in surface.calls] == ["get_data"]
     assert context.plan() == draft
+
+
+async def test_a_step_reading_a_left_out_entity_stops_a_translation_standing_on_a_held_read(
+    decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    wide_source: Callable[..., SelectedSource],
+    manifest: Callable[..., dict[str, Any]],
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The retrieval holds Kenya's series alone. The first translation keeps Kenya's
+    newest year and compiles. An amendment adds a filter keeping Ghana alone; the
+    rolling group is as it was, so its retrieval is not run again, and the Ghana filter
+    stops the translation on the entity the held read records as left out."""
+    dataset = requirement(
+        entities=[Entity(name="Kenya", role="debtor"), Entity(name="Ghana", role="debtor")],
+        period_end_open=True,
+    )
+    newest = FilterRequirement(
+        id="newest",
+        decision_ids=["measure"],
+        input_id=dataset.id,
+        predicates=(
+            EntityIn(names=("Kenya",)),
+            PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0)),
+        ),
+    )
+    ghana = FilterRequirement(
+        id="ghana",
+        decision_ids=["measure"],
+        input_id=dataset.id,
+        predicates=(EntityIn(names=("Ghana",)),),
+    )
+
+    def draft(*derived: FilterRequirement) -> Plan:
+        return Plan(
+            question="What did Kenya and Ghana pay to service their debt?",
+            decisions=[decision()],
+            evidence_requirements=[dataset, *derived],
+            first_years=[FirstYear(requirement_id=dataset.id, year=2015)],
+            status=PlanStatus.DRAFT,
+        )
+
+    context = _Context(draft(newest), wide_source())
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok(manifest())], "resolve_anchor": [_anchor("2024")]},
+    )
+    first = await _propose(context, surface)
+    assert first["outcome"] == "ok", first
+
+    context.state[PLAN_STATE_KEY] = draft(newest, ghana).model_dump_json()
+    answer = await _propose(context, surface)
+
+    assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
+    detail = answer["detail"]
+    assert (detail["code"], detail["step_id"]) == ("entity_no_series", "ghana")
+    assert [name for name, _ in surface.calls] == ["get_data", "resolve_anchor"]
 
 
 @pytest.mark.parametrize(
@@ -396,7 +564,7 @@ async def _fails_its_digest(**_kwargs: Any) -> None:
     [
         (_times_out, "country/KEN", "transport_failed", ReferralKind.SURFACE_UNAVAILABLE),
         (_fails_its_digest, "country/KEN", "step_result_unusable", ReferralKind.INTERNAL_FAILURE),
-        (None, "country/UGA", "entity_missing", ReferralKind.REQUIREMENT_UNMEETABLE),
+        (None, "country/UGA", "entity_no_series", ReferralKind.REQUIREMENT_UNMEETABLE),
     ],
     ids=["transport", "malformed", "shortfall"],
 )
@@ -493,6 +661,33 @@ async def test_a_read_past_the_entrys_time_records_the_plan_as_written(
     assert (growth.window_start, growth.window_end) == (2019, 2024)
     assert [name for name, _ in surface.calls] == calls
     assert events == ["translation.anchor_read_skipped"]
+
+
+async def test_the_planner_entry_evals_stand_in_read_records_the_plan_as_written(
+    rolling_draft: Callable[..., Plan],
+    source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`evals/planner_entry` replays a translation with `entry._no_anchor_read` as its
+    newest-year read, called as `propose_operations` calls the served one."""
+    path = Path(__file__).resolve().parents[4] / "evals" / "planner_entry" / "entry.py"
+    spec = importlib.util.spec_from_file_location("planner_entry_eval_entry", path)
+    assert spec is not None and spec.loader is not None
+    entry = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, entry)
+    spec.loader.exec_module(entry)
+    context = _Context(rolling_draft(), source())
+    surface = ScriptedSurface(schemas=real_schemas, responses={})
+    core = build_translator_core(surface=surface, anchor_read=entry._no_anchor_read)
+
+    answer = await core.propose_operations(
+        translation=build_translation(context.plan(), context.specs), tool_context=context
+    )
+
+    assert answer["outcome"] == "ok", answer
+    assert "restated" not in answer
+    assert surface.calls == []
 
 
 async def test_a_restatement_refused_names_the_requirement_whose_move_the_rule_refuses(

@@ -24,7 +24,7 @@ from typing import Any, cast
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.sources import DiscoveryStatus
-from compiler.surface import McpSurface
+from compiler.surface import McpSurface, ToolSurfaceUnavailableError
 from data_mcp import resolution
 from data_mcp.server import mcp as real_data_mcp
 from fastmcp import FastMCP
@@ -736,8 +736,10 @@ async def test_run_translate_gives_up_after_max_rounds(
             "sources": [{"spec_id": SPEC_KENYA}],
         }
 
-    async def propose_operations(*, translation: object, tool_context: Any) -> dict[str, object]:
-        del translation, tool_context
+    async def propose_operations(
+        *, translation: object, tool_context: Any, schemas: object
+    ) -> dict[str, object]:
+        del translation, tool_context, schemas
         return {
             "outcome": "invalid_input",
             "code": "compile_failed",
@@ -758,6 +760,7 @@ async def test_run_translate_gives_up_after_max_rounds(
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
+        list_tools=_no_tools,
     )
     context = context_holding(draft())
 
@@ -766,6 +769,11 @@ async def test_run_translate_gives_up_after_max_rounds(
     (stop,) = referred
     assert stop["kind"] is ReferralKind.INTERNAL_FAILURE
     assert "4" in str(stop["reason"])
+
+
+async def _no_tools() -> list[Any]:
+    """A `TranslatorCore.list_tools` for a core whose fakes read no schema."""
+    return []
 
 
 def _compile_failure_core(
@@ -781,13 +789,73 @@ def _compile_failure_core(
 
     answers = iter(failures)
 
-    async def propose_operations(*, translation: object, tool_context: Any) -> dict[str, object]:
-        del translation, tool_context
+    async def propose_operations(
+        *, translation: object, tool_context: Any, schemas: object
+    ) -> dict[str, object]:
+        del translation, tool_context, schemas
         return next(answers)
 
     return dataclasses.replace(
         core, discover_source=discover_source, propose_operations=propose_operations
     )
+
+
+async def test_every_proposal_round_compiles_against_one_listing_of_the_surface(
+    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+) -> None:
+    """A first round that discovers a source again and a second that compiles both
+    read the one list of tools the translation took before its first round."""
+    discover_again: dict[str, object] = {
+        "outcome": "invalid_input",
+        "code": "compile_failed",
+        "message": "discover it again",
+        "action": {
+            "call": "discover_source",
+            "arguments": {"requirement_id": "annual_debt_service"},
+        },
+    }
+    compiled: dict[str, object] = {"outcome": "ok"}
+    answers = iter([discover_again, compiled])
+    listed: list[list[Any]] = []
+    read: list[object] = []
+
+    async def list_tools() -> list[Any]:
+        listed.append([object()])
+        return listed[-1]
+
+    async def propose_operations(
+        *, translation: object, tool_context: Any, schemas: object
+    ) -> dict[str, object]:
+        del translation, tool_context
+        read.append(schemas)
+        return next(answers)
+
+    core = dataclasses.replace(
+        _compile_failure_core(core, []),
+        propose_operations=propose_operations,
+        list_tools=list_tools,
+    )
+
+    result = await run_translate(context_holding(draft()), core=core)
+
+    assert result == {"outcome": "ok"}
+    assert len(listed) == 1
+    assert read == [listed[0], listed[0]]
+
+
+async def test_a_surface_that_cannot_be_listed_refers_the_plan_as_transient(
+    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+) -> None:
+    async def list_tools() -> list[Any]:
+        raise ToolSurfaceUnavailableError("data-mcp did not answer")
+
+    core = dataclasses.replace(_compile_failure_core(core, []), list_tools=list_tools)
+
+    referral = cast(
+        "dict[str, object]", (await run_translate(context_holding(draft()), core=core))["referral"]
+    )
+
+    assert (referral["kind"], referral["outcome"]) == ("surface_unavailable", "transient")
 
 
 def _needs_repair(code: str) -> dict[str, object]:
@@ -908,9 +976,11 @@ async def test_a_transient_failure_proposed_again_is_retried_and_may_repeat_unma
     core = _compile_failure_core(core, failures)
     propose = core.propose_operations
 
-    async def counting(*, translation: object, tool_context: Any) -> dict[str, object]:
+    async def counting(
+        *, translation: object, tool_context: Any, schemas: object
+    ) -> dict[str, object]:
         proposed.append(translation)
-        return await propose(translation=translation, tool_context=tool_context)
+        return await propose(translation=translation, tool_context=tool_context, schemas=schemas)
 
     core = dataclasses.replace(core, propose_operations=counting)
     context = context_holding(draft())
@@ -993,9 +1063,9 @@ def _spying_core(
     """
 
     async def propose_operations(
-        *, translation: Translation, tool_context: Any
+        *, translation: Translation, tool_context: Any, schemas: object
     ) -> dict[str, object]:
-        del tool_context
+        del tool_context, schemas
         captured.append(translation)
         return {"outcome": "ok"}
 
@@ -1006,6 +1076,7 @@ def _spying_core(
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
+        list_tools=_no_tools,
     )
 
 
@@ -1492,6 +1563,7 @@ async def test_a_stop_on_the_first_requirement_leaves_the_seconds_record_in_the_
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
+        list_tools=_no_tools,
     )
 
     result = await run_translate(context, core=core)
@@ -1557,6 +1629,7 @@ async def test_two_referrals_settle_only_the_first_ones_requirement(
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=_spying_return_to_planner(calls),
+        list_tools=_no_tools,
     )
 
     result = await run_translate(context, core=core)

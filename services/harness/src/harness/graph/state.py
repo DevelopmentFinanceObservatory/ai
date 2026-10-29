@@ -17,7 +17,7 @@ from collections.abc import (
     Sequence,
 )
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
 from google.adk import Context, Event
@@ -48,7 +48,8 @@ STEP_PROGRESS_KEY = "step_progress"
 
 # The `custom_metadata` key the `planner` node's first event travels under,
 # as it starts a draft: `{"revising": bool}`, true when the draft revises a
-# plan already on record. Read by `harness.studio_translate._Translator`.
+# plan already on record, with `"pick": True` added when it replans for a
+# pick on the plan card. Read by `harness.studio_translate._Translator`.
 PLANNER_STARTED_KEY = "planner_started"
 
 # The orchestrator's session state (`create_root_workflow`'s
@@ -96,6 +97,12 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The state a planner entry replanning for a pick on the plan card puts back
+# when the replan does not land (`harness.graph.planning`), written when the
+# replan pauses on a planner-side ask and cleared when the entry ends, so it
+# is set only while such a replan is paused. Outside the drafting prefixes
+# the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
+PICK_REPLAN_KEY = "switch:pick_replan"
 # The `custom_metadata` key an orchestrator node's own status line travels
 # under ("Reading your question"), read by `studio_translate._Translator`.
 ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
@@ -147,7 +154,15 @@ class AskQuestion(BaseModel):
 
     question: str = Field(description="the question as the user reads it")
     options: Annotated[list[AskOption], BeforeValidator(ask_options)] = Field(
-        description="the likely answers, at least one; the user may also write their own"
+        default_factory=list,
+        description=(
+            "the likely answers, at least one; the user may also write their own. Leave it "
+            "empty for a prices question, whose options are filled in for you"
+        ),
+    )
+    prices_of: str | None = Field(
+        default=None,
+        description="for the prices question of a part that lists `open_prices`, that part's spec_id",
     )
 
 
@@ -183,24 +198,123 @@ class PendingPlan(BaseModel):
     asks_across_years: list[int] = []
 
 
-def ask_candidates(options: list[AskOption]) -> list[dict[str, str]]:
+def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
+    """The `open_prices` entries of each reading of the turn whose prices are open,
+    by its spec_id, each with its `prices`: the first the prices search read,
+    current, and each after it constant (`harness.turn_records.open_prices`).
+
+    Read over the readings of `ORCHESTRATOR_SEARCHES_KEY` and the blocks of
+    `ORCHESTRATOR_SPECS_KEY`. Only code reads `prices`: the readings the model
+    reads carry the entries without it (`store_search`).
+    """
+    specs = state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    parts: dict[str, list[dict[str, Any]]] = {}
+    for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or ():
+        reading = SearchReading.model_validate(stored)
+        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
+        if block is None or reading.spec_id is None:
+            continue
+        entries = open_prices(
+            block,
+            window=reading.window.model_dump() if reading.window is not None else None,
+            other_prices=[offer.model_dump() for offer in reading.other_prices],
+        )
+        if entries:
+            parts[reading.spec_id] = [
+                {**entry, "prices": "current" if index == 0 else "constant"}
+                for index, entry in enumerate(entries)
+            ]
+    return parts
+
+
+def prices_question(
+    question: AskQuestion, parts: Mapping[str, list[dict[str, Any]]]
+) -> AskQuestion:
+    """`question` with, when it prices a part of `parts` (`AskQuestion.prices_of`),
+    that part's `open_prices` entries as its options."""
+    entries = parts.get(question.prices_of) if question.prices_of is not None else None
+    if entries is None:
+        return question
+    return question.model_copy(
+        update={
+            "options": [
+                AskOption(label=entry["label"], spec_id=entry.get("spec_id")) for entry in entries
+            ]
+        }
+    )
+
+
+def priced_options(
+    questions: list[AskQuestion], state: SessionState
+) -> list[dict[int, PricedOption]]:
+    """For each of `questions`, the place of each option offering prices, with
+    the part it prices and the prices: each option of a question pricing a
+    part (`AskQuestion.prices_of`) that is one of the part's `open_prices`
+    entries (`open_parts`), matched by spec_id, else by label among the
+    entries carrying none. A question pricing no part has none."""
+    parts = open_parts(state)
+    priced: list[dict[int, PricedOption]] = []
+    for question in questions:
+        entries = parts.get(question.prices_of) if question.prices_of is not None else None
+        marks: dict[int, PricedOption] = {}
+        for index, option in enumerate(question.options):
+            entry = next(
+                (
+                    entry
+                    for entry in entries or ()
+                    if entry.get("spec_id") == option.spec_id
+                    and (option.spec_id is not None or entry["label"] == option.label)
+                ),
+                None,
+            )
+            if entry is not None and question.prices_of is not None:
+                marks[index] = PricedOption(question.prices_of, entry["prices"])
+        priced.append(marks)
+    return priced
+
+
+class PricedOption(NamedTuple):
+    """The prices an `ask_user` option offers, as code reads them off the turn's
+    search results (`priced_options`): `part`, the
+    spec_id of the reading whose `open_prices` the option is one of, and
+    `prices`, `current` or `constant`."""
+
+    part: str
+    prices: Literal["current", "constant"]
+
+
+def ask_candidates(
+    options: list[AskOption], priced: Mapping[int, PricedOption] | None = None
+) -> list[dict[str, str]]:
     """One question's options as the clarify interrupt's candidates: a count
     under its own spec_id, so a pick returns it, and any other answer under
-    `o{n}`, its place in the question's list."""
+    `o{n}`, its place in the question's list. An option of `priced`, by
+    place, carries its `part` and `prices`, which the planner reads off the
+    answered interrupt (`planner.agent._prices_chosen`)."""
+    priced = priced or {}
     return [
-        {"spec_id": option.spec_id or f"o{index + 1}", "label": option.label}
+        {
+            "spec_id": option.spec_id or f"o{index + 1}",
+            "label": option.label,
+            **(priced[index]._asdict() if index in priced else {}),
+        }
         for index, option in enumerate(options)
     ]
 
 
-def ask_questions(questions: list[AskQuestion]) -> list[dict[str, Any]]:
+def ask_questions(
+    questions: list[AskQuestion], priced: Sequence[Mapping[int, PricedOption]] = ()
+) -> list[dict[str, Any]]:
     """`PendingAsk.questions` as the clarify interrupt's payload entries: each
-    under `q{n}`, its place in the call, with its candidates (`ask_candidates`)."""
+    under `q{n}`, its place in the call, with its candidates (`ask_candidates`),
+    each question's priced options read from `priced` by place."""
     return [
         {
             "id": f"q{index + 1}",
             "question": question.question,
-            "candidates": ask_candidates(question.options),
+            "candidates": ask_candidates(
+                question.options, priced[index] if index < len(priced) else None
+            ),
         }
         for index, question in enumerate(questions)
     ]

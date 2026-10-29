@@ -38,6 +38,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
+from harness.early_mint import EarlyMints
 from harness.generative import GeminiEdit
 from harness.graph.state import AGENT_NAME
 from harness.graph.workflow import create_root_workflow
@@ -264,6 +265,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "check MCP_API_TOKEN (and MCP_AUTH_DISABLED) agree across this process"
         ) from exc
     yield
+    # Early mints still running are cancelled before the clients they call
+    # through close. apis finishes any mint already posted.
+    try:
+        if app.state.early_mints is not None:
+            await app.state.early_mints.aclose()
+    except Exception:
+        logger.exception("failed to cancel the early mints during shutdown")
     # `StudioRunner.aclose` releases the studio executor's resources, which
     # are `McpExecutor`'s long-lived per-conversation presentation-mcp
     # clients, the one long-lived client this process opens (every other MCP
@@ -417,6 +425,25 @@ def create_app(
         card_replay=live_refresh.replay,
         dataset_versions=live_refresh.dataset_versions,
     )
+    # Each card's retrievals, sent before approval through the executor's
+    # own `get_data` clients, as many at once as a run's steps.
+    early_mints = (
+        EarlyMints(
+            send=executor.get_data_in_background,
+            max_concurrent=resolved_settings.executor_max_concurrent_steps,
+            settle_s=resolved_settings.early_mint_wait_s,
+        )
+        if resolved_settings.early_mint
+        else None
+    )
+    app.state.early_mints = early_mints
+    if early_mints is not None:
+        logger.info(
+            "early mints: on; a card's stream waits up to %gs for their mint POSTs",
+            resolved_settings.early_mint_wait_s,
+        )
+    else:
+        logger.info("early mints: off (EARLY_MINT=false)")
     # The store exists before the workflow because the recall seam is
     # bound to it (conversation resolved per request via contextvar).
     store = StudioStore(app.state.session_service, app_name=AGENT_NAME)
@@ -479,6 +506,7 @@ def create_app(
             run_ledger=run_ledger,
             publisher=executor.publish_result,
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
+            early_mints=early_mints,
         )
 
     studio = StudioRunner(
@@ -492,6 +520,7 @@ def create_app(
         ),
         tool_surface=tool_surface,
         provenance=provenance,
+        early_mints=early_mints,
     )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))

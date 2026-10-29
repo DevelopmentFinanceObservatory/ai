@@ -29,7 +29,7 @@ from typing import Any, Literal, NamedTuple, cast
 
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
-from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
+from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count
 from data_mcp.scope import ScopeAxis
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles
@@ -55,6 +55,7 @@ from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
 from harness.scope_choices import (
+    PROVIDER_STREAMS,
     REASON_COPY,
     SERVED_OTHERWISE,
     EntitiesBinding,
@@ -681,9 +682,12 @@ class SearchReading(StrictModel):
     words settled on the part (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`,
     copied from its block): their entries are the planner's.
     `entity_groups` are the named sets the part's places were asked for as
-    (`resolved.entity_groups`), which a resubmit of the reading posts again
-    (`harness.graph.switch`); stored and not rendered. `observed_at` is
-    stored and not rendered.
+    (`resolved.entity_groups`), each holding what a resubmit of the reading posts
+    again (`harness.graph.switch`); stored and not rendered.
+    `entity_groups_unreadable` is true when the part's block named sets whose
+    posted identity this release could not read (`compiler.sources.block_wire_groups`), so
+    `entity_groups` is empty without the part having none, and that resubmit
+    refuses. It is stored and not rendered, as is `observed_at`.
     """
 
     text: str | None
@@ -728,6 +732,9 @@ class SearchReading(StrictModel):
     entity_groups: tuple[ResolvedGroup, ...] = Field(
         default=(), exclude_if=lambda groups: not groups
     )
+    entity_groups_unreadable: bool = Field(
+        default=False, exclude_if=lambda unreadable: not unreadable
+    )
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -768,7 +775,8 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them, `planner_axes` and `entity_groups` too. A `no_data` part's `reason` is the
+        among them, `planner_axes`, `entity_groups` and
+        `entity_groups_unreadable` too. A `no_data` part's `reason` is the
         reading's `refusal_code`, and `counted_as`, `alternatives` and
         `other_prices` are `harness.tool_contracts.measure_choice`'s.
         """
@@ -836,6 +844,7 @@ class SearchReading(StrictModel):
             scope=part.get("scope"),
             planner_axes=tuple(part.get("planner_axes") or ()),
             entity_groups=tuple(part.get("entity_groups") or ()),
+            entity_groups_unreadable=part.get("entity_groups_unreadable") is True,
             origin=origin,
             observed_at=observed_at,
         )
@@ -1158,11 +1167,17 @@ def basis_line(
     `_used_readings` reads it; its newest reading speaks for it. Each
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
-    clauses are the same share them; otherwise each part's clauses follow
-    its name (`part_name`):
+    clauses are the same share them. Otherwise the clauses every part
+    holds come first, in the first part's order, and each part's other
+    clauses follow its name (`part_name`). Parts left with the same other
+    clauses share one name list; a part left with none goes unnamed:
 
         Counted as: health incl. population and reproductive health
         (CRS 120 + 130) · Africa incl. regional buckets · gross disbursements.
+
+        Counted as: gross disbursements, current USD · bilateral plus
+        imputed multilateral, 2023; health: health incl. population and
+        reproductive health (CRS 120 + 130).
 
         Counted as: "health aid": ... · ...; "education aid": ... · ....
 
@@ -1183,16 +1198,20 @@ def basis_line(
             )
     if not parts:
         return None
-    if len(parts) == 1:
-        return f"{_BASIS_LEAD}{_CLAUSE_JOIN.join(next(iter(parts)))}."
-    return (
-        _BASIS_LEAD
-        + "; ".join(
-            f"{' and '.join(names)}: {_CLAUSE_JOIN.join(clauses)}"
-            for clauses, names in parts.items()
-        )
-        + "."
-    )
+    first, *others = parts
+    shared = tuple(clause for clause in first if all(clause in other for other in others))
+    # Parts grouped again by the clauses they hold beyond the shared ones.
+    remainders: dict[tuple[str, ...], list[str]] = {}
+    for clauses, names in parts.items():
+        remainder = tuple(clause for clause in clauses if clause not in shared)
+        if remainder:
+            remainders.setdefault(remainder, []).extend(names)
+    pieces = [_CLAUSE_JOIN.join(shared)] if shared else []
+    pieces += [
+        f"{' and '.join(names)}: {_CLAUSE_JOIN.join(remainder)}"
+        for remainder, names in remainders.items()
+    ]
+    return f"{_BASIS_LEAD}{'; '.join(pieces)}."
 
 
 # The order chips take by axis, and how many an answer offers.
@@ -1375,22 +1394,18 @@ def _unworded_name(block: Mapping[str, Any] | None) -> str:
 
 
 def _served_name(block: Mapping[str, Any] | None) -> str | None:
-    """Search's name for what `block` counts, from `resolved.shape.label`: the
-    `measure` the search digest shows the model (`data_mcp.digest`).
-
-    A label that is the block's `measure_label` followed by the concept in
-    brackets ("gross disbursements (official development assistance)") gives
-    the concept alone, since the basis line states the measure as a clause.
-    `None` when the block states no label.
+    """Search's name for what `block` counts: `resolved.concept_label`, which
+    states no basis, since the basis line states the measure as a clause, else
+    `resolved.shape.label`, the `measure` the search digest shows the model
+    (`data_mcp.digest`), as Search composed it. `None` when the block states
+    neither.
     """
+    concept = block_concept_label(block)
+    if concept:
+        return concept
     resolved = (block or {}).get("resolved") or {}
     label = (resolved.get("shape") or {}).get("label")
-    if not isinstance(label, str) or not label:
-        return None
-    measure = resolved.get("measure_label")
-    if isinstance(measure, str) and label.startswith(f"{measure} (") and label.endswith(")"):
-        return label[len(measure) + 2 : -1]
-    return label
+    return label if isinstance(label, str) and label else None
 
 
 def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
@@ -1479,12 +1494,13 @@ def _serves(option: Option, served: ServedScope, *, choice: ScopeChoice) -> bool
     netting are its own. A provider option counts whose spending is counted,
     by its scope binding or, binding a published total's slot, by its id
     (`Option.provider_scope`):
-    an inclusive one holds exactly when imputed multilateral aid is a served
-    component, and a bilateral or a contributions one (a published total
-    counting core contributions to multilaterals) only when it is not. The
-    record does not tell those two apart, so with no imputed component
-    either holds only when `choice` offers no option of the other. The
-    record holds no what/how slot, so any other slot option cannot be told.
+    one whose scope counts imputed multilateral aid (`PROVIDER_STREAMS`)
+    holds exactly when that is a served component, and any other (bilateral
+    flows, core contributions to multilaterals, or both, as published totals
+    count them) only when it is not. The record does not tell those apart,
+    so with no imputed component such an option holds only when `choice`
+    offers no other. The record holds no what/how slot, so any other slot
+    option cannot be told.
     """
     binding = option.binding
     if isinstance(binding, EntitiesBinding):
@@ -1509,10 +1525,19 @@ def _serves_provider(
     """`_serves` for a provider option of `choice` counting `scope`
     (`Option.provider_scope`), whether it binds the scope or a slot."""
     imputed = any(component.role == "imputed" for component in served.components)
-    if scope == "inclusive" or imputed:
-        return (scope == "inclusive") == imputed
-    offered = {option.provider_scope for option in choice.options}
-    return None if {"bilateral", "contributions"} <= offered else True
+    if _counts_imputed(scope) or imputed:
+        return _counts_imputed(scope) == imputed
+    untold = {
+        offered
+        for option in choice.options
+        if (offered := option.provider_scope) is not None and not _counts_imputed(offered)
+    }
+    return None if len(untold) > 1 else True
+
+
+def _counts_imputed(scope: ProviderScope) -> bool:
+    """Whether `scope` counts an imputed share of multilateral spending (`PROVIDER_STREAMS`)."""
+    return "imputed_multilateral" in PROVIDER_STREAMS[scope]
 
 
 def named_spec_ids(reading: SearchReading) -> list[str]:

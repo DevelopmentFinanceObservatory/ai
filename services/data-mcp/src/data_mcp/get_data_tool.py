@@ -18,12 +18,14 @@ shared upstream client lives in `data_mcp.client_holder`.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Annotated, Any, Literal, NamedTuple
 
 import httpx2
@@ -35,6 +37,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
+from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from data_mcp import node_lookup
@@ -81,6 +84,17 @@ from data_mcp.manifest import (
     SeriesStatisticsModel,
     render_validation_errors,
     strip_manifest,
+)
+from data_mcp.mint_admission import (
+    BACKGROUND_DECLINED,
+    BACKGROUND_MINT_SPAN_ATTRIBUTE,
+    CONSTRAINT_ID_KEY,
+    Admission,
+    admission_headers,
+    background_outcome,
+    background_result,
+    declined_in_background,
+    requested_admission,
 )
 from data_mcp.mint_ledger import HeldMint, MintLedger
 from data_mcp.operations import (
@@ -197,6 +211,16 @@ _deadline_clock: Clock = time.monotonic
 # The mints this process holds apis mint slots for on behalf of outside callers,
 # on `_deadline_clock`'s time. Tests replace it with an empty one.
 _mint_ledger = MintLedger()
+
+# How a mint POST ended (`_send_mint`): apis' response, this service's refusal, or
+# the `UpstreamError` it raised.
+type _MintOutcome = httpx2.Response | ToolRefusal | UpstreamError
+
+# Each mint POST still open, under its request key (`_post_mint`), and the future
+# set when it ends: to its outcome, to `None` when it was never written out, or
+# cancelled when it was written out and ended without one. Per process. Only the
+# POST that added an entry removes it.
+_open_mint_posts: dict[str, asyncio.Future[_MintOutcome | None]] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -1147,8 +1171,130 @@ async def _post_mint(
     spec_id: str,
     settings: Settings,
     deadline: CallDeadline,
+    admission: Admission = None,
+    on_sent: Callable[[], None] | None = None,
+) -> httpx2.Response | ToolResult:
+    """POST one mint request inside what `deadline` leaves it (`_send_mint`), unless
+    this process already holds a POST of the same request open. A refusal comes back
+    as its `ToolResult`.
+
+    apis runs two identical synchronous mints in flight at once as two mints, so no
+    call posts while a POST of the same request is open. A background call answers
+    at once with `background_result` outcome `"joined"`, sending nothing: the open
+    POST mints the frame. A foreground call joins the open POST (`_joined_outcome`)
+    and takes how it ends as its own: apis' response, the POST's refusal, or the
+    `UpstreamError` it raised, which is raised here. When that POST was never
+    written out (`on_sent`), or apis declined it as a background mint, apis started
+    nothing, and the call posts its own. The harness posts a card's mints
+    in the background before the user approves it (`harness.early_mint`), and the run
+    then asks for the same frames in the foreground.
+
+    Every POST is held open per process, in `_open_mint_posts`, from before it is
+    sent until it ends, answered, failed or cancelled, and only that POST removes
+    its entry. The dedupe therefore holds where the harness reaches data-mcp
+    in-process, as it does over its loopback mount, and two processes can still mint
+    the same request twice.
+
+    Raises:
+        UpstreamError: from this call's POST, or from the open POST it joined.
+    """
+    request_key = json.dumps(request_body, sort_keys=True)
+    while (open_post := _open_mint_posts.get(request_key)) is not None:
+        if admission is not None:
+            return background_result(spec_id=spec_id, outcome="joined")
+        joined = await _joined_outcome(open_post, spec_id=spec_id, deadline=deadline)
+        if isinstance(joined, UpstreamError):
+            raise joined
+        if joined is not None:
+            return to_tool_result(joined) if isinstance(joined, ToolRefusal) else joined
+    ended: asyncio.Future[_MintOutcome | None] = asyncio.get_running_loop().create_future()
+    _open_mint_posts[request_key] = ended
+    written_out = False
+
+    def mark_written_out() -> None:
+        nonlocal written_out
+        written_out = True
+        if on_sent is not None:
+            on_sent()
+
+    outcome: _MintOutcome | None = None
+    try:
+        sent = await _send_mint(
+            client,
+            request_body,
+            request_key=request_key,
+            spec_id=spec_id,
+            settings=settings,
+            deadline=deadline,
+            admission=admission,
+            on_sent=mark_written_out,
+        )
+        outcome = sent
+    except UpstreamError as exc:
+        outcome = exc
+        raise
+    finally:
+        if not written_out:
+            ended.set_result(None)
+        elif outcome is None:
+            ended.cancel()
+        else:
+            ended.set_result(outcome)
+        del _open_mint_posts[request_key]
+    return to_tool_result(sent) if isinstance(sent, ToolRefusal) else sent
+
+
+async def _joined_outcome(
+    open_post: asyncio.Future[_MintOutcome | None], *, spec_id: str, deadline: CallDeadline
+) -> _MintOutcome | None:
+    """How `open_post` ended, for a foreground call that joined it, or `None` when
+    apis started nothing for it, which leaves the call to post its own: the POST was
+    never written out (too little of its own deadline, no ID token, a ledger
+    refusal, a connection that failed first), or apis declined it as a background
+    mint.
+
+    The call waits while `deadline` leaves more than `post_mint_reserve_s`, the most
+    its own POST could have waited. A POST still open then, or one that ended
+    cancelled after it was sent, refuses `mint_joined_unanswered`: apis may still be
+    running it, and a repeat call joins it again or finds the frame it built.
+    """
+    budget = current_call_budget()
+    joined_at = deadline.clock()
+    wait_s = deadline.reserving(budget.post_mint_reserve_s).remaining()
+    await asyncio.wait({open_post}, timeout=max(wait_s, 0.0))
+    if open_post.done() and not open_post.cancelled():
+        outcome = open_post.result()
+        if (
+            isinstance(outcome, UpstreamError)
+            and outcome.extensions.get(CONSTRAINT_ID_KEY) == BACKGROUND_DECLINED
+        ):
+            return None
+        return outcome
+    return ToolRefusal.mint_joined_unanswered(
+        spec_id=spec_id,
+        waited_s=deadline.clock() - joined_at,
+        retry_after_s=DEADLINE_RETRY_AFTER_S,
+    )
+
+
+async def _send_mint(
+    client: UpstreamClient,
+    request_body: Mapping[str, Any],
+    *,
+    request_key: str,
+    spec_id: str,
+    settings: Settings,
+    deadline: CallDeadline,
+    admission: Admission,
+    on_sent: Callable[[], None] | None,
 ) -> httpx2.Response | ToolRefusal:
-    """POST one mint request inside what `deadline` leaves it.
+    """POST one mint request inside what `deadline` leaves it. `request_key` is
+    `request_body` as the ledger keys it.
+
+    A `"background"` `admission` sends `MINT_ADMISSION_HEADER` on the POST
+    (`data_mcp.mint_admission`), so apis admits the mint only while it has room.
+    `on_sent` is called once the request has been written out
+    (`UpstreamClient.request`).
 
     The current `CallBudget` sizes it: the POST gets `mint_timeout_s` at most and must
     end with `post_mint_reserve_s` of `deadline` left. With less than
@@ -1185,7 +1331,7 @@ async def _post_mint(
     held: HeldMint | None = None
     if not budget.waits_out_sync_mint:
         admitted = _mint_ledger.admit(
-            request_key=json.dumps(request_body, sort_keys=True),
+            request_key=request_key,
             spec_id=spec_id,
             now=started_at,
             answer_by=mint_deadline.expires_at,
@@ -1203,6 +1349,8 @@ async def _post_mint(
             retry=False,
             timeout=timeout_s,
             deadline=mint_deadline,
+            headers=admission_headers(admission),
+            on_sent=on_sent,
         )
     except UpstreamAuthUnavailable as exc:
         if held is not None:
@@ -1245,8 +1393,17 @@ async def _attempt_mint(
     settings: Settings,
     deadline: CallDeadline,
     on_poll: OnPoll | None = None,
+    admission: Admission = None,
+    on_sent: Callable[[], None] | None = None,
 ) -> ToolResult:
     """POST the `spec_id` mint and turn the result into this tool's response.
+
+    A background `admission` goes to the mint POST alone (`_post_mint`), and the
+    mint ends on apis' answer to it, with `background_result`, with no poll and
+    no frame read, or at once, outcome `"joined"`, when a POST of the same request
+    is already open. A background mint apis declines refuses with the decline named in its
+    `fix` (`data_mcp.mint_admission.declined_in_background`). `on_sent` hears each
+    mint POST written out.
 
     `identity` is `None` on the registry-fallback path, where the request omits the
     `definition` sidecar and a `spec_not_found` refusal completes `definition_not_held`.
@@ -1333,10 +1490,20 @@ async def _attempt_mint(
     for attempt in range(2):
         try:
             posted = await _post_mint(
-                client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+                client,
+                request_body,
+                spec_id=spec_id,
+                settings=settings,
+                deadline=deadline,
+                admission=admission,
+                on_sent=on_sent,
             )
-            if isinstance(posted, ToolRefusal):
-                return to_tool_result(posted)
+            if isinstance(posted, ToolResult):
+                return posted
+            if admission is not None:
+                # A background caller needs only the mint started, so it neither polls nor reads a frame.
+                outcome = "queued" if posted.status_code == HTTPStatus.ACCEPTED else "minted"
+                return background_result(spec_id=spec_id, outcome=outcome)
             resolved = await _mint_payload_or_refusal(
                 posted,
                 client=client,
@@ -1358,7 +1525,10 @@ async def _attempt_mint(
                 # `definition_not_held` -- "held by neither store nor registry"
                 # -- is what this completes.
                 return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-            return minted(to_tool_result(_rebase_entities_role_pointer(from_upstream_error(exc))))
+            refusal = _rebase_entities_role_pointer(from_upstream_error(exc))
+            if admission is not None:
+                refusal = declined_in_background(refusal, exc)
+            return minted(to_tool_result(refusal))
         if isinstance(resolved, ToolResult):
             return minted(resolved)
         payload, operation_poll = resolved
@@ -1646,8 +1816,8 @@ async def _mint_recorded_response(
             posted = await _post_mint(
                 client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
             )
-            if isinstance(posted, ToolRefusal):
-                return to_tool_result(posted)
+            if isinstance(posted, ToolResult):
+                return posted
             payload = await _manifest_payload_without_waiting(
                 posted,
                 client=client,
@@ -1908,6 +2078,10 @@ async def get_data(
         resources/templates/list and absent from resources/list.
     """
     settings = Settings()
+    admission = requested_admission()
+    if admission is not None:
+        # So a count of a turn's retrievals can leave out the mints no run asked for.
+        trace.get_current_span().set_attribute(BACKGROUND_MINT_SPAN_ATTRIBUTE, True)
     budget_deadline_s = current_call_budget().deadline_s
     deadline_s = settings.get_data_deadline_s if budget_deadline_s is None else budget_deadline_s
     deadline = CallDeadline.after(deadline_s, clock=_deadline_clock)
@@ -1963,11 +2137,9 @@ async def get_data(
     if scope is not None and scope.facets is not None:
         wire_scope["facets"] = scope.facets
 
-    client = get_client()
-    on_poll = _report_progress(ctx)
-
-    return await _attempt_mint(
-        client=client,
+    mint = functools.partial(
+        _attempt_mint,
+        client=get_client(),
         spec_id=spec_id,
         identity=identity,
         sends_definition=sends_definition,
@@ -1980,5 +2152,77 @@ async def get_data(
         dropped_roles=dropped_roles,
         settings=settings,
         deadline=deadline,
-        on_poll=on_poll,
+        # A background mint never polls, and its task outlives the request,
+        # so it holds no reference to the request's `ctx`.
+        on_poll=_report_progress(ctx) if admission is None else None,
+        admission=admission,
     )
+    # A background mint answers once its POST is out. The POST stays open in a task.
+    return await (mint() if admission is None else _posted_in_background(mint, spec_id=spec_id))
+
+
+# The background mints whose POST is still open, so none is collected mid-flight
+# and `aclose_background_mints` can close them at shutdown.
+_background_mints: set[asyncio.Task[ToolResult]] = set()
+
+
+async def _posted_in_background(
+    mint: Callable[..., Coroutine[Any, Any, ToolResult]], *, spec_id: str
+) -> ToolResult:
+    """Run `mint` as a task of its own and answer once its POST is written out,
+    with `background_result` outcome `"posted"`, or once it ends, with its result,
+    whichever comes first.
+
+    The task keeps the POST open until apis answers: apis runs the mint on CPU
+    that Cloud Run allocates only while the request is open.
+    """
+    sent = asyncio.Event()
+    task = asyncio.create_task(mint(on_sent=sent.set))
+    _background_mints.add(task)
+    task.add_done_callback(
+        functools.partial(
+            _background_mint_done,
+            spec_id=spec_id,
+            caller=current_writer(),
+            started=time.monotonic(),
+        )
+    )
+    sent_wait = asyncio.ensure_future(sent.wait())
+    try:
+        await asyncio.wait({task, sent_wait}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        sent_wait.cancel()
+    if task.done():
+        return task.result()
+    return background_result(spec_id=spec_id, outcome="posted")
+
+
+def _background_mint_done(
+    task: asyncio.Task[ToolResult], *, spec_id: str, caller: str, started: float
+) -> None:
+    """Forget `task` and log how apis answered its POST (`declined` when apis had
+    no room for it, else the outcome or refusal code), with the caller and the
+    seconds since the call started, so the line joins the caller's own."""
+    _background_mints.discard(task)
+    if task.cancelled():
+        outcome = "cancelled"
+    elif (exc := task.exception()) is not None:
+        outcome = f"error:{type(exc).__name__}"
+    else:
+        outcome = background_outcome(task.result().structured_content)
+    logger.info(
+        "background mint answered: spec_id=%s caller=%s outcome=%s elapsed_s=%.2f",
+        spec_id,
+        caller,
+        outcome,
+        time.monotonic() - started,
+    )
+
+
+async def aclose_background_mints() -> None:
+    """Close every background mint POST still open, at shutdown. apis runs on
+    any mint it admitted."""
+    tasks = list(_background_mints)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)

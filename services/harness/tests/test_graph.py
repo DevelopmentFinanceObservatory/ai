@@ -19,13 +19,13 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, NamedTuple, cast, override
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
+from compiler.caller_clients import MAX_CALLERS
 from compiler.evidence import check_evidence, evidence_from_source
-from compiler.sources import block_groups, wire_groups
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -37,11 +37,14 @@ from compiler.surface import (
 )
 from data_mcp.definition_store import InMemoryDefinitionStore
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
+from data_mcp.definition_writes import windowed_identity
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from executor.classify import ToolFailure
 from executor.completion import FramePublished
 from executor.ledger import InMemoryRunLedger
 from executor.outcomes import (
+    ISSUE_REMEDIES,
     Accepted,
     EvidenceRecord,
     MethodChoiceNeeded,
@@ -65,6 +68,9 @@ from harness.chart_binding import (
     over_cap_dimension,
     select_binding_ok,
 )
+from harness.conversation import current_conversation_id
+from harness.decision_pick import DecisionPick
+from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
 from harness.graph import switch as switch_module
 from harness.graph.execute import (
@@ -86,6 +92,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
+    PICK_REPLAN_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
@@ -100,11 +107,13 @@ from harness.graph.switch import (
     SWITCH_STOP,
     SwitchFailedError,
 )
+from harness.plan_display import decision_option_id
 from harness.planner_seam import PlannerSeam, store_aligned_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
+from harness.sentences import SeamCode
 from harness.settings import Settings
 from harness.studio_translate import _node_name
 from harness.tool_contracts import HarnessCode, reading_facts
@@ -113,11 +122,13 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
+    DECISION_PICK_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     Coverage,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
     GrowthRequirement,
     Period,
@@ -127,9 +138,12 @@ from planner.plan import (
     SessionState,
     WindowedPin,
     authored,
+    decision_pick,
     open_window,
     plan_revision,
     repinned,
+    save_decision_pick,
+    windowed_pins,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -149,7 +163,7 @@ from submission.service import (
     save_aligned_pin,
     scope_choice_decisions,
 )
-from translator.discovery import PartFault, PartNotResolvedError
+from translator.discovery import RESOLVED_STATE_PREFIX, PartFault, PartNotResolvedError
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import (
@@ -1760,6 +1774,379 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     assert redrafted["restarted"] is True
 
 
+def _picked_window(plan: PlannerPlan) -> DecisionPick:
+    """The pick of a planner decision the card offers to switch
+    (`plan_display.switchable_decision`): `_seam_plan`'s window, fixing the
+    period, switched to its other option on `plan`."""
+    return DecisionPick.on_card(authored(plan), slot="window", chosen="2018-2024")
+
+
+_PICK_SWITCH = {"choice_id": "decision/window", "option_id": decision_option_id("2018-2024")}
+# A drafting key the replan writes, which a replan that does not land puts back.
+_DRAFTING_KEY = "planner:replan_scratch"
+
+
+def _pickable_plan(
+    *, schemas: list[ToolSchema], chosen: str = "2015-2024", version: int = 1
+) -> PlannerPlan:
+    """`_seam_plan` with its window decision fixing the period, so the card offers it."""
+    plan = _seam_plan(schemas=schemas, version=version)
+    (window,) = plan.decisions
+    fixed = window.model_copy(
+        update={"chosen": chosen, "fixes": DecisionFixes(period=Period(start=2015, end=2024))}
+    )
+    return plan.model_copy(update={"decisions": (fixed,)})
+
+
+class _ReplanSeam(_Seam):
+    """A `PlannerModel` that drafts its first plan outright and, on every
+    later call, writes `_DRAFTING_KEY` and the pick it is handed, as
+    `PlannerSeam` records it, notes the snapshot the state holds under
+    `PICK_REPLAN_KEY` (`held_snapshot`), waits for `release` when given one,
+    and then answers its next scripted result."""
+
+    def __init__(self, plans: list[dict[str, Any]], release: asyncio.Event | None = None) -> None:
+        super().__init__(plans)
+        self.release = release
+        self.replanning = asyncio.Event()
+        self.held_snapshot: Any = None
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if self.calls:
+            ctx = kwargs["ctx"]
+            self.held_snapshot = ctx.state.get(PICK_REPLAN_KEY)
+            ctx.state[_DRAFTING_KEY] = "draft"
+            if (pick := kwargs.get("pick")) is not None:
+                save_decision_pick(ctx.state, pick)
+            self.replanning.set()
+            if self.release is not None:
+                await self.release.wait()
+        return await super().__call__(**kwargs)
+
+
+async def test_a_planner_decisions_pick_replans_with_the_pick_held(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A switch of a planner decision's row routes to the planner, which is
+    handed the pick, no amendment, and the plan on record, and offers the
+    replanned plan with nothing else moved."""
+    plan = _pickable_plan(schemas=real_schemas)
+    replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
+    seam = _ReplanSeam(
+        [
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": replanned.model_dump(mode="json"), "summary": {}},
+        ]
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    assert seam.calls[1]["pick"] == _picked_window(plan)
+    assert seam.calls[1]["amendment"] is None
+    assert seam.calls[1]["prior_plan"] == plan.model_dump(mode="json")
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(replanned)
+    assert "moved" not in offered
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    state = _session_state(runner)
+    assert state[_DRAFTING_KEY] == "draft"
+    # The pick belongs to its entry, and only a pause records the snapshot.
+    assert decision_pick(cast(SessionState, state)) is None
+    assert seam.held_snapshot is None
+    assert state.get(PICK_REPLAN_KEY) is None
+
+
+async def test_a_switch_to_the_option_a_planner_decision_has_offers_the_plan_unchanged(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A switch of a planner decision's row to the option it already has
+    does not apply: the planner is not called again, and the card offers the
+    plan on record with `switch_failed`, saying the choice is already on it."""
+    plan = _pickable_plan(schemas=real_schemas)
+    seam = _ReplanSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    switch = {"choice_id": "decision/window", "option_id": decision_option_id("2015-2024")}
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": switch})
+
+    assert len(seam.calls) == 1
+    offered = _output_of(events, "switch")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"]["choice_id"] == "decision/window"
+    assert offered["switch_failed"]["reason"] == "That choice is already on the plan."
+    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
+
+
+# A pick dump an earlier release wrote: it reads what the card's requirements
+# read as one digest and names the decisions to cite, and states no fixes.
+_OLD_SHAPE_PICK = {
+    "slot": "window",
+    "chosen": "2018-2024",
+    "origin_reading": "0" * 64,
+    "cited": ["window"],
+    "kept_requirements": {},
+    "kept_decisions": {},
+}
+
+
+async def test_a_pick_this_release_cannot_read_offers_the_plan_unchanged(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The approve payload carries a pick in an earlier release's shape, as
+    one written before a deploy. No replan runs: the card offers the plan on
+    record with `switch_failed`, asking the user to make the choice again,
+    and no pick is left in state."""
+    plan = _pickable_plan(schemas=real_schemas)
+    seam = _ReplanSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    monkeypatch.setattr(
+        "harness.graph.planning.decision_pick",
+        lambda *_, **__: SimpleNamespace(model_dump=lambda **_: _OLD_SHAPE_PICK),
+    )
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    assert len(seam.calls) == 1
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"] == {
+        **_PICK_SWITCH,
+        "code": SCOPE_CHOICE_NOT_APPLIED,
+        "reason": "That choice could not be applied. Make it again.",
+        "retryable": True,
+    }
+    state = _session_state(runner)
+    assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert state.get(DECISION_PICK_STATE_KEY) is None
+
+
+class _StaleSnapshotSeam(_ReplanSeam):
+    """`_ReplanSeam` whose first draft leaves `PICK_REPLAN_KEY` holding a
+    snapshot, as a pick replan paused on an ask the user never answered does."""
+
+    def __init__(self, plans: list[dict[str, Any]], stale: dict[str, Any]) -> None:
+        super().__init__(plans)
+        self.stale = stale
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.calls:
+            kwargs["ctx"].state[PICK_REPLAN_KEY] = self.stale
+        return await super().__call__(**kwargs)
+
+
+async def test_a_pick_this_release_cannot_read_puts_back_no_stale_snapshot(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A snapshot an earlier, unanswered pick replan left under
+    `PICK_REPLAN_KEY` belongs to no resume. A fresh entry whose pick cannot
+    be read leaves the plan and the drafting state as they stand, so the
+    state on record matches the card it offers."""
+    plan = _pickable_plan(schemas=real_schemas)
+    stale = {
+        "plan": _pickable_plan(
+            schemas=real_schemas, chosen="2018-2024", version=2
+        ).model_dump_json(),
+        _DRAFTING_KEY: "stale",
+    }
+    seam = _StaleSnapshotSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}], stale)
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    assert _session_state(runner)[PICK_REPLAN_KEY] == stale
+    monkeypatch.setattr(
+        "harness.graph.planning.decision_pick",
+        lambda *_, **__: SimpleNamespace(model_dump=lambda **_: _OLD_SHAPE_PICK),
+    )
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    assert _output_of(events, "planner")["switch_failed"]["code"] == SCOPE_CHOICE_NOT_APPLIED
+    state = _session_state(runner)
+    assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert state.get(_DRAFTING_KEY) != "stale"
+    assert state.get(PICK_REPLAN_KEY) is None
+
+
+@pytest.mark.parametrize(
+    ("code", "final", "reported", "retryable"),
+    [
+        ("budget_exhausted", False, "budget_exhausted", False),
+        (None, False, SeamCode.PLAN_NOT_READY.value, False),
+        (SeamCode.DISCOVERY_UNAVAILABLE.value, True, SeamCode.DISCOVERY_UNAVAILABLE.value, True),
+    ],
+    ids=["coded", "uncoded", "service-unreachable"],
+)
+async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_state_back(
+    real_schemas: list[ToolSchema],
+    code: str | None,
+    final: bool,
+    reported: str,
+    retryable: bool,
+) -> None:
+    """The planner refuses the replan: the card offers the plan on record
+    again with the switch node's `switch_failed`, carrying the refusal's code,
+    or the seam's `plan_not_ready` for a refusal stating none, and the
+    sentence for the user, and the drafting state is put back. The same pick
+    can succeed again only where a scope switch's revision could, whatever
+    the refusal's `final` says."""
+    plan = _pickable_plan(schemas=real_schemas)
+    refused = {
+        "text": "The draft budget is spent.",
+        "final": final,
+        "code": code,
+        "reason": "This request has used its budget of 4 plan drafts.",
+    }
+    seam = _ReplanSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}, {"refused": refused}]
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"] == {
+        **_PICK_SWITCH,
+        "code": reported,
+        "reason": refused["reason"],
+        "retryable": retryable,
+    }
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _session_state(runner).get(_DRAFTING_KEY) is None
+    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
+
+
+async def test_a_stopped_pick_replan_offers_the_plan_unchanged_and_puts_its_state_back(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user stops the replan (`SWITCH_STOP`) while the planner drafts:
+    the draft is cancelled, and the card offers the plan on record again
+    under `switch_cancelled`, as a stopped scope switch does."""
+    plan = _pickable_plan(schemas=real_schemas)
+    seam = _ReplanSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}], release=asyncio.Event()
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    stop = asyncio.Event()
+
+    token = SWITCH_STOP.set(stop)
+    try:
+        resumed = asyncio.ensure_future(
+            _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+        )
+    finally:
+        SWITCH_STOP.reset(token)
+    await asyncio.wait_for(seam.replanning.wait(), timeout=5)
+    stop.set()
+    events = await asyncio.wait_for(resumed, timeout=5)
+
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"]["code"] == SWITCH_CANCELLED
+    assert offered["switch_failed"]["retryable"] is True
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _session_state(runner).get(_DRAFTING_KEY) is None
+
+
+class _AskingOnPickSeam(_ReplanSeam):
+    """`_ReplanSeam` that, on its second call, asks the user a question
+    through a real `ctx.run_node` pause after writing `_DRAFTING_KEY` and the
+    pick, as `PlannerSeam` records it."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if len(self.calls) == 1:
+            kwargs["ctx"].state[_DRAFTING_KEY] = "draft"
+            save_decision_pick(kwargs["ctx"].state, kwargs["pick"])
+            self.calls.append(kwargs)
+            await kwargs["ctx"].run_node(_ask_the_user)
+            raise AssertionError("the ask pauses the replan")
+        return await super().__call__(**kwargs)
+
+
+async def test_a_planner_ask_during_a_pick_replan_keeps_its_state_and_resumes_with_the_pick(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The planner asks the user a question while replanning for a pick. The
+    replan runs as a task so a Stop can reach it, and the ask still pauses
+    the turn, with the replan's state kept for the resume, which is handed
+    the pick again and offers the replanned plan."""
+    plan = _pickable_plan(schemas=real_schemas)
+    replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
+    seam = _AskingOnPickSeam(
+        [
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": replanned.model_dump(mode="json"), "summary": {}},
+        ]
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+    assert _pending_interrupt(paused) == _PLANNER_ASK
+    assert _session_state(runner)[_DRAFTING_KEY] == "draft"
+
+    events = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
+
+    assert seam.calls[2]["pick"] == _picked_window(plan)
+    assert _output_of(events, "planner")["revision"] == plan_revision(replanned)
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+@pytest.mark.parametrize("ending", ["refused", "stopped"])
+async def test_a_pick_replan_failing_after_an_ask_puts_back_the_state_from_before_the_pick(
+    real_schemas: list[ToolSchema], ending: str
+) -> None:
+    """The planner asks a question while replanning for a pick, and the
+    resumed replan is refused or the user stops it. The card offers the plan
+    unchanged with `switch_failed`, and the state is as it stood before the
+    pick, with no drafting state, no pick for a later revision of the plan
+    to hold, and no record of the replan."""
+    plan = _pickable_plan(schemas=real_schemas)
+    refused = {"text": "No plan.", "final": False, "code": "plan_not_ready", "reason": "No plan."}
+    seam = _AskingOnPickSeam(
+        [
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"refused": refused},
+        ],
+        release=asyncio.Event() if ending == "stopped" else None,
+    )
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+    paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
+    assert _pending_interrupt(paused) == _PLANNER_ASK
+    assert _session_state(runner)[PICK_REPLAN_KEY] is not None
+
+    stop = asyncio.Event()
+    token = SWITCH_STOP.set(stop)
+    try:
+        resumed = asyncio.ensure_future(_resume(runner, _PLANNER_ASK, {"answer": "2018"}))
+    finally:
+        SWITCH_STOP.reset(token)
+    if ending == "stopped":
+        await asyncio.wait_for(seam.replanning.wait(), timeout=5)
+        stop.set()
+    events = await asyncio.wait_for(resumed, timeout=5)
+
+    offered = _output_of(events, "planner")
+    assert offered["revision"] == plan_revision(plan)
+    assert offered["switch_failed"]["code"] == (
+        SWITCH_CANCELLED if ending == "stopped" else "plan_not_ready"
+    )
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    state = _session_state(runner)
+    assert PlannerPlan.model_validate_json(state["plan"]) == plan
+    assert state.get(_DRAFTING_KEY) is None
+    assert decision_pick(cast(SessionState, state)) is None
+    assert state.get(PICK_REPLAN_KEY) is None
+
+
 async def test_an_approval_for_a_superseded_revision_routes_to_amend(
     real_schemas: list[ToolSchema],
 ) -> None:
@@ -2748,6 +3135,36 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "message": "the source states no provenance",
     }
 
+    # A stop with every donor named missing. The failed step carries what the
+    # user can do about it, since the code alone says only that the names could
+    # not be resolved.
+    refused_names_missing = Refused(
+        revision="rev1",
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail="requirement 'donor_oda' is not met by what 'get_data' returned",
+        step_id="donor_oda",
+        requirement_id="donor_oda",
+        issues=tuple(
+            EvidenceIssue(
+                code=EvidenceIssueCode.ENTITY_MISSING,
+                severity=Severity.ERROR,
+                requirement_id="donor_oda",
+                detail=f"the source resolves no entity named {name!r}",
+                required=name,
+            )
+            for name in ("United States", "Germany")
+        ),
+    )
+    names_missing = _failed_step(refused_names_missing)
+    assert names_missing.pop("remedy") == ISSUE_REMEDIES[EvidenceIssueCode.ENTITY_MISSING]
+    assert names_missing == {
+        "step_id": "donor_oda",
+        "tool": None,
+        "code": "entity_missing",
+        "message": "the source resolves no entity named 'United States'; the source "
+        "resolves no entity named 'Germany'",
+    }
+
 
 _GET_DATA = ToolId(server="data-mcp", name="get_data")
 
@@ -3162,6 +3579,10 @@ def _hashed_scope() -> dict[str, Any]:
     return scope
 
 
+# The window the plan of `_scoped_plan` reads its dataset over.
+_PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
+
+
 def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """The spec_id and envelope Search answers for `scope` switched to CRS
     120 and 130: grant equivalents become the basis, since gross is out of
@@ -3324,12 +3745,15 @@ async def _switch_runner(
     option_id: str = "sector:120+130",
     aligned: bool = False,
     entity_groups: dict[str, Any] | None = None,
+    stored_unreadable: bool = False,
+    stored_groups: list[dict[str, Any]] | None = None,
     seam_type: type[_RevisingSeam] = _RevisingSeam,
     earlier_whole: AlignedPin | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
-    `aligned`) beside its block naming `entity_groups` when given, held as the
+    `aligned`, as one whose sets were not readable when `stored_unreadable`, and
+    as one resolved with `stored_groups` when given) beside its block naming `entity_groups` when given, held as the
     whole `earlier_whole` an earlier plan compiled from its part when given,
     then answered with a switch to `option_id`, by default its sector to CRS
     120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
@@ -3355,6 +3779,8 @@ async def _switch_runner(
             "spec_id": pin,
             "scope": scope,
             "planner_axes": ["measure_basis"] if aligned else [],
+            "entity_groups": stored_groups or [],
+            "entity_groups_unreadable": stored_unreadable,
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
@@ -3530,26 +3956,103 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     assert offered["revision"] == plan_revision(revised)
 
 
+_AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
+# Africa as a set naming a class of party outside `common.place_type.PartyClass`: the
+# set does not read, but what a resubmit posts of it does.
+_AFRICA_UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
+# Africa as a set stating a registry id that is not text, so what a resubmit posts of
+# it does not read.
+_AFRICA_UNPOSTABLE = {"label": "Africa", "ref": "africa", "group_id": 7}
+
+
+_AFRICA_POSTED = {"destination": {"label": "Africa", "ref": "africa"}}
+
+
+@pytest.mark.parametrize(
+    ("group", "stored_unreadable", "stored_groups", "posted"),
+    [
+        pytest.param(_AFRICA_TOTAL, False, None, _AFRICA_POSTED, id="block-reads-stored-readable"),
+        pytest.param(_AFRICA_TOTAL, True, None, _AFRICA_POSTED, id="block-reads-stored-unreadable"),
+        pytest.param(
+            _AFRICA_UNKNOWN_CLASS,
+            True,
+            None,
+            _AFRICA_POSTED,
+            id="block-of-an-unknown-class-stored-unreadable",
+        ),
+        pytest.param(
+            _AFRICA_UNPOSTABLE,
+            False,
+            [{"role": "destination", **_AFRICA_TOTAL}],
+            _AFRICA_POSTED,
+            id="block-unreadable-stored-readable",
+        ),
+        # The block names no sets and the reading was stored with the G7 on its
+        # donors: the stored set is posted, since the block's none says nothing of it.
+        pytest.param(
+            None,
+            False,
+            [{"role": "origin", "label": "G7"}],
+            {"origin": {"label": "G7"}},
+            id="block-names-none-stored-readable",
+        ),
+    ],
+)
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
+    group: dict[str, Any] | None,
+    stored_unreadable: bool,
+    stored_groups: list[dict[str, Any]] | None,
+    posted: dict[str, Any],
 ) -> None:
     """The part's block names Africa as the set its recipients were asked for,
     with the total party Search states for it. The switch posts the set as a
     compile on another basis does (`compiler.sources.wire_groups`): its label
-    and ref, and no total, which Search recomputes."""
+    and ref, and no total, which Search recomputes. It reads the block again,
+    so a reading stored when an earlier release could not read the set switches
+    once this release can. A set naming a class of party this release does not
+    know is posted by its label and ref, all the resubmit sends of it. Where what
+    the block's set posts does not read, as a set stating a registry id that is
+    not text, or where the block names no sets, it posts the
+    readable sets the reading was stored with."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
-    await _switch_runner(real_schemas, search, entity_groups=groups)
-
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert entry["entity_groups"] == wire_groups(
-        block_groups({"resolved": {"entity_groups": groups}})
+    await _switch_runner(
+        real_schemas,
+        search,
+        entity_groups={"destination": group} if group is not None else {},
+        stored_unreadable=stored_unreadable,
+        stored_groups=stored_groups,
     )
-    assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
+
+    (sent,) = search.posted
+    (entry,) = sent["input"]["entries"]
+    assert entry.get("entity_groups") == posted
+
+
+async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The part's block names a set on its recipients with a registry id that is not
+    text, so what the switch would post of it cannot be read. Posting the part without it would let
+    Search count another population, so the switch posts nothing and offers the
+    plan unchanged under `switch_failed`, which asking again cannot get past."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    runner, _, plan, _, events = await _switch_runner(
+        real_schemas, search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
+    )
+
+    assert search.posted == []
+    offered = _output_of(events, "switch")
+    assert offered["revision"] == plan_revision(plan)
+    failed = offered["switch_failed"]
+    assert (failed["code"], failed["retryable"]) == (SCOPE_CHOICE_NOT_APPLIED, False)
+    assert PlannerPlan.model_validate_json(_session_state(runner)["plan"]) == plan
 
 
 @pytest.mark.parametrize(
@@ -3628,7 +4131,8 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     leaves the readings as they were and the planner's drafting state as it
     found it. A revision's refusal gives the reason its own
     (`harness.sentences.refusal_reason`); only one Search could not answer
-    in time can succeed later."""
+    in time can succeed later. The part Search answered stays in the turn's
+    resolve store, which holds whatever the switch's outcome."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = (
@@ -3684,6 +4188,10 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     # The fake seam drafted with no pin sources or rounds of its own.
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
+    resolved = [
+        value for key, value in state.items() if key.startswith(RESOLVED_STATE_PREFIX) and value
+    ]
+    assert len(resolved) == (0 if refused_by == "search" else 1)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 
 
@@ -3834,6 +4342,26 @@ async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
     assert stopped.value.code == SWITCH_CANCELLED
 
 
+async def test_a_revision_that_paused_in_the_same_wait_as_the_stop_stays_paused() -> None:
+    """The revision pauses on a question to the user as the Stop lands. ADK
+    has streamed the question, so the pause stands and no `switch_failed`
+    follows it."""
+    stop = asyncio.Event()
+    stop.set()
+
+    async def revision() -> dict[str, Any]:
+        raise NodeInterruptedError()
+
+    token = SWITCH_STOP.set(stop)
+    try:
+        with pytest.raises(NodeInterruptedError):
+            await asyncio.wait_for(
+                switch_module._unless_stopped(cast(Any, None), revision()), timeout=5
+            )
+    finally:
+        SWITCH_STOP.reset(token)
+
+
 @_UNWIND_ERRORS
 async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cancelled(
     error: type[BaseException],
@@ -3869,28 +4397,89 @@ _INCLUSIVE_PROVENANCE = {
 }
 
 
+class _RecordedFixtures(FixtureSurface):
+    """A `FixtureSurface` recording each call's tool and arguments in `calls`."""
+
+    def __init__(
+        self, *, schemas: list[ToolSchema], responses: Mapping[str, ToolCallResult]
+    ) -> None:
+        super().__init__(schemas=schemas, responses=responses)
+        self.calls: list[tuple[str, Mapping[str, object]]] = []
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
+    ) -> ToolCallResult:
+        self.calls.append((tool.name, arguments))
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
 class _TranslatingSeam(_Seam):
     """A `PlannerModel` drafting `plans` and revising through the real
     `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
-    translation's discovery and the compile, over `schemas`, with no model."""
+    translation's discovery and the compile, over `schemas`, answering
+    `responses`, with no model."""
 
-    def __init__(self, plans: list[dict[str, Any]], *, schemas: list[ToolSchema]) -> None:
+    def __init__(
+        self,
+        plans: list[dict[str, Any]],
+        *,
+        schemas: list[ToolSchema],
+        responses: Mapping[str, ToolCallResult] | None = None,
+    ) -> None:
         super().__init__(plans)
-        self._seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=schemas))
+        self.surface = _RecordedFixtures(schemas=schemas, responses=responses or {})
+        self._seam = PlannerSeam(settings=Settings(), surface=self.surface)
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         return await self._seam.revise(**kwargs)
 
 
-async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
-    real_schemas: list[ToolSchema],
-) -> None:
+class _SwitchedOff(NamedTuple):
+    """A switch off a stated source (`_switch_off_a_stated_source`): the runner, the
+    switch's events, the seam that revised, the pin Search answered and the copy
+    of it over the plan's years."""
+
+    runner: Any
+    events: list[Any]
+    seam: _TranslatingSeam
+    new_pin: str
+    copy_pin: str
+
+
+class _RefusingPickSeam(_TranslatingSeam):
+    """A `_TranslatingSeam` whose replan for a pick asks the user a question
+    through a real `ctx.run_node` pause, after recording the pick and
+    drafting state as `PlannerSeam` does, and is refused once resumed."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        pick = kwargs.get("pick")
+        if pick is None:
+            return await super().__call__(**kwargs)
+        self.calls.append(kwargs)
+        ctx = kwargs["ctx"]
+        if ctx.resume_inputs:
+            return {"refused": {"text": "No plan.", "final": False, "code": "plan_not_ready"}}
+        save_decision_pick(ctx.state, pick)
+        ctx.state[_DRAFTING_KEY] = "draft"
+        await ctx.run_node(_ask_the_user)
+        raise AssertionError("the ask pauses the replan")
+
+
+async def _switch_off_a_stated_source(
+    real_schemas: list[ToolSchema], *, before_switch: str | None = None
+) -> _SwitchedOff:
     """The deployed failure: the planner stated the CRS as the health
     numerator's source, and the user switched it to bilateral plus imputed
-    multilateral, a dataset Search names otherwise. The switch drops the
-    stated source with the pin it left, so the translation takes the new pin
-    with no search, the plan compiles, and its run accepts what the new
-    dataset returns."""
+    multilateral, a dataset Search names otherwise and holds from 1995. The
+    switch posts the identity over every year its search answered, which the
+    plan pins. Admission copies the pin over the years the plan reads, and the
+    translation resolves the copy, which Search answers over those years.
+
+    `before_switch` is what happened on the card before the switch:
+    `"refused_pick_replan"` switches the window decision, which then fixes
+    the period, and the planner's replan asks a question and is refused once
+    answered (`_RefusingPickSeam`)."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -3899,7 +4488,7 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
         "coverage": {
             "kind": "exact",
             "has_data": True,
-            "window": {"start_year": 2015, "end_year": 2024},
+            "window": {"start_year": 1995, "end_year": 2024},
         },
         "facets": {"provenance": _INCLUSIVE_PROVENANCE},
         "entities": [{"role": "country", "ref": "country/KEN", "label": "Kenya"}],
@@ -3919,8 +4508,34 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             ],
         }
     )
-    seam = _TranslatingSeam(
-        [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
+    if before_switch == "refused_pick_replan":
+        plan = plan.model_copy(
+            update={
+                "decisions": tuple(
+                    d.model_copy(
+                        update={"fixes": DecisionFixes(period=Period(start=2015, end=2024))}
+                    )
+                    if d.slot == "window"
+                    else d
+                    for d in plan.decisions
+                )
+            }
+        )
+    identity = block["definition"]["identity"]
+    copy_pin, copied = windowed_identity(identity, _PLAN_WINDOW)
+    over_window = copy.deepcopy(envelope)
+    copied_block = over_window["parts"][0]["spec"]
+    copied_block["spec_id"] = copied_block["definition"]["spec_id"] = copy_pin
+    copied_block["definition"]["identity"] = copied
+    copied_block["resolved"]["coverage"]["window"]["start_year"] = 2015
+    seam = (_RefusingPickSeam if before_switch == "refused_pick_replan" else _TranslatingSeam)(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}],
+        schemas=real_schemas,
+        responses={
+            "resolve_definition": ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: over_window}
+            )
+        },
     )
     search = SearchStub(answer={scope["id"]: envelope})
     runner, _ = orchestrator_runner(
@@ -3934,6 +4549,13 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
         {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+    if before_switch == "refused_pick_replan":
+        paused = await _resume(
+            runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH}
+        )
+        assert _pending_interrupt(paused) == _PLANNER_ASK
+        refused = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
+        assert _output_of(refused, "planner")["switch_failed"]["code"] == "plan_not_ready"
 
     events = await _resume(
         runner,
@@ -3943,14 +4565,34 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             "switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"},
         },
     )
+    return _SwitchedOff(runner, events, seam, new_pin, copy_pin)
 
+
+@pytest.mark.parametrize("before_switch", [None, "refused_pick_replan"])
+async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
+    real_schemas: list[ToolSchema], before_switch: str | None
+) -> None:
+    """A switch off a stated source (`_switch_off_a_stated_source`) drops the
+    stated source with the pin it left, so the translation takes the new pin
+    with no search, the plan compiles, and its run accepts what the new
+    dataset returns. The translation resolves the copy admission made over the
+    plan's years, and searches nothing. A pick on the card belongs to its
+    planner entry, so the revision holds none after a replan for one was
+    refused following a question the planner asked."""
+    runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(
+        real_schemas, before_switch=before_switch
+    )
+
+    assert [(tool, arguments.get("spec_id")) for tool, arguments in seam.surface.calls] == [
+        ("resolve_definition", copy_pin)
+    ]
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered, offered.get("switch_failed")
     revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
     (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
-    assert (dataset.source_spec_id, dataset.source) == (new_pin, None)
+    assert (dataset.source_spec_id, dataset.source) == (copy_pin, None)
     assert revised.workflow is not None
-    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [new_pin]
+    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [copy_pin]
     approved = PlannerPlan.model_validate(
         revised.model_dump()
         | {
@@ -3959,7 +4601,7 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
             "approved_at": datetime.now(UTC),
         }
     )
-    manifest = _get_data_manifest(spec_id=new_pin)
+    manifest = _get_data_manifest(spec_id=copy_pin)
     manifest["citation"]["sources"] = [_INCLUSIVE_PROVENANCE]
     fetched = ToolCallResult(is_error=False, structured_content=manifest, text="fetched")
 
@@ -3970,6 +4612,24 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     )
 
     assert isinstance(outcome, Accepted), outcome
+
+
+async def test_a_later_period_amendment_reads_the_switched_dataset_over_every_year_it_holds(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """After a switch off a stated source (`_switch_off_a_stated_source`), the
+    stored reading is of the switched dataset, the planner's block for it
+    states the years Search holds it for, from 1995, and the plan's copy over
+    its own years is held as a copy of that dataset. A later amendment of the period
+    reads the dataset whole and copies it over the new years."""
+    runner, _, _, new_pin, copy_pin = await _switch_off_a_stated_source(real_schemas)
+
+    state = _session_state(runner)
+    shown = state["planner:pin_sources"][new_pin]["block"]
+    assert shown["resolved"]["coverage"]["window"]["start_year"] == 1995
+    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert stored.spec_id == new_pin
+    assert windowed_pins(cast(SessionState, state))[copy_pin].windowed_from == new_pin
 
 
 @pytest.mark.parametrize(
@@ -4109,20 +4769,47 @@ async def test_a_chip_compiles_through_search_fetches_what_it_compiled_and_never
     assert [step["result"]["outcome"] for step in executor.steps] == ["ok"]
 
 
-async def test_a_chip_posts_the_groups_its_reading_was_resolved_with() -> None:
+@pytest.mark.parametrize(
+    "group", [_AFRICA_TOTAL, _AFRICA_UNKNOWN_CLASS], ids=["total", "unknown-class"]
+)
+async def test_a_chip_posts_the_groups_its_reading_was_resolved_with(
+    group: dict[str, Any],
+) -> None:
     """The answer's reading came from a search whose block named Africa as the
     set its recipients were asked for, and no plan kept that block. The chip's
-    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`)."""
+    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`),
+    one naming a class of party this release does not know too, since the reading
+    stored what the resubmit posts of it."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
-    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
-    await _chip_turn(search, entity_groups=groups)
+    await _chip_turn(search, entity_groups={"destination": group})
 
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
     assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
+
+
+async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> None:
+    """The answer's reading came from a block naming a set on its recipients with a
+    registry id that is not text, and no block of it is kept, so nothing names the set. Posting the part
+    without it would let Search count another population, so the chip posts nothing
+    and its step fails as a plan card's switch over such a block does."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    runner, _, executor, _ = await _chip_turn(
+        search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
+    )
+
+    assert search.posted == []
+    (step,) = executor.steps
+    refusal = step["result"]["refusal"]
+    assert (refusal["code"], refusal["retry_mode"]) == (SCOPE_CHOICE_NOT_APPLIED, "do_not_retry")
+    assert not any(c["tool"] == "get_data" for c in executor.calls)
+    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
 
 
 async def test_a_chip_offered_on_another_reading_is_refused_stale_and_compiles_nothing() -> None:
@@ -4201,3 +4888,270 @@ async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_no
     }
     assert not any(c["tool"] == "get_data" for c in executor.calls)
     assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
+
+
+# --- early mints at the card offer ---------------------------------------------
+
+
+class _EarlySends:
+    """`EarlyMints`' send: records each call's arguments, then answers
+    `outcome`, raises it, or waits on `hold` first when one is set."""
+
+    def __init__(self, outcome: str | Exception = "ok", *, hold: asyncio.Event | None = None):
+        self.outcome = outcome
+        self.hold = hold
+        self.sent: list[dict[str, Any]] = []
+        self.cancelled = 0
+
+    async def __call__(self, args: dict[str, Any]) -> str:
+        self.sent.append(args)
+        if self.hold is not None:
+            try:
+                await self.hold.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_execution_sends(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The first card starts its retrieval, an amendment's card starts its own,
+    a re-offer of that card starts nothing, and the run the approval starts
+    asks `get_data` with exactly the arguments the early call sent."""
+    plan_v1 = _seam_plan(question="kenya debt", schemas=real_schemas, stat_vars="sum")
+    plan_v2 = _seam_plan(question="kenya debt, revised", schemas=real_schemas, stat_vars="sum")
+    seam = _Seam(
+        [
+            {"plan": plan_v1.model_dump(mode="json"), "summary": {}},
+            {"plan": plan_v2.model_dump(mode="json"), "summary": {}},
+        ]
+    )
+    sends = _EarlySends()
+    surface = _CallRecordingSurface(_fixture_surface(real_schemas))
+    runner, _ = orchestrator_runner(
+        plan_call(_BRIEF),
+        planner=seam,
+        tool_surface=surface,
+        executor=ScriptedExecutor(),
+        early_mints=EarlyMints(send=sends, max_concurrent=4, settle_s=3.0),
+    )
+
+    await _start(runner)
+    await asyncio.sleep(0)
+    assert sends.sent == [{"spec_id": SPEC_A, "stat_vars": "sum"}]
+
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
+    await asyncio.sleep(0)
+    revision_2 = _output_of(events, "planner")["revision"]
+    assert len(sends.sent) == 2
+
+    # An answer naming the superseded card offers the same card again.
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan_v1)))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 2
+
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_2))
+    assert [args for tool, args in surface.calls if tool == "get_data"] == sends.sent[1:]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "logged"),
+    [
+        ("declined", "outcome=declined"),
+        (RuntimeError("apis unreachable"), "outcome=error:RuntimeError"),
+    ],
+    ids=["declined", "raised"],
+)
+async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_alone(
+    real_schemas: list[ToolSchema],
+    caplog: pytest.LogCaptureFixture,
+    outcome: str | Exception,
+    logged: str,
+) -> None:
+    plan = _seam_plan(schemas=real_schemas)
+
+    async def card(early_mints: EarlyMints | None) -> tuple[Any, Any, str | None]:
+        seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+        runner, _ = orchestrator_runner(
+            plan_call(_BRIEF), planner=seam, executor=ScriptedExecutor(), early_mints=early_mints
+        )
+        events = await _start(runner)
+        await asyncio.sleep(0)
+        return (
+            _output_of(events, "planner"),
+            _session_state(runner)["plan"],
+            _pending_interrupt(events),
+        )
+
+    sends = _EarlySends(outcome)
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        offered = await card(EarlyMints(send=sends, max_concurrent=4, settle_s=3.0))
+
+    assert offered == await card(None)
+    assert offered[2] == APPROVE_INTERRUPT
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert f"spec_id={SPEC_A}" in line
+    assert f"plan_revision={plan_revision(plan)}" in line
+    assert logged in line
+    assert "elapsed_s=" in line
+
+
+async def test_a_call_unsent_at_one_stream_end_logs_one_line_with_its_own_elapsed_time(
+    real_schemas: list[ToolSchema], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A call still pending when the stream ends is logged unsent then, with
+    the seconds since its card was offered, and logs nothing when it ends."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    now = [100.0]
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.01, clock=lambda: now[0])
+    early.offer(_seam_plan(schemas=real_schemas))
+
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        now[0] = 102.5
+        await early.settle()
+        await early.settle()
+        now[0] = 109.0
+        hold.set()
+        await asyncio.gather(*early._tasks)
+
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert "outcome=unsent_at_stream_end" in line
+    assert "elapsed_s=2.50" in line
+
+
+async def test_a_cards_early_calls_go_out_no_more_than_the_cap_at_once(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A card with more retrievals than the cap sends the cap's worth, and the
+    rest as those end."""
+    wide = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=2, settle_s=3.0)
+
+    early.offer(wide)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(sends.sent) == 2
+
+    hold.set()
+    await asyncio.gather(*early._tasks)
+    assert len(sends.sent) == 3
+
+
+def _with_retrievals(plan: Any, count: int) -> Any:
+    """`plan` with its one retrieval step `count` times over, unvalidated: only
+    `EarlyMints` reads it."""
+    assert plan.workflow is not None
+    (retrieval,) = [step for step in plan.workflow.steps if step.tool == _GET_DATA]
+    return plan.model_copy(
+        update={"workflow": plan.workflow.model_copy(update={"steps": (retrieval,) * count})}
+    )
+
+
+async def test_offering_a_newer_card_withdraws_the_older_cards_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The older card's call already out runs on; its calls still queued are
+    withdrawn unsent and logged, and the newer card's call goes out."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+        await asyncio.sleep(0)
+        assert len(sends.sent) == 1
+        early.offer(_seam_plan(question="kenya debt, revised", schemas=real_schemas))
+        hold.set()
+        await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 2
+    assert sends.cancelled == 0
+    lines = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert sum("outcome=withdrawn" in line for line in lines) == 2
+
+
+async def test_withdrawing_cancels_the_latest_cards_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema],
+) -> None:
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+    early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+
+    early.withdraw()
+    hold.set()
+    await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 1
+    assert sends.cancelled == 0
+
+
+async def test_evicting_a_conversation_withdraws_its_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The oldest conversation's record is dropped once `MAX_CALLERS` newer
+    conversations have offered. Its call already out runs on; its queued
+    calls never start."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+    oldest = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
+    other = _seam_plan(schemas=real_schemas)
+
+    current_conversation_id.set("conversation-0")
+    early.offer(oldest)
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+    for n in range(1, MAX_CALLERS + 1):
+        current_conversation_id.set(f"conversation-{n}")
+        early.offer(other)
+    hold.set()
+    await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 1 + MAX_CALLERS
+    assert sends.cancelled == 0
+
+
+async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_not(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _seam_plan(schemas=real_schemas)
+    early = EarlyMints(send=_EarlySends(), max_concurrent=4, settle_s=3.0)
+    withdrawn: list[str] = []
+    monkeypatch.setattr(early, "withdraw", lambda: withdrawn.append("withdraw"))
+    runner, _ = orchestrator_runner(
+        plan_call(_BRIEF),
+        planner=_Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
+        tool_surface=_fixture_surface(real_schemas),
+        executor=ScriptedExecutor(),
+        early_mints=early,
+    )
+
+    await _start(runner)
+    assert withdrawn == []
+
+    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    assert withdrawn == ["withdraw"]
+
+
+async def test_closing_early_mints_cancels_the_calls_still_running(
+    real_schemas: list[ToolSchema],
+) -> None:
+    sends = _EarlySends(hold=asyncio.Event())
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=3.0)
+    early.offer(_seam_plan(schemas=real_schemas))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+
+    await early.aclose()
+
+    assert sends.cancelled == 1

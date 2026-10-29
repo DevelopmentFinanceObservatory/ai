@@ -192,9 +192,12 @@ async def bounded(
     span = trace.get_current_span()
     while True:
         may_retry = stream and not budget.retry_spent
-        first_chunk_by = budget.clock() + budget.first_chunk_s
+        opened = budget.clock()
+        first_chunk_by = opened + budget.first_chunk_s
         delivered = False
         delivered_text = False
+        delivered_thought = False
+        streamed = 0.0
         gaps: list[float] = []
         cut: SeamCode | None = None
         retry = False
@@ -233,12 +236,19 @@ async def bounded(
                     finally:
                         budget.model_time_spent += budget.clock() - before
                     waited = round(budget.clock() - before, 3)
+                    streamed += waited
                     if not delivered:
                         _record_first_chunk(span, seconds=waited)
                     else:
                         gaps.append(waited)
                     delivered = True
-                    delivered_text = delivered_text or _has_text(response)
+                    if not delivered_thought and _has_thought(response):
+                        delivered_thought = True
+                        _record_streamed(span, "dfo.model.first_thought_s", seconds=streamed)
+                    if not delivered_text and _has_text(response):
+                        delivered_text = True
+                        _record_streamed(span, "dfo.model.first_text_s", seconds=streamed)
+                    _record_thoughts_tokens(span, response)
                     yield response
         except asyncio.CancelledError:
             _mark_failed(span, "cancelled")
@@ -288,6 +298,35 @@ def _has_text(response: LlmResponse) -> bool:
     """Whether `response` carries answer text, which Studio streams to the user."""
     parts = response.content.parts if response.content and response.content.parts else []
     return any(part.text and not part.thought for part in parts)
+
+
+def _has_thought(response: LlmResponse) -> bool:
+    """Whether `response` carries thought-summary text, which Studio hides."""
+    parts = response.content.parts if response.content and response.content.parts else []
+    return any(part.text and part.thought for part in parts)
+
+
+def _record_streamed(span: trace.Span, key: str, *, seconds: float) -> None:
+    """Stamp `key` on `span` with `seconds`, the time this attempt waited on
+    the stream up to the chunk at hand.
+
+    Measured as `dfo.model.first_chunk_s` is, on the waits alone, so time ADK
+    spends at the generator's yield is left out and the three compare.
+    `dfo.model.first_thought_s` and `dfo.model.first_text_s` beside
+    `dfo.model.first_chunk_s` tell a model thinking apart from a provider
+    queueing before it sends anything."""
+    if span.is_recording():
+        span.set_attribute(key, round(seconds, 3))
+
+
+def _record_thoughts_tokens(span: trace.Span, response: LlmResponse) -> None:
+    """Stamp the thought tokens the response's usage reports as
+    `dfo.model.thoughts_token_count`, on the span that carries the call's
+    `dfo.model.first_*` times, so one span tells how long the model thought
+    and how many tokens that took."""
+    usage = response.usage_metadata
+    if usage is not None and usage.thoughts_token_count is not None and span.is_recording():
+        span.set_attribute("dfo.model.thoughts_token_count", usage.thoughts_token_count)
 
 
 def _record_first_chunk(span: trace.Span, *, seconds: float) -> None:
