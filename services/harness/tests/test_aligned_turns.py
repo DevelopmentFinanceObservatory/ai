@@ -14,11 +14,16 @@ from pathlib import Path
 from typing import Any, cast
 
 from analysis_mcp.server import mcp as analysis_mcp
+from common.materialisation import FrameRef
 from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface, ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.server import mcp as data_mcp
+from executor.outcomes import Accepted, EvidenceRecord
+from harness.graph.execute import record_served_scopes
+from harness.graph.plan_done import record_plan
 from harness.graph.state import (
+    ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -27,14 +32,13 @@ from harness.planner_seam import PlannerSeam
 from harness.scope_choices import planner_axes
 from harness.settings import Settings
 from harness.studio_state import ConversationState
-from harness.turn_records import PlanRecord, SearchReading
+from harness.turn_records import PlanRecord, SearchReading, basis_line, loose_match_notes
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
     Period,
     Plan,
     ResolvedBy,
-    aligned_stated_pins,
     current_earlier_block,
     load_plan,
     pin_sources,
@@ -61,6 +65,7 @@ from .planner.test_agent import (
 from .planner.test_aligned_identity import _multilateral_compiles
 from .test_graph import (
     APPROVE_INTERRUPT,
+    _ManifestSurface,
     _output_of,
     _plan_runner,
     _resume,
@@ -122,13 +127,21 @@ async def _compiled(plan: Plan, blocks: dict[str, dict[str, Any]]) -> Plan:
     return plan.with_translation(translation=translation, workflow=compiled.workflow)
 
 
-async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
-    """Run turn 1, which compares the US total with France's multilateral ODA and so
-    aligns the total onto US multilateral ODA's spec_id, and close it as the Studio
-    does. Returns the ledger turn 2 opens with, with the closed turn's blocks set as
-    the earlier blocks (`current_earlier_block`)."""
+_COMPARISON = "How does US ODA compare with France's multilateral ODA?"
+
+
+async def _turn_one(
+    decision: DecisionFactory, *, us: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], Plan]:
+    """Run turn 1, which compares the US total, read as `us` (its reading under
+    "US ODA" by default), with France's multilateral ODA and so aligns the total
+    onto US multilateral ODA's spec_id. Returns the turn's state and its plan,
+    compiled."""
     surface = cast(ToolSurface, _multilateral_compiles())
-    searched = [_searched(_US_TOTAL, "US ODA"), _searched(_FRANCE, "France's multilateral ODA")]
+    searched = [
+        us or _searched(_US_TOTAL, "US ODA"),
+        _searched(_FRANCE, "France's multilateral ODA"),
+    ]
     turn_one = _SeamHarness(
         {
             ORCHESTRATOR_SEARCHES_KEY: searched,
@@ -136,12 +149,11 @@ async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
         }
     )
     seam = PlannerSeam(settings=Settings(), surface=surface)
-    question = "How does US ODA compare with France's multilateral ODA?"
     seam._agent.model = ScriptedPlannerLlm(
         script=[
             [
                 _proposal(
-                    question,
+                    _COMPARISON,
                     decision,
                     _dac_countries("second", _US_TOTAL),
                     _dac_countries("other", _FRANCE),
@@ -150,7 +162,7 @@ async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
             ]
         ]
     )
-    await turn_one.run(seam, question=question, readings=searched)
+    await turn_one.run(seam, question=_COMPARISON, readings=searched)
     state = await turn_one.state()
     compared = load_plan(state)
     assert compared is not None
@@ -159,21 +171,30 @@ async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
         for r in compared.evidence_requirements
         if isinstance(r, DatasetRequirement)
     } == {"second": _MULTILATERAL, "other": _FRANCE["spec_id"]}
-
-    conversation = ConversationState(conversation_id="conv_aligned")
-    conversation.turn_user_message = question
-    conversation.turn_readings = list(state[ORCHESTRATOR_SEARCHES_KEY])
-    conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY])
     recorded = await _compiled(
         compared, {_MULTILATERAL: _US_MULTILATERAL, _FRANCE["spec_id"]: _FRANCE}
     )
-    conversation.turn_plans = [
-        PlanRecord.from_plan(
-            recorded,
-            searched=[_TOTAL, _FRANCE["spec_id"]],
-            aligned_from=aligned_stated_pins(state),
-        ).model_dump(mode="json")
+    return state, recorded
+
+
+async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
+    """Run turn 1 (`_turn_one`), record its plan, whose compile source carries the
+    count of the total moved onto it (`PlanSource.aligned_basis`), and close it as
+    the Studio does. Returns the ledger turn 2 opens with, with the closed turn's
+    blocks set as the earlier blocks (`current_earlier_block`)."""
+    state, recorded = await _turn_one(decision)
+    conversation = ConversationState(conversation_id="conv_aligned")
+    conversation.turn_user_message = _COMPARISON
+    conversation.turn_readings = list(state[ORCHESTRATOR_SEARCHES_KEY])
+    conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY])
+    record_plan(state, recorded)
+    conversation.turn_plans = list(state[ORCHESTRATOR_PLAN_RECORDS_KEY])
+    (aligned,) = [
+        source
+        for source in PlanRecord.model_validate(conversation.turn_plans[0]).sources
+        if source.spec_id == _MULTILATERAL
     ]
+    assert aligned.aligned_basis is not None
     conversation.close_turn(final_text="The US gave more.")
     prior = conversation.prior_ledger_state()
     assert prior is not None
@@ -181,13 +202,109 @@ async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
     return prior
 
 
+async def test_an_aligned_inputs_loose_stated_series_keeps_its_note(
+    decision: DecisionFactory,
+) -> None:
+    """Search answered "US ODA" with the US total only as its closest match, and
+    alignment moved the total onto the multilateral row. The plan retrieves the
+    compile alone, yet the answer still tells the user the series their words got
+    is a loose match: the compile moved only the provider."""
+    us = _searched(_US_TOTAL, "US ODA")
+    us["departures"] = [{"code": "closest_match", "text": "You asked for X. This shows Y."}]
+    state, recorded = await _turn_one(decision, us=us)
+    record_plan(state, recorded)
+
+    (note,) = loose_match_notes(
+        state[ORCHESTRATOR_SEARCHES_KEY],
+        specs=state[ORCHESTRATOR_SPECS_KEY],
+        plans=state[ORCHESTRATOR_PLAN_RECORDS_KEY],
+    )
+    assert note.startswith('The closest series to "US ODA" is a loose match')
+
+
+async def test_an_aligned_input_is_counted_on_its_compiles_basis(
+    decision: DecisionFactory,
+) -> None:
+    """The total's own reading counts DAC1's total, and alignment moved it onto the
+    multilateral row. Read with France's part left out, the basis line states the
+    total's count on the provider of the compile the plan retrieved, core
+    contributions, where its own reading holds bilateral plus core contributions."""
+    state, recorded = await _turn_one(decision)
+    record_plan(state, recorded)
+    (us,) = [r for r in state[ORCHESTRATOR_SEARCHES_KEY] if r["spec_id"] == _TOTAL]
+
+    line = basis_line(
+        [us], specs=state[ORCHESTRATOR_SPECS_KEY], plans=state[ORCHESTRATOR_PLAN_RECORDS_KEY]
+    )
+
+    assert (
+        line
+        == "Counted as: gross disbursements, current USD · core contributions to multilaterals."
+    )
+
+
+async def test_an_aligned_inputs_count_states_how_its_compile_was_served(
+    decision: DecisionFactory,
+) -> None:
+    """The plan's retrieval of the compile the total was moved onto was served as
+    the OECD headline, net to 2017 and grant equivalents from 2018. No reading holds
+    the compile, yet the basis line states the served count in place of the
+    compile's gross option, as it does for a reading's retrieval."""
+    state, recorded = await _turn_one(decision)
+    frame = FrameRef(spec_id=_MULTILATERAL, content_version="cv_" + "1" * 32)
+    outcome = Accepted(
+        revision="rev",
+        evidence=(
+            EvidenceRecord(
+                requirement_id="second",
+                step_id="second_op",
+                frame_ref=frame,
+                spec_id=_MULTILATERAL,
+                stat_vars=(),
+                window=None,
+                gaps=(),
+                citation="DAC1",
+            ),
+        ),
+        steps=(),
+        results={},
+    )
+    identity = _US_MULTILATERAL["resolved"]["scope_choices"]["compiled"]["identity"]
+    manifest = {
+        "definition": {"schema_version": 1, "spec_id": _MULTILATERAL, "identity": identity},
+        "coverage": {"window": {"start_year": 2015, "end_year": 2024}},
+        "trace": {
+            "components": [
+                {"role": role, "periods": spans, "dropped_years": [], "rows": 10, "zero_rows": 0}
+                for role, spans in (
+                    ("headline_net", [[2015, 2017]]),
+                    ("headline_ge", [[2018, 2024]]),
+                )
+            ]
+        },
+    }
+    record_served_scopes(state, cast(Any, _ManifestSurface(frame, manifest)), outcome)
+    record_plan(state, recorded)
+    (us,) = [r for r in state[ORCHESTRATOR_SEARCHES_KEY] if r["spec_id"] == _TOTAL]
+
+    line = basis_line(
+        [us], specs=state[ORCHESTRATOR_SPECS_KEY], plans=state[ORCHESTRATOR_PLAN_RECORDS_KEY]
+    )
+
+    assert line == (
+        "Counted as: net to 2017, grant equivalents from 2018 · "
+        "core contributions to multilaterals."
+    )
+
+
 async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_marks(
     decision: DecisionFactory,
 ) -> None:
     """Turn 1 aligns the US total onto US multilateral ODA's spec_id, and the Studio
     closes the turn. Turn 2, a fresh planner session, pins that spec_id directly as
-    the numerator of a share of the total. The direct pin reads no planner marks,
-    since the planner settled nothing of it, and the share keeps the total on its
+    the numerator of a share of the total. The direct pin reads no block and no
+    planner marks, since the planner settled nothing of it, though turn 1's plan
+    record holds how the compile counted the total. The share keeps the total on its
     own pin, so it does not divide one series by itself."""
     prior = await _turn_one_closed(decision)
     surface = cast(ToolSurface, _multilateral_compiles())
@@ -223,6 +340,7 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
     ]
     assert reading.planner_axes == ()
     direct = pin_sources(state)[_MULTILATERAL]
+    assert direct.spec_block(_MULTILATERAL) is None
     assert planner_axes(direct.spec_block(_MULTILATERAL)) == frozenset()
 
 

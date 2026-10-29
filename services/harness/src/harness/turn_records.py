@@ -67,7 +67,7 @@ from harness.scope_choices import (
     ShapeBinding,
     block_dataset,
 )
-from harness.tool_contracts import requested_range, series_description
+from harness.tool_contracts import reading_facts, requested_range, series_description
 
 # Where a source or reading came from: the orchestrator's `search`, the
 # translator's own discovery, or a dataset the user brought from Search
@@ -115,6 +115,24 @@ class PlanPeriod(StrictModel):
     requirement_ids: tuple[str, ...]
 
 
+class AlignedBasis(StrictModel):
+    """How a compile alignment moved inputs onto counts them, for the basis line.
+
+    `scope` is the compile's own scope (`SearchReading.scope` of its block),
+    and `name` the part's name in a basis line naming several parts
+    (`part_name`), read off the compile's block under the words of the
+    stated input's reading (`aligned_basis`). `served` is how the plan's
+    retrieval of the compile was counted, as a search reading's fetch keeps
+    it (`FetchReading.served`); `None` when no retrieval of it was recorded.
+    Only `basis_line` reads it: a later turn takes no block, pin or marks
+    from it.
+    """
+
+    name: str
+    scope: PartScope
+    served: ServedScope | None = Field(default=None, exclude_if=lambda served: served is None)
+
+
 class PlanSource(StrictModel):
     """One source the compiled plan retrieves.
 
@@ -144,8 +162,12 @@ class PlanSource(StrictModel):
     retrieved as it was found. `aligned_from` are the pins the inputs
     alignment moved onto this source state (`planner.plan.AlignedInput.stated_pin`),
     so a later turn holds the block of each one the user's search read
-    (`harness.studio_state.ConversationState.close_turn`); left out when
-    alignment moved none onto it.
+    (`harness.studio_state.ConversationState.close_turn`) and the answer's
+    loose-match notes name a loose stated series (`loose_match_notes`); left
+    out when alignment moved none onto it. `aligned_basis` is how the source
+    counts those inputs, which `basis_line` states, since the turn holds no
+    reading of a compile; left out when alignment moved none onto it or its
+    block carries no scope choices.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -175,6 +197,7 @@ class PlanSource(StrictModel):
     )
     windowed_from: str | None = Field(default=None, exclude_if=lambda origin: origin is None)
     aligned_from: tuple[str, ...] = Field(default=(), exclude_if=lambda stated: not stated)
+    aligned_basis: AlignedBasis | None = Field(default=None, exclude_if=lambda basis: basis is None)
 
 
 class RecordedIdentity(StrictModel):
@@ -293,6 +316,7 @@ class PlanRecord(StrictModel):
         run_id: str | None = None,
         windowed_from: Mapping[str, str] | None = None,
         aligned_from: Mapping[str, Collection[str]] | None = None,
+        aligned_bases: Mapping[str, AlignedBasis] | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
 
@@ -305,6 +329,8 @@ class PlanRecord(StrictModel):
                 copied from, by the copy's spec_id (`planner.plan.windowed_pins`).
             aligned_from: The pins the inputs alignment moved onto each compile
                 state, by the compile's spec_id (`aligned_from`).
+            aligned_bases: How each of those compiles counts the inputs moved
+                onto it, by the compile's spec_id (`aligned_basis`).
 
         A source's origin is `search` when `searched` names it, else
         `translator`.
@@ -333,6 +359,7 @@ class PlanRecord(StrictModel):
                 searched=searched,
                 windowed_from=windowed_from or {},
                 aligned_from=aligned_from or {},
+                aligned_bases=aligned_bases or {},
             ),
             decisions=tuple(
                 PlanDecision(
@@ -1027,7 +1054,10 @@ def loose_match_notes(
 
     A reading is a loose match when it carries a `closest_match` departure,
     or `retrieval_score_weak` and is no `definite` reading. The turn used it
-    as `_used_readings` reads it. The sentence
+    as `_used_readings` reads it, a stated pin alignment moved onto a compile
+    (`PlanSource.aligned_from`) included: the looseness is the Search's that
+    answered the user's words with that pin, and the compile moved only the
+    input's basis or provider. The sentence
     names what was asked and the series' heading and byline
     (`harness.tool_contracts.series_description` of its block in `specs`,
     the reading's resolved sentence when the block is missing), then what
@@ -1053,7 +1083,7 @@ def loose_match_notes(
         plans: The turn's plan records, as `PlanRecord` JSON.
     """
     notes: dict[str, str] = {}
-    for reading in _used_readings(readings, plans=plans):
+    for reading in _used_readings(readings, plans=plans, stated=True):
         assert reading.spec_id is not None
         if reading.spec_id not in notes and _loose(reading):
             notes[reading.spec_id] = _loose_match_note(reading, specs.get(reading.spec_id))
@@ -1061,24 +1091,33 @@ def loose_match_notes(
 
 
 def _used_readings(
-    readings: Sequence[Mapping[str, Any]], *, plans: Sequence[Mapping[str, Any]]
+    readings: Sequence[Mapping[str, Any]],
+    *,
+    plans: Sequence[Mapping[str, Any]],
+    stated: bool = False,
 ) -> list[SearchReading]:
     """The turn's readings of parts it used, in order.
 
     The turn used a part when a fetch of its spec_id returned data, or a
     plan record names it as a source, directly or as the spec_id a windowed
-    copy was copied from (`PlanSource.windowed_from`).
+    copy was copied from (`PlanSource.windowed_from`), and, when `stated`,
+    as a pin alignment moved onto a compile (`PlanSource.aligned_from`).
 
     Args:
         readings: The turn's search readings, as `SearchReading` JSON.
         plans: The turn's plan records, as `PlanRecord` JSON.
+        stated: Whether the stated pins of aligned inputs count as used.
     """
     planned = {
         spec_id
         for plan in plans
         for source in plan.get("sources") or ()
         if isinstance(source, Mapping)
-        for spec_id in (source.get("spec_id"), source.get("windowed_from"))
+        for spec_id in (
+            source.get("spec_id"),
+            source.get("windowed_from"),
+            *(source.get("aligned_from") or () if stated else ()),
+        )
         if spec_id is not None
     }
     return [
@@ -1163,6 +1202,43 @@ def _measures_money(block: Mapping[str, Any]) -> bool:
     )
 
 
+def aligned_basis(
+    block: Mapping[str, Any], *, words: str | None, served: Mapping[str, Any] | None
+) -> AlignedBasis | None:
+    """How the compile `block` counts the inputs alignment moved onto it, as
+    a reading of it under `words`, the stated input's, would read: its scope
+    and its name (`part_name`), with `served`, the plan's retrieval of it as
+    `harness.scope_choices.served_facts` reads it, when one was recorded.
+    `None` when the block carries no scope choices."""
+    reading = SearchReading.from_part(
+        {"variable": words, "status": "definite", **reading_facts(block)}
+    )
+    if reading.scope is None:
+        return None
+    return AlignedBasis(
+        name=part_name(reading, block),
+        scope=reading.scope,
+        served=ServedScope.of(served, scope=reading.scope) if served is not None else None,
+    )
+
+
+def _aligned_bases(
+    plans: Sequence[Mapping[str, Any]], *, read: Collection[str | None]
+) -> list[AlignedBasis]:
+    """The basis of each compile `plans` moved inputs onto and no spec_id in
+    `read` names, the newest plan's for each, in the order the plans first
+    name them. A windowed copy of a compile is that compile."""
+    bases: dict[str, AlignedBasis] = {}
+    for plan in plans:
+        for source in plan.get("sources") or ():
+            if not isinstance(source, Mapping) or not source.get("aligned_basis"):
+                continue
+            compiled = str(source.get("windowed_from") or source["spec_id"])
+            if compiled not in read and source["spec_id"] not in read:
+                bases[compiled] = AlignedBasis.model_validate(source["aligned_basis"])
+    return list(bases.values())
+
+
 # How the basis line opens and joins one part's clauses.
 _BASIS_LEAD = "Counted as: "
 _CLAUSE_JOIN = " · "
@@ -1177,7 +1253,11 @@ def basis_line(
     """One line on how the turn's figures were counted, from its stored readings.
 
     `None` when the turn used no part with scope choices. A part is used as
-    `_used_readings` reads it; its newest reading speaks for it. Each
+    `_used_readings` reads it; its newest reading speaks for it. A compile
+    alignment moved inputs onto speaks through its plan source's
+    `PlanSource.aligned_basis`, the newest plan's, unless a reading of its
+    own does; the stated pin's reading does not, since its choices on the
+    moved axes name the basis the compile left. Each
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
     clauses are the same share them. Otherwise the clauses every part
@@ -1199,16 +1279,22 @@ def basis_line(
         specs: The spec blocks the turn's searches returned, by spec_id.
         plans: The turn's plan records, as `PlanRecord` JSON.
     """
-    used = [
-        reading for reading in _used_readings(readings, plans=plans) if reading.scope is not None
-    ]
+    used = newest_per_spec_id(
+        [reading for reading in _used_readings(readings, plans=plans) if reading.scope is not None]
+    )
     parts: dict[tuple[str, ...], list[str]] = {}
-    for reading in newest_per_spec_id(used):
-        clauses = _scope_clauses(reading)
+    for reading in used:
+        assert reading.scope is not None
+        served = reading.fetch.served if reading.fetch is not None else None
+        clauses = _scope_clauses(reading.scope, served)
         if clauses:
             parts.setdefault(clauses, []).append(
                 part_name(reading, specs.get(reading.spec_id or ""))
             )
+    for basis in _aligned_bases(plans, read={reading.spec_id for reading in used}):
+        clauses = _scope_clauses(basis.scope, basis.served)
+        if clauses:
+            parts.setdefault(clauses, []).append(basis.name)
     if not parts:
         return None
     first, *others = parts
@@ -1421,16 +1507,13 @@ def _served_name(block: Mapping[str, Any] | None) -> str | None:
     return label if isinstance(label, str) and label else None
 
 
-def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
-    """The basis line's clauses for one used reading: one per scope choice
-    that names its active option, then one per entry Search dropped.
+def _scope_clauses(scope: PartScope, served: ServedScope | None) -> tuple[str, ...]:
+    """The basis line's clauses for one used part's `scope`: one per scope
+    choice that names its active option, then one per entry Search dropped.
 
-    A composite frame's served components state what its figures count
+    A composite frame's `served` components state what its figures count
     (`ServedScope.composite_clause`) in place of the choice on that clause's
     axis, or after the choices when the part has none on it."""
-    scope = reading.scope
-    assert scope is not None
-    served = reading.fetch.served if reading.fetch is not None else None
     composite = served.composite_clause() if served is not None else None
     clauses = [
         composite[1]
@@ -1826,10 +1909,12 @@ def _sources(
     searched: Collection[str],
     windowed_from: Mapping[str, str],
     aligned_from: Mapping[str, Collection[str]],
+    aligned_bases: Mapping[str, AlignedBasis],
 ) -> tuple[PlanSource, ...]:
     """One entry per distinct spec_id the workflow retrieves, in binding order.
 
-    A windowed copy of a compile takes the stated pins of the compile it copies.
+    A windowed copy of a compile takes the stated pins and the basis of the
+    compile it copies.
     """
     assert plan.workflow is not None
     measures = {
@@ -1846,6 +1931,7 @@ def _sources(
         window = source.coverage_window
         asked = requested_range(source.identity or {})
         origin: Origin = "search" if source.spec_id in searched else "translator"
+        compiled = windowed_from.get(source.spec_id, source.spec_id)
         seen[source.spec_id] = PlanSource(
             spec_id=source.spec_id,
             name=source.provenance_label,
@@ -1868,14 +1954,8 @@ def _sources(
             groups=source.groups,
             elected_measure=source.elected_measure,
             windowed_from=windowed_from.get(source.spec_id),
-            aligned_from=tuple(
-                sorted(
-                    aligned_from.get(
-                        windowed_from.get(source.spec_id, source.spec_id),
-                        (),
-                    )
-                )
-            ),
+            aligned_from=tuple(sorted(aligned_from.get(compiled, ()))),
+            aligned_basis=aligned_bases.get(compiled) if compiled in aligned_from else None,
         )
     return tuple(seen.values())
 

@@ -131,6 +131,7 @@ from planner.plan import (
     current_discovery_time_left,
     cut_user_text,
     discovery_time_left,
+    held_sources,
     load_ask_breakdowns,
     load_asks,
     load_asks_across_years,
@@ -155,7 +156,6 @@ from submission.service import (
     SEARCHED_PINS_STATE_KEY,
     Proposal,
     SourceReadings,
-    aligned_pins,
     pinned_sources,
     searched_pins,
     submit,
@@ -1487,20 +1487,18 @@ def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) 
 
 
 def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
-    """Every spec block `state` holds a pin's source in, by spec_id: those of
-    the datasets the planner was shown (`pin_sources`), then this turn's
-    searches (`ORCHESTRATOR_SPECS_KEY`), then the pins compiled for a
-    calculation's inputs (`aligned_pins`), each later one in place of an
-    earlier one for its spec_id."""
+    """Every spec block `state` holds a pin's source in, by spec_id: those on
+    record (`held_sources`), then this turn's searches (`ORCHESTRATOR_SPECS_KEY`)
+    in place of those for their spec_ids. A pin compiled for a calculation's
+    input gives its block only to a spec_id no dataset the planner was shown
+    holds, so a pin of a shown dataset reads the block it was shown with,
+    whatever compile shares its spec_id."""
     blocks: dict[str, Mapping[str, Any]] = {
         spec_id: block
-        for spec_id, shown in pin_sources(state).items()
-        if (block := shown.spec_block(spec_id)) is not None
+        for spec_id, held in held_sources(state).items()
+        if (block := held.spec_block(spec_id)) is not None
     }
     blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
-    for pin in aligned_pins(state):
-        if (block := pin.block) is not None:
-            blocks[pin.spec_id] = block
     return blocks
 
 

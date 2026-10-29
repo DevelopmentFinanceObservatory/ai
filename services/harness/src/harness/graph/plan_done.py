@@ -23,6 +23,7 @@ from google.adk import Context
 from planner.plan import (
     Plan,
     SessionState,
+    aligned_pins,
     aligned_stated_pins,
     authored_text,
     copy_origins,
@@ -37,6 +38,7 @@ from harness.graph.seams import (
     Executor,
 )
 from harness.graph.state import (
+    ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
@@ -46,12 +48,13 @@ from harness.graph.state import (
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
+    conversation_readings,
     frame_id_for,
     readable_plan,
     register_frames,
 )
 from harness.sentences import DECLINE_REASONS
-from harness.turn_records import PlanAsk, PlanRecord
+from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
 
 # Characters of planner text one hand-back to the orchestrator may carry per
 # field, and characters the plan record may take. The two recorded plans in
@@ -640,12 +643,38 @@ def record_plan(
         run_id=run_id,
         windowed_from={copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()},
         aligned_from=aligned_stated_pins(state),
+        aligned_bases=_aligned_bases(state),
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
         *(state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),
         plan_record.model_dump(mode="json"),
     ]
     return plan_record
+
+
+def _aligned_bases(state: SessionState) -> dict[str, AlignedBasis]:
+    """How each compile `state` holds counts the inputs alignment moved onto
+    it, by the compile's spec_id (`harness.turn_records.aligned_basis`): read
+    off the compile's block (`AlignedPin.block`) under the words of the
+    newest reading of the pin it was compiled from, with how the plan's
+    retrieval of it was served (`ORCHESTRATOR_ALIGNED_SERVED_KEY`). A declared
+    whole (`AlignedPin.whole_axis`) is no reading of its part's words and is
+    read under none. A compile whose block is missing or has no scope choices
+    has no basis."""
+    words = {
+        reading.get("spec_id"): reading.get("text") for reading in conversation_readings(state)
+    }
+    served = state.get(ORCHESTRATOR_ALIGNED_SERVED_KEY) or {}
+    bases: dict[str, AlignedBasis] = {}
+    for pin in aligned_pins(state):
+        block = pin.block
+        if block is None or pin.spec_id in bases:
+            continue
+        stated = None if pin.whole_axis is not None else words.get(pin.origin)
+        basis = aligned_basis(block, words=stated, served=served.get(pin.spec_id))
+        if basis is not None:
+            bases[pin.spec_id] = basis
+    return bases
 
 
 def plan_done_node(

@@ -5183,14 +5183,18 @@ def test_a_declared_wholes_compile_leaves_the_readings_unchanged() -> None:
 _WINDOWED_HEALTH = "spec_" + "e" * 32
 
 
-@pytest.mark.parametrize("held", ["earlier_turn", "this_turn", "windowed_copy"])
+@pytest.mark.parametrize(
+    "held", ["earlier_turn", "this_turn", "windowed_copy", "shown_and_compiled"]
+)
 def test_a_revision_names_a_pin_by_the_block_it_is_held_in(
     decision: Any, requirement: Any, derived_requirement: Any, held: str
 ) -> None:
     """A revision that did not compile names a retrieval by the concept of the
     block its pin reads: one an earlier turn stored, held through
-    `earlier_block` alone; one this turn's search stored; or, for a pin
-    copied over its window, its origin's block."""
+    `earlier_block` alone; one this turn's search stored; for a pin
+    copied over its window, its origin's block; or, for a user's own pin of a
+    dataset the planner was shown that alignment also compiled another input
+    onto, an average say, the block it was shown with, not the compile's."""
     block = {"spec_id": HEALTH, "resolved": {"concept_label": "health"}}
     state: dict[str, Any] = {}
     pinned = HEALTH
@@ -5200,12 +5204,24 @@ def test_a_revision_names_a_pin_by_the_block_it_is_held_in(
         )
     elif held == "this_turn":
         state[ORCHESTRATOR_SPECS_KEY] = {HEALTH: block}
-    else:
+    elif held == "windowed_copy":
         save_pin_sources(cast(SessionState, state), {HEALTH: PinSource(block=block, settled=True)})
         state[WINDOWED_PINS_STATE_KEY] = [
             {"spec_id": _WINDOWED_HEALTH, "identity": {}, "windowed_from": HEALTH}
         ]
         pinned = _WINDOWED_HEALTH
+    else:
+        save_pin_sources(cast(SessionState, state), {HEALTH: PinSource(block=block, settled=True)})
+        compiled = {"spec_id": HEALTH, "resolved": {"concept_label": "average health aid"}}
+        save_aligned_pin(
+            cast(SessionState, state),
+            AlignedPin(
+                origin=TOTAL,
+                option_ids=("measure_basis:gross",),
+                spec_id=HEALTH,
+                digest={"spec_block": compiled},
+            ),
+        )
     plan = Plan(
         question="health aid",
         decisions=[decision()],
