@@ -11,7 +11,9 @@ answer, or the `ToolRefusal` its reply maps to:
 - 202 is a root dataset still building, `ToolRefusal.analysis_pending` with the
   runner's `retry_after_s`.
 - A problem document keeps the runner's `code`, `detail` and `fix` where this
-  service defines the code, which holds for every engine code. A root the
+  service defines the code, which holds for every engine code, except that
+  `place_levels_mixed` is written again from its `fix`
+  (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. A root the
   runner cannot read (`snapshot_not_found`, `recipe_not_found`,
   `artifact_expired`) is, in this order: the caller's own frame refs read as
   that root, not held or aged out (`ToolRefusal.frames_lost`, which names
@@ -35,6 +37,12 @@ it, so a call over data the record never saw would otherwise compute a window
 that ends at another dataset's latest period. The ref's roots are the roots
 the runner read, those behind a derived input and the anchor roots included,
 so the check covers a derived input as it covers a fetched frame.
+
+`replay_derived` asks the runner to compute a derived frame again from its stored
+recipe with `latest: true`, which reads its roots at their datasets' current
+versions, and returns the pair it computed. A call whose derived input lost a
+root sends the replayed pair in its place (`tool_pipeline.run_on_runner`); every
+other call sends `latest: false`, reading each root at the version it names.
 
 `read_derived_manifest` and `read_derived_file` read a frame the runner stored,
 by its `ops_` pair, from `GET /api/datasets/derived/{spec_id}/{content_version}`
@@ -93,7 +101,8 @@ _LOCAL_CODES = frozenset(
         ToolErrorCode.INTERNAL_ERROR,
     }
 )
-_RUNNER_CODES = frozenset(code.value for code in ToolErrorCode if code not in _LOCAL_CODES)
+# Codes the runner's engine refuses a computation with.
+RUNNER_CODES = frozenset(code.value for code in ToolErrorCode if code not in _LOCAL_CODES)
 _UNHELD_ROOT_CODES = frozenset({"snapshot_not_found", "recipe_not_found"})
 _EXPIRED_ROOT_CODE = "artifact_expired"
 _ROOT_CODES = _UNHELD_ROOT_CODES | {_EXPIRED_ROOT_CODE}
@@ -307,7 +316,9 @@ async def refusal_for(
     fix: dict[str, Any] = dict(given) if isinstance(given, Mapping) else {}
     retryable = problem.get("retryable") is True
     root: Pair = (str(fix.get("spec_id")), str(fix.get("content_version")))
-    if code in _RUNNER_CODES:
+    if code == ToolErrorCode.PLACE_LEVELS_MIXED and isinstance(fix.get("column"), str):
+        refusal = _place_levels_mixed(fix)
+    elif code in RUNNER_CODES:
         refusal = ToolRefusal(code=ToolErrorCode(code), message=detail, fix=fix)
     elif code in _ROOT_CODES and (refs := refs_by_root.get(root)):
         refusal = ToolRefusal.frames_lost(
@@ -337,6 +348,21 @@ async def refusal_for(
             fix=fix,
         )
     return refusal
+
+
+def _place_levels_mixed(fix: Mapping[str, Any]) -> ToolRefusal:
+    """The runner's `place_levels_mixed`, written from its `fix` as this service
+    writes it, so its message names the call this service's tools take."""
+    whole_class = fix.get("whole_class")
+    whole_total = fix.get("whole_total")
+    return ToolRefusal.place_levels_mixed(
+        column=fix["column"],
+        types=[str(cell) for cell in fix.get("types") or ()],
+        whole_total=whole_total if isinstance(whole_total, str) else None,
+        whole_class=whole_class if isinstance(whole_class, str) else None,
+        member_count=int(fix.get("member_count") or 0),
+        members=[str(member) for member in fix.get("example_members") or ()],
+    )
 
 
 def _pending(response: httpx2.Response) -> ToolRefusal:
@@ -422,8 +448,8 @@ async def run_tree(
 def _ready_summary(
     body: Mapping[str, Any] | None, *, anchor: Anchor | None
 ) -> VerbSummary | ToolRefusal:
-    """The summary of the ready answer `body`, or the refusal for an answer outside
-    the contract or, for a rolling call, one that read a root outside `anchor`."""
+    """The summary of the ready answer `body`, or the refusal for an answer outside the contract
+    or, for a rolling call, one that read a root outside `anchor`."""
     if (
         body is None
         or body.get("status") != "ready"
@@ -437,6 +463,32 @@ def _ready_summary(
     except (ValidationError, KeyError) as exc:
         logger.warning("analysis runner summary unreadable: %s", exc)
         return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
+
+
+async def replay_derived(ref: FrameRef) -> FrameRef | None:
+    """The pair of the derived frame `ref` computed again from its stored recipe on
+    its datasets' current versions, or `None` when the runner computes no frame."""
+    response = await runner_holder.get().post(
+        ANALYSIS_PATH, {"tree": ref.model_dump(), "latest": True}
+    )
+    if isinstance(response, ToolRefusal) or response.status_code != httpx2.codes.OK:
+        return None
+    body = _json(response) or {}
+    ref_body = body.get("ref")
+    members = ref_body.get("members") if isinstance(ref_body, Mapping) else None
+    if not isinstance(members, list) or len(members) != 1 or not isinstance(members[0], Mapping):
+        return None
+    member = members[0]
+    spec = member.get("spec")
+    try:
+        return FrameRef.model_validate(
+            {
+                "spec_id": spec.get("spec_id") if isinstance(spec, Mapping) else None,
+                "content_version": member.get("content_version"),
+            }
+        )
+    except ValidationError:
+        return None
 
 
 async def find_anchor(
