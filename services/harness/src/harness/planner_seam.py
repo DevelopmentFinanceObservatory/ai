@@ -1930,9 +1930,10 @@ def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> No
 
     A pin compiled for a calculation's input (`submission.service.AlignedPin`)
     is no reading: admission derives it again on every proposal, a switch of
-    the axis it moved resubmits from the compile itself
-    (`harness.graph.switch`), and a later turn reads its spec_id as any source
-    the translator found (`harness.turn_records.PlanRecord.source_readings`).
+    the axis it moved, or of a row of a requirement pinning it directly,
+    resubmits from the compile itself (`harness.graph.switch`), and a later
+    turn reads its spec_id as any source the translator found
+    (`harness.turn_records.PlanRecord.source_readings`).
     """
     searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]
     if not searched:
