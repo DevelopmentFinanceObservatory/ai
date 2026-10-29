@@ -81,10 +81,12 @@ from google.adk.workflow._errors import NodeInterruptedError
 from planner.agent import run_together
 from planner.plan import (
     AlignedInput,
+    AlignedPin,
     DatasetRequirement,
     Decision,
     PinSource,
     SessionState,
+    aligned_pins,
     alignments,
     compiled_pin,
     definitions_on_record,
@@ -216,7 +218,9 @@ class _Target:
     requirement stating `pin` follows. For an input alignment moved onto a
     compile (`planner.plan.AlignedPin`), the decision on an axis it moved is
     that requirement's alone: `moved_for` is its id, `scope` the compile's,
-    and `block` the compile's spec block.
+    and `block` the compile's spec block. A pin of a compile the planner was
+    not shown carries the compile's `scope` and `block` too, under `moved_for`
+    `None`.
     """
 
     pin: str
@@ -233,7 +237,7 @@ class _Switched:
     the answer Search gave, and the spec_id and scope that answer states.
     `moved_for` names the one requirement it moves, `None` when it moves every
     requirement stating `pin`, and `block` is the compile's spec block for one
-    it moves (`_Target`)."""
+    read from a compile (`_Target`)."""
 
     pin: str
     reading: SearchReading
@@ -419,7 +423,7 @@ async def _switched_plan(
             groups=_groups(
                 target.reading,
                 target.block
-                if target.moved_for is not None
+                if target.block is not None
                 else specs.get(target.pin) or _source_block(sources.get(target.pin), target.pin),
                 pin=target.pin,
             ),
@@ -609,7 +613,9 @@ def _target(
 
     A pin's own scope decision (`planner.plan.is_scope_choice`) moves the pin it
     fixes, a windowed copy read as the pin it copies (`to_origin`), from the
-    newest reading of it with a scope holding the decision's axis. A decision
+    newest reading of it with a scope holding the decision's axis. A pin of a
+    compile the planner was not shown moves from the compile, whose block the
+    card read the row from (`_compile_target`). A decision
     on an axis alignment moved for one requirement (`held`), which only that
     requirement cites and which fixes the pin it states, moves that requirement
     alone, from the compile it is pinned to (`planner.plan.compiled_pin`): its scope
@@ -628,6 +634,9 @@ def _target(
     pinned = decision.fixes.source_spec_id or ""
     pin = to_origin.get(pinned, pinned)
     if is_scope_choice(decision):
+        compiled = None if pin in pin_sources(state) else _held_compile(state, pin)
+        if compiled is not None:
+            return _compile_target(compiled, axis=axis, readings=readings)
         reading, choice = _newest_with(readings, pin=pin, axis=axis)
         assert reading.scope is not None
         return _Target(pin=pin, reading=reading, scope=reading.scope, choice=choice)
@@ -664,6 +673,43 @@ def _target(
         choice=choice,
         moved_for=moved.requirement_id,
         block=compiled.block,
+    )
+
+
+def _held_compile(state: SessionState, pin: str) -> AlignedPin | None:
+    """The newest compile `state` holds under the spec_id `pin` with a spec block,
+    the one whose block `planner.plan.held_sources` offers for `pin`."""
+    return next(
+        (c for c in reversed(aligned_pins(state)) if c.spec_id == pin and c.block is not None),
+        None,
+    )
+
+
+def _compile_target(
+    compiled: AlignedPin, *, axis: str, readings: Sequence[SearchReading]
+) -> _Target:
+    """What switching a requirement's own row on `axis` moves when it pins
+    `compiled` directly: the card read the row from the compile's block
+    (`planner.plan.held_sources`), so the switch posts from that block's scope,
+    under the words and roles of the newest reading of the pin it was compiled
+    from. A declared whole (`AlignedPin.whole_axis`) is no reading of its part's
+    words and keeps that reading's roles under no words.
+
+    Raises:
+        SwitchFailedError: If the block holds no choice on `axis` or no
+            reading of the pin it was compiled from is stored.
+    """
+    scope = part_scope(compiled.spec_id, compiled.block)
+    choice = next((c for c in scope.choices if c.axis == axis), None) if scope else None
+    origin = next((reading for reading in readings if reading.spec_id == compiled.origin), None)
+    if scope is None or choice is None or origin is None:
+        raise SwitchFailedError(
+            "Search's record of this source is gone.", code=SCOPE_CHOICE_NOT_APPLIED
+        )
+    if compiled.whole_axis is not None:
+        origin = origin.model_copy(update={"text": None})
+    return _Target(
+        pin=compiled.spec_id, reading=origin, scope=scope, choice=choice, block=compiled.block
     )
 
 
@@ -819,8 +865,8 @@ def _reading_digest(item: _Switched, *, axis: str) -> dict[str, Any]:
     settled stay the planner's through the switch, less the switched axis,
     which is now the user's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`):
     those its words settled on the reading (`SearchReading.planner_axes`), or,
-    for an input alignment moved, those the compile's block marks, every axis
-    alignment moved among them.
+    for a source read from a compile, those the compile's block marks, every
+    axis alignment moved among them.
     """
     digest = resolver_digest(item.envelope)
     (part,) = digest.get("part_digests") or [{}]

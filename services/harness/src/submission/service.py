@@ -514,8 +514,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     previous, rounds = resolved
     held_copies = windowed_pins(view.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
-    # Alignments belong to the plan this call amends. A fresh plan states its own pins.
-    held_alignments = alignments(view.state) if previous is not None else {}
+    # Alignments belong to the plan this call amends. A fresh plan states its own
+    # pins, and its admission replaces every alignment on record.
+    recorded_alignments = alignments(view.state)
+    held_alignments = recorded_alignments if previous is not None else {}
     if to_origin:
         _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
     evidence_requirements = [
@@ -873,7 +875,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         plan=plan,
         rounds=rounds,
         windowed_pins=tuple(copies) if copies or held_copies else None,
-        alignments=tuple(entries.values()) if entries or held_alignments else None,
+        alignments=tuple(entries.values()) if entries or recorded_alignments else None,
     )
 
 
