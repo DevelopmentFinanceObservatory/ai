@@ -79,6 +79,7 @@ from planner.plan import (
     UnsupportedOperation,
     UnsupportedPlanError,
     WholeIsItsMemberError,
+    WholeOf,
     _build_shapes,
     authored_text,
     cut_user_text,
@@ -95,6 +96,7 @@ from planner.plan import (
     scope_choice_slot,
     settle_decisions,
     split_of,
+    whole_of_fault,
     windowed_pin,
 )
 from planner.proof import mismatches
@@ -7157,3 +7159,35 @@ def test_an_ask_across_years_names_a_listed_ask_once(
 ) -> None:
     with pytest.raises(ValidationError, match="across years"):
         _creditor_plan(decision, ("creditor",), across_years=numbers)
+
+
+@pytest.mark.parametrize(
+    ("part_entities", "asks_for_roles"),
+    [
+        pytest.param([Entity(name="United States", role=None)], True, id="part-entity-has-no-role"),
+        pytest.param(
+            [Entity(name="Kenya", role="recipient")], False, id="part-names-only-the-other-side"
+        ),
+    ],
+)
+def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
+    part_entities: list[Entity], asks_for_roles: bool
+) -> None:
+    period = Period(start=2023, end=2023)
+    part = DatasetRequirement(
+        id="part", decision_ids=["measure"], measure="aid", entities=part_entities, period=period
+    )
+    whole = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure="total aid",
+        entities=part_entities,
+        across=("donor",),
+        period=period,
+        whole_of=WholeOf(part="part", axis="donor"),
+    )
+
+    reason = whole_of_fault(whole, {"part": part, "whole": whole})
+
+    assert reason is not None
+    assert ("state each entity's role" in reason) is asks_for_roles

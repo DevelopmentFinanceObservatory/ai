@@ -557,8 +557,7 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     what a resubmit posts of it (`compiler.sources.readable_wire_groups`), which a
     later resubmit of the reading, such as a chip's, posts again. Where what one
     posts is not readable they are none, with a warning logged, and
-    `entity_groups_unreadable` is true, so that resubmit refuses rather than post
-    the part without them. These are keys
+    `entity_groups_unreadable` is true, and that resubmit refuses. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a

@@ -1237,6 +1237,16 @@ def test_summed_members_state_only_the_residuals_search_names(
     )
 
 
+def test_an_unknown_answer_still_states_that_the_published_figure_can_differ() -> None:
+    group = {"origin": {"ref": "DAC", "label": "DAC members", "total": None, "sum_differs": True}}
+    (read,) = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=group)).groups
+
+    assert members_reading(read, answer=None) == (
+        f"The figures for {read.label} come from its members' figures."
+        + _PUBLISHED.format(label=read.label)
+    )
+
+
 def test_a_stored_set_reads_the_residuals_it_was_stored_with() -> None:
     stated = {"ref": "africa", "label": "Africa", "total": None}
     blocks = [

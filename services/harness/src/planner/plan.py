@@ -2388,6 +2388,12 @@ def _entity_whole_fault(
     """
     side = role_party(axis)
     named = [e for e in part.entities if e.role is not None and role_party(e.role) == side]
+    if not named and (roleless := [e.name for e in part.entities if e.role is None]):
+        return (
+            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and the side of "
+            f"{part.id!r}'s entities ({', '.join(sorted(roleless))}) is not stated; state each "
+            "entity's role, donor or recipient"
+        )
     if not named:
         return (
             f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and {part.id!r} names "

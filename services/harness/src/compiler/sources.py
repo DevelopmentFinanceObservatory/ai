@@ -1269,20 +1269,21 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     set with no published total, the sentence names none.
     Where Search says the source publishes its own figure for the group
     (`ResolvedGroup.sum_differs`), a second sentence says that figure can
-    differ, so the residuals' list ends with the first.
+    differ, after every answer's sentence but `EACH`'s, so the residuals' list
+    ends with the first.
     """
     if group.reads_total:
         return None
-    if answer is None:
-        return f"The figures for {group.label} come from its members' figures."
-    if answer is MembersAnswer.EACH:
-        return f"The figures for {group.label} are its members' figures, each on its own."
     published = (
         f" The source publishes its own figure for {group.label}, "
         "which can differ from one built from its members."
         if group.sum_differs
         else ""
     )
+    if answer is None:
+        return f"The figures for {group.label} come from its members' figures.{published}"
+    if answer is MembersAnswer.EACH:
+        return f"The figures for {group.label} are its members' figures, each on its own."
     built = "adds up" if answer is MembersAnswer.SUMMED else "is computed from"
     return (
         f"The figure for {group.label} {built} its members' figures{_left_out(group)}.{published}"
