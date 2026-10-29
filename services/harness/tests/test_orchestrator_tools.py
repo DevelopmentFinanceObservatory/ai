@@ -1829,6 +1829,56 @@ async def test_make_charts_names_every_series_of_a_quotient_with_a_composed_unit
     assert write["select"] == {"stat_var": series}
 
 
+async def test_make_charts_reads_a_derived_frame_once_a_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two cards on one quotient each read its rows for a covering select and a
+    drawn period, and dfo-apis serves the file once for the whole call."""
+    reads: list[Any] = []
+    read_file = orchestrator_tools.derived_file
+
+    async def counting(ref: Any) -> Any:
+        reads.append(ref)
+        return await read_file(ref)
+
+    monkeypatch.setattr(orchestrator_tools, "derived_file", counting)
+    store = InMemoryMaterialisationStore()
+    set_store(store)
+    try:
+        aid, population = await _held_per_capita_sides(store)
+        result = await analysis_verbs.quotient_of(
+            frame_ref=aid.model_dump(), denominator_frame_ref=population.model_dump()
+        )
+        assert result.is_error is False, result.content[0].text
+        quotient = {
+            "spec_id": result.structured_content["spec_id"],
+            "content_version": result.structured_content["content_version"],
+        }
+        series = f"dcid:{quotient['spec_id']}"
+        view = {"dimensions": [{"name": "stat_var", "values": [series], "plural": False}]}
+        executor = FakeExecutor()
+        tools, ctx = _tools(executor=executor)
+        register_frames(ctx.state, [(quotient, view, None)])
+
+        drawn = await tools["make_charts"](
+            [
+                {
+                    "frame": frame_id_for(quotient),
+                    "type": chart_type,
+                    "title": "Aid per person",
+                    "select_json": "{}",
+                }
+                for chart_type in ("line_chart", "table")
+            ],
+            ctx,
+        )
+    finally:
+        set_store(None)
+
+    assert all("error" not in chart for chart in drawn["charts"]), drawn
+    assert len(reads) == 1
+
+
 async def test_make_charts_refuses_an_empty_list_and_says_it_cannot_clear_the_canvas():
     """An empty call drew nothing and removed nothing; a bare `{"charts": []}`
     read as success, and the model told the user the canvas was cleared."""

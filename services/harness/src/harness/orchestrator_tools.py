@@ -47,7 +47,9 @@ import json
 import logging
 import re
 import weakref
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
@@ -65,7 +67,7 @@ from common.place_type import (
     kind_column,
     type_column,
 )
-from common.row_budget import row_budget
+from common.row_budget import RowBudgetExhausted, row_budget
 from compiler.sources import (
     default_reading,
     is_family,
@@ -123,7 +125,7 @@ from harness.chart_binding import (
     top_members,
 )
 from harness.conversation import current_user_message
-from harness.derived_frames import derived_file
+from harness.derived_frames import DerivedFile, derived_file
 from harness.dfo_faq import (
     CANNOT_DESCRIBE_DFO,
     DfoFaqUnavailable,
@@ -458,18 +460,55 @@ async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[_FrameRows], T]
         return await claim.hold_through(asyncio.to_thread(rows_work))
 
 
+# The derived files one make_charts call has read, by frame pair, `None` for a
+# read that failed, or no mapping outside a call. A chart can read the same frame
+# for its drawn period, its ranking, its coordinates and its covering select, and
+# a derived frame is immutable, so each pair is read once a call, a failed read
+# included. The held bytes are compressed Parquet, and they go when the call ends.
+_derived_reads: ContextVar[dict[tuple[str, str], DerivedFile | None] | None] = ContextVar(
+    "derived_reads", default=None
+)
+
+
+@contextmanager
+def _derived_reads_once() -> Iterator[None]:
+    """Read each derived frame pair at most once inside the block."""
+    token = _derived_reads.set({})
+    try:
+        yield
+    finally:
+        _derived_reads.reset(token)
+
+
+async def _read_derived(ref: Mapping[str, Any]) -> DerivedFile | None:
+    """The derived file `ref` names, or `None` when it could not be read, from
+    this call's reads when it read the pair before."""
+    pair = (str(ref["spec_id"]), str(ref["content_version"]))
+    reads = _derived_reads.get()
+    if reads is not None and pair in reads:
+        return reads[pair]
+    try:
+        derived = await derived_file(FrameRef(spec_id=pair[0], content_version=pair[1]))
+    except Exception:
+        # As the store's read in `_frame_work`: an unread frame leaves the select as written.
+        logger.warning("make_charts: could not read %s from dfo-apis", ref, exc_info=True)
+        derived = None
+    if reads is not None:
+        reads[pair] = derived
+    return derived
+
+
 async def _derived_frame_work[T](
     ref: Mapping[str, Any], work: Callable[[_FrameRows], T]
 ) -> T | None:
     """`_frame_work` for a derived frame, read from dfo-apis."""
+    derived = await _read_derived(ref)
+    if derived is None:
+        return None
     try:
-        derived = await derived_file(
-            FrameRef(spec_id=ref["spec_id"], content_version=ref["content_version"])
-        )
         claim = row_budget().claim(derived.num_rows)
-    except Exception:
-        # As the store's read above: an unread frame leaves the select as written.
-        logger.warning("make_charts: could not read %s from dfo-apis", ref, exc_info=True)
+    except RowBudgetExhausted:
+        logger.warning("make_charts: no row budget left for %s", ref, exc_info=True)
         return None
     with claim:
 
@@ -2432,7 +2471,8 @@ def build_orchestrator_tools(
                     "make_charts needs at least one chart. It only adds charts; it "
                     "cannot remove or clear cards on the canvas. Nothing changed.",
                 )
-            drawn = await _draw(charts, tool_context)
+            with _derived_reads_once():
+                drawn = await _draw(charts, tool_context)
         result: dict[str, Any] = {"charts": drawn}
         if len(charts) > MAX_CHARTS_PER_CALL:
             result["not_drawn"] = (

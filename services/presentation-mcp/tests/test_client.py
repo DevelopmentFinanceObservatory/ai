@@ -24,6 +24,7 @@ import httpx2
 import pytest
 import rfc8785
 from common.apis_auth import ApisAuthError
+from common.caller import CALLER_HEADER, supplied_caller
 from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
@@ -42,7 +43,12 @@ from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, s
 from dfo_frame_grammar import Frame
 from presentation_mcp import client as client_module
 from presentation_mcp import frame_publish
-from presentation_mcp.client import PRINCIPAL_HEADER, WRITE_TOKEN_HEADER, PlatformAssembler
+from presentation_mcp.client import (
+    CALLER_PRINCIPAL_HEADER,
+    PRINCIPAL_HEADER,
+    WRITE_TOKEN_HEADER,
+    PlatformAssembler,
+)
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody
 from presentation_mcp.platform_contract import (
@@ -249,6 +255,7 @@ def _settings(
     upstream_max_attempts: int = 3,
     upstream_backoff_base_s: float = 0.01,
     datasets_first_party_principal: str | None = _PUBLISH_PRINCIPAL,
+    dfo_caller_principal: str | None = None,
 ) -> Settings:
     """Configured with a publish principal by default, so every existing
     publish-mechanics test here (path, body, memoisation, ...) exercises
@@ -263,6 +270,7 @@ def _settings(
         upstream_max_attempts=upstream_max_attempts,
         upstream_backoff_base_s=upstream_backoff_base_s,
         datasets_first_party_principal=datasets_first_party_principal,
+        dfo_caller_principal=dfo_caller_principal,
     )
 
 
@@ -1198,33 +1206,88 @@ async def test_publish_call_carries_the_configured_principal_header(
     assert PRINCIPAL_HEADER not in frame_request.headers
 
 
+_CALLER_PRINCIPAL = "website-secret"
+_ADDRESS_CALLER = "ip:" + "0123456789abcdef" * 2
+
+
 @pytest.mark.parametrize(
-    ("principal", "sent"),
-    [(_PUBLISH_PRINCIPAL, _PUBLISH_PRINCIPAL), (None, None)],
-    ids=["configured", "unconfigured"],
+    ("caller", "publish_principal", "caller_principal", "named", "sent"),
+    [
+        pytest.param(
+            Caller.FIRST_PARTY,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            _ADDRESS_CALLER,
+            {PRINCIPAL_HEADER: _PUBLISH_PRINCIPAL},
+            id="first-party-exempt",
+        ),
+        pytest.param(
+            Caller.FIRST_PARTY, None, _CALLER_PRINCIPAL, _ADDRESS_CALLER, {}, id="first-party-unset"
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            _ADDRESS_CALLER,
+            {CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL, CALLER_HEADER: _ADDRESS_CALLER},
+            id="external-named-by-website",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            None,
+            _ADDRESS_CALLER,
+            {},
+            id="external-no-caller-principal",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            "conversation:" + "0" * 32,
+            {},
+            id="external-not-an-address",
+        ),
+        pytest.param(
+            Caller.EXTERNAL, _PUBLISH_PRINCIPAL, _CALLER_PRINCIPAL, None, {}, id="external-unnamed"
+        ),
+    ],
 )
 @pytest.mark.parametrize("call", ["create", "revise"])
-async def test_a_component_write_carries_the_configured_principal(
-    call: str, principal: str | None, sent: str | None
+async def test_a_component_write_names_whose_card_allowance_it_spends(
+    call: str,
+    caller: Caller,
+    publish_principal: str | None,
+    caller_principal: str | None,
+    named: str | None,
+    sent: dict[str, str],
 ) -> None:
-    """apis spends a per-caller card allowance on a create or revise and exempts
-    the publish principal, so both writes name it when one is configured."""
+    """dfo-apis spends a per-caller card allowance on a create or revise and
+    exempts the publish principal. Only a first-party write carries it. An
+    external write names the website's caller beside the caller principal, or
+    nothing, so dfo-apis counts it against this service's address."""
     requests, handler = _counting_handler(httpx2.Response(200, json=WRITE_BODY))
-    settings = _settings(datasets_first_party_principal=principal)
+    settings = _settings(
+        datasets_first_party_principal=publish_principal, dfo_caller_principal=caller_principal
+    )
 
-    async with _assembler(handler, settings=settings) as assembler:
-        if call == "create":
-            reply = await assembler.create_component(intent=INTENT, caller=Caller.EXTERNAL)
-        else:
-            reply = await assembler.revise_component(
-                component_id="cmp_1",
-                patch={"title": "New"},
-                write_token=WRITE_TOKEN,
-                caller=Caller.EXTERNAL,
-            )
+    with supplied_caller(named) if named is not None else contextlib.nullcontext():
+        async with _assembler(handler, settings=settings) as assembler:
+            if call == "create":
+                reply = await assembler.create_component(intent=INTENT, caller=caller)
+            else:
+                reply = await assembler.revise_component(
+                    component_id="cmp_1",
+                    patch={"title": "New"},
+                    write_token=WRITE_TOKEN,
+                    caller=caller,
+                )
 
     assert isinstance(reply, WriteReply)
-    assert requests[0].headers.get(PRINCIPAL_HEADER) == sent
+    allowance_headers = (PRINCIPAL_HEADER, CALLER_PRINCIPAL_HEADER, CALLER_HEADER)
+    assert {
+        name: requests[0].headers[name] for name in allowance_headers if name in requests[0].headers
+    } == sent
 
 
 async def test_an_ops_ref_reads_from_the_platform_with_no_principal_configured(
@@ -1940,7 +2003,8 @@ async def test_no_session_header_goes_to_the_platform() -> None:
     ]
 
 
-async def test_caller_never_reaches_the_wire() -> None:
+async def test_a_first_party_write_sends_no_caller() -> None:
+    """The caller kind stays local, and a first-party write names no caller."""
     requests, handler = _counting_handler(httpx2.Response(201, json=WRITE_BODY))
 
     async with _assembler(handler) as assembler:

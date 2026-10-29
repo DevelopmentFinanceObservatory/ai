@@ -7,7 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 from common.settings import FrameServiceSettings
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 
 # Letters, digits, and hyphens in dot-separated labels. The origin goes into a
 # Content-Security-Policy source list, where a space, `;`, quote, or `*` would
@@ -109,19 +109,30 @@ class Settings(FrameServiceSettings):
     to, sent as the `x-dfo-principal` header (`client.PRINCIPAL_HEADER`) on
     the call `client.PlatformAssembler._ensure_published_pair` issues to
     `POST /api/datasets/frames/publish`, which apis' publish door authorizes
-    by it (`datasets_api.doors.publish`), and on every component create and
-    revise. apis spends one unit of a per-caller daily card allowance on a
-    create or revise and exempts this principal, so without it every
-    conversation through this service shares one client address's allowance.
-    No other apis route this service calls reads the header. Must equal
+    by it (`datasets_api.doors.publish`), and on a component create and revise
+    that the harness makes for a Studio conversation (`Caller.FIRST_PARTY`).
+    apis spends one unit of a per-caller daily card allowance on a create or
+    revise and exempts a principal holding the publish grant, so Studio's
+    writes spend none. An external caller's write never carries it
+    (`client.PlatformAssembler._card_write_headers`). No other apis route this
+    service calls reads the header. Must equal
     whatever the apis deployment's own `DATASETS_FIRST_PARTY_PRINCIPAL` env
     var holds. The two are separate deployments, and nothing keeps them in
     sync but a deployer setting the same value on both. `None` (the default,
-    including a blank env value) sends no header, so cards spend the client
-    address's allowance, and this service publishes nothing ahead of a read
+    including a blank env value) sends no header, so Studio's cards spend the
+    allowance of the address dfo-apis sees, and this service publishes nothing ahead of a read
     or a write, since a frame_ref an analysis verb returns is one dfo-apis'
     analysis runner published already and the platform answers for it.
     `publish_frame` refuses `publish_not_configured` without one.
+
+    `dfo_caller_principal` (`DFO_CALLER_PRINCIPAL`) is the secret dfo-apis
+    shares with the website, the same value analysis-mcp reads. An external
+    caller's component create or revise whose request the website named as
+    `x-dfo-caller: ip:<digest>` carries it beside that caller
+    (`x-dfo-caller-principal`, `x-dfo-caller`), so dfo-apis counts the card
+    against that client's allowance. Unset or blank, or for a caller named any
+    other way, the write carries neither header, and dfo-apis counts it against
+    the address it sees for this service, one allowance every such caller shares.
 
     `presentation_public_url` is the URL at which this service's routes are
     reachable from a browser, mount path included: the co-mounted harness
@@ -163,17 +174,18 @@ class Settings(FrameServiceSettings):
     frame_store_bucket: str | None = None
     frame_store_verify_content_version: bool = False
     datasets_first_party_principal: str | None = None
+    dfo_caller_principal: SecretStr | None = None
     presentation_public_url: str = Field(default="", validate_default=True)
     chart_render_timeout_s: float = 2.0
     chart_worker_warm: bool = True
 
-    @field_validator("datasets_first_party_principal", mode="before")
+    @field_validator("datasets_first_party_principal", "dfo_caller_principal", mode="before")
     @classmethod
     def _blank_principal_is_unset(cls, value: object) -> object:
         """A blank env value means "unconfigured", matching
         `BaseServiceSettings._blank_mcp_token_is_unset`'s own precedent --
-        an env file that sets `DATASETS_FIRST_PARTY_PRINCIPAL=` (present but
-        empty) must degrade the same way as leaving it out entirely, not
+        an env file that sets `DATASETS_FIRST_PARTY_PRINCIPAL=` or
+        `DFO_CALLER_PRINCIPAL=` (present but empty) must degrade the same way as leaving it out entirely, not
         send an empty header value apis' own principal check would
         refuse as a non-matching principal instead of as "not configured".
         """

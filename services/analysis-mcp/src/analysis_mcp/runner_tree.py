@@ -25,13 +25,17 @@ refuses `frame_integrity_failed`, and any other failed read of it
 no other option, so a frame fetched with one refuses `rendering_not_recorded`.
 
 The runner checks every rolling literal against the latest period it finds
-itself, so no tree carries `anchor_key`. The key names the anchor record `resolve_anchor` stored, whose `roots` are the frames
-the anchor route was asked about. A rolling call sends them as the request's
-`anchor_roots` (`Tree.anchor_roots`), each the root node `root_node` gives, so the
-runner takes the latest period over the roots the literals were written from,
-such as both sides of a pairing whose one side the call grows. A key that names
-no readable record, or a record naming a derived (`ops_`) root, refuses
-`rolling_anchor_unresolved` before any call.
+itself, so no tree carries `anchor_key`. The key names the anchor record
+`resolve_anchor` stored, whose `roots` are the frames the anchor route was asked
+about. A rolling call sends them as the request's `anchor_roots`
+(`runner_client.Anchor`), each the root node `root_node` gives, so the runner
+takes the latest period over the roots the literals were written from, such as
+both sides of a pairing whose one side the call grows. The anchor roots stay
+apart from the frames the call passed (`Tree.refs_by_root`), so a refusal over
+one of them names the record. A key that names no readable record, a record
+naming a derived (`ops_`) root, and a call whose `rolling.population` is not
+the record's populations refuse `rolling_anchor_unresolved` before any call. The
+answer is checked to have read no root outside the record (`runner_client`).
 """
 
 from __future__ import annotations
@@ -50,8 +54,8 @@ from common.materialisation import (
 )
 
 from analysis_mcp.identity import OpSpecVariant
-from analysis_mcp.op_spec import Verb
-from analysis_mcp.runner_client import DEFAULT_RETRY_AFTER_S
+from analysis_mcp.op_spec import Populations, Verb
+from analysis_mcp.runner_client import DEFAULT_RETRY_AFTER_S, Anchor, Pair
 from analysis_mcp.tool_errors import ToolRefusal
 
 logger = logging.getLogger(__name__)
@@ -72,17 +76,16 @@ _READ_OPTIONS = frozenset(
     {"format", "bundle", "layout", "columns", "without_party_totals", "groupby"}
 )
 
-type Pair = tuple[str, str]
-
 
 @dataclass(frozen=True, kw_only=True)
 class Tree:
-    """A request tree, and the frame ref each of its roots stands for, by the pair
-    the root names: the runner's refusals name a root by that pair."""
+    """A request tree, the caller's frame refs each of its roots stands for, by the
+    pair the root names (the runner's refusals name a root by that pair), and a
+    rolling call's anchor record."""
 
     node: dict[str, Any]
-    refs_by_root: Mapping[Pair, FrameRef]
-    anchor_roots: tuple[dict[str, Any], ...] = ()
+    refs_by_root: Mapping[Pair, tuple[FrameRef, ...]]
+    anchor: Anchor | None = None
 
 
 async def _mint_record(ref: FrameRef) -> MintRecord | None | ToolRefusal:
@@ -152,12 +155,9 @@ def _sides(op_spec: OpSpecVariant) -> tuple[FrameRef, FrameRef | None]:
     return op_spec.frame_ref, second
 
 
-async def _anchor_roots(
-    anchor_key: str, refs_by_root: dict[Pair, FrameRef]
-) -> tuple[dict[str, Any], ...] | ToolRefusal:
-    """The root node of each root of the anchor record under `anchor_key`, each
-    pair added to `refs_by_root`, or the refusal for a record or root the runner
-    cannot be sent."""
+async def _anchor(anchor_key: str, *, populations: Populations) -> Anchor | ToolRefusal:
+    """The anchor record under `anchor_key` as a rolling call over `populations`
+    sends it, or the refusal for a record the call cannot be sent with."""
     try:
         record = await get_store().get_anchor_record(anchor_key)
     except AnchorRecordIntegrityError as exc:
@@ -170,7 +170,15 @@ async def _anchor_roots(
             reason=f"no record is stored under {anchor_key}",
             context={"anchor_key": anchor_key},
         )
+    stated = [population.model_dump(mode="json") for population in populations]
+    if stated != [population.model_dump(mode="json") for population in record.populations]:
+        return ToolRefusal.rolling_anchor_unresolved(
+            detail="populations_differ",
+            reason=f"rolling.population is not the populations {anchor_key} was resolved over",
+            context={"anchor_key": anchor_key},
+        )
     nodes: list[dict[str, Any]] = []
+    pairs: set[Pair] = set()
     for ref in record.roots:
         if ref.spec_id.startswith("ops_"):
             # The runner takes a latest period over dataset roots only, and
@@ -185,8 +193,8 @@ async def _anchor_roots(
             return root
         node, pair = root
         nodes.append(node)
-        refs_by_root.setdefault(pair, ref)
-    return tuple(nodes)
+        pairs.add(pair)
+    return Anchor(key=anchor_key, nodes=tuple(nodes), pairs=frozenset(pairs))
 
 
 async def verb_tree(op_spec: OpSpecVariant, *, anchor_key: str | None = None) -> Tree | ToolRefusal:
@@ -195,7 +203,7 @@ async def verb_tree(op_spec: OpSpecVariant, *, anchor_key: str | None = None) ->
     slots = {"verb", "frame_ref", *_SECOND_SLOT.values()}
     arguments = op_spec.model_dump(mode="json", exclude=slots, exclude_none=True)
     inputs: dict[str, Any] = {}
-    refs_by_root: dict[Pair, FrameRef] = {}
+    refs_by_root: dict[Pair, tuple[FrameRef, ...]] = {}
     data, other = _sides(op_spec)
     for name, ref in (("data", data), ("other", other)):
         if ref is None:
@@ -204,12 +212,15 @@ async def verb_tree(op_spec: OpSpecVariant, *, anchor_key: str | None = None) ->
         if isinstance(root, ToolRefusal):
             return root
         inputs[name], pair = root
-        refs_by_root[pair] = ref
-    anchor_roots: tuple[dict[str, Any], ...] = ()
-    if anchor_key is not None:
-        anchored = await _anchor_roots(anchor_key, refs_by_root)
+        held = refs_by_root.get(pair, ())
+        refs_by_root[pair] = held if ref in held else (*held, ref)
+    anchor: Anchor | None = None
+    # `op_spec.with_anchor_key` gives a key to every rolling call and to no other.
+    rolling = getattr(op_spec, "rolling", None)
+    if anchor_key is not None and rolling is not None:
+        anchored = await _anchor(anchor_key, populations=rolling.population)
         if isinstance(anchored, ToolRefusal):
             return anchored
-        anchor_roots = anchored
+        anchor = anchored
     node = {"verb": str(op_spec.verb), "arguments": arguments, "inputs": inputs}
-    return Tree(node=node, refs_by_root=refs_by_root, anchor_roots=anchor_roots)
+    return Tree(node=node, refs_by_root=refs_by_root, anchor=anchor)

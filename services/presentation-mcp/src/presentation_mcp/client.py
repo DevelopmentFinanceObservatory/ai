@@ -7,10 +7,11 @@ refusal's `code` intact, a span per call, injectable transport and sleep, and
 surface probe: the server's startup `release()` fetch already proves the
 surface is mounted before any tool call reaches this client.
 
-The `caller` kwarg on `create_component`/`revise_component` is accepted
-because the `Assembler` Protocol requires it, and never put on the wire --
-it is presentation-mcp's own local truth about its own transport (external
-vs. first-party), not something the platform needs to know.
+The `caller` kwarg on `create_component`/`revise_component` is
+presentation-mcp's own reading of the transport a write arrived on
+(`server._transport_caller`), and decides which caller headers the write
+carries (`PlatformAssembler._card_write_headers`). The kind itself never goes
+on the wire.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
+from common.caller import CALLER_HEADER, current_caller
 from common.materialisation import FrameRef, get_store
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
@@ -97,12 +99,22 @@ _RECIPE_CONFLICT_CONSTRAINTS = frozenset(
 
 # Sent on the three calls whose apis route reads it: the publish call
 # (`_ensure_published_pair`'s POST to `_PUBLISH_ROUTE`, which
-# `datasets_api.doors.publish` authorizes by it), and a component create and
-# revise. apis spends one unit of a per-caller daily card allowance on each
-# create and revise, and exempts a principal holding the publish grant, so
-# without it every conversation through this service shares the one client
-# address's allowance. No other route reads it, so no other call carries it.
+# `datasets_api.doors.publish` authorizes by it), and a first-party component
+# create and revise. apis spends one unit of a per-caller daily card allowance
+# on each create and revise, and exempts a principal holding the publish grant,
+# so Studio's conversations, which share the harness's one address, spend
+# none. No other route reads it, so no other call carries it.
 PRINCIPAL_HEADER = "x-dfo-principal"
+
+# Sent beside `CALLER_HEADER` on an external caller's create and revise, when
+# the website named that caller by address: the secret dfo-apis shares with
+# the website, which vouches for the caller it names
+# (`dfo_platform.caller.resolve_caller`).
+CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
+
+# The form of a caller the website named by its client's address. dfo-apis
+# accepts no other form beside `CALLER_PRINCIPAL_HEADER`.
+_ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
 
 # Sent only on a revise: the component's write token, which apis checks
 # before it merges a patch.
@@ -408,6 +420,11 @@ class PlatformAssembler:
         self._read_timeout_s = settings.upstream_read_timeout_s
         self._connect_timeout_s = settings.upstream_connect_timeout_s
         self._publish_principal = settings.datasets_first_party_principal
+        self._caller_principal = (
+            None
+            if settings.dfo_caller_principal is None
+            else settings.dfo_caller_principal.get_secret_value()
+        )
         self._max_frame_rows = settings.max_frame_rows
         self._auth = auth
         self._sleep = sleep
@@ -465,8 +482,8 @@ class PlatformAssembler:
         `write_component` again, which mints a fresh token and can store a
         second draft.
 
-        `caller` is accepted for Protocol conformance and never put on the wire
-        (see this module's own docstring).
+        `caller` picks the headers that name who the card counts against
+        (`_card_write_headers`).
         """
         write_token = _new_write_token()
         # Publish before create: `create_component` never validates
@@ -484,7 +501,7 @@ class PlatformAssembler:
                 _COMPONENTS_ROUTE,
                 route=_COMPONENTS_ROUTE,
                 json={"intent": dict(intent), "write_token": write_token},
-                principal=self._publish_principal,
+                headers=self._card_write_headers(caller),
             )
         except PlatformError as exc:
             return self._refusal(exc)
@@ -498,8 +515,8 @@ class PlatformAssembler:
         write_token: str,
         caller: Caller,
     ) -> WriteReply | Refusal:
-        # `caller` is accepted for Protocol conformance and never put on the
-        # wire (see this module's own docstring). A revise names the component
+        # `caller` picks the headers that name who the card counts against
+        # (`_card_write_headers`). A revise names the component
         # it targets and merges the same patch into the same stored intent
         # every time -- a repeated identical patch is the platform's
         # structural no-op, so it is safe to retry.
@@ -520,12 +537,29 @@ class PlatformAssembler:
                 path,
                 route=_COMPONENT_ROUTE,
                 json={"intent": dict(patch)},
-                principal=self._publish_principal,
-                headers={WRITE_TOKEN_HEADER: write_token},
+                headers={**self._card_write_headers(caller), WRITE_TOKEN_HEADER: write_token},
             )
         except PlatformError as exc:
             return self._refusal(exc)
         return self._write_reply(response.json())
+
+    def _card_write_headers(self, caller: Caller) -> dict[str, str]:
+        """The headers that tell dfo-apis whose card allowance a create or revise spends.
+
+        A first-party write, Studio's, carries the publish principal, which
+        dfo-apis exempts. An external write carries the caller principal and
+        the caller the website named, when this process holds the principal
+        and the request's `x-dfo-caller` is an `ip:` digest, so dfo-apis
+        counts that client. Any other external write carries neither, and
+        dfo-apis counts it against the address it sees for this service.
+        """
+        if caller is Caller.FIRST_PARTY:
+            principal = self._publish_principal
+            return {} if principal is None else {PRINCIPAL_HEADER: principal}
+        named = current_caller()
+        if self._caller_principal is None or named is None or not _ADDRESS_CALLER.fullmatch(named):
+            return {}
+        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: named}
 
     async def get_frame_view(
         self,
@@ -972,8 +1006,9 @@ class PlatformAssembler:
                 attempt. The publish call sends its body this way.
             params: Query parameters.
             principal: The `x-dfo-principal` header value, or `None` to send
-                none at all. Set on the publish call and on a component create
-                and revise only. `PRINCIPAL_HEADER`'s comment says why.
+                none at all. Set on the publish call only; a component create
+                and revise send theirs through `headers`
+                (`_card_write_headers`). `PRINCIPAL_HEADER`'s comment says why.
             headers: Further request headers, sent on every attempt.
                 `revise_component` sends `WRITE_TOKEN_HEADER` here.
 

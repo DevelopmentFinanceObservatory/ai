@@ -11,8 +11,9 @@ from typing import Any
 import httpx2
 import pytest
 from analysis_mcp import verbs
-from analysis_mcp.runner_client import RunnerClient, runner_holder
-from analysis_mcp.summary import VerbSummary
+from analysis_mcp.digest import render_summary_digest
+from analysis_mcp.runner_client import RunnerClient, read_derived_manifest, runner_holder
+from analysis_mcp.summary import LIST_CAP, VerbSummary
 from common.caller import supplied_caller
 from common.materialisation import (
     AnchorRecord,
@@ -75,6 +76,7 @@ def _install(
         RunnerClient(
             base_url="http://runner.test",
             timeout_s=5.0,
+            read_timeout_s=5.0,
             caller_principal=principal,
             auth=_no_token,
             transport=httpx2.MockTransport(runner.handle),
@@ -96,14 +98,26 @@ def store() -> Iterator[InMemoryMaterialisationStore]:
     set_store(None)
 
 
-def _recorded_ready() -> dict[str, Any]:
-    """A 200 body dfo-apis' runner gave, from the recorded replies."""
+def _recorded_ready(verb: str | None = None) -> dict[str, Any]:
+    """A 200 body dfo-apis' runner gave, for a call of `verb` when given, from the
+    recorded replies."""
     replies = json.loads(REPLIES_PATH.read_text())
     return next(
         reply["body"]
         for key, reply in replies.items()
-        if reply["status"] == 200 and key.startswith("/api/datasets/analysis {")
+        if reply["status"] == 200
+        and key.startswith("/api/datasets/analysis {")
+        and verb in (None, reply["body"]["summary"]["verb"])
     )
+
+
+def _reading(body: dict[str, Any], *roots: dict[str, str]) -> dict[str, Any]:
+    """The ready answer `body` with its ref naming `roots` as the roots it read."""
+    members = [
+        {**member, "roots": [{**root, "rendering": {"format": "parquet"}} for root in roots]}
+        for member in body["ref"]["members"]
+    ]
+    return {**body, "ref": {**body["ref"], "members": members}}
 
 
 # The tree a call sends -----------------------------------------------------------
@@ -152,6 +166,38 @@ _ROLLING = {
     "window_end": {"anchor": "latest", "offset": 0, "rule": "half1"},
     "population": [{"spec_id": _SPEC, "bindings": {}}],
 }
+_POPULATIONS = [{"spec_id": _SPEC, "bindings": {}}, {"spec_id": _OTHER_SPEC, "bindings": {}}]
+_OTHER_DATASET = {"spec_id": _OTHER_SPEC, "content_version": _DATASET_CV}
+
+
+async def _anchor_over_both(store: InMemoryMaterialisationStore) -> AnchorRecord:
+    """An anchor record over `_FRAME` and `_OTHER_FRAME`, the second a fetched frame
+    of the dataset version `_OTHER_DATASET` read with an enrichment column."""
+    await store.put_mint_record(
+        MintRecord(
+            frame=FrameRef(**_OTHER_FRAME),
+            dataset=FrameRef(**_OTHER_DATASET),
+            options={"format": "parquet", "columns": ["observationAbout_type"]},
+        )
+    )
+    record = AnchorRecord(
+        populations=_POPULATIONS,
+        roots=(FrameRef(**_FRAME), FrameRef(**_OTHER_FRAME)),
+        rule="half1",
+        period="2022",
+    )
+    await store.put_anchor_record(record)
+    return record
+
+
+async def _rolling_growth(frame_ref: dict[str, str], anchor_key: str) -> Any:
+    return await verbs.growth(
+        frame_ref=frame_ref,
+        window_start="2021",
+        window_end="2022",
+        rolling={**_ROLLING, "population": _POPULATIONS},
+        anchor_key=anchor_key,
+    )
 
 
 async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
@@ -160,23 +206,7 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
     # The record was resolved over a second root beside the call's own frame, as
     # over both sides of a pairing whose one side the call grows. The second was
     # fetched with columns, which its rendering carries.
-    await store.put_mint_record(
-        MintRecord(
-            frame=FrameRef(**_OTHER_FRAME),
-            dataset=FrameRef(spec_id=_OTHER_SPEC, content_version=_DATASET_CV),
-            options={"format": "parquet", "columns": ["observationAbout_type"]},
-        )
-    )
-    record = AnchorRecord(
-        populations=[
-            {"spec_id": _SPEC, "bindings": {}},
-            {"spec_id": _OTHER_SPEC, "bindings": {}},
-        ],
-        roots=(FrameRef(**_FRAME), FrameRef(**_OTHER_FRAME)),
-        rule="half1",
-        period="2022",
-    )
-    await store.put_anchor_record(record)
+    record = await _anchor_over_both(store)
     anchor_roots = [
         {**_FRAME, "rendering": {"without_party_totals": False, "columns": []}},
         {
@@ -185,7 +215,7 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
             "rendering": {"without_party_totals": False, "columns": ["observationAbout_type"]},
         },
     ]
-    ready = _recorded_ready()
+    ready = _reading(_recorded_ready("growth"), _FRAME, _OTHER_DATASET)
 
     def answer(body: dict[str, Any]) -> httpx2.Response:
         sent = sorted(body.get("anchor_roots", ()), key=lambda root: root["spec_id"])
@@ -194,6 +224,54 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
         return _problem(422, "op_spec_invalid")
 
     runner = _install(answer)
+    result = await _rolling_growth(_FRAME, record.anchor_key)
+
+    assert result.is_error is False, result.content
+    tree = runner.body["tree"]
+    assert tree["verb"] == "growth"
+    assert tree["arguments"]["window_start"] == "2021"
+    assert tree["arguments"]["rolling"]["window_end"] == _ROLLING["window_end"]
+    assert "anchor_key" not in tree["arguments"]
+    assert "frame_ref" not in tree["arguments"]
+
+
+@pytest.mark.parametrize(
+    "frame_ref",
+    # A frame of other data, and a derived input the runner computes from it.
+    [{"spec_id": "spec_" + "9" * 32, "content_version": "cv_" + "9" * 32}, _DERIVED],
+    ids=["fetched-frame", "derived-input"],
+)
+async def test_a_rolling_call_that_read_data_outside_its_anchor_record_refuses(
+    store: InMemoryMaterialisationStore, frame_ref: dict[str, str]
+) -> None:
+    # The runner takes the latest period over the anchor roots alone, so it
+    # answers a call over other data with a window that ends at their period.
+    record = await _anchor_over_both(store)
+    outside = {"spec_id": "spec_" + "9" * 32, "content_version": "cv_" + "9" * 32}
+    _install(
+        httpx2.Response(
+            200, json=_reading(_recorded_ready("growth"), outside, _FRAME, _OTHER_DATASET)
+        )
+    )
+
+    result = await _rolling_growth(frame_ref, record.anchor_key)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert structured["fix"] == {
+        "detail": "root_not_in_record",
+        "anchor_key": record.anchor_key,
+        "root": outside,
+    }
+
+
+async def test_a_rolling_call_over_other_populations_than_its_record_refuses_before_any_call(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    record = await _anchor_over_both(store)
+    runner = _install(_problem(422, "op_spec_invalid"))
+
     result = await verbs.growth(
         frame_ref=_FRAME,
         window_start="2021",
@@ -202,13 +280,34 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
         anchor_key=record.anchor_key,
     )
 
-    assert result.is_error is False
-    tree = runner.body["tree"]
-    assert tree["verb"] == "growth"
-    assert tree["arguments"]["window_start"] == "2021"
-    assert tree["arguments"]["rolling"]["window_end"] == _ROLLING["window_end"]
-    assert "anchor_key" not in tree["arguments"]
-    assert "frame_ref" not in tree["arguments"]
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert structured["fix"]["detail"] == "populations_differ"
+    assert runner.requests == []
+
+
+@pytest.mark.parametrize("code", ["snapshot_not_found", "artifact_expired"])
+async def test_a_lost_anchor_root_refuses_the_anchor_not_a_frame_the_call_never_passed(
+    store: InMemoryMaterialisationStore, code: str
+) -> None:
+    record = await _anchor_over_both(store)
+    _install(_problem(410, code, fix={**_OTHER_DATASET, "latest": True}))
+
+    result = await _rolling_growth(_FRAME, record.anchor_key)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "rolling_anchor_unresolved",
+        "correct_and_retry",
+    )
+    assert structured["fix"] == {
+        "detail": "anchor_root_lost",
+        "anchor_key": record.anchor_key,
+        "root": _OTHER_DATASET,
+    }
+    assert "resolve_anchor" in structured["message"]
 
 
 async def _anchor_over_a_derived_root(store: InMemoryMaterialisationStore) -> str:
@@ -430,6 +529,77 @@ async def test_a_ready_answer_replies_with_its_summarys_verb_result_and_digest(
     assert f"spec_id={summary.spec_id}, content_version={summary.content_version}" in text
 
 
+async def test_a_summary_tolerates_fields_dfo_apis_adds_to_its_exclusions_and_time(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    body = _recorded_ready("rank")
+    summary = body["summary"]
+    assert summary["exclusions"], "the recorded rank summary carries an exclusion"
+    added = {
+        **summary,
+        "exclusions": [{**exclusion, "series": []} for exclusion in summary["exclusions"]],
+        "time": {**summary["time"], "basis": "observed"},
+    }
+    _install(httpx2.Response(200, json={**body, "summary": added}))
+
+    result = await verbs.rank(frame_ref=_FRAME, rank_by=["donor"])
+
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None
+    assert result.structured_content["exclusions"] == summary["exclusions"]
+
+
+@pytest.mark.parametrize(
+    ("verb", "field"),
+    [("growth", "window_start"), ("growth", "window_end"), ("aggregate", "aggregation")],
+)
+async def test_a_summary_without_a_parameter_its_digest_reads_refuses_naming_it(
+    store: InMemoryMaterialisationStore, verb: str, field: str
+) -> None:
+    body = _recorded_ready(verb)
+    summary = body["summary"]
+    parameters = {key: value for key, value in summary["parameters"].items() if key != field}
+    _install(httpx2.Response(200, json={**body, "summary": {**summary, "parameters": parameters}}))
+
+    if verb == "growth":
+        result = await verbs.growth(frame_ref=_FRAME, window_start="2017", window_end="2024")
+    else:
+        result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["upstream_code"]) == (
+        "upstream_error",
+        "response_invalid",
+    )
+    assert f"parameters.{field}" in structured["fix"]["detail"]
+
+
+@pytest.mark.parametrize(
+    ("verb", "entries", "count", "value"),
+    [
+        ("join", "matched_keys", "matched_key_count", "left_value"),
+        ("filter", "kept_row_summaries", "kept_row_summary_count", "value"),
+    ],
+)
+def test_a_summary_holds_only_the_entries_its_digest_shows(
+    verb: str, entries: str, count: str, value: str
+) -> None:
+    summary = _recorded_ready(verb)["summary"]
+    entry = summary["result"][entries][0]
+    listed = [{**entry, value: float(index)} for index in range(LIST_CAP * 5)]
+
+    parsed = VerbSummary.parse({**summary, "result": {**summary["result"], entries: listed}})
+
+    held = getattr(parsed.result, entries)
+    assert getattr(parsed.result, count) == LIST_CAP * 5
+    # The largest values, in the order the runner listed them.
+    assert [getattr(item, value) for item in held] == [
+        float(index) for index in range(LIST_CAP * 4, LIST_CAP * 5)
+    ]
+    assert f"{LIST_CAP * 5} " in render_summary_digest(parsed)
+
+
 # The caller ------------------------------------------------------------------------
 
 
@@ -592,6 +762,68 @@ async def test_a_lost_root_behind_a_derived_input_refuses_that_input_unrecoverab
 
 
 @pytest.mark.parametrize(
+    ("code", "lost"),
+    [("snapshot_not_found", "frame_not_held"), ("artifact_expired", "frame_expired")],
+)
+async def test_both_sides_read_from_one_lost_dataset_version_are_named_in_one_refusal(
+    store: InMemoryMaterialisationStore, code: str, lost: str
+) -> None:
+    # Two frames fetched from one dataset version with different columns: the
+    # runner reads both as one root, so losing it loses both.
+    second = {"spec_id": "spec_" + "6" * 32, "content_version": "cv_" + "6" * 32}
+    await store.put_mint_record(_record({"format": "parquet"}))
+    await store.put_mint_record(
+        MintRecord(
+            frame=FrameRef(**second),
+            dataset=FrameRef(spec_id=_SPEC, content_version=_DATASET_CV),
+            options={"format": "parquet", "columns": ["observationAbout_type"]},
+        )
+    )
+    _install(_problem(410, code, fix={"spec_id": _SPEC, "content_version": _DATASET_CV}))
+
+    result = await verbs.compare(frame_ref=_FRAME, right_frame_ref=second)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == lost
+    assert structured["fix"]["frame_refs"] == [second, _FRAME]
+
+
+async def test_a_lost_root_names_only_the_derived_input_computed_from_it(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    other = {"spec_id": "ops_" + "a" * 32, "content_version": "ocv_" + "a" * 32}
+    lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+    roots = {_OPS: [lost], other["spec_id"]: [_OTHER_DATASET]}
+    reads: list[str] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":
+            spec_id = request.url.path.split("/")[-2]
+            reads.append(spec_id)
+            return httpx2.Response(200, json={"roots": roots[spec_id]})
+        return _problem(404, "snapshot_not_found", fix={**lost, "latest": True})
+
+    runner_holder.set(
+        RunnerClient(
+            base_url="http://runner.test",
+            timeout_s=5.0,
+            read_timeout_s=5.0,
+            caller_principal=None,
+            auth=_no_token,
+            transport=httpx2.MockTransport(handle),
+        )
+    )
+    result = await verbs.share_of(frame_ref=_DERIVED, denominator_frame_ref=other)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "derived_input_unrecoverable"
+    assert structured["fix"]["frame_refs"] == [_DERIVED]
+    assert sorted(reads) == sorted(roots)
+
+
+@pytest.mark.parametrize(
     ("operations", "queued"), [(["op_1"], True), ([], False)], ids=["rebuilding", "in-flight"]
 )
 async def test_a_pending_answer_counts_its_rebuilds_only_when_it_names_some(
@@ -614,6 +846,7 @@ async def test_an_unreachable_runner_refuses_retryable_upstream_error(
         RunnerClient(
             base_url="http://runner.test",
             timeout_s=5.0,
+            read_timeout_s=5.0,
             caller_principal=None,
             auth=_no_token,
             transport=httpx2.MockTransport(refuse),
@@ -636,6 +869,31 @@ async def test_an_op_spec_that_does_not_validate_refuses_before_any_call(
     assert result.structured_content is not None
     assert result.structured_content["code"] == "op_spec_invalid"
     assert runner.requests == []
+
+
+# Derived frame reads --------------------------------------------------------------
+
+
+async def test_a_derived_frame_read_waits_the_read_timeout_not_the_compute_timeout() -> None:
+    reads: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        reads.append(request)
+        return httpx2.Response(200, json={"roots": []})
+
+    runner_holder.set(
+        RunnerClient(
+            base_url="http://runner.test",
+            timeout_s=130.0,
+            read_timeout_s=7.0,
+            caller_principal=None,
+            auth=_no_token,
+            transport=httpx2.MockTransport(handle),
+        )
+    )
+    await read_derived_manifest(FrameRef(**_DERIVED))
+
+    assert reads[0].extensions["timeout"]["read"] == 7.0
 
 
 # resolve_anchor --------------------------------------------------------------------

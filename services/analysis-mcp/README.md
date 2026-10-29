@@ -128,11 +128,10 @@ The service stores an execution trace with lineage and replay metadata.
 
 The service reads configuration through `Settings`.
 
-| Variable                   | Type    | Default  | Description                                                                        |
-| -------------------------- | ------- | -------- | ---------------------------------------------------------------------------------- |
-| `SEED_FIXTURE_FRAMES`      | Boolean | `false`  | Seeds the materialisation store with development finance fixture frames on startup |
-| `MAX_FRAME_ROWS`           | Integer | `250000` | Maximum row count permitted for an input frame                                     |
-| `AGGREGATE_COVERAGE_FLOOR` | Float   | `0.5`    | Minimum realised cell coverage fraction required for reductions                    |
+| Variable              | Type    | Default  | Description                                                                        |
+| --------------------- | ------- | -------- | ---------------------------------------------------------------------------------- |
+| `SEED_FIXTURE_FRAMES` | Boolean | `false`  | Seeds the materialisation store with development finance fixture frames on startup |
+| `MAX_FRAME_ROWS`      | Integer | `250000` | Maximum row count permitted for an input frame                                     |
 
 ## Testing and baseline updates
 

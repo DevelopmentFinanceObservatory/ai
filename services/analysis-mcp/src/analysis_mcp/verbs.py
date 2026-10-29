@@ -9,7 +9,9 @@ that forms no op-spec refuses `op_spec_invalid` before any call. A rolling
 `op_spec.with_anchor_key`. The key reaches no request. The call sends the roots
 of the anchor record it names as `anchor_roots`, and the runner checks each
 rolling literal against the latest period it finds over them
-(`runner_tree.verb_tree`).
+(`runner_tree.verb_tree`). The call refuses when its `rolling.population` is not
+the record's, or when the runner read a root the record was not resolved over
+(`runner_client.run_tree`).
 
 `resolve_anchor` asks the runner's anchor route for the latest period of the
 root frames over the populations, then stores the anchor record and returns its
@@ -204,14 +206,14 @@ async def resolve_anchor(populations: Any, roots: Any) -> ToolResult:
         FrameRef(**root) for root in canonical_roots(root.model_dump() for root in request.roots)
     ]
     nodes: list[dict[str, Any]] = []
-    refs_by_root: dict[Pair, FrameRef] = {}
+    refs_by_root: dict[Pair, tuple[FrameRef, ...]] = {}
     for ref in distinct:
         root = await root_node(ref)
         if isinstance(root, ToolRefusal):
             return to_tool_result(root)
         node, pair = root
         nodes.append(node)
-        refs_by_root[pair] = ref
+        refs_by_root[pair] = (*refs_by_root.get(pair, ()), ref)
 
     populations_json = [population.model_dump(mode="json") for population in request.populations]
     answer = await find_anchor(nodes, populations_json, refs_by_root=refs_by_root)

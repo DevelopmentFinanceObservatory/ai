@@ -16,6 +16,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from analysis_mcp import aggregate_tool
 from analysis_mcp import server as server_module
 from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.artifact import Interval, Observation
@@ -495,11 +496,11 @@ async def test_non_finite_result_refuses(seeded) -> None:
     assert result.structured_content["code"] == "non_finite_result"
 
 
-async def test_coverage_below_the_configured_floor_refuses(
-    seeded, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_coverage_below_the_floor_refuses(seeded, monkeypatch: pytest.MonkeyPatch) -> None:
     _store, handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0.9")  # sparse_coverage_frame realises 0.75
+    monkeypatch.setattr(
+        aggregate_tool, "COVERAGE_FLOOR", 0.9
+    )  # sparse_coverage_frame realises 0.75
     result = await aggregate(
         frame_ref=handles.sparse_coverage,
         aggregation="sum",

@@ -57,6 +57,7 @@ from common.auth import BearerTokenVerifier, apply_gate
 from common.logging import configure_logging
 from common.materialisation import install_store_if_unset
 from common.mcp_telemetry import (
+    LOOPBACK_SCOPE_KEY,
     WRITE_TOKEN_KEY,
     LangfuseSessionMiddleware,
     LangfuseToolIoMiddleware,
@@ -73,6 +74,7 @@ from fastmcp.apps import (
     app_config_to_meta_dict,
 )
 from fastmcp.resources import ResourceContent, ResourceResult
+from fastmcp.server.dependencies import get_http_request
 from fastmcp.tools import Tool, ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import ClientCapabilities, ImageContent, TextContent, ToolAnnotations
@@ -109,9 +111,22 @@ logger = logging.getLogger(__name__)
 
 settings = Settings()
 
-# HTTP is the only transport this server has, and HTTP callers are always
-# external. A first-party path would need a second transport, not a flag here.
-_CALLER = Caller.EXTERNAL
+
+def _transport_caller() -> Caller:
+    """Who is writing, read from the transport the request arrived on.
+
+    `FIRST_PARTY` for a request carrying the `LOOPBACK_SCOPE_KEY` mark, which
+    the harness's loopback guard sets on its per-server mount, where only the
+    harness's own Studio clients reach this server. `EXTERNAL` for every other
+    request: one through the harness's combined server, a standalone
+    deployment of this server, or a call with no HTTP request behind it.
+    """
+    try:
+        scope = get_http_request().scope
+    except RuntimeError:  # no HTTP request in flight
+        return Caller.EXTERNAL
+    return Caller.FIRST_PARTY if scope.get(LOOPBACK_SCOPE_KEY) is True else Caller.EXTERNAL
+
 
 # The `ui://` resource serving Prefab's CDN renderer page, a stub that loads
 # renderer.js and renderer.css from jsDelivr at the installed prefab-ui version,
@@ -498,14 +513,15 @@ async def write_component(
     leaves it out.
     """
     assembler = get_assembler()
+    caller = _transport_caller()
     if component_id is None:
-        reply = await _safely(assembler.create_component(intent=intent, caller=_CALLER))
+        reply = await _safely(assembler.create_component(intent=intent, caller=caller))
     elif write_token is None:
         reply = _missing_write_token(component_id)
     else:
         reply = await _safely(
             assembler.revise_component(
-                component_id=component_id, patch=intent, write_token=write_token, caller=_CALLER
+                component_id=component_id, patch=intent, write_token=write_token, caller=caller
             )
         )
     return await _component_reply(

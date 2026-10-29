@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from analysis_mcp import rank_tool
 from analysis_mcp import server as server_module
 from analysis_mcp.artifact import Interval
 from analysis_mcp.engine.rank import run_rank
@@ -173,11 +174,9 @@ async def test_heterogeneous_unit_frame_refuses(seeded) -> None:
     assert result.structured_content["code"] == "unit_heterogeneous"
 
 
-async def test_coverage_below_the_configured_floor_refuses(
-    seeded, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_coverage_below_the_floor_refuses(seeded, monkeypatch: pytest.MonkeyPatch) -> None:
     _store, handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0.9")  # sparse_coverage_frame realises 0.75
+    monkeypatch.setattr(rank_tool, "COVERAGE_FLOOR", 0.9)  # sparse_coverage_frame realises 0.75
     result = await rank(
         frame_ref=handles.sparse_coverage, rank_by=("recipient",), aggregation="sum"
     )
@@ -271,7 +270,7 @@ async def test_per_period_rank_coverage_floor_check_is_unaffected(
     `RankResult.overall_coverage_fraction`, which `per_period` doesn't
     change the computation of."""
     _store, handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0.9")  # sparse_coverage_frame realises 0.75
+    monkeypatch.setattr(rank_tool, "COVERAGE_FLOOR", 0.9)  # sparse_coverage_frame realises 0.75
     result = await rank(frame_ref=handles.sparse_coverage, rank_by=("recipient",), per_period=True)
     assert result.structured_content["code"] == "coverage_insufficient"
 
@@ -557,7 +556,7 @@ async def test_a_collapsed_rank_labels_and_times_the_windows_observed_extent(
     A window holding one period labels the point and records an
     observation."""
     store, _handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0")
+    monkeypatch.setattr(rank_tool, "COVERAGE_FLOOR", 0)
     frame = Frame.build(
         role_keys=["reporter"],
         rows=[

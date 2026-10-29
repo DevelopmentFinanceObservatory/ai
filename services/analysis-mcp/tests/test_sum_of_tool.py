@@ -20,7 +20,7 @@ from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar import Frame
 from fastmcp import Client
-from runner_replay import frame_digest
+from runner_replay import ReplayedRunner, frame_digest
 
 
 def _format(value: float) -> str:
@@ -78,7 +78,7 @@ def _row(*, year: str = "2020", value: float = 1.0, **extra: object) -> dict[str
 
 
 async def test_two_datasets_sum_through_the_registered_tool(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, runner: ReplayedRunner
 ) -> None:
     """France's bilateral (2010-2024, reported) plus imputed multilateral
     (2011-2023, modelled) aid to Guatemala, through the live FastMCP
@@ -128,9 +128,18 @@ async def test_two_datasets_sum_through_the_registered_tool(
     assert "facet 'provenance' differs between the sides" in digest
     assert "facet 'measurementMethod' differs between the sides" in digest
 
-    # The runner holds the result; this server's store holds its inputs alone.
-    pair = FrameRef(spec_id=structured["spec_id"], content_version=structured["content_version"])
-    assert await store.get(pair) is None
+    # The reply names the frame the runner stored for this call, computed from
+    # the two seeded frames, and the two years only the left side reports.
+    assert (structured["spec_id"], structured["content_version"]) in runner.stored.values()
+    inputs = runner.requests[-1]["tree"]["inputs"]
+    assert {
+        name: {"spec_id": node["spec_id"], "content_version": node["content_version"]}
+        for name, node in inputs.items()
+    } == {"data": bilateral, "other": imputed}
+    assert [
+        (exclusion["reason"], exclusion["rows"], exclusion["side"])
+        for exclusion in structured["exclusions"]
+    ] == [("period_unmatched", 2, "left")]
 
 
 async def test_replay_from_execution_record_reproduces_the_stored_frame(seeded) -> None:

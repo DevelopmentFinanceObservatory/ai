@@ -174,6 +174,7 @@ def replayed_runner(
         return RunnerClient(
             base_url=RUNNER_URL,
             timeout_s=5.0,
+            read_timeout_s=5.0,
             caller_principal=None,
             auth=_no_token,
             transport=httpx2.MockTransport(replayed.handle),

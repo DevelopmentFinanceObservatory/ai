@@ -13,19 +13,35 @@ answer, or the `ToolRefusal` its reply maps to:
 - A problem document keeps the runner's `code`, `detail` and `fix` where this
   service defines the code, which holds for every engine code. A root the
   runner cannot read (`snapshot_not_found`, `recipe_not_found`,
-  `artifact_expired`) is the caller's own frame ref not held or aged out. A
-  root the call did not name is one behind a derived (`ops_`) input, which the
+  `artifact_expired`) is, in this order: the caller's own frame refs read as
+  that root, not held or aged out (`ToolRefusal.frames_lost`, which names
+  every side read from it); a root of a rolling call's anchor record,
+  `rolling_anchor_unresolved` with `anchor_root_lost`, since the record must
+  be resolved again; or a root behind a derived (`ops_`) input, which the
   runner computes again from its stored recipe, so that input is
-  `derived_input_unrecoverable`. `over_ceiling` is `frame_too_large`, and a
-  busy runner's retryable `service_unavailable` keeps its code with a delay.
-  Any other code is `upstream_error` naming it.
+  `derived_input_unrecoverable`. The refusal names only the derived inputs
+  whose manifest lists the root, and every one when a manifest cannot be read.
+  `over_ceiling` is `frame_too_large`, and a busy runner's retryable
+  `service_unavailable` keeps its code with a delay. Any other code is
+  `upstream_error` naming it.
 - An answer outside that contract, an unreachable dfo-apis, a timeout and a
   failed credential are `upstream_error`, the last three retryable.
+
+A rolling call's answer is checked against its anchor record (`Anchor`): every
+root the answer's ref names must be one the record was resolved over, else the
+call refuses `rolling_anchor_unresolved` with `root_not_in_record`. The runner
+takes the latest period over the anchor roots and checks the literals against
+it, so a call over data the record never saw would otherwise compute a window
+that ends at another dataset's latest period. The ref's roots are the roots
+the runner read, those behind a derived input and the anchor roots included,
+so the check covers a derived input as it covers a fetched frame.
 
 `read_derived_manifest` and `read_derived_file` read a frame the runner stored,
 by its `ops_` pair, from `GET /api/datasets/derived/{spec_id}/{content_version}`
 and its `/file`, for a caller that needs its recipe or its rows. Each raises
-`DerivedUnread` naming the problem document's code.
+`DerivedUnread` naming the problem document's code. A read waits
+`derived_read_timeout_s`, far less than a compute call's
+`analysis_runner_timeout_s`, so a stalled dfo-apis fails a read in seconds.
 
 Every call carries the Cloud Run ID token (`common.apis_auth`) and, for a caller
 the website named (`x-dfo-caller: ip:<digest>`), the caller principal beside it,
@@ -36,9 +52,11 @@ harness names no client address, so it is not sent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import httpx2
@@ -89,6 +107,20 @@ _BUSY_CODE = "service_unavailable"
 _RESPONSE_INVALID = "response_invalid"
 
 type Pair = tuple[str, str]
+# The caller's frame refs each root pair of a request stands for: two sides
+# fetched from one dataset version with different options share one root.
+type RefsByRoot = Mapping[Pair, tuple[FrameRef, ...]]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Anchor:
+    """The anchor record a rolling call is checked against: its `key`, the root
+    node of each of its roots (`nodes`), sent as the request's `anchor_roots`, and
+    the pair each node names (`pairs`)."""
+
+    key: str
+    nodes: tuple[dict[str, Any], ...]
+    pairs: frozenset[Pair]
 
 
 class AnchorAnswer(BaseModel):
@@ -110,11 +142,13 @@ class RunnerClient:
         *,
         base_url: str,
         timeout_s: float,
+        read_timeout_s: float,
         caller_principal: str | None,
         auth: AuthProvider,
         transport: httpx2.AsyncBaseTransport | None = None,
     ) -> None:
         self._client = httpx2.AsyncClient(base_url=base_url, timeout=timeout_s, transport=transport)
+        self._read_timeout_s = read_timeout_s
         self._caller_principal = caller_principal
         self._auth = auth
 
@@ -133,8 +167,9 @@ class RunnerClient:
     async def get(
         self, path: str, *, params: Mapping[str, str] | None = None
     ) -> httpx2.Response | ToolRefusal:
-        """GET `path`, or the retryable refusal for a call that got no answer."""
-        return await self._send("GET", path, params=params)
+        """GET `path` within the read timeout, or the retryable refusal for a call
+        that got no answer."""
+        return await self._send("GET", path, params=params, timeout=self._read_timeout_s)
 
     async def _send(self, method: str, path: str, **request: Any) -> httpx2.Response | ToolRefusal:
         try:
@@ -161,6 +196,7 @@ def _default_client() -> RunnerClient:
     return RunnerClient(
         base_url=settings.dfo_apis_url,
         timeout_s=settings.analysis_runner_timeout_s,
+        read_timeout_s=settings.derived_read_timeout_s,
         caller_principal=None if principal is None else principal.get_secret_value(),
         auth=apis_auth_provider(base_url=settings.dfo_apis_url),
     )
@@ -195,20 +231,73 @@ def _unusable(detail: str) -> ToolRefusal:
     )
 
 
-def _caller_ref(fix: Mapping[str, Any], refs_by_root: Mapping[Pair, FrameRef]) -> FrameRef | None:
-    """The caller's frame ref for the root a refusal's `fix` names."""
-    return refs_by_root.get((fix.get("spec_id"), fix.get("content_version")))
+def _pairs(roots: object) -> frozenset[Pair] | None:
+    """The pair of each root in `roots`, a JSON list of `{spec_id, content_version}`
+    objects, or `None` when it is not one."""
+    if not isinstance(roots, list):
+        return None
+    pairs: set[Pair] = set()
+    for root in roots:
+        if not isinstance(root, Mapping):
+            return None
+        spec_id, content_version = root.get("spec_id"), root.get("content_version")
+        if not isinstance(spec_id, str) or not isinstance(content_version, str):
+            return None
+        pairs.add((spec_id, content_version))
+    return frozenset(pairs)
 
 
-def _derived_inputs(refs_by_root: Mapping[Pair, FrameRef]) -> list[dict[str, str]]:
-    """The derived (`ops_`) frame refs the request sent, each under its own pair."""
-    return [ref.model_dump() for ref in refs_by_root.values() if ref.spec_id.startswith("ops_")]
+async def _manifest_roots(ref: FrameRef) -> frozenset[Pair] | None:
+    """The root pairs the manifest of the derived frame `ref` lists, or `None` when
+    it cannot be read."""
+    try:
+        manifest = await read_derived_manifest(ref)
+    except DerivedUnread:
+        return None
+    return _pairs(manifest.get("roots"))
 
 
-def refusal_for(response: httpx2.Response, *, refs_by_root: Mapping[Pair, FrameRef]) -> ToolRefusal:
+async def _derived_inputs_over(root: Pair, refs_by_root: RefsByRoot) -> list[dict[str, str]]:
+    """The derived (`ops_`) inputs the request sent that were computed from `root`:
+    each whose manifest lists it, or that cannot be told apart. A lone derived input
+    is the one, and reads nothing."""
+    derived = [
+        ref for refs in refs_by_root.values() for ref in refs if ref.spec_id.startswith("ops_")
+    ]
+    if len(derived) > 1:
+        async with asyncio.TaskGroup() as group:
+            reads = [group.create_task(_manifest_roots(ref)) for ref in derived]
+        over = [
+            ref
+            for ref, read in zip(derived, reads, strict=True)
+            if (roots := read.result()) is None or root in roots
+        ]
+        derived = over or derived
+    return [ref.model_dump() for ref in derived]
+
+
+def _anchor_root_lost(anchor: Anchor, root: Pair, code: str) -> ToolRefusal:
+    spec_id, content_version = root
+    return ToolRefusal.rolling_anchor_unresolved(
+        detail="anchor_root_lost",
+        reason=(
+            f"the record under {anchor.key} was resolved over the data {spec_id}, "
+            f"{content_version}, which the analysis service no longer holds ({code})"
+        ),
+        context={
+            "anchor_key": anchor.key,
+            "root": {"spec_id": spec_id, "content_version": content_version},
+        },
+    )
+
+
+async def refusal_for(
+    response: httpx2.Response, *, refs_by_root: RefsByRoot, anchor: Anchor | None = None
+) -> ToolRefusal:
     """The refusal a runner's non-2xx `response` maps to. See the module docstring.
 
-    `refs_by_root` maps each root pair the request named to the caller's frame ref.
+    `refs_by_root` maps each root pair the request named as a frame to the
+    caller's frame refs, and `anchor` is a rolling call's anchor record.
     """
     problem = _json(response)
     if problem is None or not isinstance(problem.get("code"), str):
@@ -222,18 +311,16 @@ def refusal_for(response: httpx2.Response, *, refs_by_root: Mapping[Pair, FrameR
     given = problem.get("fix")
     fix: dict[str, Any] = dict(given) if isinstance(given, Mapping) else {}
     retryable = problem.get("retryable") is True
-    root = _caller_ref(fix, refs_by_root)
+    root: Pair = (str(fix.get("spec_id")), str(fix.get("content_version")))
     if code in _RUNNER_CODES:
         refusal = ToolRefusal(code=ToolErrorCode(code), message=detail, fix=fix)
-    elif code in _UNHELD_ROOT_CODES and root is not None:
-        refusal = ToolRefusal.frame_not_held(
-            spec_id=root.spec_id, content_version=root.content_version
+    elif code in _ROOT_CODES and (refs := refs_by_root.get(root)):
+        refusal = ToolRefusal.frames_lost(
+            frame_refs=[ref.model_dump() for ref in refs], expired=code == _EXPIRED_ROOT_CODE
         )
-    elif code == _EXPIRED_ROOT_CODE and root is not None:
-        refusal = ToolRefusal.frame_expired(
-            spec_id=root.spec_id, content_version=root.content_version
-        )
-    elif code in _ROOT_CODES and (derived := _derived_inputs(refs_by_root)):
+    elif code in _ROOT_CODES and anchor is not None and root in anchor.pairs:
+        refusal = _anchor_root_lost(anchor, root, code)
+    elif code in _ROOT_CODES and (derived := await _derived_inputs_over(root, refs_by_root)):
         refusal = ToolRefusal.derived_input_root_lost(
             frame_refs=derived, root=fix, upstream_code=code
         )
@@ -269,44 +356,99 @@ def _pending(response: httpx2.Response) -> ToolRefusal:
     )
 
 
+def _ref_roots(body: Mapping[str, Any]) -> frozenset[Pair] | None:
+    """The root pairs every member of a ready answer's ref names, or `None` when the
+    answer holds no such ref."""
+    ref = body.get("ref")
+    members = ref.get("members") if isinstance(ref, Mapping) else None
+    if not isinstance(members, list) or not members:
+        return None
+    pairs: set[Pair] = set()
+    for member in members:
+        roots = _pairs(member.get("roots")) if isinstance(member, Mapping) else None
+        if roots is None:
+            return None
+        pairs |= roots
+    return frozenset(pairs)
+
+
+def _uncovered(body: Mapping[str, Any], anchor: Anchor) -> ToolRefusal | None:
+    """The refusal for a ready answer `body` that read a root `anchor`'s record was
+    not resolved over. See the module docstring."""
+    roots = _ref_roots(body)
+    if roots is None:
+        return _unusable("the analysis answer names no roots")
+    uncovered = sorted(roots - anchor.pairs)
+    if not uncovered:
+        return None
+    spec_id, content_version = uncovered[0]
+    return ToolRefusal.rolling_anchor_unresolved(
+        detail="root_not_in_record",
+        reason=(
+            f"the call read the data {spec_id}, {content_version}, which the record was "
+            "not resolved over"
+        ),
+        context={
+            "anchor_key": anchor.key,
+            "root": {"spec_id": spec_id, "content_version": content_version},
+        },
+    )
+
+
+def _unread_summary(exc: ValidationError | KeyError) -> str:
+    """What of a summary did not fit: the place of its first field error, or the
+    verb no facts model reads."""
+    if isinstance(exc, KeyError):
+        return f"no facts model reads the verb {exc.args[0]!r}"
+    error = exc.errors()[0]
+    place = ".".join(str(part) for part in error["loc"]) or "summary"
+    return f"{place}: {error['msg']}"
+
+
 async def run_tree(
-    node: Mapping[str, Any],
-    *,
-    anchor_roots: Sequence[Mapping[str, Any]] = (),
-    refs_by_root: Mapping[Pair, FrameRef],
+    node: Mapping[str, Any], *, anchor: Anchor | None = None, refs_by_root: RefsByRoot
 ) -> VerbSummary | ToolRefusal:
     """The summary of the tree `node` computed by the runner, or its refusal.
-    `anchor_roots`, when given, are the roots the runner takes a rolling call's
-    latest period over."""
+    `anchor`, for a rolling call, sends its record's roots, which the runner takes
+    the latest period over, and checks the answer read no other root."""
     request: dict[str, Any] = {"tree": node, "latest": False}
-    if anchor_roots:
-        request["anchor_roots"] = list(anchor_roots)
+    if anchor is not None:
+        request["anchor_roots"] = list(anchor.nodes)
     response = await runner_holder.get().post(ANALYSIS_PATH, request)
     if isinstance(response, ToolRefusal):
         return response
     if response.status_code == httpx2.codes.ACCEPTED:
         return _pending(response)
     if not response.is_success:
-        return refusal_for(response, refs_by_root=refs_by_root)
-    body = _json(response)
+        return await refusal_for(response, refs_by_root=refs_by_root, anchor=anchor)
+    return _ready_summary(_json(response), anchor=anchor)
+
+
+def _ready_summary(
+    body: Mapping[str, Any] | None, *, anchor: Anchor | None
+) -> VerbSummary | ToolRefusal:
+    """The summary of the ready answer `body`, or the refusal for an answer outside
+    the contract or, for a rolling call, one that read a root outside `anchor`."""
     if (
         body is None
         or body.get("status") != "ready"
         or not isinstance(body.get("summary"), Mapping)
     ):
         return _unusable("the analysis answer holds no summary")
+    if anchor is not None and (refusal := _uncovered(body, anchor)) is not None:
+        return refusal
     try:
         return VerbSummary.parse(body["summary"])
     except (ValidationError, KeyError) as exc:
         logger.warning("analysis runner summary unreadable: %s", exc)
-        return _unusable(f"the analysis summary does not fit this service: {type(exc).__name__}")
+        return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
 
 
 async def find_anchor(
     roots: Sequence[Mapping[str, Any]],
     populations: Sequence[Mapping[str, Any]],
     *,
-    refs_by_root: Mapping[Pair, FrameRef],
+    refs_by_root: RefsByRoot,
 ) -> AnchorAnswer | ToolRefusal:
     """The latest period of `roots` over `populations`, or the refusal."""
     response = await runner_holder.get().post(
@@ -317,7 +459,7 @@ async def find_anchor(
     if response.status_code == httpx2.codes.ACCEPTED:
         return _pending(response)
     if not response.is_success:
-        return refusal_for(response, refs_by_root=refs_by_root)
+        return await refusal_for(response, refs_by_root=refs_by_root)
     body = _json(response)
     try:
         return AnchorAnswer.model_validate(body)

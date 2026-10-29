@@ -711,6 +711,28 @@ class ToolRefusal:
         )
 
     @classmethod
+    def frames_lost(cls, *, frame_refs: Sequence[Mapping[str, str]], expired: bool) -> Self:
+        """`frame_expired` (`expired`) or `frame_not_held` for the caller's frames
+        `frame_refs`, which the runner read as one dataset version it no longer holds.
+        Two sides fetched from one version with different options are two frames over
+        one root, so the refusal names both and one round of fetches mends the call."""
+        first, *others = frame_refs
+        lost = cls.frame_expired if expired else cls.frame_not_held
+        refusal = lost(spec_id=first["spec_id"], content_version=first["content_version"])
+        if not others:
+            return refusal
+        named = ", ".join(f"{ref['spec_id']}/{ref['content_version']}" for ref in others)
+        return cls(
+            code=refusal.code,
+            message=(
+                f"{refusal.message} The frame(s) {named} of this call were read from the "
+                "same data and are lost with it: fetch each again the same way and retry "
+                "with the new frame_refs."
+            ),
+            fix={**refusal.fix, "frame_refs": [dict(ref) for ref in frame_refs]},
+        )
+
+    @classmethod
     def mixed_time_grain(cls, *, grains: list[str], periods: list[str]) -> Self:
         """`grains` names every distinct grain the resolved input's own
         `time_period` column carries, in `year`/`month`/`day` order, and
@@ -1352,8 +1374,8 @@ class ToolRefusal:
     def derived_input_root_lost(
         cls, *, frame_refs: Sequence[Mapping[str, str]], root: Mapping[str, Any], upstream_code: str
     ) -> Self:
-        """`frame_refs` are the derived (`ops_`) inputs the call sent, and `root` the
-        dataset version behind one of them that dfo-apis no longer holds
+        """`frame_refs` are the derived (`ops_`) inputs of the call computed from
+        `root`, the dataset version dfo-apis no longer holds
         (`upstream_code`: `snapshot_not_found`, `recipe_not_found` or
         `artifact_expired`). dfo-apis computes a derived input again from its
         stored recipe, so the input is lost with its root."""

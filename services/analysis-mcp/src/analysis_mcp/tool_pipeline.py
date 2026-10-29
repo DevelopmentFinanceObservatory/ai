@@ -215,7 +215,8 @@ async def store_result_and_render(
 async def run_on_runner(op_spec: OpSpecVariant, *, anchor_key: str | None = None) -> ToolResult:
     """The reply every registered verb returns for `op_spec`, computed by the runner.
     A rolling call's `anchor_key` sends the roots of its anchor record beside the
-    tree (`runner_tree.verb_tree`).
+    tree (`runner_tree.verb_tree`), and its answer is checked against them
+    (`runner_client.run_tree`).
 
     `structured_content` is the summary's `VerbResult` fields and `content` the
     digest rendered from its facts, as the in-process tools built both. A frame
@@ -225,9 +226,7 @@ async def run_on_runner(op_spec: OpSpecVariant, *, anchor_key: str | None = None
     tree = await verb_tree(op_spec, anchor_key=anchor_key)
     if isinstance(tree, ToolRefusal):
         return to_tool_result(tree)
-    summary = await run_tree(
-        tree.node, anchor_roots=tree.anchor_roots, refs_by_root=tree.refs_by_root
-    )
+    summary = await run_tree(tree.node, anchor=tree.anchor, refs_by_root=tree.refs_by_root)
     if isinstance(summary, ToolRefusal):
         return to_tool_result(summary)
     return ToolResult(

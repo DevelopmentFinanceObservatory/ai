@@ -24,7 +24,7 @@ from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_s
 from dfo_frame_grammar import Frame, unit_cell_to_json
 from fastmcp import Client
 from fastmcp.tools import ToolResult
-from runner_replay import frame_digest
+from runner_replay import ReplayedRunner, frame_digest
 
 GDP = "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
 POPULATION = "dcid:Count_Person"
@@ -106,8 +106,12 @@ async def _stored(store: InMemoryMaterialisationStore, result: ToolResult) -> tu
     return await store.get(FrameRef(**_pair(result)))
 
 
-def _pair_of(structured: dict) -> dict[str, str]:
-    return {"spec_id": structured["spec_id"], "content_version": structured["content_version"]}
+def _input_pairs(runner: ReplayedRunner) -> dict[str, dict[str, str]]:
+    """The frame pair of each input of the last tree the tools sent the runner."""
+    return {
+        name: {"spec_id": node["spec_id"], "content_version": node["content_version"]}
+        for name, node in runner.requests[-1]["tree"]["inputs"].items()
+    }
 
 
 async def _units(store: InMemoryMaterialisationStore, result: ToolResult) -> list[object]:
@@ -155,7 +159,7 @@ def _per_head(aid: dict, population: dict, place: str) -> dict[str, object]:
 
 
 async def test_gdp_per_head_through_the_registered_tool(
-    monkeypatch: pytest.MonkeyPatch, store: InMemoryMaterialisationStore
+    monkeypatch: pytest.MonkeyPatch, store: InMemoryMaterialisationStore, runner: ReplayedRunner
 ) -> None:
     """Guatemala's GDP in US dollars (2019-2022) over its unit-less population
     (2020-2023), through the live FastMCP `Client`: one series over 2020-2022
@@ -183,8 +187,17 @@ async def test_gdp_per_head_through_the_registered_tool(
     assert structured["role_keys"] == []
     assert structured["stat_var_count"] == 1
     assert structured["dropped_key_count"] == 0
-    # The runner holds the result; this server's store holds its inputs alone.
-    assert await store.get(FrameRef(**_pair_of(structured))) is None
+    # The reply names the frame the runner stored for this call, computed from
+    # the two seeded frames, and the period each side alone reports.
+    assert (structured["spec_id"], structured["content_version"]) in runner.stored.values()
+    assert _input_pairs(runner) == {"data": gdp, "other": population}
+    assert [
+        (exclusion["reason"], exclusion["rows"], exclusion["side"])
+        for exclusion in structured["exclusions"]
+    ] == [
+        ("period_unmatched", 1, "numerator"),
+        ("period_unmatched", 1, "denominator"),
+    ]
 
     digest = result.content[0].text
     assert digest.startswith("quotient_of: 3 matched period(s), in dcid:USDollar per Count_Person")

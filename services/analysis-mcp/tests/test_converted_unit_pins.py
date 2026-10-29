@@ -16,13 +16,15 @@ from analysis_mcp import server as server_module
 from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
+from analysis_mcp.runner_client import ANALYSIS_PATH
+from analysis_mcp.summary import VerbSummary
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from analysis_mcp.units import unit_name
 from common.materialisation import FrameRef, InMemoryMaterialisationStore
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import unit_cell_from_json
 from fastmcp import Client
-from runner_replay import frame_digest
+from runner_replay import ReplayedRunner, frame_digest, request_key
 
 EUR_CONSTANT = {"currency": "EUR", "prices": "constant", "base_year": 2020}
 USD_CURRENT = {"currency": "USD", "prices": "current"}
@@ -161,6 +163,18 @@ async def _arguments(
 
 
 # Each verb's unit-pin parameters, as its `unit_heterogeneous` refusal names them.
+# The field of each verb's summary facts that names the unit a pin resolved.
+_RESOLVED_UNIT = {
+    "aggregate": "resolved_unit",
+    "rank": "resolved_unit",
+    "growth": "resolved_unit",
+    "compare": "left_resolved_unit",
+    "sum_of": "unit",
+    "share_of": "numerator_resolved_unit",
+    "quotient_of": "unit",
+    "join": "left_resolved_unit",
+}
+
 PIN_PARAMETERS = {
     "aggregate": ("unit",),
     "rank": ("unit",),
@@ -178,6 +192,7 @@ async def test_a_mixed_frame_resolves_by_pinning_a_refusal_candidate(
     verb: str,
     store: InMemoryMaterialisationStore,
     units: tuple[dict[str, Any], dict[str, Any]],
+    runner: ReplayedRunner,
 ) -> None:
     arguments = await _arguments(verb, store, units)
 
@@ -187,7 +202,7 @@ async def test_a_mixed_frame_resolves_by_pinning_a_refusal_candidate(
     assert refusal["fix"]["units"] == list(units)
 
     await _assert_pin_resolves(
-        verb, arguments, refusal["fix"]["units"][1], store=store, expected=units[1]
+        verb, arguments, refusal["fix"]["units"][1], runner=runner, expected=units[1]
     )
 
 
@@ -196,6 +211,7 @@ async def test_a_refusal_candidate_id_passed_back_as_the_pin_resolves_the_frame(
     verb: str,
     store: InMemoryMaterialisationStore,
     units: tuple[dict[str, Any], dict[str, Any]],
+    runner: ReplayedRunner,
 ) -> None:
     arguments = await _arguments(verb, store, units)
 
@@ -204,7 +220,7 @@ async def test_a_refusal_candidate_id_passed_back_as_the_pin_resolves_the_frame(
     assert refusal["code"] == "unit_heterogeneous"
     candidate = refusal["fix"]["disambiguation"]["candidates"][0]
     assert candidate["id"] == units[0]
-    await _assert_pin_resolves(verb, arguments, candidate["id"], store=store, expected=units[0])
+    await _assert_pin_resolves(verb, arguments, candidate["id"], runner=runner, expected=units[0])
 
 
 async def _assert_pin_resolves(
@@ -212,11 +228,11 @@ async def _assert_pin_resolves(
     arguments: dict[str, Any],
     pin: object,
     *,
-    store: InMemoryMaterialisationStore,
+    runner: ReplayedRunner,
     expected: dict[str, object],
 ) -> None:
     """Retry `verb` with every unit-pin parameter set to `pin`, and check the
-    call succeeds and its stored trace resolved to `expected`. `quotient_of`
+    call succeeds and the runner's summary resolved to `expected`. `quotient_of`
     writes the two pinned sides as one composed unit, and refuses a pin that
     is composed already, and `share_of` resolves to per cent with the pin
     recorded as its numerator's unit. A verb that sums refuses a composed
@@ -248,10 +264,14 @@ async def _assert_pin_resolves(
             return
         expected = {"numerator": expected, "denominator": expected}
     assert "code" not in result, result
-    # The runner holds the result; its digest names the unit it resolved to, a
-    # share's pinned unit as its numerator's.
-    assert await store.get(FrameRef(**_pair(result))) is None
-    assert unit_name(unit_cell_from_json(expected)) in digest_of(result)
+    # The reply names the frame the runner stored for this call, and the unit
+    # its summary resolved, a share's as its numerator's, is the pinned one.
+    assert (result["spec_id"], result["content_version"]) in runner.stored.values()
+    reply = runner.replies[request_key(ANALYSIS_PATH, runner.requests[-1])]
+    summary = VerbSummary.parse(reply["body"]["summary"])
+    resolved = getattr(summary.result, _RESOLVED_UNIT[verb])
+    assert resolved == unit_cell_from_json(expected)
+    assert unit_name(resolved) in digest_of(result)
 
 
 async def test_a_converted_pin_absent_from_the_frame_refuses_with_pinnable_candidates(

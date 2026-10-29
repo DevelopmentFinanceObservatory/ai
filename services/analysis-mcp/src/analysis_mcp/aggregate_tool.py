@@ -34,6 +34,7 @@ from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_aggregate_digest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
+    COVERAGE_FLOOR,
     AggregateResult,
     ComposedUnitSumError,
     NonFiniteAggregateResultError,
@@ -287,11 +288,11 @@ async def aggregate(
     ) as exc:
         return to_tool_result(composite_refusal(_refusal_for_engine_error(exc), [input_trace]))
 
-    if result.realised_coverage_fraction < settings.aggregate_coverage_floor:
+    if result.realised_coverage_fraction < COVERAGE_FLOOR:
         return to_tool_result(
             ToolRefusal.coverage_insufficient(
                 realised_coverage_fraction=result.realised_coverage_fraction,
-                floor=settings.aggregate_coverage_floor,
+                floor=COVERAGE_FLOOR,
                 skipped_cell_count=result.skipped_cell_count,
             )
         )
