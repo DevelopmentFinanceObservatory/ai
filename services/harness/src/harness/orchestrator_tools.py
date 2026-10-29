@@ -98,6 +98,7 @@ from planner.plan import (
 from planner.skills import GET_SKILL, GET_SKILL_FILE
 from planner.workflow import ToolId
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
+from submission.prices_choice import measure_key
 from translator.discovery import (
     DefinitionNotResolvedError,
     PartNotResolvedError,
@@ -1325,13 +1326,17 @@ MAX_ASK_QUESTIONS = 3
 
 
 def _questions_refusal(
-    questions: list[AskQuestion], named: set[str], parts: Collection[str] = ()
+    questions: list[AskQuestion],
+    named: set[str],
+    parts: Collection[str] = (),
+    measures: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any] | None:
     """The refusal of an `ask_user` call that asks no question or more than
     `MAX_ASK_QUESTIONS`, asks a question with no option, prices a part that
     is none of `parts`, the spec_ids of the readings whose prices are open
-    (`harness.graph.state.open_parts`), prices one part in two questions,
-    offers a spec_id no search result
+    (`harness.graph.state.open_parts`), prices one part, or two parts
+    measuring the same thing over other windows (equal `measures`,
+    `submission.prices_choice.measure_key`), in two questions, offers a spec_id no search result
     this turn named (`_named_spec_ids`), or offers one spec_id on two options
     of the call; None when it asks well. `questions` hold the options a
     prices question is given (`harness.graph.state.prices_question`)."""
@@ -1353,6 +1358,16 @@ def _questions_refusal(
         f"{part} is priced by more than one question"
         for part in sorted(set(priced))
         if priced.count(part) > 1
+    ]
+    by_measure: dict[str, set[str]] = {}
+    for part in priced:
+        if (key := (measures or {}).get(part)) is not None:
+            by_measure.setdefault(key, set()).add(part)
+    problems += [
+        f"{' and '.join(sorted(same))} measure one thing over other years, so one prices "
+        "question covers them"
+        for same in by_measure.values()
+        if len(same) > 1
     ]
     problems += [
         f"question {question.question!r} offers no option"
@@ -2434,7 +2449,13 @@ def build_orchestrator_tools(
         """
         parts = open_parts(tool_context.state)
         questions = [prices_question(question, parts) for question in questions]
-        refused = _questions_refusal(questions, _named_spec_ids(tool_context), parts)
+        blocks = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+        refused = _questions_refusal(
+            questions,
+            _named_spec_ids(tool_context),
+            parts,
+            {part: measure_key(blocks[part]) for part in parts if part in blocks},
+        )
         if refused:
             return refused
         spent = _spend(tool_context, "ask_user")

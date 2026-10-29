@@ -481,6 +481,51 @@ async def test_two_prices_questions_on_one_part_are_refused():
     assert f"{_GROSS} is priced by more than one question" in refused["refusal"]
 
 
+@pytest.mark.parametrize("same_measure", [True, False], ids=["two-windows", "two-counts"])
+async def test_two_windows_of_one_measure_take_one_prices_question(same_measure: bool):
+    """Two readings of one measure over different years are one part, so two
+    prices questions on them are refused, and nothing pauses. Two readings of
+    different counts each take their own question."""
+    other = copy.deepcopy(_FRANCE_KENYA)
+    other["spec_id"] = other["definition"]["spec_id"] = _OTHER
+    identity = other["definition"]["identity"]
+    if same_measure:
+        identity["requested_window"] = {"kind": "range", "start": 2010, "end": 2014}
+    else:
+        for slot in identity["slots"]:
+            if slot["property"] == "nettingBasis":
+                slot["binding"]["ref"] = "Net"
+    runner, _ = orchestrator_runner(
+        call(
+            "ask_user",
+            questions=[
+                {"question": "Aid to 2014 in which prices?", "prices_of": _OTHER},
+                {"question": "Aid since 2018 in which prices?", "prices_of": _FK_GROSS},
+            ],
+        ),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(
+        runner,
+        **{
+            ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: other},
+            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_FK_GROSS), _open_reading(_OTHER)],
+        },
+    )
+
+    events = await run_turn(runner, types.UserContent("Aid to 2014 against since 2018?"))
+
+    paused = [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
+    assert (not paused) is same_measure
+    if same_measure:
+        (refused,) = [
+            r.response for e in events for r in e.get_function_responses() if r.name == "ask_user"
+        ]
+        assert refused is not None
+        assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
+        assert "measure one thing over other years" in refused["refusal"]
+
+
 _COUNT_AND_PRICES = [
     {
         "question": "How should aid be counted?",

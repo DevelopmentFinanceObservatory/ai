@@ -26,6 +26,7 @@ user priced is left as it was.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -34,6 +35,7 @@ from typing import Any, Literal, NamedTuple
 
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
 from compiler.evidence import requested_unit as requested_unit_of
+from compiler.sources import readable_source
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
@@ -331,6 +333,19 @@ class Parts:
             if reading.prices == "constant" and reading.base_year is not None:
                 return spec_id, reading
         return None
+
+
+def measure_key(block: Mapping[str, Any]) -> str | None:
+    """What `block` measures, its window and prices left out, with its currency,
+    as one comparable key: two parts with equal keys measure the same thing,
+    as `Parts.same_measure` reads it, and take one prices choice. `None` when
+    the block states no identity."""
+    identity = _priceless(block)
+    if identity is None:
+        return None
+    source = readable_source(block)
+    currency = source_unit(source).currency if source is not None else None
+    return json.dumps([identity, currency], sort_keys=True)
 
 
 def _priceless(block: Mapping[str, Any] | None) -> dict[str, Any] | None:
