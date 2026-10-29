@@ -108,6 +108,8 @@ Returns a `ToolResult` with the following items.
 
 The `get_skill_file` tool reads one file of a skill verbatim, from `GET /api/skills/{skill_id}/resources/{path}`.
 
+The harness calls it on data-mcp's own mount. The combined server at `/mcp/` leaves it out of its list and answers a call to it with `tool_not_found` and a `fix` naming `get_skill`.
+
 #### Parameters
 
 - `skill_id`: The skill's id, as for `get_skill`.

@@ -61,6 +61,7 @@ from analysis_mcp.op_spec import (
     CategoryMatchPredicate,
     FilterOpSpec,
     FilterRolling,
+    FrameRefArgument,
     OrderedThresholdPredicate,
     PlaceLevelPredicate,
     with_anchor_key,
@@ -161,12 +162,13 @@ def _filter_step(op_spec: FilterOpSpec, result: FilterResult, *, trace: Trace) -
 @holds_input_rows
 async def filter_verb(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The {spec_id, content_version} pair naming a materialised frame or a "
                 "prior verb result. Obtained from get_data's or a prior verb's own digest "
-                "-- never invented."
+                "-- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],

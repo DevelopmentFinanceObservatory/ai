@@ -889,6 +889,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "internal_error",
             "request_invalid",
             "op_spec_invalid",
+            "frame_ref_incomplete",
             "role_ambiguous",
             "join_no_common_key_columns",
             "filter_predicate_type_mismatch",

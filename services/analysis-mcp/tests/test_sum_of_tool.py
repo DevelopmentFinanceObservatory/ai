@@ -77,14 +77,17 @@ def _row(*, year: str = "2020", value: float = 1.0, **extra: object) -> dict[str
     }
 
 
+@pytest.mark.parametrize(
+    ("tool", "form"), [("sum_of", {}), ("compare", {"operation": "sum"})], ids=["sum_of", "compare"]
+)
 async def test_two_datasets_sum_through_the_registered_tool(
-    monkeypatch: pytest.MonkeyPatch, runner: ReplayedRunner
+    monkeypatch: pytest.MonkeyPatch, runner: ReplayedRunner, tool: str, form: dict[str, str]
 ) -> None:
     """France's bilateral (2010-2024, reported) plus imputed multilateral
     (2011-2023, modelled) aid to Guatemala, through the live FastMCP
-    `Client`. The result is one series over 2011-2023 under the operation's
-    own ref, with both coverages, the left-out years, and the facet warnings
-    on the digest."""
+    `Client`, as `sum_of` and as `compare`'s sum form. The result is one series
+    over 2011-2023 under the operation's own ref, with both coverages, the
+    left-out years, and the facet warnings on the digest."""
     store = InMemoryMaterialisationStore()
     handles = await seed_fixture_store(store)
 
@@ -96,7 +99,7 @@ async def test_two_datasets_sum_through_the_registered_tool(
 
     async with Client(server_module.mcp) as client:
         result = await client.call_tool(
-            "sum_of", {"frame_ref": bilateral, "right_frame_ref": imputed}
+            tool, {"frame_ref": bilateral, "right_frame_ref": imputed, **form}
         )
 
     assert result.is_error is False
@@ -181,6 +184,17 @@ async def test_sum_of_and_compare_both_warn_on_the_facet_difference(seeded) -> N
     for result in (summed, compared):
         assert result.is_error is False
         assert "facet 'provenance' differs" in result.content[0].text
+
+
+async def test_compares_sum_form_is_sum_of(seeded) -> None:
+    _store, handles = seeded
+    bilateral, imputed = handles.sum_pair
+
+    summed = await sum_of(frame_ref=bilateral, right_frame_ref=imputed)
+    added = await compare(frame_ref=bilateral, right_frame_ref=imputed, operation="sum")
+
+    assert added.structured_content == summed.structured_content
+    assert added.content == summed.content
 
 
 @pytest.mark.parametrize(

@@ -624,7 +624,7 @@ async def resolve_anchor(
                 "The populations the latest period is taken over: one {spec_id, bindings} "
                 "for each root dataset of the question, bindings narrowing its series as "
                 "{column: [values]}, and levels, when set, holding a place-type column to "
-                "one level of place as {column: level}. A keyed share_of, quotient_of or "
+                "one level of place as {column: level}. A keyed share_of or "
                 "join whose two sides both count is one {pair: [left populations, right "
                 "populations], keys: {left column: right column}} instead. The same value "
                 "goes on every rolling call as rolling.population."

@@ -4,7 +4,12 @@ dfo-apis' analysis runner.
 Each verb tool takes the arguments, signature and docstring of its in-process
 twin (`aggregate_tool.aggregate` and the rest), builds the same op-spec from
 them, and runs it on the runner (`tool_pipeline.run_on_runner`). An argument
-that forms no op-spec refuses `op_spec_invalid` before any call. A rolling
+that forms no op-spec refuses `op_spec_invalid` before any call, and a frame
+argument with no `content_version` refuses `frame_ref_incomplete`. `compare`
+takes `sum_of`'s form under `operation="sum"`, and `share_of` takes
+`quotient_of`'s under `operation="quotient"`: the form picks the op-spec, so each
+keeps its own runner call, result and refusals. A share whose sides hold two
+units refuses with `fix` naming the quotient form. A rolling
 `growth`, `rank` or `filter` needs an `anchor_key`, checked by
 `op_spec.with_anchor_key`. The key reaches no request. The call sends the roots
 of the anchor record it names as `anchor_roots`, and the runner checks each
@@ -60,27 +65,51 @@ from analysis_mcp.op_spec import (
 )
 from analysis_mcp.runner_client import find_anchor
 from analysis_mcp.runner_tree import Pair, root_node
-from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import build_op_spec_or_refusal, run_on_runner
 
 type Arguments = Mapping[str, Any]
 type Tool = Callable[..., Awaitable[ToolResult]]
+type Refine = Callable[[Arguments, ToolRefusal], ToolRefusal]
+
+_FRAME_ARGUMENTS = ("frame_ref", "right_frame_ref", "denominator_frame_ref")
 
 
-def _on_runner(in_process: Tool, build: Callable[[Arguments], OpSpecVariant]) -> Tool:
+def frame_ref_incomplete(arguments: Arguments) -> ToolRefusal | None:
+    """The refusal for the first frame argument in `arguments` that names a
+    `spec_id` without its `content_version`, or `None` when none does. Any other
+    malformed argument is left to the op-spec to refuse."""
+    for name in _FRAME_ARGUMENTS:
+        ref = arguments.get(name)
+        if isinstance(ref, Mapping) and "spec_id" in ref and "content_version" not in ref:
+            return ToolRefusal.frame_ref_incomplete(argument=name, spec_id=str(ref["spec_id"]))
+    return None
+
+
+def _on_runner(
+    in_process: Tool, build: Callable[[Arguments], OpSpecVariant], *, refine: Refine | None = None
+) -> Tool:
     """The registered tool for `in_process`. It keeps that tool's signature and
     docstring, builds its op-spec with `build` from the bound arguments, and
-    computes it on the runner."""
+    computes it on the runner. `refine` rewrites a runner refusal given the
+    call's arguments."""
     signature = inspect.signature(in_process)
 
     @functools.wraps(in_process)
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        op_spec = build_op_spec_or_refusal(lambda: build(bound.arguments))
+        arguments = bound.arguments
+        if (incomplete := frame_ref_incomplete(arguments)) is not None:
+            return to_tool_result(incomplete)
+        op_spec = build_op_spec_or_refusal(lambda: build(arguments))
         if isinstance(op_spec, ToolResult):
             return op_spec
-        return await run_on_runner(op_spec, anchor_key=bound.arguments.get("anchor_key"))
+        return await run_on_runner(
+            op_spec,
+            anchor_key=arguments.get("anchor_key"),
+            refine=None if refine is None else functools.partial(refine, arguments),
+        )
 
     return tool
 
@@ -110,6 +139,11 @@ def _slice_pair[T: CompareOpSpec | SumOfOpSpec](op_spec: type[T]) -> Callable[[A
         )
 
     return build
+
+
+def _compare(a: Arguments) -> CompareOpSpec | SumOfOpSpec:
+    """`compare`'s op-spec, or `sum_of`'s under `operation="sum"`."""
+    return _slice_pair(SumOfOpSpec if a["operation"] == "sum" else CompareOpSpec)(a)
 
 
 def _growth(a: Arguments) -> GrowthOpSpec:
@@ -170,6 +204,22 @@ def _two_sided[T: ShareOfOpSpec | QuotientOfOpSpec](op_spec: type[T]) -> Callabl
     return build
 
 
+def _share_of(a: Arguments) -> ShareOfOpSpec | QuotientOfOpSpec:
+    """`share_of`'s op-spec, or `quotient_of`'s under `operation="quotient"`."""
+    return _two_sided(QuotientOfOpSpec if a["operation"] == "quotient" else ShareOfOpSpec)(a)
+
+
+def _quotient_for_two_units(a: Arguments, refusal: ToolRefusal) -> ToolRefusal:
+    """A share's `cross_frame_unit_mismatch`, rewritten to name the quotient form.
+    The runner's `fix` names each side's unit under its label."""
+    if a["operation"] != "share" or refusal.code != ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH:
+        return refusal
+    return ToolRefusal.share_units_differ(
+        numerator_unit=refusal.fix.get("numerator"),
+        denominator_unit=refusal.fix.get("denominator"),
+    )
+
+
 def _join(a: Arguments) -> JoinOpSpec:
     return JoinOpSpec(
         frame_ref=a["frame_ref"],
@@ -182,10 +232,10 @@ def _join(a: Arguments) -> JoinOpSpec:
 
 
 aggregate = _on_runner(aggregate_tool.aggregate, _aggregate)
-compare = _on_runner(compare_tool.compare, _slice_pair(CompareOpSpec))
+compare = _on_runner(compare_tool.compare, _compare)
 growth = _on_runner(growth_tool.growth, _growth)
 rank = _on_runner(rank_tool.rank, _rank)
-share_of = _on_runner(share_of_tool.share_of, _two_sided(ShareOfOpSpec))
+share_of = _on_runner(share_of_tool.share_of, _share_of, refine=_quotient_for_two_units)
 join = _on_runner(join_tool.join, _join)
 filter_verb = _on_runner(filter_tool.filter_verb, _filter)
 sum_of = _on_runner(sum_of_tool.sum_of, _slice_pair(SumOfOpSpec))

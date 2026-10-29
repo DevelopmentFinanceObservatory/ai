@@ -34,6 +34,7 @@ from typing import Any
 
 import mcp.types as mt
 from common.auth import BearerTokenVerifier, apply_gate
+from common.declaration import declared_tool
 from common.logging import configure_logging
 from common.materialisation import (
     InMemoryMaterialisationStore,
@@ -50,7 +51,7 @@ from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools import ToolResult
+from fastmcp.tools import Tool, ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -157,10 +158,10 @@ mcp = FastMCP(name="analysis-mcp", lifespan=_lifespan, auth=BearerTokenVerifier(
 
 _TITLES: Mapping[str, str] = {
     "aggregate": "Aggregate by group",
-    "compare": "Compare two series",
+    "compare": "Subtract or add two series",
     "growth": "Calculate growth",
     "rank": "Rank entities",
-    "share_of": "Calculate share of total",
+    "share_of": "Calculate a share or a ratio",
     "join": "Join two results",
     "filter": "Filter rows",
     "sum_of": "Add two series",
@@ -175,9 +176,9 @@ def _register(fn: Callable[..., Awaitable[ToolResult]], wire_name: str) -> None:
     `tool_pipeline.store_result_and_render` builds every successful payload
     from. `-> ToolResult` on the wrapped function suppresses fastmcp's own
     schema derivation, so `output_schema` is passed explicitly here rather
-    than left to be derived.
+    than left to be derived. The input schema is `common.declaration`'s.
     """
-    mcp.tool(
+    tool = Tool.from_function(
         _with_internal_error_backstop(fn, wire_name),
         name=wire_name,
         version=IMPLEMENTATION_VERSIONS[wire_name],
@@ -185,6 +186,7 @@ def _register(fn: Callable[..., Awaitable[ToolResult]], wire_name: str) -> None:
         annotations=READ_ONLY_CATALOGUE,
         output_schema=VERB_OUTPUT_SCHEMA,
     )
+    mcp.add_tool(declared_tool(tool))
 
 
 _register(aggregate, "aggregate")
@@ -199,13 +201,17 @@ _register(quotient_of, "quotient_of")
 
 # `resolve_anchor` computes no frame, so it declares its own result schema and
 # version in place of the verbs'.
-mcp.tool(
-    _with_internal_error_backstop(resolve_anchor, "resolve_anchor"),
-    name="resolve_anchor",
-    version=RESOLVE_ANCHOR_VERSION,
-    title="Find the latest period",
-    annotations=READ_ONLY_CATALOGUE,
-    output_schema=RESOLVE_ANCHOR_OUTPUT_SCHEMA,
+mcp.add_tool(
+    declared_tool(
+        Tool.from_function(
+            _with_internal_error_backstop(resolve_anchor, "resolve_anchor"),
+            name="resolve_anchor",
+            version=RESOLVE_ANCHOR_VERSION,
+            title="Find the latest period",
+            annotations=READ_ONLY_CATALOGUE,
+            output_schema=RESOLVE_ANCHOR_OUTPUT_SCHEMA,
+        )
+    )
 )
 
 
