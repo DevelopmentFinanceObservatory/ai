@@ -815,12 +815,19 @@ class SearchReading(StrictModel):
         )
 
     def with_fetch(self, result: Mapping[str, Any]) -> SearchReading:
-        """This reading with the outcome of a `fetch` result for its spec_id."""
-        if result.get("code"):
-            fetched = FetchReading(refusal_code=str(result["code"]))
-        else:
-            fetched = FetchReading(summary=_str_or_none(result.get("summary")))
-        return self.model_copy(update={"fetch": fetched})
+        """This reading with the outcome of a `fetch` result for its spec_id.
+
+        The fetch's `served` and `args`, which a later release stores, are
+        kept. It is no longer only a plan step's retrieval (`plan_step`)."""
+        refused = bool(result.get("code"))
+        outcome: dict[str, Any] = {
+            "summary": None if refused else _str_or_none(result.get("summary")),
+            "refusal_code": str(result["code"]) if refused else None,
+            "plan_step": False,
+        }
+        return self.model_copy(
+            update={"fetch": (self.fetch or FetchReading()).model_copy(update=outcome)}
+        )
 
 
 def _offers(offers: Sequence[Any] | None) -> tuple[CandidateReading, ...]:

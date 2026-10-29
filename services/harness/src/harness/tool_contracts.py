@@ -499,18 +499,19 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     raw_parts = envelope.get("parts") or []
     raw_part = raw_parts[0] if raw_parts else {}
     digest["spec_block"] = (
-        _with_bound_refs(raw_part, raw_part.get("spec"))
+        _with_bound_refs(raw_part.get("spec"), _stored_rows(raw_part))
         if digest.get("status") == "definite"
         else None
     )
     for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
+        rows = _stored_rows(part)
         summary["spec_block"] = (
-            _with_bound_refs(part, part.get("spec"))
+            _with_bound_refs(part.get("spec"), rows)
             if summary.get("status") == "definite"
             else None
         )
         summary["candidate_blocks"] = {
-            spec["spec_id"]: _with_bound_refs(part, spec)
+            spec["spec_id"]: _with_bound_refs(spec, rows)
             for spec in _offered_specs(part)
             if spec.get("spec_id")
         }
@@ -518,12 +519,16 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     return digest
 
 
-def _with_bound_refs(part: Mapping[str, Any], spec: Any) -> Any:
-    """`spec`, a block `part` carries, with the part's `bound_refs` as rows (`bound_rows`) under `_bound_refs` when it has any."""
-    rows = bound_rows(bound_refs(part))
+def _stored_rows(part: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """`part`'s `bound_refs` as the JSON rows (`bound_rows`) each block it carries stores."""
+    return [row.model_dump(mode="json") for row in bound_rows(bound_refs(part))]
+
+
+def _with_bound_refs(spec: Any, rows: list[dict[str, Any]]) -> Any:
+    """`spec`, a block a part carries, with the part's stored `rows` under `_bound_refs` when it has any."""
     if not rows or not isinstance(spec, Mapping):
         return spec
-    return {**spec, "_bound_refs": [row.model_dump(mode="json") for row in rows]}
+    return {**spec, "_bound_refs": rows}
 
 
 def _offered_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
