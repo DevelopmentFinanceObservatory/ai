@@ -4,8 +4,12 @@ dfo-apis' analysis runner.
 Each verb tool takes the arguments, signature and docstring of its in-process
 twin (`aggregate_tool.aggregate` and the rest), builds the same op-spec from
 them, and runs it on the runner (`tool_pipeline.run_on_runner`). An argument
-that forms no op-spec refuses `op_spec_invalid` before any call, and a frame
-argument with no `content_version` refuses `frame_ref_incomplete`. `compare`
+that forms no op-spec refuses `op_spec_invalid` before any call. A frame
+argument naming a `spec_` id alone is read at the Spec's newest version
+(`runner_tree.newest_ref`), and one naming any other id alone refuses
+`frame_ref_incomplete`. `rank`, `aggregate` and `share_of` also take
+`place_level`, which no in-process twin has: it filters each input to one level
+of place on the runner (`runner_tree.verb_tree`). `compare`
 takes `sum_of`'s form under `operation="sum"`, and `share_of` takes
 `quotient_of`'s under `operation="quotient"`: the form picks the op-spec, so each
 keeps its own runner call, result and refusals. A share whose sides hold two
@@ -32,11 +36,13 @@ from __future__ import annotations
 import functools
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Annotated, Any
 
 from common.materialisation import AnchorRecord, FrameRef, get_store
+from common.place_type import PlaceLevel
 from common.rolling import canonical_roots
 from fastmcp.tools import ToolResult
+from pydantic import Field
 
 from analysis_mcp import (
     aggregate_tool,
@@ -64,7 +70,7 @@ from analysis_mcp.op_spec import (
     with_anchor_key,
 )
 from analysis_mcp.runner_client import find_anchor
-from analysis_mcp.runner_tree import Pair, root_node
+from analysis_mcp.runner_tree import Pair, newest_ref, root_node
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import build_op_spec_or_refusal, run_on_runner
 
@@ -74,43 +80,99 @@ type Refine = Callable[[Arguments, ToolRefusal], ToolRefusal]
 
 _FRAME_ARGUMENTS = ("frame_ref", "right_frame_ref", "denominator_frame_ref")
 
+# The argument `rank`, `aggregate` and `share_of` take beside their twins' own.
+_PLACE_LEVEL = inspect.Parameter(
+    "place_level",
+    inspect.Parameter.KEYWORD_ONLY,
+    default=None,
+    annotation=Annotated[
+        PlaceLevel | None,
+        Field(
+            default=None,
+            description=(
+                "Keep only the places at this level before the call, such as Country. Set it "
+                "when the frame holds places of several levels and the call refuses "
+                "place_levels_mixed."
+            ),
+        ),
+    ],
+)
 
-def frame_ref_incomplete(arguments: Arguments) -> ToolRefusal | None:
-    """The refusal for the first frame argument in `arguments` that names a
-    `spec_id` without its `content_version`, or `None` when none does. Any other
-    malformed argument is left to the op-spec to refuse."""
-    for name in _FRAME_ARGUMENTS:
-        ref = arguments.get(name)
-        if isinstance(ref, Mapping) and "spec_id" in ref and "content_version" not in ref:
-            return ToolRefusal.frame_ref_incomplete(argument=name, spec_id=str(ref["spec_id"]))
+
+def _bare(ref: Any) -> str | None:
+    """The `spec_id` of a frame argument that names one with no `content_version`."""
+    if isinstance(ref, Mapping) and "spec_id" in ref and "content_version" not in ref:
+        return str(ref["spec_id"])
     return None
 
 
+def frame_ref_incomplete(arguments: Arguments) -> ToolRefusal | None:
+    """The refusal for the first frame argument in `arguments` that names an id other
+    than a `spec_` id without its `content_version`, or `None` when none does. Any
+    other malformed argument is left to the op-spec to refuse."""
+    for name in _FRAME_ARGUMENTS:
+        spec_id = _bare(arguments.get(name))
+        if spec_id is not None and not spec_id.startswith("spec_"):
+            return ToolRefusal.frame_ref_incomplete(argument=name, spec_id=spec_id)
+    return None
+
+
+def _held_newest(arguments: Arguments) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """`arguments` with each bare `spec_` frame argument held as `newest_ref`, and
+    the Specs those name, each once."""
+    held = dict(arguments)
+    newest: dict[str, None] = {}
+    for name in _FRAME_ARGUMENTS:
+        spec_id = _bare(arguments.get(name))
+        if spec_id is not None:
+            held[name] = newest_ref(spec_id).model_dump()
+            newest[spec_id] = None
+    return held, tuple(newest)
+
+
 def _on_runner(
-    in_process: Tool, build: Callable[[Arguments], OpSpecVariant], *, refine: Refine | None = None
+    in_process: Tool,
+    build: Callable[[Arguments], OpSpecVariant],
+    *,
+    refine: Refine | None = None,
+    takes_place_level: bool = False,
 ) -> Tool:
     """The registered tool for `in_process`. It keeps that tool's signature and
     docstring, builds its op-spec with `build` from the bound arguments, and
     computes it on the runner. `refine` rewrites a runner refusal given the
-    call's arguments."""
+    call's arguments. `takes_place_level` adds `place_level` to the signature."""
     signature = inspect.signature(in_process)
 
     @functools.wraps(in_process)
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:
+        place_level: PlaceLevel | None = (
+            kwargs.pop("place_level", None) if takes_place_level else None
+        )
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
         arguments = bound.arguments
         if (incomplete := frame_ref_incomplete(arguments)) is not None:
             return to_tool_result(incomplete)
-        op_spec = build_op_spec_or_refusal(lambda: build(arguments))
+        held, newest = _held_newest(arguments)
+        op_spec = build_op_spec_or_refusal(lambda: build(held))
         if isinstance(op_spec, ToolResult):
             return op_spec
         return await run_on_runner(
             op_spec,
             anchor_key=arguments.get("anchor_key"),
+            place_level=place_level,
+            newest=newest,
             refine=None if refine is None else functools.partial(refine, arguments),
         )
 
+    if takes_place_level:
+        tool.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]  # inspect reads it
+            parameters=[*signature.parameters.values(), _PLACE_LEVEL]
+        )
+        tool.__annotations__ = {
+            **in_process.__annotations__,
+            "place_level": _PLACE_LEVEL.annotation,
+        }
     return tool
 
 
@@ -231,11 +293,13 @@ def _join(a: Arguments) -> JoinOpSpec:
     )
 
 
-aggregate = _on_runner(aggregate_tool.aggregate, _aggregate)
+aggregate = _on_runner(aggregate_tool.aggregate, _aggregate, takes_place_level=True)
 compare = _on_runner(compare_tool.compare, _compare)
 growth = _on_runner(growth_tool.growth, _growth)
-rank = _on_runner(rank_tool.rank, _rank)
-share_of = _on_runner(share_of_tool.share_of, _share_of, refine=_quotient_for_two_units)
+rank = _on_runner(rank_tool.rank, _rank, takes_place_level=True)
+share_of = _on_runner(
+    share_of_tool.share_of, _share_of, refine=_quotient_for_two_units, takes_place_level=True
+)
 join = _on_runner(join_tool.join, _join)
 filter_verb = _on_runner(filter_tool.filter_verb, _filter)
 sum_of = _on_runner(sum_of_tool.sum_of, _slice_pair(SumOfOpSpec))

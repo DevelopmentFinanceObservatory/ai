@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 
@@ -381,9 +382,15 @@ async def test_every_registered_tool_keeps_its_in_process_twins_schema_and_descr
         registered = {tool.name: tool for tool in await client.list_tools()}
 
     assert set(registered) == set(expected)
+    leveled = set()
     for name, tool in registered.items():
-        assert tool.input_schema == expected[name].input_schema, name
+        schema = copy.deepcopy(tool.input_schema)
+        if schema["properties"].pop("place_level", None) is not None:
+            leveled.add(name)
+        assert schema == expected[name].input_schema, name
         assert tool.description == expected[name].description, name
+    # `place_level` is the registered tools' own: it builds a runner filter step.
+    assert leveled == {"aggregate", "rank", "share_of"}
 
 
 @pytest.mark.parametrize(("verb_fn", "verb_name"), [(aggregate, "aggregate"), (compare, "compare")])

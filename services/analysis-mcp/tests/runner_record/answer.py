@@ -14,7 +14,10 @@ root read with columns, a groupby or the party-totals cut is the read
 pair those columns, that groupby and that cut give (`analysis_roots.frame_ref_for`,
 with no enrichment stamp). The
 recorded frame of a groupby root is the dataset version apis summed, which a
-mint record names as the root's dataset, so it is read as recorded.
+mint record names as the root's dataset, so it is read as recorded. A root that
+states no `columns`, such as a Spec root, takes the default enrichment the live
+root source gives a dataset whose identity names no flow role, the place type
+(`analysis_roots.mint_options`).
 
 A GET reads what the calls stored, after every call is answered, as the door
 serving its path answers it: a derived frame's manifest and its Parquet file (`doors.derived`),
@@ -47,7 +50,7 @@ from datasets_api.analysis import (
     run_analysis,
     run_anchor,
 )
-from datasets_api.analysis_roots import frame_ref_for
+from datasets_api.analysis_roots import frame_ref_for, mint_options
 from datasets_api.derived import (
     DerivedReads,
     manifest_body,
@@ -87,12 +90,18 @@ class _RenderedRoots(FakeRootSource):
 
     def __init__(self, *, rendered: Mapping[_Rendered, Frame], stores: Stores) -> None:
         frames = {(spec_id, version): frame for (spec_id, version, _), frame in rendered.items()}
-        super().__init__(frames=frames, newest=dict(frames), recipes=stores.recipe_store)
+        # A Spec root reads the version its frame is recorded under: each key is a pair.
+        newest = dict(frames.keys())
+        super().__init__(frames=frames, newest=newest, recipes=stores.recipe_store)
         self.rendered = dict(rendered)
 
     def resolve(
         self, root: SpecRoot | DatasetRoot, *, latest: bool, trace_id: str | None
     ) -> ResolvedRoot:
+        if root.rendering.columns is None:
+            columns = tuple(mint_options(root.rendering, identity={}).get("columns") or ())
+            rendering = root.rendering.model_copy(update={"columns": columns})
+            root = root.model_copy(update={"rendering": rendering})
         resolved = super().resolve(root, latest=latest, trace_id=trace_id)
         columns = tuple(root.rendering.columns or ())
         groupby = (

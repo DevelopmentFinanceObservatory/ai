@@ -24,6 +24,23 @@ refuses `frame_integrity_failed`, and any other failed read of it
 `service_unavailable`, which a retry may mend. The runner reads a root with
 no other option, so a frame fetched with one refuses `rendering_not_recorded`.
 
+A Spec root (`spec_root`) is the Spec alone, `{spec_id}`, which the runner reads
+at its newest version. With no `rendering` it takes the enrichment columns the
+dataset's roles need (dfo-apis `analysis_roots.enrichment_columns`), the columns
+the public `get_data` adds, so its root record, and the `ops_` id of a call over
+it, are those of the same call over the frame `get_data` returns. A bare
+`spec_id` argument is held in the op-spec as `newest_ref`, a pair naming no
+version, and `verb_tree` sends its Spec root in its place (`replaced`). A frame
+fetched again after the runner lost it is the Spec root of its mint record's
+rendering, or of no rendering when no record is held.
+
+`place_level` puts a `filter` step keeping the places at that level under the
+verb, on each input, so the call computes the tree an explicit `filter` call and
+the verb over its result would, and gets its ids. The step's predicate reads the
+`{role}_type` column of the first typed role (`common.place_type.TYPED_ROLES`)
+the side keys by (`_place_role`), else of `observationAbout`, the one place role
+whose mixed levels refuse `place_levels_mixed`.
+
 The runner checks every rolling literal against the latest period it finds
 itself, so no tree carries `anchor_key`. The key names the anchor record
 `resolve_anchor` stored, whose `roots` are the frames the anchor route was asked
@@ -52,9 +69,17 @@ from common.materialisation import (
     MintRecord,
     get_store,
 )
+from common.place_type import PLACE_ROLE, TYPED_ROLES, PlaceLevel, type_column
 
 from analysis_mcp.identity import OpSpecVariant
-from analysis_mcp.op_spec import Populations, Verb
+from analysis_mcp.op_spec import (
+    AggregateOpSpec,
+    FilterOpSpec,
+    PlaceLevelPredicate,
+    Populations,
+    RankOpSpec,
+    Verb,
+)
 from analysis_mcp.runner_client import DEFAULT_RETRY_AFTER_S, Anchor, Pair
 from analysis_mcp.tool_errors import ToolRefusal
 
@@ -75,6 +100,19 @@ _SECOND_SLOT: Mapping[Verb, str] = {
 _READ_OPTIONS = frozenset(
     {"format", "bundle", "layout", "columns", "without_party_totals", "groupby"}
 )
+
+# The op-spec frame slots, which the tree's `inputs` fill in place of `arguments`.
+_FRAME_SLOTS = frozenset({"verb", "frame_ref", *_SECOND_SLOT.values()})
+
+# The content_version a bare `spec_id` argument is held under until the runner reads
+# the Spec (`newest_ref`). It names no version: `verb_tree` sends the Spec root in
+# its place, so it reaches no request.
+_NEWEST = "cv_" + "0" * 32
+
+
+def newest_ref(spec_id: str) -> FrameRef:
+    """The pair a bare `spec_id` argument is held under in an op-spec."""
+    return FrameRef(spec_id=spec_id, content_version=_NEWEST)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -131,7 +169,13 @@ async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
             spec_id=ref.spec_id, content_version=ref.content_version, options=unread
         )
     dataset = record.dataset
-    rendering = {
+    node = {**dataset.model_dump(), "rendering": _rendering(record)}
+    return node, (dataset.spec_id, dataset.content_version)
+
+
+def _rendering(record: MintRecord) -> dict[str, Any]:
+    """The rendering of a root read as `record`'s options state."""
+    rendering: dict[str, Any] = {
         "without_party_totals": record.options.get("without_party_totals") is True,
         # Sorted and listed once, as dfo-apis keeps a root's columns
         # (`analysis_roots.mint_options`), so the recipe's normal form is the one
@@ -140,8 +184,18 @@ async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
     }
     if (groupby := record.options.get("groupby")) is not None:
         rendering["groupby"] = groupby
-    node = {**dataset.model_dump(), "rendering": rendering}
-    return node, (dataset.spec_id, dataset.content_version)
+    return rendering
+
+
+async def spec_root(ref: FrameRef) -> tuple[dict[str, Any], MintRecord | None]:
+    """The Spec root that fetches the `spec_` frame `ref` again at its newest version,
+    with the rendering its mint record states, and the record. With no record, or
+    one that cannot be read or read again, the root takes the default rendering, as
+    `get_data` with default arguments fetches it."""
+    record = await _mint_record(ref)
+    if not isinstance(record, MintRecord) or set(record.options) - _READ_OPTIONS:
+        return {"spec_id": ref.spec_id}, None
+    return {"spec_id": ref.spec_id, "rendering": _rendering(record)}, record
 
 
 def _sides(op_spec: OpSpecVariant) -> tuple[FrameRef, FrameRef | None]:
@@ -197,23 +251,71 @@ async def _anchor(anchor_key: str, *, populations: Populations) -> Anchor | Tool
     return Anchor(key=anchor_key, nodes=tuple(nodes), pairs=frozenset(pairs))
 
 
-async def verb_tree(op_spec: OpSpecVariant, *, anchor_key: str | None = None) -> Tree | ToolRefusal:
+def _place_role(keys: tuple[str, ...]) -> str:
+    """The role whose places a `place_level` step keeps on a side keyed by `keys`."""
+    return next((key for key in keys if key in TYPED_ROLES), PLACE_ROLE)
+
+
+def _side_keys(op_spec: OpSpecVariant) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The columns `op_spec` keys `data` and `other` by."""
+    if isinstance(op_spec, RankOpSpec):
+        return op_spec.rank_by, op_spec.rank_by
+    if isinstance(op_spec, AggregateOpSpec):
+        return op_spec.group_by, op_spec.group_by
+    numerator_by: tuple[str, ...] = getattr(op_spec, "numerator_by", ())
+    denominator_by: Mapping[str, str] = getattr(op_spec, "denominator_by", {})
+    return numerator_by, tuple(denominator_by.get(key, key) for key in numerator_by)
+
+
+def _level_step(
+    node: dict[str, Any], ref: FrameRef, *, level: PlaceLevel, keys: tuple[str, ...]
+) -> dict[str, Any]:
+    """`node` under the `filter` step an explicit `filter` call keeping the places at
+    `level` sends, its arguments built as `verb_tree` builds every verb's."""
+    predicate = PlaceLevelPredicate(column=type_column(_place_role(keys)), level=level)
+    step = FilterOpSpec(frame_ref=ref, predicates=(predicate,))
+    arguments = step.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
+    return {"verb": str(Verb.FILTER), "arguments": arguments, "inputs": {"data": node}}
+
+
+async def verb_tree(
+    op_spec: OpSpecVariant,
+    *,
+    anchor_key: str | None = None,
+    place_level: PlaceLevel | None = None,
+    replaced: Mapping[Pair, dict[str, Any]] | None = None,
+) -> Tree | ToolRefusal:
     """The one-node tree of `op_spec`, with the anchor roots of the record under
-    `anchor_key` when given, or the refusal for a frame it reads."""
-    slots = {"verb", "frame_ref", *_SECOND_SLOT.values()}
-    arguments = op_spec.model_dump(mode="json", exclude=slots, exclude_none=True)
+    `anchor_key` when given, or the refusal for a frame it reads. A frame ref whose
+    pair is in `replaced` is sent as the root node it maps to, and `place_level`
+    filters each input to that level first (see the module docstring)."""
+    arguments = op_spec.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
     inputs: dict[str, Any] = {}
     refs_by_root: dict[Pair, tuple[FrameRef, ...]] = {}
     data, other = _sides(op_spec)
+    keys = dict(zip(("data", "other"), _side_keys(op_spec), strict=True))
     for name, ref in (("data", data), ("other", other)):
         if ref is None:
             continue
-        root = await root_node(ref)
-        if isinstance(root, ToolRefusal):
-            return root
-        inputs[name], pair = root
-        held = refs_by_root.get(pair, ())
-        refs_by_root[pair] = held if ref in held else (*held, ref)
+        if replaced is not None and (ref.spec_id, ref.content_version) in replaced:
+            node = replaced[ref.spec_id, ref.content_version]
+            pair: Pair | None = (
+                (node["spec_id"], node["content_version"]) if "content_version" in node else None
+            )
+        else:
+            root = await root_node(ref)
+            if isinstance(root, ToolRefusal):
+                return root
+            node, pair = root
+        inputs[name] = (
+            node
+            if place_level is None
+            else _level_step(node, ref, level=place_level, keys=keys[name])
+        )
+        # A Spec root names no pair: the runner names the version it read.
+        if pair is not None:
+            held = refs_by_root.get(pair, ())
+            refs_by_root[pair] = held if ref in held else (*held, ref)
     anchor: Anchor | None = None
     # `op_spec.with_anchor_key` gives a key to every rolling call and to no other.
     rolling = getattr(op_spec, "rolling", None)

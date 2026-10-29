@@ -109,8 +109,13 @@ fires when a pair aged out past an in-memory store's TTL, with a `get_data`
 retry only for a Datasets-family (`spec_...`) pair; a durable, bucket-backed
 store never raises it, since a pair its lifecycle rule has deleted comes
 back as the same `frame_not_held` a pair that was never registered would.
-`frame_ref_incomplete` fires when a frame argument names a `spec_id` with no
-`content_version`; the call is retryable with the full pair.
+`frame_ref_incomplete` fires when a frame argument names a derived (`ops_`) or
+malformed `spec_id` with no `content_version`; the call is retryable with the
+full pair. A bare `spec_` id is fetched (`runner_tree.spec_root`).
+A frame the runner lost is fetched or computed again before either refusal
+reaches a caller (`tool_pipeline.run_on_runner`). When that fails the refusal
+keeps its code and retry mode, and its message gains the sentence saying the
+server could not rebuild the frame (`not_rebuilt`).
 `frame_integrity_failed` fires when a durable store's read-time check finds
 the stored object itself is wrong: its bytes don't match what was recorded
 at write time, its row count differs from the count recorded beside it,
@@ -160,8 +165,8 @@ the world, regions, World Bank groups, countries and their subdivisions
 side by side. A type outside `PLACE_LEVELS`, such as `Place`,
 `ProvisionalNode` or `UNGeoRegion`, names no level, so places sharing only
 that type are refused, and one place alone passes whatever its type. It is
-retryable over a `filter` result that keeps one level (`place_level` on the
-type column). On a flow party role (`financingProvider`,
+retryable with `place_level` set, which `rank`, `aggregate` and `share_of` take,
+and `fix["place_level"]` names a level some of the places sit at. On a flow party role (`financingProvider`,
 `financingRecipient`) the verbs leave out the parties whose
 `{role}_party_kind` cell is `total` and record them as `party_total`
 exclusions; the refusal fires there only when several parties include one
@@ -213,10 +218,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Literal, Self
 
+from common.materialisation import FrameRef
 from common.place_type import (
     PARTY_ROLES,
     PLACE_LEVELS,
@@ -225,6 +231,7 @@ from common.place_type import (
     PartyKind,
     class_column,
     enrichment_role,
+    levels_of,
     whole_column,
 )
 from common.refusal import internal_error_message, refusal_meta, refusal_text
@@ -369,6 +376,25 @@ _DISAMBIGUATION_CANDIDATE_CAP = 10
 # lists; `fix` carries the whole sample.
 _KEY_SAMPLE_IN_MESSAGE = 5
 
+# The codes of a refusal whose caller frames the runner no longer holds.
+_LOST_CODES = frozenset(
+    {
+        ToolErrorCode.FRAME_NOT_HELD,
+        ToolErrorCode.FRAME_EXPIRED,
+        ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE,
+    }
+)
+
+# The sentence a lost-frame refusal gains when the server could not rebuild the frame.
+_NOT_REBUILT = (
+    "The server could not rebuild this frame by itself. Call get_data with the spec_id "
+    "(spec_...) to register it again and pass the frame_ref it returns; for an ops_ result, "
+    "repeat the verb calls that made it."
+)
+
+# The level a `place_levels_mixed` fix names first when the places sit at it.
+_COUNTRY_LEVEL = "Country"
+
 # The party kinds a filter keeps to compare or rank a flow side's members: private parties
 # are of kind `party` too, told apart by their class.
 _MEMBER_KINDS: tuple[PartyKind, ...] = ("party",)
@@ -446,6 +472,26 @@ class ToolRefusal:
             # A runner refusal that was not retryable names no delay to wait.
             return RetryMode.DO_NOT_RETRY
         return _RETRY_MODE_BY_CODE[self.code]
+
+    @property
+    def lost_frames(self) -> tuple[FrameRef, ...]:
+        """The caller's frames this refusal says the runner no longer holds: every
+        frame `frames_lost` or `derived_input_root_lost` names, none for any other."""
+        if self.code not in _LOST_CODES:
+            return ()
+        named = self.fix.get("frame_refs")
+        if named is None and "spec_id" in self.fix and "content_version" in self.fix:
+            named = [self.fix]
+        if not isinstance(named, list):
+            return ()
+        return tuple(
+            FrameRef(spec_id=ref["spec_id"], content_version=ref["content_version"])
+            for ref in named
+        )
+
+    def not_rebuilt(self) -> Self:
+        """This lost-frame refusal after the server failed to rebuild its frames."""
+        return replace(self, message=f"{self.message} {_NOT_REBUILT}")
 
     @classmethod
     def op_spec_invalid(cls, *, detail: str) -> Self:
@@ -741,13 +787,14 @@ class ToolRefusal:
 
     @classmethod
     def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
-        """The frame argument `argument` names `spec_id` with no `content_version`."""
+        """The frame argument `argument` names `spec_id`, which is no `spec_` id, with
+        no `content_version`."""
         return cls(
             code=ToolErrorCode.FRAME_REF_INCOMPLETE,
             message=(
-                f"{argument} names spec_id {spec_id!r} without its content_version. Pass the "
-                "full {spec_id, content_version} pair from the get_data or verb result that "
-                "made the frame."
+                f"{argument} names {spec_id!r} without its content_version, and only a "
+                "spec_ id is fetched by itself. Pass the full {spec_id, content_version} "
+                "pair from the result that made the frame."
             ),
             fix={"argument": argument, "spec_id": spec_id},
         )
@@ -1513,9 +1560,9 @@ class ToolRefusal:
                 message=(
                     f"The {role} parties in this frame cannot be pooled or ranked: the frame "
                     f"carries no {column!r} column, so its parties cannot be told apart from "
-                    "the group totals that hold them. Retrieve the data again with get_data "
-                    f"and place_types=true, which adds {column!r}, and retry with that "
-                    f"frame_ref, or filter the frame to a single {role} party."
+                    "the group totals that hold them. Call get_data again for this spec_id "
+                    "(it adds the party kinds by default) and repeat the call with the "
+                    "frame_ref it returns."
                 ),
                 fix={"column": column, "types": []},
             )
@@ -1538,6 +1585,8 @@ class ToolRefusal:
                 ),
                 fix={"column": column, "types": list(types), "member_kinds": list(_MEMBER_KINDS)},
             )
+        levels = sorted({level for cell in types for level in levels_of(cell) & PLACE_LEVELS})
+        level = _COUNTRY_LEVEL if _COUNTRY_LEVEL in levels else next(iter(levels), None)
         return cls(
             code=ToolErrorCode.PLACE_LEVELS_MIXED,
             message=(
@@ -1546,13 +1595,13 @@ class ToolRefusal:
                 "among every place's types. A frame that names no place holds the world, "
                 "regions, World Bank groups, countries and their subdivisions side by side, "
                 "and ranking or summing them together counts a place beside the places inside "
-                "it. Filter the frame first with a place_level predicate on "
-                f"{column!r} naming one of those levels, such as Country, then retry with that "
-                "result's frame_ref. A type outside those levels, such as Place or "
-                "ProvisionalNode, names no level, and no place_level filter keeps the places "
-                "that carry it alone."
+                "it. A type outside those levels, such as Place or ProvisionalNode, names no "
+                "level, and no level kept leaves the places that carry it alone. Repeat the "
+                "call with place_level set to the level to keep, for example "
+                'place_level="Country".'
             ),
-            fix={"column": column, "types": list(types)},
+            fix={"column": column, "types": list(types)}
+            | ({} if level is None else {"place_level": level}),
         )
 
     @classmethod

@@ -93,12 +93,31 @@ async def _held_root(ref: FrameRef, columns: list[str] | None) -> Frame | None:
     return None if held is None else held[0]
 
 
+async def _newest(spec_id: str) -> FrameRef | None:
+    """The dataset version a Spec root reads: the dataset a mint record of `spec_id`
+    names, else a frame the store holds under `spec_id`."""
+    store = get_store()
+    listed = [listing.ref for listing in await store.list_frames()]
+    for ref in listed:
+        record = await store.get_mint_record(ref)
+        if record is not None and record.dataset.spec_id == spec_id:
+            return record.dataset
+    return next((ref for ref in listed if ref.spec_id == spec_id), None)
+
+
 async def _record(key: str, entry: dict[str, Any]) -> None:
     """Write the unrecorded request `entry` under `key` to `RUNNER_RECORD`, with the
-    frames its roots name, each under its pair and the columns it is read with."""
+    frames its roots name, each under its pair and the columns it is read with. A
+    Spec root's frame is recorded under the version `_newest` finds, which the
+    answering runner reads as the Spec's newest."""
     frames: dict[str, str] = {}
     for root in _roots(entry["body"]) if "body" in entry else ():
-        ref = FrameRef(spec_id=root["spec_id"], content_version=root["content_version"])
+        if "content_version" in root:
+            ref = FrameRef(spec_id=root["spec_id"], content_version=root["content_version"])
+        elif (newest := await _newest(root["spec_id"])) is not None:
+            ref = newest
+        else:
+            continue
         columns = (root.get("rendering") or {}).get("columns")
         held = await _held_root(ref, columns)
         if held is not None:
