@@ -2157,6 +2157,12 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
         "\nOn the plan card the user picked 'the top 10 donors' for decision 'donor_scope'. "
         in asked
     )
+    assert (
+        "Change only that decision and the requirements that cite it. Carry every other "
+        "requirement, with its id, its content and its citations, and every other decision "
+        "exactly as the plan card has them. Keep the id of any replaced requirement that "
+        "another requirement reads.\n" in asked
+    )
     assert "The user asks for this change" not in asked
     assert refused is not None and amended is not None
     assert refused["refused"]["code"] == amended["refused"]["code"] == SeamCode.PLAN_NOT_READY

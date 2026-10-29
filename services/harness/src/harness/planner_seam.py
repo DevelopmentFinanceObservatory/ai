@@ -1452,7 +1452,11 @@ class PlannerSeam:
                 f"\nOn the plan card the user picked {pick.chosen!r} for decision "
                 f"{pick.slot!r}. Call {PROPOSE_PLAN} again with that decision's `chosen` "
                 f"set to {pick.chosen!r} and the evidence requirements citing it changed to "
-                "state what that option asks for, which has it translated and compiled again.\n"
+                "state what that option asks for, which has it translated and compiled again. "
+                "Change only that decision and the requirements that cite it. Carry every other "
+                "requirement, with its id, its content and its citations, and every other "
+                "decision exactly as the plan card has them. Keep the id of any replaced "
+                "requirement that another requirement reads.\n"
             )
         if not fresh:
             return ask
