@@ -108,7 +108,7 @@ from harness.graph.switch import (
     SwitchFailedError,
 )
 from harness.plan_display import decision_option_id
-from harness.planner_seam import PlannerSeam, store_aligned_readings
+from harness.planner_seam import PlannerSeam, store_searched_pin_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
@@ -160,7 +160,9 @@ from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, 
 from pydantic import ValidationError
 from submission.service import (
     AlignedPin,
+    SearchedPin,
     save_aligned_pin,
+    save_searched_pin,
     scope_choice_decisions,
 )
 from translator.discovery import RESOLVED_STATE_PREFIX, PartFault, PartNotResolvedError
@@ -3675,48 +3677,42 @@ class _RevisingSeam(_Seam):
         return self._revised
 
 
-# The pin of the whole `_StoppedSeam` compiles over every sector of its part.
-_WHOLE_PIN = "spec_" + "7" * 32
+# The dataset `_StoppedSeam`'s revision searches for an input it pinned none for.
+_SEARCHED_PIN = "spec_" + "7" * 32
 
 
 class _StoppedSeam(_RevisingSeam):
     """A `_RevisingSeam` whose revision the user stops while it runs: it writes
-    drafting state, compiles a declared whole over every sector of the switched
-    source and stores its reading (`store_aligned_readings`), as a revision of a
-    share does, sets `SWITCH_STOP` as a Stop does, and waits to be cancelled."""
+    drafting state, searches a dataset for an input it pinned none for and stores
+    its reading (`store_searched_pin_readings`), as a revision of a share does,
+    sets `SWITCH_STOP` as a Stop does, and waits to be cancelled."""
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         self.revisions.append(kwargs)
         ctx = kwargs["ctx"]
         ctx.state["planner:rounds"] = 1
-        (origin,) = {
-            r.source_spec_id
-            for r in authored(
-                PlannerPlan.model_validate(kwargs["prior_plan"])
-            ).evidence_requirements
-            if isinstance(r, DatasetRequirement)
-        }
-        block = {"spec_id": _WHOLE_PIN, "resolved": {"scope_choices": None}}
-        save_aligned_pin(
+        block = {"spec_id": _SEARCHED_PIN, "resolved": {"scope_choices": None}}
+        save_searched_pin(
             cast(SessionState, ctx.state),
-            AlignedPin(
-                origin=cast(str, origin),
-                option_ids=(),
-                spec_id=_WHOLE_PIN,
+            SearchedPin(
+                requirement_key="total",
+                status="definite",
+                spec_id=_SEARCHED_PIN,
                 digest={
                     "part_digests": [
                         {
-                            "variable": _WHOLE_PIN,
+                            "variable": "US total ODA",
                             "status": "definite",
-                            "spec_id": _WHOLE_PIN,
+                            "spec_id": _SEARCHED_PIN,
                             "spec_block": block,
                         }
                     ]
                 },
-                whole_axis="sector",
+                asked_roles=("donor",),
             ),
         )
-        store_aligned_readings(ctx, cast(SessionState, ctx.state))
+        store_searched_pin_readings(ctx, cast(SessionState, ctx.state))
+        assert _SEARCHED_PIN in [r["spec_id"] for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY]]
         stop = SWITCH_STOP.get()
         assert stop is not None
         stop.set()
@@ -4206,7 +4202,7 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     """A Stop while the revision runs (`SWITCH_STOP`) cancels it and offers
     the plan unchanged under `switch_cancelled`, which asking again can get
     past, on a live pause, with the drafting state, the plan and the readings
-    the revision wrote put back, a declared whole's reading among them. A
+    the revision wrote put back, a searched input's reading among them. A
     revision that finishes in the same step as the Stop ends stopped too."""
     scope = _hashed_scope()
     new_pin, envelope = _switched_answer(scope)
@@ -4269,7 +4265,7 @@ async def test_a_switch_whose_revision_raises_puts_the_state_back_and_raises(
 ) -> None:
     """A revision ending on an error other than `SwitchFailedError` ends the switch
     with that error, once the drafting state, the plan and the readings it wrote,
-    a declared whole's reading among them, are put back for the next turn."""
+    a searched input's reading among them, are put back for the next turn."""
     scope = _hashed_scope()
     new_pin, envelope = _switched_answer(scope)
     revised = _scoped_plan(

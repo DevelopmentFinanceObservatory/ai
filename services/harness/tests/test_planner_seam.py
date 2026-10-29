@@ -85,7 +85,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
-from harness.turn_records import SearchReading, part_name
+from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
 from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
@@ -121,6 +121,7 @@ from planner.plan import (
     ShareOfRequirement,
     Unit,
     WholeOf,
+    alignments,
     amendment_entry,
     current_discovery_time_left,
     current_earlier_block,
@@ -152,7 +153,6 @@ from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
 from submission.service import (
     AlignedPin,
-    SourceReadings,
     save_aligned_pin,
     scope_choice_decisions,
 )
@@ -5145,77 +5145,39 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
     assert f"for requirement {dataset.id!r}" in refused["text"]
 
 
-@pytest.mark.parametrize(
-    ("axis", "named"),
-    [
-        ("sector", "gross disbursements in all sectors"),
-        ("donor", "health (CRS 120) from all donors"),
-        ("recipient", "health (CRS 120) to all recipients"),
-    ],
-)
-def test_a_declared_wholes_reading_is_named_by_the_whole_not_its_parts_words(
-    axis: str, named: str
-) -> None:
-    """US health aid, whose only scope choice is its sector, and the whole of it
-    over every sector, donor or recipient, compiled with no entries sent, so its
-    scope holds no choice entry naming where it came from: the whole's reading is
-    named by the whole. Over every sector, which opens the sector choice, it is
-    the opened axis on the part's measure. Over every donor or recipient the
-    whole keeps the part's sector choice and, with no concept stated, is named
-    by that sector option, as the plan card names it."""
-    part_scope = _switchable_scope()
-    part_scope["entries"] = []
-    part_scope["dropped_entries"] = []
-    part_scope["choices"] = part_scope["choices"][:1]
-    whole_scope = {
-        **copy.deepcopy(part_scope),
-        "id": f"{TOTAL}_base",
-        "choices": [] if axis == "sector" else copy.deepcopy(part_scope["choices"]),
-    }
+def test_a_declared_wholes_compile_leaves_the_readings_unchanged() -> None:
+    """US health aid and the whole of it over every donor, compiled from the part:
+    the compile is no reading of the conversation, so storing the turn's readings
+    leaves them and their blocks as the search stored them. A later turn names the
+    whole by its own requirement (`tests.test_aligned_turns`)."""
     origin = SearchReading.from_part(
-        {"variable": "US health aid", "status": "definite", "spec_id": HEALTH, "scope": part_scope}
-    )
-    block = {
-        "spec_id": TOTAL,
-        "resolved": {
-            "scope_choices": whole_scope,
-            "measure_label": "gross disbursements",
-            "shape": {"label": "gross disbursements (official development assistance)"},
-        },
-    }
+        {
+            "variable": "US health aid",
+            "status": "definite",
+            "spec_id": HEALTH,
+            "scope": _switchable_scope(),
+        }
+    ).model_dump(mode="json")
+    block = {"spec_id": TOTAL, "resolved": {"scope_choices": None}}
     whole = AlignedPin(
         origin=HEALTH,
         option_ids=(),
         spec_id=TOTAL,
         digest={
+            "spec_block": block,
             "part_digests": [
                 {"variable": TOTAL, "status": "definite", "spec_id": TOTAL, "spec_block": block}
-            ]
+            ],
         },
-        whole_axis=axis,
+        whole_axis="donor",
     )
-    ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: [origin.model_dump(mode="json")]})
+    ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: [origin]})
     planner_state: dict[str, Any] = {}
     save_aligned_pin(cast(SessionState, planner_state), whole)
 
-    planner_seam.store_aligned_readings(cast(Any, ctx), cast(SessionState, planner_state))
+    planner_seam.store_searched_pin_readings(cast(Any, ctx), cast(SessionState, planner_state))
 
-    stored = SearchReading.model_validate(ctx.state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    assert stored.spec_id == TOTAL
-    assert part_name(stored, block) == f'"{named}"'
-
-
-def test_a_declared_whole_with_no_block_is_named_by_its_axis_with_no_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A whole whose digest holds no spec block is named by the axis it opens,
-    and no block is read as a source, so no unreadable block is logged."""
-    whole = AlignedPin(origin=HEALTH, option_ids=(), spec_id=TOTAL, digest={}, whole_axis="donor")
-
-    with caplog.at_level(logging.WARNING):
-        named = planner_seam._whole_reading_name(whole, None, sources=SourceReadings({}.get))
-
-    assert (named, caplog.records) == ("all donors", [])
+    assert ctx.state == {ORCHESTRATOR_SEARCHES_KEY: [origin]}
 
 
 _WINDOWED_HEALTH = "spec_" + "e" * 32
@@ -5261,165 +5223,15 @@ def test_a_revision_names_a_pin_by_the_block_it_is_held_in(
     assert plan_display.plan_words(plan, pinned=sources).names["health"] == "health"
 
 
-@pytest.mark.parametrize("axis", ["donor", "recipient"])
-@pytest.mark.parametrize(
-    ("whole_concept", "part_concept", "sector_on", "concept"),
-    [
-        pytest.param("health", "health", None, "health", id="part-concept"),
-        pytest.param(None, "health", None, "health", id="whole-states-none"),
-        pytest.param(
-            "official development assistance",
-            "bilateral ODA",
-            None,
-            "official development assistance",
-            id="counted-on-another-series",
-        ),
-        pytest.param(None, None, None, "gross disbursements", id="no-concept"),
-        pytest.param(None, None, "whole", "health (CRS 120)", id="no-concept-whole-sector"),
-        pytest.param(None, None, "part", "health (CRS 120)", id="no-concept-part-sector"),
-    ],
-)
-@pytest.mark.parametrize("bound", [True, False], ids=["bound-total", "open-role"])
-@pytest.mark.parametrize("planned", [False, True], ids=["no-plan", "plan"])
-def test_a_donor_or_recipient_wholes_reading_is_named_off_its_own_block(
-    decision: Callable[..., Decision],
-    axis: str,
-    whole_concept: str | None,
-    part_concept: str | None,
-    sector_on: str | None,
-    concept: str,
-    bound: bool,
-    planned: bool,
-) -> None:
-    """US health aid to Kenya and its whole over every donor or recipient: the
-    whole's reading is named as the card names it, off its own block and its
-    part's alone. The concept is the one Search states for the whole, else for
-    the part, so a whole Search counted on another series (bilateral ODA's on
-    total ODA) reads its own; the parties are those its block binds, the opened
-    side by the set bound there, else by the members left open there. With
-    neither block stating a concept, as from a Search sending no `concept_label`, the
-    whole is named by the sector option its scope holds, else the part's, as
-    the card names it by the part's sector decision, else by its measure, the
-    parties still named. A plan in the planner's state declaring the whole
-    changes nothing."""
-    kept = (
-        {"role": "destination", "ref": "country/KEN", "label": "Kenya"}
-        if axis == "donor"
-        else {"role": "origin", "ref": "country/USA", "label": "United States"}
-    )
-    part_scope = _switchable_scope()
-    part_scope["entries"] = []
-    part_scope["dropped_entries"] = []
-    (sector,) = [c for c in part_scope["choices"] if c["axis"] == "sector"]
-    part_scope["choices"] = []
-    whole_scope = {**copy.deepcopy(part_scope), "id": f"{TOTAL}_base"}
-    if sector_on == "whole":
-        whole_scope["choices"] = [sector]
-    if bound:
-        population = "official donors (DAC)" if axis == "donor" else "ODA-eligible recipients"
-        opened: dict[str, Any] = {"entity_groups": {axis: {"label": population}}}
-    else:
-        population = "140 donors" if axis == "donor" else "140 recipients"
-        role = "origin" if axis == "donor" else "destination"
-        opened = {"role_axis_facts": [{"role": role, "member_count": 140}]}
-    block = {
-        "spec_id": TOTAL,
-        "resolved": {
-            "scope_choices": whole_scope,
-            "measure_label": "gross disbursements",
-            "entities": [kept],
-            **opened,
-            **({"concept_label": whole_concept} if whole_concept is not None else {}),
-        },
-    }
-    whole = AlignedPin(
-        origin=HEALTH,
-        option_ids=(),
-        spec_id=TOTAL,
-        digest={
-            "part_digests": [
-                {"variable": TOTAL, "status": "definite", "spec_id": TOTAL, "spec_block": block}
-            ]
-        },
-        whole_axis=axis,
-    )
-    part_resolved: dict[str, Any] = {}
-    if part_concept is not None:
-        part_resolved["concept_label"] = part_concept
-    if sector_on == "part":
-        part_resolved["scope_choices"] = {**part_scope, "choices": [sector]}
-    part_block = {"spec_id": HEALTH, "resolved": part_resolved}
-    ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: []})
-    planner_state: dict[str, Any] = {}
-    if planned:
-        plan = Plan(
-            question="What share of US health aid to Kenya is it?",
-            decisions=[decision()],
-            evidence_requirements=[
-                DatasetRequirement(
-                    id="part",
-                    decision_ids=["measure"],
-                    measure="health aid",
-                    entities=[
-                        Entity(name="United States", role="donor"),
-                        Entity(name="Kenya", role="recipient"),
-                    ],
-                    period=Period(start=2023, end=2023),
-                    source_spec_id=HEALTH,
-                ),
-                DatasetRequirement(
-                    id="whole",
-                    decision_ids=["measure"],
-                    measure="health aid",
-                    entities=[
-                        Entity(name="Kenya", role="recipient")
-                        if axis == "donor"
-                        else Entity(name="United States", role="donor")
-                    ],
-                    across=[axis],
-                    period=Period(start=2023, end=2023),
-                    source_spec_id=TOTAL,
-                    whole_of=WholeOf(part="part", axis=axis),
-                ),
-                AggregateRequirement(
-                    id="whole_total",
-                    input_id="whole",
-                    reduction=Reduction.SUM,
-                    group_by=[GroupBy.PERIOD],
-                ),
-                ShareOfRequirement(
-                    id="share",
-                    decision_ids=["measure"],
-                    numerator=RequirementSide(input_id="part"),
-                    denominator=RequirementSide(input_id="whole_total"),
-                ),
-            ],
-        )
-        save_plan(cast(SessionState, planner_state), plan)
-    save_pin_sources(
-        cast(SessionState, planner_state), {HEALTH: PinSource(block=part_block, settled=True)}
-    )
-    save_aligned_pin(cast(SessionState, planner_state), whole)
-
-    planner_seam.store_aligned_readings(cast(Any, ctx), cast(SessionState, planner_state))
-
-    stored = SearchReading.model_validate(ctx.state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    assert stored.text == (
-        f"{concept} from {population} to Kenya"
-        if axis == "donor"
-        else f"{concept} from United States to {population}"
-    )
-
-
-async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(
+async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_switches_from_it(
     decision: Any,
 ) -> None:
     """A revision of US health aid as a share of the US total compiles the total on
-    gross disbursements. The compiled pin joins the turn's readings under the
-    words and asked roles of the reading it was compiled from, with its compiled
-    scope and marked as the planner's, so the `switch` node resolves the target
-    of the compiled pin's basis row on the plan card and a later search carries
-    no basis from it."""
+    gross disbursements. The compile joins no reading: the turn's readings are the
+    search's alone. The total's basis row is its own (`scope_measure_basis_of_total`),
+    and the `switch` node resolves its target from the compile, under the words
+    and asked roles of the total's own reading, so the switch moves the total
+    alone; a later search carries no basis from it."""
     blocks = (
         basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
         basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
@@ -5480,19 +5292,22 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
         )
         revised = load_plan(cast(SessionState, ctx.state))
         assert revised is not None
-        (row,) = [
-            d
-            for d in revised.decisions
-            if d.scope is not None
-            and d.scope.axis == "measure_basis"
-            and d.fixes is not None
-            and d.fixes.source_spec_id == TOTAL_GROSS
-        ]
+        state = cast(SessionState, ctx.state)
+        (row,) = [d for d in revised.decisions if d.slot == "scope_measure_basis_of_total"]
         readings = switch._readings(ctx)
-        pin, reading, scope, choice = switch._target(row, to_origin={}, readings=readings)
+        target = switch._target(
+            revised, row, state=state, held=alignments(state), to_origin={}, readings=readings
+        )
         return {
             "stored": [(r.spec_id, r.planner_axes) for r in readings],
-            "target": [pin, reading.text, list(reading.asked_roles), scope.id, choice.active],
+            "target": [
+                target.pin,
+                target.moved_for,
+                target.reading.text,
+                list(target.reading.asked_roles),
+                target.scope.id,
+                target.choice.active,
+            ],
             "carried": _search_context(cast(SessionState, ctx.state)).carried_entries,
         }
 
@@ -5514,9 +5329,10 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
     ]
 
     assert len(surface.calls) == 1
-    assert result["stored"] == [(TOTAL_GROSS, ("measure_basis",)), (TOTAL, ())]
+    assert result["stored"] == [(TOTAL, ())]
     assert result["target"] == [
-        TOTAL_GROSS,
+        TOTAL,
+        "total",
         "US total ODA",
         ["donor"],
         f"{TOTAL}_base",

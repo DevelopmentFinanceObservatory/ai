@@ -2184,7 +2184,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     (`planner.plan.save_pin_sources`) and held as a
     `submission.service.SearchedPin` with its digest, so the next proposal
     pins it and the planner seam stores it as a reading of the conversation
-    (`harness.planner_seam.store_aligned_readings`). Any other answer is
+    (`harness.planner_seam.store_searched_pin_readings`). Any other answer is
     held as a search that settled on nothing, under Search's part status, or
     `refused` for a refusal, and the next proposal is refused
     (`submission.service._aligned_bases`). The search takes the time the

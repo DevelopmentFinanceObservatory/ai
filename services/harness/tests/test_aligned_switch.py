@@ -29,6 +29,7 @@ from planner.plan import (
     Decision,
     Plan,
     ResolvedBy,
+    alignments,
     load_plan,
 )
 from planner.workflow import ToolId
@@ -36,6 +37,7 @@ from planner.workflow import ToolId
 from .planner.test_agent import DecisionFactory, _FakeToolContext
 from .planner.test_aligned_identity import (
     _GROSS,
+    _NET,
     _gross_compared_with_net_average,
     _left_on_net,
 )
@@ -62,10 +64,30 @@ def _counted_on_grant_equivalents() -> dict[str, Any]:
     return block
 
 
+def _counted_net() -> dict[str, Any]:
+    """`_left_on_net`'s part with net disbursements chosen on the card: the spec_id
+    `_NET`, as spec_ids are canonical over the identity, its basis the user's."""
+    block = _left_on_net()
+    scope = block["resolved"]["scope_choices"]
+    (basis,) = [c for c in scope["choices"] if c["axis"] == "measure_basis"]
+    basis["provenance"] = "explicit"
+    scope["entries"] = [
+        *scope["entries"],
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:net",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": basis["id"]},
+        },
+    ]
+    return block
+
+
 class _Resubmits:
     """A tool surface answering each resubmit of the DAC1 part by the basis its last
     entry counts: gross as `_GROSS`, grant equivalents as
-    `_counted_on_grant_equivalents`. Every other tool is unreachable."""
+    `_counted_on_grant_equivalents`, net as `_counted_net`. Every other tool is
+    unreachable."""
 
     def __init__(self) -> None:
         self.posted: list[str] = []
@@ -84,6 +106,7 @@ class _Resubmits:
         block = {
             "measure_basis:gross": _GROSS,
             "measure_basis:grant_equivalent": _counted_on_grant_equivalents(),
+            "measure_basis:net": _counted_net(),
         }[option]
         part = {"status": "definite", "spec": json.loads(json.dumps(block))}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
@@ -210,3 +233,27 @@ async def test_a_switch_of_the_aligned_row_makes_the_input_the_users_own(
     assert rows["first"][1] != rows["second"][1]
     shown = {d.slot for d in shown_decisions(admitted)}
     assert {_basis_row(admitted, rid).slot for rid in ("first", "second")} <= shown
+
+
+async def test_a_switch_of_the_aligned_row_back_to_its_own_basis_keeps_the_input_there(
+    decision: DecisionFactory,
+) -> None:
+    """The user switches the average's basis, which alignment moved to gross, back to
+    the net basis its own pin counts. The user's pick states net for the average, so
+    alignment does not move it again: the average pins its own net source, its basis
+    row the user's, and the comparison keeps the contrast the user chose."""
+    ctx, plan = await _aligned_plan(decision)
+
+    planner = await _switch(ctx, plan, _basis_row(plan, "second"), "measure_basis:net")
+
+    (admitted,) = planner.admitted
+    pins = {
+        r.id: r.source_spec_id
+        for r in admitted.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    }
+    assert pins == {"first": _GROSS["spec_id"], "second": _NET}
+    assert "second" not in alignments(ctx.state)
+    row = _basis_row(admitted, "second")
+    assert row.resolved_by is ResolvedBy.USER
+    assert row.chosen != _basis_row(admitted, "first").chosen

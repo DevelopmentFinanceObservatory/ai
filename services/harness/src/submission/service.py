@@ -649,7 +649,17 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         view.prices_chosen(),
         evidence_requirements,
         requirements_after,
-        parts=Parts.of_shown(pins, sources.get, sources.block),
+        parts=Parts.of_shown(
+            pins,
+            sources.get,
+            sources.block,
+            pinned=[
+                requirement.source_spec_id
+                for requirement in requirements_after
+                if isinstance(requirement, DatasetRequirement)
+                and requirement.source_spec_id is not None
+            ],
+        ),
         propose=proposer.call,
     )
     if isinstance(priced, dict):

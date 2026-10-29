@@ -139,18 +139,34 @@ class Parts:
         shown: Mapping[str, PinSource],
         source_of: Callable[[str], SelectedSource | None],
         block_of: Callable[[str], Mapping[str, Any] | None],
+        *,
+        pinned: Collection[str] = (),
     ) -> Parts:
         """The parts of the datasets `shown` to the planner, read through
         `source_of` and `block_of`: each settled one is a reading of its own
-        unless it was fetched as another count of one (`PinSource.other_count_of`)."""
+        unless it was fetched as another count of one (`PinSource.other_count_of`).
+
+        A dataset a requirement pins (`pinned`) that the planner was not shown,
+        a pin compiled for another input that the planner pins directly
+        (`planner.plan.held_sources`), is a reading of its own too, its
+        measure read off the block `block_of` holds for it. So the user's
+        prices choice on that measure holds it."""
+        compiled = [
+            spec_id
+            for spec_id in dict.fromkeys(pinned)
+            if spec_id not in shown and block_of(spec_id) is not None
+        ]
         return cls(
             source_of,
             block_of,
-            shown=shown.keys(),
+            shown=[*shown.keys(), *compiled],
             searched=[
-                spec_id
-                for spec_id, source in shown.items()
-                if source.settled and source.other_count_of is None
+                *(
+                    spec_id
+                    for spec_id, source in shown.items()
+                    if source.settled and source.other_count_of is None
+                ),
+                *compiled,
             ],
         )
 

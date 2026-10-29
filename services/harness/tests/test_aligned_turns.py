@@ -40,6 +40,7 @@ from planner.plan import (
 from planner.workflow import ToolId
 from translator.mechanical import build_translation
 
+from .basis_alignment import WholeCompiles, us_2023_block
 from .orchestrator_fakes import approve_answer
 from .planner.test_agent import (
     _US_MULTILATERAL,
@@ -48,7 +49,11 @@ from .planner.test_agent import (
     _another_part,
     _dac_countries,
     _difference,
+    _FakeToolContext,
     _share,
+    _show_blocks,
+    _tools_reading,
+    _us_2023,
 )
 from .planner.test_aligned_identity import _multilateral_compiles
 from .test_graph import (
@@ -64,6 +69,7 @@ from .test_planner_seam import ScriptedPlannerLlm, _SeamHarness
 _FRANCE = _another_part(_US_MULTILATERAL)
 _MULTILATERAL = _US_MULTILATERAL["spec_id"]
 _TOTAL = _US_TOTAL["spec_id"]
+_US = "United States of America"
 _MCP = McpSurface(sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp})
 
 
@@ -203,6 +209,62 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
     assert reading.planner_axes == ()
     direct = pin_sources(state)[_MULTILATERAL]
     assert planner_axes(direct.spec_block(_MULTILATERAL)) == frozenset()
+
+
+async def test_a_declared_wholes_dataset_reaches_a_later_turn_under_the_wholes_own_words(
+    decision: DecisionFactory,
+) -> None:
+    """Turn 1 reads US aid to health as a share of US total ODA, declared the health
+    part over every sector, so admission compiles the whole from the part. The
+    compile is no reading of turn 1: it reaches turn 2's ledger as a source the
+    translator found, under the words the whole's own requirement states, never
+    the part's, and the conversation digest names it by its source."""
+    ctx = _FakeToolContext()
+    health = us_2023_block("health")
+    whole = us_2023_block("whole")
+    _show_blocks(ctx, health)
+    result = await _us_2023(
+        _tools_reading(cast(ToolSurface, WholeCompiles()))["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=None,
+        declared=True,
+    )
+    assert result["outcome"] == "ok", result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    # The recorded whole states no coverage window and names the donor as the
+    # graph labels it; the compile needs a window and the part's name.
+    covered = json.loads(json.dumps(whole).replace(_US, "United States"))
+    covered["resolved"].setdefault("coverage", {})["window"] = {
+        "start_year": 2023,
+        "end_year": 2023,
+    }
+    recorded = await _compiled(plan, {health["spec_id"]: health, whole["spec_id"]: covered})
+
+    conversation = ConversationState(conversation_id="conv_whole")
+    conversation.turn_user_message = plan.question
+    conversation.turn_readings = [_searched(health, "US aid to health")]
+    conversation.turn_specs = {health["spec_id"]: health}
+    conversation.turn_plans = [
+        PlanRecord.from_plan(recorded, searched=[health["spec_id"]]).model_dump(mode="json")
+    ]
+    conversation.close_turn(final_text="About a tenth.")
+
+    prior = conversation.prior_ledger_state()
+    assert prior is not None
+    (reading,) = [
+        SearchReading.model_validate(r)
+        for r in prior["readings"]
+        if r["spec_id"] == whole["spec_id"]
+    ]
+    assert (reading.text, reading.origin) == ("US total ODA", "translator")
+    digest = conversation.conversation_digest_state()
+    assert digest is not None
+    (line,) = digest["turns"][-1]["plans"]
+    assert whole["spec_id"] in line
+    assert "US aid to health" not in line
 
 
 async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision() -> None:

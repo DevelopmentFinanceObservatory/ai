@@ -12393,6 +12393,43 @@ def test_a_whole_declared_from_a_priced_part_is_held_to_the_user_s_prices(
     assert refused["detail"]["requirement_id"] == "total"
 
 
+def test_a_direct_pin_of_an_unshown_compile_is_held_to_the_user_s_prices(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user picked constant prices for gross French aid to Kenya. A pin compiled
+    for another input over the years 2020 to 2024 of that series is held as a
+    compile only, never shown to the planner. A plan pinning it directly, with no
+    unit, reads what the priced part measures, so it is refused as dropping the
+    user's choice."""
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    compiled = copy.deepcopy(_FRANCE_KENYA)
+    compiled["spec_id"] = "spec_" + "3" * 32
+    compiled["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin="spec_" + "4" * 32,
+            option_ids=("measure_basis:gross",),
+            spec_id=compiled["spec_id"],
+            digest={"spec_block": compiled},
+        ),
+    )
+    ctx.session.events = _prices_ask_events()
+    dataset, derived = requirements
+    direct = dataset.model_copy(update={"source_spec_id": compiled["spec_id"], "unit": None})
+
+    refused = _propose_one(_tools_by_name(), ctx, decision(), [direct, derived])
+
+    assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
+    assert refused["detail"]["part"] == _GROSS
+    assert refused["detail"]["requirement_id"] == dataset.id
+
+
 def test_an_answer_to_another_question_leaves_the_prices_choice_standing(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
