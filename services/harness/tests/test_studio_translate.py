@@ -31,7 +31,7 @@ from harness.conversation import current_conversation_id, current_conversation_k
 from harness.decision_pick import DecisionPick, decision_pick
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
-from harness.plan_display import decision_option_id
+from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_seam import PlannerSeamError
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
@@ -726,10 +726,11 @@ def test_a_reason_opening_with_an_option_id_reads_its_own_decisions_label() -> N
 
 
 def test_an_approved_plan_states_the_card_the_user_saw() -> None:
-    """Title, summary, step labels, caveats and, for each scope choice, its
-    short name and the option it holds; a choice holding another label than
-    before the turn's first switch of it says what it held, one switched
-    back says nothing, and a planner decision is no choice."""
+    """Title, summary, step labels, caveats and, for each switchable choice,
+    scope choice or planner decision, its `choice_id`, short name and the
+    option it holds; a choice holding another label than before the turn's
+    first switch of it says what it held, one switched back says nothing, and
+    a decision without a choice id is no choice."""
 
     def scope(choice_id: str, question: str, held: str) -> PlanDecision:
         return PlanDecision(
@@ -743,6 +744,33 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
             options=[
                 PlanDecisionOption(option_id=f"{choice_id}:held", label=held, status="available"),
                 PlanDecisionOption(option_id=f"{choice_id}:other", label="x", status="available"),
+            ],
+        )
+
+    def planner(slot: str, question: str, held: str, other: str) -> PlanDecision:
+        # The row the card gives a switchable planner decision, as `_choice_members` builds it.
+        decision = Decision(
+            slot=slot,
+            description=question,
+            options=(held, other),
+            chosen=held,
+            resolved_by="planner_default",
+            rationale="because",
+            fixes={"window_start": 2015},
+        )
+        return PlanDecision(
+            id=f"d_{slot}",
+            question=question,
+            chosen=held,
+            reason="because",
+            resolved_by="default",
+            choice_id=decision_choice_id(decision),
+            active_option_id=decision_option_id(held),
+            options=[
+                PlanDecisionOption(
+                    option_id=decision_option_id(label), label=label, status="available"
+                )
+                for label in (held, other)
             ],
         )
 
@@ -763,6 +791,7 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
         decisions=[
             scope("c_basis", "Basis", "gross disbursements"),
             scope("c_region", "Region", "Africa's countries only"),
+            planner("window", "Window", "since 2020", "since 2015"),
             PlanDecision(
                 id="d_plan", question="Chart", chosen="line", reason="r", resolved_by="default"
             ),
@@ -774,7 +803,11 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
     frame = plan_approved(
         card,
         seq=9,
-        baseline={"c_basis": "gross disbursements", "c_region": "Africa incl. regional buckets"},
+        baseline={
+            "c_basis": "gross disbursements",
+            "c_region": "Africa incl. regional buckets",
+            "decision/window": "since 2015",
+        },
     )
 
     assert frame.model_dump(mode="json", exclude_none=True) == {
@@ -787,11 +820,18 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
         "summary": "Gross aid to Kenya, 2020 to 2024.",
         "steps": [{"label": "Fetch aid"}, {"label": "Sum it", "gives_answer": True}],
         "choices": [
-            {"question": "Basis", "chosen": "gross disbursements"},
+            {"choice_id": "c_basis", "question": "Basis", "chosen": "gross disbursements"},
             {
+                "choice_id": "c_region",
                 "question": "Region",
                 "chosen": "Africa's countries only",
                 "changed_from": "Africa incl. regional buckets",
+            },
+            {
+                "choice_id": "decision/window",
+                "question": "Window",
+                "chosen": "since 2020",
+                "changed_from": "since 2015",
             },
         ],
         "caveats": [caveat],

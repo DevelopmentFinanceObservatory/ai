@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–21; 16 is folded
+v1 records its design decisions as numbered deltas (1–24; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -554,6 +554,18 @@ ignores it and an older harness omits it.
 
 `schema_version` stays 1.
 
+## Approved choices carry their id (delta 24, v1.9)
+
+- `plan.approved.choices[].choice_id` is the id the plan card's
+  `PlanDecision.choice_id` carries for the same row:
+  `"<requirement id>:<axis>"` for a scope choice and `"decision/<slot>"`
+  for a planner decision. A client tells the two apart by the
+  `decision/` prefix. The field is present from v1.9. A `plan.approved`
+  a client stored earlier, such as one in a chat snapshot, has no
+  `choice_id` on its choices, and the client reads it without one.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -654,3 +666,7 @@ Fixture values that are samples:
    with a reason the client shows as a quiet note;
    `plan.proposed` and `plan.approved` gain `caveats`, and `changed_from`
    names the label before the turn's first switch.
+1. `plan.approved.choices[]` gains `choice_id`, the id the plan card's
+   choice carries, so a client tells a planner decision
+   (`"decision/<slot>"`) from a scope choice; present from v1.9, absent
+   from a `plan.approved` stored earlier.

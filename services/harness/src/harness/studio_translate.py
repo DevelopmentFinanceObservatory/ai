@@ -1147,16 +1147,18 @@ def plan_approved(
     """The `plan.approved` frame for the plan card the user approved.
 
     Built from the card, so it states what the user saw: its title, summary,
-    step labels and caveats, and for each switchable choice the short name
-    (`PlanDecision.question`) and the label of the option it held. A choice
-    holding another label than the one `baseline` keeps for its choice id,
-    the label on the card the turn's first switch of it was made from
-    (`ConversationState.turn_choice_baseline`), carries that label as
-    `changed_from`, whether the user switched it or a switch moved it.
+    step labels and caveats, and for each decision with a `choice_id`, scope
+    choices and planner decisions (`decision/<slot>`) alike, that id, the
+    short name (`PlanDecision.question`) and the label of the option it
+    held. A choice holding another label than the one `baseline` keeps for
+    its choice id, the label on the card the turn's first switch of it was
+    made from (`ConversationState.turn_choice_baseline`), carries that label
+    as `changed_from`, whether the user switched it or a switch moved it.
     """
     labels = held_labels(card)
     choices = [
         PlanApprovedChoice(
+            choice_id=decision.choice_id,
             question=decision.question,
             chosen=labels[decision.choice_id],
             changed_from=held
