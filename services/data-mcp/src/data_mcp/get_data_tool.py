@@ -1255,8 +1255,8 @@ async def _joined_outcome(
 
     The call waits while `deadline` leaves more than `post_mint_reserve_s`, the most
     its own POST could have waited. A POST still open then, or one that ended
-    cancelled, refuses `mint_unanswered`: apis may still be running it, and a repeat
-    call joins it again or finds the frame it built.
+    cancelled after it was sent, refuses `mint_joined_unanswered`: apis may still be
+    running it, and a repeat call joins it again or finds the frame it built.
     """
     budget = current_call_budget()
     joined_at = deadline.clock()
@@ -1270,11 +1270,10 @@ async def _joined_outcome(
         ):
             return None
         return outcome
-    return ToolRefusal.mint_unanswered(
+    return ToolRefusal.mint_joined_unanswered(
         spec_id=spec_id,
-        elapsed_s=deadline.clock() - joined_at,
+        waited_s=deadline.clock() - joined_at,
         retry_after_s=DEADLINE_RETRY_AFTER_S,
-        waits_out_sync_mint=budget.waits_out_sync_mint,
     )
 
 

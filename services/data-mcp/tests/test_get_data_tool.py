@@ -880,10 +880,10 @@ async def test_a_background_call_for_a_request_already_being_posted_answers_join
 
 class _ApisFirstPostOpen(httpx2.AsyncBaseTransport):
     """apis holding the first mint POST open until `answer` is set, then answering it
-    `first`, and answering every later POST 200 at once. Each POST is reported written
-    out to the request's trace extension on arrival, as httpcore reports it, except
-    that a `first` exception fails the first POST's connection before its body is
-    written."""
+    `first`, and answering every later POST 200 after a short hold, long enough for
+    every call waiting on it to wake before it ends. Each POST is reported written out
+    to the request's trace extension on arrival, as httpcore reports it, except that a
+    `first` exception fails the first POST's connection before its body is written."""
 
     def __init__(self, first: httpx2.Response | Exception) -> None:
         self.first = first
@@ -897,6 +897,7 @@ class _ApisFirstPostOpen(httpx2.AsyncBaseTransport):
         if trace is not None and not (first and isinstance(self.first, Exception)):
             await trace("http11.send_request_body.complete", {"request": request})
         if not first:
+            await asyncio.sleep(0.05)
             return httpx2.Response(200, json={})
         await self.answer.wait()
         if isinstance(self.first, Exception):
@@ -965,6 +966,8 @@ async def test_a_foreground_mint_out_of_time_on_an_open_post_refuses_without_pos
     assert refusal["code"] == "service_unavailable"
     assert refusal["retry_mode"] == "retry_after_delay"
     assert refusal["fix"]["spec_id"] == "spec"
+    assert refusal["fix"]["waited_s"] >= 0.0
+    assert "elapsed_s" not in refusal["fix"]
     assert isinstance(answered, httpx2.Response)
     assert apis.posts == 1
     assert not get_data_tool._open_mint_posts
@@ -1022,41 +1025,48 @@ async def test_a_foreground_mint_joined_to_a_cancelled_post_refuses_without_post
             refused = await joined
 
     assert isinstance(refused, ToolResult)
-    assert (refused.structured_content or {})["retry_mode"] == "retry_after_delay"
+    refusal = refused.structured_content or {}
+    assert refusal["code"] == "service_unavailable"
+    assert refusal["retry_mode"] == "retry_after_delay"
+    assert "waited_s" in refusal["fix"]
     assert apis.posts == 1
     assert not get_data_tool._open_mint_posts
 
 
-async def test_a_foreground_mint_joined_to_a_background_post_never_written_out_posts_its_own() -> (
-    None
-):
+@pytest.mark.parametrize("joiners", [1, 3])
+async def test_foreground_mints_joined_to_a_background_post_never_written_out_post_once(
+    joiners: int,
+) -> None:
     """A background POST whose connection failed before its body went out started
-    nothing in apis, so the foreground call that joined it posts its own request and
-    takes apis' answer to that."""
+    nothing in apis. The foreground calls that joined it wake together, and exactly one
+    posts its own request: the others join that POST and take apis' answer to it."""
     apis = _ApisFirstPostOpen(httpx2.ConnectError("refused"))
 
     async with UpstreamClient(settings=_settings(), transport=apis) as upstream:
         async with asyncio.timeout(5):
             open_post = await _open_post(upstream, apis, admission="background")
-            joined = asyncio.ensure_future(
-                get_data_tool._post_mint(
-                    upstream,
-                    _REQUEST_BODY,
-                    spec_id="spec",
-                    settings=_settings(),
-                    deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+            foreground = [
+                asyncio.ensure_future(
+                    get_data_tool._post_mint(
+                        upstream,
+                        _REQUEST_BODY,
+                        spec_id="spec",
+                        settings=_settings(),
+                        deadline=CallDeadline.after(_DIRECT_DEADLINE_S),
+                    )
                 )
-            )
+                for _ in range(joiners)
+            ]
             await asyncio.sleep(0.05)
             assert apis.posts == 1
             apis.answer.set()
             unsent = await open_post
-            posted = await joined
+            posted = await asyncio.gather(*foreground)
 
     assert isinstance(unsent, ToolResult)
     assert (unsent.structured_content or {})["code"] == "service_unavailable"
-    assert isinstance(posted, httpx2.Response)
-    assert posted.status_code == 200
+    assert len(posted) == joiners
+    assert all(isinstance(each, httpx2.Response) and each.status_code == 200 for each in posted)
     assert apis.posts == 2
     assert not get_data_tool._open_mint_posts
 
