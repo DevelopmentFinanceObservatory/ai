@@ -463,7 +463,7 @@ def test_a_switch_to_an_option_the_card_words_picks_the_option_as_the_planner_wr
 ) -> None:
     """A rank decision the planner wrote as `among`'s values ("population",
     "named") shows the card's words for each, and a switch to the option
-    the card words "only the donors named" picks "named", the option as the
+    the card words "only donors picked by name" picks "named", the option as the
     plan states it."""
     plan = _donor_rank_plan(decision)
     payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
@@ -474,12 +474,12 @@ def test_a_switch_to_an_option_the_card_words_picks_the_option_as_the_planner_wr
     labels = {option.label: option.option_id for option in row.options or ()}
     assert (row.chosen, list(labels)) == (
         "all 32 donors in DAC2a",
-        ["all 32 donors in DAC2a", "only the donors named"],
+        ["all 32 donors in DAC2a", "only donors picked by name"],
     )
     assert decision_pick(
         plan,
         choice_id=row.choice_id,
-        option_id=labels["only the donors named"],
+        option_id=labels["only donors picked by name"],
         to_origin={},
     ) == DecisionPick.on_card(plan, slot="measure", chosen="named")
 

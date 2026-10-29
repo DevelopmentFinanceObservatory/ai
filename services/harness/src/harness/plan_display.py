@@ -814,44 +814,6 @@ def _unslugged(text: str) -> str:
     return text.replace("_", " ") if _SLUG.fullmatch(text) else text
 
 
-class FixedValueContext(typing.NamedTuple):
-    """What the card's words for a fixed value name, read off the requirement
-    the decision fixes (`_fixed_value_context`).
-
-    `party` and `member` are the plural and singular of who the step
-    compares or divides ("donors", "donor"), `source` the name of the
-    source a rank reads its population from, `count` how many members that
-    source holds, and `named` the entities the rank's input names on its axis.
-    """
-
-    party: str = "entities"
-    member: str = "entity"
-    source: str | None = None
-    count: int | None = None
-    named: tuple[str, ...] = ()
-
-
-def _rank_population(context: FixedValueContext) -> str:
-    """`RankAmong.POPULATION` in words: every member the source holds, counted where known."""
-    if context.source is None:
-        return f"all {context.party} the source holds"
-    if context.count is not None and context.count > 1:
-        return f"all {context.count:,} {context.party} in {context.source}"
-    return f"all {context.party} in {context.source}"
-
-
-def _rank_named(context: FixedValueContext) -> str:
-    """`RankAmong.NAMED` in words: the named entities by name, or their count past a few."""
-    if 0 < len(context.named) <= _NAMED_SHOWN:
-        return f"only {_joined(context.named)}"
-    if context.named:
-        return f"only the {len(context.named)} {context.party} named"
-    return f"only the {context.party} named"
-
-
-# The most entities `_rank_named` names one by one before counting them.
-_NAMED_SHOWN = 3
-
 # The enum each `DecisionFixes` field holding one takes its values from, by field name.
 FIXED_ENUMS: Mapping[str, type[enum.StrEnum]] = {
     "stat_vars": StatVarReading,
@@ -863,34 +825,179 @@ FIXED_ENUMS: Mapping[str, type[enum.StrEnum]] = {
     "change": GrowthChange,
 }
 
+# Builds the card's words for one value from the plan and the decision fixing
+# it, or `None` where the plan cannot say what the value means there.
+type _ValueWords = Callable[[Plan, Decision], str | None]
+
+
+def _said(words: str) -> _ValueWords:
+    """Words for a value whose meaning no plan changes."""
+    return lambda _plan, _decision: words
+
+
+class _Ranked(typing.NamedTuple):
+    """What one rank compares: its `party` in the plural, the `source` it reads
+    them from, how many that source holds (`count`) and the entities the
+    filter narrowing its axis keeps (`kept`)."""
+
+    party: str
+    source: str | None
+    count: int | None
+    kept: tuple[str, ...]
+
+
+def _citing[R: EvidenceRequirement](plan: Plan, decision: Decision, kind: type[R]) -> list[R]:
+    """The requirements of `plan` of `kind` that cite `decision`."""
+    return [
+        r
+        for r in plan.evidence_requirements
+        if isinstance(r, kind) and decision.slot in r.decision_ids
+    ]
+
+
+def _agreed[T](values: Sequence[T]) -> T | None:
+    """The one value every entry of `values` holds; `None` when they differ or there are none."""
+    return values[0] if values and all(value == values[0] for value in values) else None
+
+
+def _ranked(requirement: RankRequirement, plan: Plan) -> _Ranked:
+    """What `requirement` compares, its count as `_sentence_rank` counts it."""
+    role = _axis_role(requirement, plan)
+    datasets = datasets_of(requirement, plan)
+    covering = next((d for d in datasets if role is not None and role in d.across), None)
+    source = next(
+        (
+            s
+            for d in ([covering] if covering is not None else datasets)
+            if (s := _selected_source(d.id, plan)) is not None
+        ),
+        None,
+    )
+    count = (
+        _population_count(covering, role, plan)
+        if covering is not None
+        and role is not None
+        and _place_level_word(requirement, plan) is None
+        else None
+    )
+    return _Ranked(
+        party=_axis_word(requirement, plan),
+        source=(source.published_tables or source.provenance_label) if source else None,
+        count=count,
+        kept=_kept_on_axis(requirement, role, plan),
+    )
+
+
+def _kept_on_axis(requirement: RankRequirement, role: str | None, plan: Plan) -> tuple[str, ...]:
+    """The names the filter nearest `requirement` keeps on its axis: the
+    `EntityIn` of `role`, or of no role, a `named` rank compiles only behind
+    (`planner.plan._rank_shape`). Empty when no filter upstream narrows the axis."""
+    pending = [requirement.input_id]
+    while pending:
+        upstream = plan.requirement(pending.pop(0))
+        if isinstance(upstream, FilterRequirement):
+            names = [
+                name
+                for predicate in upstream.predicates
+                if isinstance(predicate, EntityIn) and predicate.role in (None, role)
+                for name in predicate.names
+            ]
+            if names:
+                return tuple(dict.fromkeys(names))
+        pending.extend(inputs_of(upstream))
+    return ()
+
+
+def _rank_population(plan: Plan, decision: Decision) -> str | None:
+    """`RankAmong.POPULATION` in words: every member the ranks' source holds,
+    named and counted only where every rank citing `decision` agrees."""
+    ranked = [_ranked(r, plan) for r in _citing(plan, decision, RankRequirement)]
+    if not ranked:
+        return None
+    party = _agreed([r.party for r in ranked]) or "entities"
+    source = _agreed([r.source for r in ranked])
+    count = _agreed([r.count for r in ranked])
+    if source is None:
+        return f"all {party} {'the source holds' if len(ranked) == 1 else 'each source holds'}"
+    if count is not None and count > 1:
+        return f"all {count:,} {party} in {source}"
+    return f"all {party} in {source}"
+
+
+def _rank_named(plan: Plan, decision: Decision) -> str | None:
+    """`RankAmong.NAMED` in words: the entities the narrowing filter keeps,
+    where every rank citing `decision` keeps the same ones. A `named` rank
+    compiles only behind such a filter, so with none the option means
+    entities picked by name."""
+    ranked = [_ranked(r, plan) for r in _citing(plan, decision, RankRequirement)]
+    if not ranked:
+        return None
+    party = _agreed([r.party for r in ranked]) or "entities"
+    kept = _agreed([r.kept for r in ranked])
+    if kept and len(kept) <= _NAMED_SHOWN:
+        return f"only {_joined(kept)}"
+    if kept:
+        return f"only the {len(kept)} {party} the filter keeps"
+    return f"only {party} picked by name"
+
+
+# The most entities `_rank_named` names one by one before counting them.
+_NAMED_SHOWN = 3
+
+
+def _denominator_words(scope: DenominatorScope) -> _ValueWords:
+    """`scope` in words, as each keyed share citing the decision states it
+    (`_denominator_scope_text`), where they all state it alike."""
+
+    def words(plan: Plan, decision: Decision) -> str | None:
+        return _agreed(
+            [
+                _denominator_scope_text(share, scope, plan)
+                for share in _citing(plan, decision, ShareOfRequirement)
+                if share.axis is not None
+            ]
+        )
+
+    return words
+
+
+def _by_party(plan: Plan, decision: Decision) -> str | None:
+    """`GroupBy.ENTITY` in words: by the one party every aggregate citing
+    `decision` reads (`_lone_role`)."""
+    roles = [_lone_role(r, plan) for r in _citing(plan, decision, AggregateRequirement)]
+    role = _agreed(roles)
+    return f"by {singular(role)}" if role is not None else None
+
+
 # The card's words for each value a decision option can fix, so an option the
 # planner wrote as the value itself ("population") reads as what it means.
 # Lower case, as every option text the card shows is.
-FIXED_VALUE_WORDS: Mapping[enum.StrEnum, Callable[[FixedValueContext], str]] = {
-    StatVarReading.SUM: lambda _: "summed into one series",
-    StatVarReading.SEPARATE: lambda _: "one series per indicator",
-    Reduction.SUM: lambda _: "total",
-    Reduction.MEAN: lambda _: "average",
-    Reduction.MAX: lambda _: "highest value",
-    Reduction.MIN: lambda _: "lowest value",
-    GroupBy.PERIOD: lambda _: "by year",
-    GroupBy.ENTITY: lambda context: f"by {context.member}",
-    GroupBy.BREAKDOWN: lambda _: "by category",
-    RankDirection.HIGHEST_FIRST: lambda _: "highest first",
-    RankDirection.LOWEST_FIRST: lambda _: "lowest first",
+FIXED_VALUE_WORDS: Mapping[enum.StrEnum, _ValueWords] = {
+    StatVarReading.SUM: _said("summed into one series"),
+    StatVarReading.SEPARATE: _said("one series per indicator"),
+    Reduction.SUM: _said("total"),
+    Reduction.MEAN: _said("average"),
+    Reduction.MAX: _said("highest value"),
+    Reduction.MIN: _said("lowest value"),
+    GroupBy.PERIOD: _said("by year"),
+    GroupBy.ENTITY: _by_party,
+    GroupBy.BREAKDOWN: _said("by category"),
+    RankDirection.HIGHEST_FIRST: _said("highest first"),
+    RankDirection.LOWEST_FIRST: _said("lowest first"),
     RankAmong.POPULATION: _rank_population,
     RankAmong.NAMED: _rank_named,
-    DenominatorScope.PER_AXIS: lambda context: f"each {context.member}'s own total",
-    DenominatorScope.POOLED: lambda context: f"one total across all {context.party}",
-    GrowthChange.RELATIVE: lambda _: "percentage change",
-    GrowthChange.ABSOLUTE: lambda _: "change in value",
+    DenominatorScope.PER_AXIS: _denominator_words(DenominatorScope.PER_AXIS),
+    DenominatorScope.POOLED: _denominator_words(DenominatorScope.POOLED),
+    GrowthChange.RELATIVE: _said("percentage change"),
+    GrowthChange.ABSOLUTE: _said("change in value"),
 }
 
 
 def fixed_value_words(text: str, plan: Plan, decision: Decision) -> str | None:
     """The card's words (`FIXED_VALUE_WORDS`) for option `text` of `decision`
     when the planner wrote it as a value of a field `decision` fixes;
-    `None` for any other text.
+    `None` for any other text, and where the plan cannot say what the value
+    means, so the planner's words stand.
 
     `text` names a value when, read as a slug ("highest first" as
     `highest_first`), it is one of the values of exactly one field `decision`
@@ -916,64 +1023,7 @@ def fixed_value_words(text: str, plan: Plan, decision: Decision) -> str | None:
     holds = value in held if isinstance(held, tuple) else value == held
     if holds != (text == decision.chosen):
         return None
-    return FIXED_VALUE_WORDS[value](_fixed_value_context(field, plan, decision))
-
-
-def _fixed_value_context(field: str, plan: Plan, decision: Decision) -> FixedValueContext:
-    """What the words for a value of `field` name, read off the first
-    requirement citing `decision` that states `field`; the defaults where
-    none does or its kind names no party."""
-    requirement = next(
-        (
-            r
-            for r in plan.evidence_requirements
-            if decision.slot in r.decision_ids and field in type(r).model_fields
-        ),
-        None,
-    )
-    if isinstance(requirement, RankRequirement):
-        return _rank_context(requirement, plan)
-    if isinstance(requirement, ShareOfRequirement) and requirement.axis is not None:
-        return FixedValueContext(
-            party=pluralize(singular(requirement.axis)), member=singular(requirement.axis)
-        )
-    return FixedValueContext()
-
-
-def _rank_context(requirement: RankRequirement, plan: Plan) -> FixedValueContext:
-    """Who `requirement` ranks, the source it reads them from, how many that
-    source holds (as `_sentence_rank` counts them) and those its input names."""
-    role = _axis_role(requirement, plan)
-    datasets = datasets_of(requirement, plan)
-    covering = next((d for d in datasets if role is not None and role in d.across), None)
-    source = (
-        _selected_source(covering.id, plan)
-        if covering is not None
-        else next(
-            (s for d in datasets if (s := _selected_source(d.id, plan)) is not None),
-            None,
-        )
-    )
-    level = _place_level_word(requirement, plan)
-    count = (
-        _population_count(covering, role, plan)
-        if covering is not None and role is not None and level is None
-        else None
-    )
-    return FixedValueContext(
-        party=_axis_word(requirement, plan),
-        member=_axis_word(requirement, plan, plural=False),
-        source=(source.published_tables or source.provenance_label) if source else None,
-        count=count,
-        named=tuple(
-            dict.fromkeys(
-                entity.name
-                for dataset in datasets
-                for entity in dataset.entities
-                if role is not None and entity.role == role
-            )
-        ),
-    )
+    return FIXED_VALUE_WORDS[value](plan, decision)
 
 
 def concept_name(
@@ -2211,6 +2261,12 @@ def _axis_role(requirement: RankRequirement, plan: Plan) -> str | None:
     `across` carry when the axis is left to infer from a single-role input."""
     if requirement.axis is not None:
         return requirement.axis
+    return _lone_role(requirement, plan)
+
+
+def _lone_role(requirement: EvidenceRequirement, plan: Plan) -> str | None:
+    """The sole role the datasets `requirement` reads name entities in or cover
+    (`across`); `None` when they carry none or more than one."""
     datasets = datasets_of(requirement, plan)
     roles = sorted(
         {entity.role for dataset in datasets for entity in dataset.entities if entity.role}
@@ -2650,19 +2706,28 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     return f"{sentence}; keeps {kept}, {shared_place_phrase(requirement.limit)}."
 
 
+def _denominator_scope_text(
+    requirement: ShareOfRequirement, scope: DenominatorScope | None, plan: Plan
+) -> str:
+    """What keyed share `requirement` divides by under `scope`, in words
+    (`denominator_scope_phrase`), read off its own denominator."""
+    denominator = plan.requirement(requirement.denominator.input_id)
+    narrowing = narrowing_step(denominator, plan)
+    return denominator_scope_phrase(
+        scope,
+        measure=_measure_of(denominator, plan),
+        step=_label(denominator, plan),
+        narrowed_by=None if narrowing is None else _label(narrowing, plan),
+        entity=requirement.denominator.entity,
+    )
+
+
 def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     numerator = plan.requirement(requirement.numerator.input_id)
     measure = _measure_of(numerator, plan)
     denominator = plan.requirement(requirement.denominator.input_id)
     if requirement.axis is not None:
-        narrowing = narrowing_step(denominator, plan)
-        scope_text = denominator_scope_phrase(
-            requirement.denominator_scope,
-            measure=_measure_of(denominator, plan),
-            step=_label(denominator, plan),
-            narrowed_by=None if narrowing is None else _label(narrowing, plan),
-            entity=requirement.denominator.entity,
-        )
+        scope_text = _denominator_scope_text(requirement, requirement.denominator_scope, plan)
         return f"Share of {measure} per {requirement.axis}, {scope_text}."
     divisor = _measure_of(denominator, plan)
     # A denominator narrowed to fewer members than its sources hold names the
