@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import Any, Literal, NamedTuple
 
@@ -111,7 +111,8 @@ class Parts:
     when none is held. `shown` is every spec_id the planner was shown, and
     `searched` those a search settled on as readings of their own, not
     fetched as another count of one (`of_shown`); `None` reads every shown
-    series so. `aligned` maps each pin alignment compiled to the pin it was
+    series so. `priced` are the parts the user chose prices for
+    (`priced_by`). `aligned` maps each pin alignment compiled to the pin it was
     compiled from (`submission.service.AlignedPin`).
 
     A part's series are the part, each series its block offers in its place,
@@ -126,6 +127,7 @@ class Parts:
     shown: Collection[str] = ()
     aligned: Mapping[str, str] | None = None
     searched: Collection[str] | None = None
+    priced: Collection[str] = ()
 
     @classmethod
     def of_shown(
@@ -150,6 +152,10 @@ class Parts:
                 if source.settled and source.other_count_of is None
             ],
         )
+
+    def priced_by(self, choices: Mapping[str, PricesChoice]) -> Parts:
+        """These parts, with the parts `choices` prices marked."""
+        return replace(self, priced=frozenset(choices))
 
     def origin_of(self, pin: str | None) -> str | None:
         """The pin as the planner wrote it, before alignment moved it: each
@@ -201,35 +207,48 @@ class Parts:
         offered = self.offered(reading)
         return [*offered, *(found for one in offered for found in self.same_measure(one, currency))]
 
-    def _own(self, reading: str) -> list[str]:
-        """The series measuring what `reading` itself measures: those its block
-        offers in other prices (axis `unit`), and every shown series measuring
-        the same in its currency, any window or prices (`same_measure`)."""
-        return [
-            *(one for one in self.offered(reading) if self.unit_offered(reading, one)),
-            *self.same_measure(reading, self.unit_of(reading).currency),
-        ]
+    def _offers_in_prices(self, reading: str) -> list[str]:
+        """The series `reading`'s block offers as its count in other prices (axis `unit`)."""
+        return [one for one in self.offered(reading) if self.unit_offered(reading, one)]
+
+    def _measures(self, reading: str) -> list[str]:
+        """Every shown series measuring what `reading` measures in its currency,
+        any window or prices (`same_measure`)."""
+        return self.same_measure(reading, self.unit_of(reading).currency)
 
     @cached_property
     def _readings(self) -> tuple[str, ...]:
-        """The series a search settled on (`searched`) not in constant prices:
-        each its own part whether or not the user priced it. A constant series
-        is one found for a reading's prices."""
+        """The series a search settled on (`searched`) not in constant prices.
+        A constant series is one found for a reading's prices."""
         searched = self.shown if self.searched is None else self.searched
         return tuple(one for one in searched if self.unit_of(one).prices != "constant")
 
+    def _part_of(self, reading: str) -> str:
+        """The reading whose part `reading` is: the first priced reading
+        measuring what it measures (`_measures`), whatever the shown order,
+        else the first such reading. Readings differing only in window are
+        one part; another count or currency is another measure."""
+        same = [reading, *(one for one in self._measures(reading) if one in self._readings)]
+        ordered = [one for one in self._readings if one in same]
+        return next((one for one in ordered if one in self.priced), ordered[0])
+
     def owner_of(self, spec_id: str) -> str | None:
-        """The one reading whose part `spec_id` belongs to: itself when it is a
-        reading, else the reading measuring what it measures (`_own`), else the
-        first reading reaching it through another count it offers
-        (`_reached`); `None` when no reading reaches it. So a gross part and a
-        net part of one flow pair never claim each other's series."""
+        """The one reading whose part `spec_id` belongs to: a priced reading
+        itself, any other reading the part it is one of (`_part_of`); else
+        the readings that offer it in other prices, then those measuring what
+        it measures, then those reaching it through another count they offer
+        (`_reached`), each time a priced one of them first. `None` when no
+        reading reaches it. So a gross part and a net part of one flow pair
+        never claim each other's series, and a constant series goes to the
+        reading the user priced."""
         if spec_id in self._readings:
-            return spec_id
-        for claims in (self._own, self._reached):
-            owner = next((one for one in self._readings if spec_id in claims(one)), None)
-            if owner is not None:
-                return owner
+            return spec_id if spec_id in self.priced else self._part_of(spec_id)
+        for claims in (self._offers_in_prices, self._measures, self._reached):
+            claimants = [one for one in self._readings if spec_id in claims(one)]
+            if claimants:
+                return next(
+                    (one for one in claimants if one in self.priced), self._part_of(claimants[0])
+                )
         return None
 
     def current_of(self, part: str, pin: str) -> str | None:
@@ -499,6 +518,7 @@ def prices_decisions(
     pins a series that cannot serve them (`_refusal`, `_wanted`). `propose`
     is the tool a refusal naming a unit calls.
     """
+    parts = parts.priced_by(choices)
     decisions: list[Decision] = []
     slots: dict[str, list[str]] = {}
     for part, choice in choices.items():
@@ -589,6 +609,7 @@ def base_year_refusal(
     requirement reading no part the user priced answers `None`, so its
     proposal is refused as any invalid plan is.
     """
+    parts = parts.priced_by(choices)
     for error in exc.errors(include_url=False, include_input=False):
         if not isinstance(error.get("ctx", {}).get("error"), BaseYearUnstatedError):
             continue

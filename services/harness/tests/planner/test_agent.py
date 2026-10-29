@@ -12068,6 +12068,54 @@ def test_a_gross_part_and_a_net_part_each_hold_their_own_prices(
     }
 
 
+@pytest.mark.parametrize("window_first", [False, True], ids=["part-first", "window-first"])
+@pytest.mark.parametrize("window_priced", [False, True], ids=["part-priced", "window-priced"])
+def test_two_windows_of_one_measure_are_one_part(
+    requirement: Callable[..., DatasetRequirement], window_first: bool, window_priced: bool
+) -> None:
+    """Two searches read one measure over two windows, beside a constant
+    series of it. The user priced one of them constant. Whichever was priced
+    and whichever was shown first, the other window is held to that choice
+    and is told to pin the constant series, and the plan pinning it lands
+    with the choice cited on both requirements."""
+    window = "spec_" + "2" * 32
+    later = copy.deepcopy(_FRANCE_KENYA)
+    later["spec_id"] = later["definition"]["spec_id"] = window
+    later["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start": 2015,
+        "end": 2022,
+    }
+    later["resolved"]["alternative_measures"] = []
+    readings = [later, _FRANCE_KENYA] if window_first else [_FRANCE_KENYA, later]
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, *readings, _constant_block())
+    sources = _shown_readings(ctx)
+    parts = Parts.of_shown(pin_sources(ctx.state), sources.get, sources.block)
+    priced, unpriced = (window, _GROSS) if window_priced else (_GROSS, window)
+    choices = {priced: PricesChoice("constant", asked=True)}
+    constant = Unit(currency="USD", prices="constant", base_year=2023)
+    held = requirement(id="held", source_spec_id=_CONSTANT_GROSS, unit=constant)
+    other = requirement(id="other", source_spec_id=unpriced, unit=None)
+
+    refused = prices_decisions(choices, [held, other], [held, other], parts=parts, propose="p")
+
+    assert isinstance(refused, dict), refused
+    assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value
+    detail = refused["detail"]
+    assert (detail["part"], detail["requirement_id"], detail["pin"]) == (
+        priced,
+        "other",
+        _CONSTANT_GROSS,
+    )
+
+    moved = other.model_copy(update={"source_spec_id": _CONSTANT_GROSS, "unit": constant})
+    landed = prices_decisions(choices, [held, moved], [held, moved], parts=parts, propose="p")
+
+    assert isinstance(landed, tuple), landed
+    assert [f"user_prices_{priced}" in reqt.decision_ids for reqt in landed[1]] == [True, True]
+
+
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
     """A prices refusal sent the planner to the user, and the user then typed
     a message, which releases every choice. A later ask offering
