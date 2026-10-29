@@ -1698,7 +1698,7 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -1724,7 +1724,7 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -1748,7 +1748,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -1808,7 +1808,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -2643,7 +2643,7 @@
       "status": 422,
       "detail": "unit='converted to current prices, pounds sterling' is not one of the units this frame declares: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -2904,7 +2904,7 @@
       "status": 422,
       "detail": "unit='dcid:USDollar per dcid:SquareKilometer' is not one of the units this frame declares: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -2968,7 +2968,7 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -2994,7 +2994,7 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -3018,7 +3018,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -3078,7 +3078,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -3754,7 +3754,7 @@
       "status": 422,
       "detail": "rank_by names column(s) this frame has no grain for: ['reporter']. Available: ['reporter'].",
       "code": "role_ambiguous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -4580,7 +4580,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -4640,7 +4640,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -5162,7 +5162,7 @@
               }
             },
             "content_version": "ocv_edcc9fafc41d8cc31bbd245aa6e8db64",
-            "output_digest": "out_c1dbad43e34347e6d42efe163f592095",
+            "output_digest": "out_48777e6b1fa4a00c4c9a70a91da34d6e",
             "roots": [
               {
                 "spec_id": "spec_9d2079074f862093b2144eee5b5700a9",
@@ -5197,7 +5197,7 @@
         ]
       },
       "frame_content_version": "cv_585190e4f1798f0740a3cc777ce2a6b0",
-      "output_digest": "out_c1dbad43e34347e6d42efe163f592095",
+      "output_digest": "out_48777e6b1fa4a00c4c9a70a91da34d6e",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_c1ebb45c3984eb0f20a267928c54f561",
@@ -5343,7 +5343,7 @@
               }
             },
             "content_version": "ocv_448a2ffa1b1def7bce27d525ed1b37a3",
-            "output_digest": "out_db249ddb5d8dca48bc742ee1dce4412b",
+            "output_digest": "out_45672c75e18a30d367105282ea8a6946",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -5369,7 +5369,7 @@
         ]
       },
       "frame_content_version": "cv_d417f0f635a4d74904b2db77df832b2e",
-      "output_digest": "out_db249ddb5d8dca48bc742ee1dce4412b",
+      "output_digest": "out_45672c75e18a30d367105282ea8a6946",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_13688280809626c7b15344cf664c318e",
@@ -5672,7 +5672,7 @@
               }
             },
             "content_version": "ocv_8a28c06b56639485bc4e00efc46decad",
-            "output_digest": "out_1b7015bef34d309fe6740c0aff8b2d61",
+            "output_digest": "out_45672c75e18a30d367105282ea8a6946",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -5698,7 +5698,7 @@
         ]
       },
       "frame_content_version": "cv_f691812529360532c4533078b164b4a1",
-      "output_digest": "out_1b7015bef34d309fe6740c0aff8b2d61",
+      "output_digest": "out_45672c75e18a30d367105282ea8a6946",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_06565272cb2cd4f43138a15996bef69b",
@@ -5993,7 +5993,7 @@
               }
             },
             "content_version": "ocv_d8c5e6e95524a5a860e49ee3e44d51b7",
-            "output_digest": "out_27bff00b6e452be0669918907bf6f7aa",
+            "output_digest": "out_9ca34075253887b39c14fa51c0005db8",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -6019,7 +6019,7 @@
         ]
       },
       "frame_content_version": "cv_3575d560c9407f46d1699d08e3e25258",
-      "output_digest": "out_27bff00b6e452be0669918907bf6f7aa",
+      "output_digest": "out_9ca34075253887b39c14fa51c0005db8",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_af5f53f6c3193ad91352b701b1dd7c50",
@@ -6323,7 +6323,7 @@
               }
             },
             "content_version": "ocv_4b3f850cb3c035a102cead8363acfa41",
-            "output_digest": "out_0abe0d092d4ed4a3117c09d61fd30f56",
+            "output_digest": "out_a3e57c22773a30a467b0b9c95e2557c0",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -6349,7 +6349,7 @@
         ]
       },
       "frame_content_version": "cv_68d93d671cefc9d596b1636eec5f3ac6",
-      "output_digest": "out_0abe0d092d4ed4a3117c09d61fd30f56",
+      "output_digest": "out_a3e57c22773a30a467b0b9c95e2557c0",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_9cabb8af99da6e36fc8c5593f6eea110",
@@ -6637,7 +6637,7 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -6664,7 +6664,7 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'dcid:USDollar per Count_Person', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -6689,7 +6689,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -6749,7 +6749,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -6809,7 +6809,7 @@
               }
             },
             "content_version": "ocv_26a7d0e448a2a93fae238f3931569ce9",
-            "output_digest": "out_66f0db577fc8efc4d6b69aae02eebf89",
+            "output_digest": "out_f7f36225b522b8629594d19445144222",
             "roots": [
               {
                 "spec_id": "spec_2cbdc368aba869090220b0fb5f8e960f",
@@ -6844,7 +6844,7 @@
         ]
       },
       "frame_content_version": "cv_a5ebc3acebb4c3559281a29da7a9fd35",
-      "output_digest": "out_66f0db577fc8efc4d6b69aae02eebf89",
+      "output_digest": "out_f7f36225b522b8629594d19445144222",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_09c6c1bc7e8fb8c3183118c64d3c3ef8",
@@ -7060,7 +7060,7 @@
               }
             },
             "content_version": "ocv_6e1bfaeb0e965bbf44df3862d1a56996",
-            "output_digest": "out_19345d879fc5298942719d60abb90e86",
+            "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -7086,7 +7086,7 @@
         ]
       },
       "frame_content_version": "cv_f51fb2daa9646dce85739365170544a5",
-      "output_digest": "out_19345d879fc5298942719d60abb90e86",
+      "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_e60e8ff75bb984732284089e42a32ad1",
@@ -7344,7 +7344,7 @@
               }
             },
             "content_version": "ocv_4421b4efd53660ed05c9b787382e692a",
-            "output_digest": "out_91f67050325fc99b9ca1d47bd4a104cd",
+            "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -7370,7 +7370,7 @@
         ]
       },
       "frame_content_version": "cv_9d982ba237b77ba58f500b06968a6d19",
-      "output_digest": "out_91f67050325fc99b9ca1d47bd4a104cd",
+      "output_digest": "out_c37ea003023d52e07003e5480e419c8a",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_b5ef33fb6e799236c7986050f04dcba7",
@@ -7614,7 +7614,7 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7641,7 +7641,7 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7666,7 +7666,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7726,7 +7726,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7786,7 +7786,7 @@
               }
             },
             "content_version": "ocv_c0b0c31d6621be4c6b231ab2f0487cad",
-            "output_digest": "out_51d25ead3442d71f8786cf8e6d65e475",
+            "output_digest": "out_e72e1c46e82318a69bb54cf16b2fb23c",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -7837,7 +7837,7 @@
         ]
       },
       "frame_content_version": "cv_d9a699439b31ef69915c1682a1b58895",
-      "output_digest": "out_51d25ead3442d71f8786cf8e6d65e475",
+      "output_digest": "out_e72e1c46e82318a69bb54cf16b2fb23c",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_42f9d034601da188403cc6ce2c0fc579",
@@ -8016,7 +8016,7 @@
               }
             },
             "content_version": "ocv_b93314f259233168803a415b08fc8fec",
-            "output_digest": "out_ad3ea73648040697c7f6dce75aafb09c",
+            "output_digest": "out_dd6ee9690d95366adc3975a4b49518f6",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -8067,7 +8067,7 @@
         ]
       },
       "frame_content_version": "cv_8408b1b2dcc3773c83f49d5bcf0c3ee8",
-      "output_digest": "out_ad3ea73648040697c7f6dce75aafb09c",
+      "output_digest": "out_dd6ee9690d95366adc3975a4b49518f6",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_ea5ff8e494daf4aa31c611cd2fe412ad",
@@ -8241,7 +8241,7 @@
               }
             },
             "content_version": "ocv_0b2be31d3c2969b80a42941a8c7268ef",
-            "output_digest": "out_5ebe1d0055af116843011d7886e2d887",
+            "output_digest": "out_9c3f4a6845860a6ae834406d21de656c",
             "roots": [
               {
                 "spec_id": "spec_c5658274af6e81f55075c50ebed00964",
@@ -8276,7 +8276,7 @@
         ]
       },
       "frame_content_version": "cv_5c5bd1a1c64508a96290dfc479bb4a5d",
-      "output_digest": "out_5ebe1d0055af116843011d7886e2d887",
+      "output_digest": "out_9c3f4a6845860a6ae834406d21de656c",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_c5533abdd4455c4653a4d9a49468fd51",
@@ -9732,7 +9732,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -9985,7 +9985,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -10045,7 +10045,7 @@
               }
             },
             "content_version": "ocv_ce8a3ada71747203a7752f89a7ba62b9",
-            "output_digest": "out_d454c8fe8ad10e643088de311cbbd698",
+            "output_digest": "out_e9f35e09993f15f69fe437f98ef02b23",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10071,7 +10071,7 @@
         ]
       },
       "frame_content_version": "cv_b4b8666761f1d3c2a12e77af97b2150b",
-      "output_digest": "out_d454c8fe8ad10e643088de311cbbd698",
+      "output_digest": "out_e9f35e09993f15f69fe437f98ef02b23",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_d6dac6aab37195ab1754ea3fbbc1c480",
@@ -10349,7 +10349,7 @@
               }
             },
             "content_version": "ocv_364ee72ae95134ea31cb7d91f6af4ec6",
-            "output_digest": "out_9611ce4ae52179a7bb8b2f3ddc3f580a",
+            "output_digest": "out_13f6c14cbbf3000aa945ddaa86080e02",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10375,7 +10375,7 @@
         ]
       },
       "frame_content_version": "cv_bf12965bf66117519644636cfc4aac36",
-      "output_digest": "out_9611ce4ae52179a7bb8b2f3ddc3f580a",
+      "output_digest": "out_13f6c14cbbf3000aa945ddaa86080e02",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_4424dec4c9ad7c20f6a8937256352ef0",
@@ -10644,7 +10644,7 @@
               }
             },
             "content_version": "ocv_85e6ef9b4638c95d152ced5bbebf6279",
-            "output_digest": "out_09c14220d3e3e041b868a3b887f39e1c",
+            "output_digest": "out_84abf1f4d740f46bd789edf25ee88137",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10670,7 +10670,7 @@
         ]
       },
       "frame_content_version": "cv_628e6f3710a0f79c3eb4f07681f11055",
-      "output_digest": "out_09c14220d3e3e041b868a3b887f39e1c",
+      "output_digest": "out_84abf1f4d740f46bd789edf25ee88137",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_eb036dd5fd8af90adf6a43bccb83d61d",
@@ -10944,7 +10944,7 @@
               }
             },
             "content_version": "ocv_9c497da0899eba1ff39c89b61bfab491",
-            "output_digest": "out_aa59d5f993208d4b04522c66e829afa5",
+            "output_digest": "out_c97ab7260d3d2bb6729374c9efc5e7d3",
             "roots": [
               {
                 "spec_id": "spec_3614a36ccd94ee0a4b6a8647019c78a6",
@@ -10970,7 +10970,7 @@
         ]
       },
       "frame_content_version": "cv_24279cd66d9b7eed171a91d3464a7162",
-      "output_digest": "out_aa59d5f993208d4b04522c66e829afa5",
+      "output_digest": "out_c97ab7260d3d2bb6729374c9efc5e7d3",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_f9fe681a723572b738d95314e735c3c6",
@@ -11236,7 +11236,7 @@
               }
             },
             "content_version": "ocv_2d2805885ce7c5534f5250ea5b378532",
-            "output_digest": "out_57ed77a46f78d52b994804f38615e1d6",
+            "output_digest": "out_e3bcf5eba05bc17888286a36af5c6cea",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -11262,7 +11262,7 @@
         ]
       },
       "frame_content_version": "cv_dea80cff95e533818f81dbda06a34bcc",
-      "output_digest": "out_57ed77a46f78d52b994804f38615e1d6",
+      "output_digest": "out_e3bcf5eba05bc17888286a36af5c6cea",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_32938d5df216225f2964862c974b723f",
@@ -11542,7 +11542,7 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -11579,7 +11579,7 @@
               }
             },
             "content_version": "ocv_e8448333daab1ba715f86bc39729181f",
-            "output_digest": "out_a1e439857c6d38104f4bcb947feacb3f",
+            "output_digest": "out_3ced42c69a60b47c3e6e2b699de9bb36",
             "roots": [
               {
                 "spec_id": "spec_13cac95fb89c8b23dbf0823982d217d2",
@@ -11605,7 +11605,7 @@
         ]
       },
       "frame_content_version": "cv_43618241a4d91808d12eb0c3e90b669c",
-      "output_digest": "out_a1e439857c6d38104f4bcb947feacb3f",
+      "output_digest": "out_3ced42c69a60b47c3e6e2b699de9bb36",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_62463e899f543a8cb032581ced66e215",
@@ -11877,7 +11877,7 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -11902,7 +11902,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -11962,7 +11962,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -12022,7 +12022,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -12072,7 +12072,7 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "e22154aa5de347e49b64d3cbce31f846",
+      "trace_id": "a5229c08b3f348958de44506b08ec790",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -12132,7 +12132,7 @@
               }
             },
             "content_version": "ocv_d6175590ff6997bed57c657edb22d119",
-            "output_digest": "out_e23a2277533844db0e05ccc80ef077e7",
+            "output_digest": "out_965597ba941d25bedbfccf4a6d2805fd",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -12183,7 +12183,7 @@
         ]
       },
       "frame_content_version": "cv_5cffc301418f7852be4042bfd0df5663",
-      "output_digest": "out_e23a2277533844db0e05ccc80ef077e7",
+      "output_digest": "out_965597ba941d25bedbfccf4a6d2805fd",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_64d68b0c01697e8b342ac1b184dd1293",
@@ -12342,7 +12342,7 @@
               }
             },
             "content_version": "ocv_3dcb22b0c2566a6d3066a28ac3a7d6f3",
-            "output_digest": "out_113b6c1f4d49c93cca581c965698a1da",
+            "output_digest": "out_ce4bb74ea1ca074f1dec91217a8857f7",
             "roots": [
               {
                 "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
@@ -12393,7 +12393,7 @@
         ]
       },
       "frame_content_version": "cv_442cef47f45c7c3127083d5a825e38d9",
-      "output_digest": "out_113b6c1f4d49c93cca581c965698a1da",
+      "output_digest": "out_ce4bb74ea1ca074f1dec91217a8857f7",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_24e83b1897a1e90df18e2910010b5d11",
@@ -12549,7 +12549,7 @@
               }
             },
             "content_version": "ocv_4ee805e30c6a28371b19edfd049d7997",
-            "output_digest": "out_28f4ca715bdbe3471305f8dc8877088d",
+            "output_digest": "out_e1fca00e33bb536cfc6e6fe90c06611a",
             "roots": [
               {
                 "spec_id": "spec_2cbdc368aba869090220b0fb5f8e960f",
@@ -12584,7 +12584,7 @@
         ]
       },
       "frame_content_version": "cv_bfe60d67153eda7188ee49879763ab51",
-      "output_digest": "out_28f4ca715bdbe3471305f8dc8877088d",
+      "output_digest": "out_e1fca00e33bb536cfc6e6fe90c06611a",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_8c33e77b1a0805f26ee8d59342c7d602",
@@ -12787,7 +12787,7 @@
               }
             },
             "content_version": "ocv_7d2a1f5ca4aab51c25e32b0cd209db77",
-            "output_digest": "out_18e71b7460cffbaadb1c91ba580a729f",
+            "output_digest": "out_8d7baa952001c2885a2b94bc30681fc5",
             "roots": [
               {
                 "spec_id": "spec_b8c81cf2974ae113a88758e07383c100",
@@ -12822,7 +12822,7 @@
         ]
       },
       "frame_content_version": "cv_0a1cf22879c61190f1df8752b7840f94",
-      "output_digest": "out_18e71b7460cffbaadb1c91ba580a729f",
+      "output_digest": "out_8d7baa952001c2885a2b94bc30681fc5",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_d6da044b747a07a11663d8d1900039fd",

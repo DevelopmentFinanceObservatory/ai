@@ -1464,7 +1464,7 @@
               }
             },
             "content_version": "ocv_73e91d9746688d37f20e29b9332514e7",
-            "output_digest": "out_4748bc1498e80d3c2635c2dccfbf1ec1",
+            "output_digest": "out_5aac9dcc11c9a30755414ab47a6b0e64",
             "roots": [
               {
                 "spec_id": "spec_ffffffffffffffffffffffffffffffff",
@@ -1512,7 +1512,7 @@
         ]
       },
       "frame_content_version": "cv_111cbf47bdeed15f839d4164567fc970",
-      "output_digest": "out_4748bc1498e80d3c2635c2dccfbf1ec1",
+      "output_digest": "out_5aac9dcc11c9a30755414ab47a6b0e64",
       "summary": {
         "verb": "growth",
         "spec_id": "ops_e740a435611623d10e6eea1885d377b3",
@@ -6530,7 +6530,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7348,7 +7348,7 @@
       "status": 422,
       "detail": "unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7563,7 +7563,7 @@
       "status": 422,
       "detail": "unit='converted to current prices, euros' is not one of the units this frame declares: ['CurrencyUSD']. Retry with one of these instead.",
       "code": "unit_heterogeneous",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -8344,7 +8344,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; include 'stat_var' in group_by, or narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -13369,7 +13369,7 @@
       "status": 422,
       "detail": "unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -14406,7 +14406,7 @@
       "status": 422,
       "detail": "The financingProvider parties in this frame cannot be pooled or ranked: the frame carries no 'financingProvider_party_kind' column, so its parties cannot be told apart from the group totals that hold them. Retrieve the data again with get_data and place_types=true, which adds 'financingProvider_party_kind', and retry with that frame_ref, or filter the frame to a single financingProvider party.",
       "code": "place_levels_mixed",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -15113,7 +15113,7 @@
       "status": 404,
       "detail": "the frame spec_00000000000000000000000000000000, cv_00000000000000000000000000000000 cannot be read: not held. Run the analysis with latest=True to read its dataset's current version",
       "code": "snapshot_not_found",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -16552,7 +16552,7 @@
               }
             },
             "content_version": "ocv_f747e4743ff2a010600246fe3ca345a8",
-            "output_digest": "out_b850db28b3f15d2844f4abba1a7ce95a",
+            "output_digest": "out_3cc112b316e2e03efd220117e996356f",
             "roots": [
               {
                 "spec_id": "spec_77777777777777777777777777777777",
@@ -16587,7 +16587,7 @@
         ]
       },
       "frame_content_version": "cv_0d258e118145d4ccf9c7494db0000f26",
-      "output_digest": "out_b850db28b3f15d2844f4abba1a7ce95a",
+      "output_digest": "out_3cc112b316e2e03efd220117e996356f",
       "summary": {
         "verb": "rank",
         "spec_id": "ops_4bb5aec15e9ab700de4c9236b155b92c",
@@ -17354,7 +17354,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -17989,7 +17989,7 @@
               }
             },
             "content_version": "ocv_b5600428c1897a6df4af5aa2531e117f",
-            "output_digest": "out_b850db28b3f15d2844f4abba1a7ce95a",
+            "output_digest": "out_3cc112b316e2e03efd220117e996356f",
             "roots": [
               {
                 "spec_id": "spec_77777777777777777777777777777777",
@@ -18024,7 +18024,7 @@
         ]
       },
       "frame_content_version": "cv_0d258e118145d4ccf9c7494db0000f26",
-      "output_digest": "out_b850db28b3f15d2844f4abba1a7ce95a",
+      "output_digest": "out_3cc112b316e2e03efd220117e996356f",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_c941b6042772a3b485e9d5afb7bcea86",
@@ -18172,7 +18172,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -18205,7 +18205,7 @@
               }
             },
             "content_version": "ocv_8cb7b595a61e5110e745581578206534",
-            "output_digest": "out_8889d4384ab8d5b25ac27af2f3e4bdfc",
+            "output_digest": "out_a8bbed572a22251158e89fce6e018912",
             "roots": [
               {
                 "spec_id": "spec_ffffffffffffffffffffffffffffffff",
@@ -18240,7 +18240,7 @@
         ]
       },
       "frame_content_version": "cv_12782827c45abb7f3e4657d3cac4182f",
-      "output_digest": "out_8889d4384ab8d5b25ac27af2f3e4bdfc",
+      "output_digest": "out_a8bbed572a22251158e89fce6e018912",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_65782abf8c48b0ebdfd17fe1acdbfae4",
@@ -19802,7 +19802,7 @@
               }
             },
             "content_version": "ocv_60d220ba02766352c08b1a179ed6afce",
-            "output_digest": "out_c0d6c15a33dd3b1a29029902c583ae55",
+            "output_digest": "out_6cefb01e779c3678047c4cead0d71b05",
             "roots": [
               {
                 "spec_id": "spec_ffffffffffffffffffffffffffffffff",
@@ -19837,7 +19837,7 @@
         ]
       },
       "frame_content_version": "cv_3f56f9f6d955f788d06d294ab3f6107d",
-      "output_digest": "out_c0d6c15a33dd3b1a29029902c583ae55",
+      "output_digest": "out_6cefb01e779c3678047c4cead0d71b05",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_0fb33aaa239a0d344f776fdd26ff1a78",
@@ -20408,7 +20408,7 @@
               }
             },
             "content_version": "ocv_b8ed741922633af54a54a4b53f9c735b",
-            "output_digest": "out_7e5e98b1b719537e07550fae8373b1f7",
+            "output_digest": "out_115a8604335b227614ed1cb822d99825",
             "roots": [
               {
                 "spec_id": "spec_ea7f40469f100662594861ead9a8d67d",
@@ -20434,7 +20434,7 @@
         ]
       },
       "frame_content_version": "cv_f90721be6352fb0cca25b7fc0c676548",
-      "output_digest": "out_7e5e98b1b719537e07550fae8373b1f7",
+      "output_digest": "out_115a8604335b227614ed1cb822d99825",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_8c5ab42052ce53b1d56c086f2d59787f",
@@ -20666,7 +20666,7 @@
               }
             },
             "content_version": "ocv_571e4b90b6781e9688d96cb25c76d008",
-            "output_digest": "out_72fd32452a585953b83138317fccebb2",
+            "output_digest": "out_115a8604335b227614ed1cb822d99825",
             "roots": [
               {
                 "spec_id": "spec_864ccdf4739871aa7da5c1f9dcaee5e2",
@@ -20692,7 +20692,7 @@
         ]
       },
       "frame_content_version": "cv_24c0c0926430f29fb86ee01ed6c110ea",
-      "output_digest": "out_72fd32452a585953b83138317fccebb2",
+      "output_digest": "out_115a8604335b227614ed1cb822d99825",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_27559cac9a5c13e7609ddd85f53e9cfd",
@@ -20930,7 +20930,7 @@
       "status": 422,
       "detail": "numerator_unit or denominator_unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -20981,7 +20981,7 @@
               }
             },
             "content_version": "ocv_462d24e998b318720fea08cc42866557",
-            "output_digest": "out_c3742499ad4ff931df95e1dfc9c46d43",
+            "output_digest": "out_115a8604335b227614ed1cb822d99825",
             "roots": [
               {
                 "spec_id": "spec_b21aa574bceeb5005ee87e79b5b7aba0",
@@ -21007,7 +21007,7 @@
         ]
       },
       "frame_content_version": "cv_c96ab90e4de9d59e952935c23ea51829",
-      "output_digest": "out_c3742499ad4ff931df95e1dfc9c46d43",
+      "output_digest": "out_115a8604335b227614ed1cb822d99825",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_7488b96321f78c68a6813aa98ba30a2a",
@@ -21251,7 +21251,7 @@
               }
             },
             "content_version": "ocv_7bb4679b2d8436f430af9f992a171363",
-            "output_digest": "out_9651e8065dcb32f829421cd6e4184c14",
+            "output_digest": "out_2d279fe1f582234cc193f2956ac22884",
             "roots": [
               {
                 "spec_id": "spec_dddddddddddddddddddddddddddddddd",
@@ -21286,7 +21286,7 @@
         ]
       },
       "frame_content_version": "cv_884fbcbda008bb81aa8f37035f442c5e",
-      "output_digest": "out_9651e8065dcb32f829421cd6e4184c14",
+      "output_digest": "out_2d279fe1f582234cc193f2956ac22884",
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_149f00b1104db99ee7857bcb7d874d79",
@@ -21442,7 +21442,7 @@
               }
             },
             "content_version": "ocv_d6ff589c31538128527c988c051b415d",
-            "output_digest": "out_d7084d3d53f6b429f006c36d3b0afb30",
+            "output_digest": "out_554292f7d1bf5e0ebcc5140a4f86c88f",
             "roots": [
               {
                 "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -21477,7 +21477,7 @@
         ]
       },
       "frame_content_version": "cv_c7d5cbe23c0c82b2fc2087ee7b7468a2",
-      "output_digest": "out_d7084d3d53f6b429f006c36d3b0afb30",
+      "output_digest": "out_554292f7d1bf5e0ebcc5140a4f86c88f",
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_52d8cc2f3248873a6a2bc5f82dc680b9",
@@ -21598,7 +21598,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -26893,7 +26893,7 @@
               }
             },
             "content_version": "ocv_957b0b86abfe6935068b34e494c3b87c",
-            "output_digest": "out_f9fb15d392f2ecf0030ad9f61719fad3",
+            "output_digest": "out_b4a3bddb34444852efadc0f411197191",
             "roots": [
               {
                 "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -26928,7 +26928,7 @@
         ]
       },
       "frame_content_version": "cv_9b94cfc92844bbf1d13cab0b09238c5e",
-      "output_digest": "out_f9fb15d392f2ecf0030ad9f61719fad3",
+      "output_digest": "out_b4a3bddb34444852efadc0f411197191",
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_ef527290cba735ff2ad03884a7330d22",
@@ -27237,7 +27237,7 @@
       "status": 422,
       "detail": "left_entity names column(s) this frame has no grain for: ['financingProvider']. Available: ['financingProvider', 'financingRecipient', 'stat_var_crsCooperationModality', 'stat_var_crsPurpose', 'stat_var_crsTypeOfFinance', 'stat_var_crsTypeOfFlow'].",
       "code": "role_ambiguous",
-      "trace_id": "6572d422d3d74525b34fd672dff7645b",
+      "trace_id": "d1c410ec9bc7429ba1de56a45edf34cb",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -27276,7 +27276,7 @@
               }
             },
             "content_version": "ocv_b64366079a9d733655badfb322cb6fc7",
-            "output_digest": "out_8b5e02a529f6c73793adf66145fb6369",
+            "output_digest": "out_50aa3f180923369b5523a035027fdf56",
             "roots": [
               {
                 "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -27302,7 +27302,7 @@
         ]
       },
       "frame_content_version": "cv_eba2f1c1012b8b603c028ef8498163a7",
-      "output_digest": "out_8b5e02a529f6c73793adf66145fb6369",
+      "output_digest": "out_50aa3f180923369b5523a035027fdf56",
       "summary": {
         "verb": "compare",
         "spec_id": "ops_71bb3b7236e755949936d55e7850a1de",

@@ -174,8 +174,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "common", editable = "packages/common" },
-    { name = "dfo-spec-kit", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184" },
-    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184" },
+    { name = "dfo-spec-kit", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=17f0469a5d5648114ae40191bda7e8a573971617" },
+    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=17f0469a5d5648114ae40191bda7e8a573971617" },
     { name = "fastmcp", specifier = ">=4.0.10,<5" },
     { name = "httpx2", specifier = ">=2.13.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
@@ -694,8 +694,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "common", editable = "packages/common" },
-    { name = "dfo-spec-kit", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184" },
-    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184" },
+    { name = "dfo-spec-kit", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=17f0469a5d5648114ae40191bda7e8a573971617" },
+    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=17f0469a5d5648114ae40191bda7e8a573971617" },
     { name = "fastmcp", specifier = ">=4.0.10,<5" },
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx2", specifier = ">=2.13.0" },
@@ -765,7 +765,7 @@ dev = [
 [[package]]
 name = "dfo-spec-kit"
 version = "0.2.0"
-source = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184#03d8f5a0f457f4b008f636c484f3bb81e3c98184" }
+source = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=17f0469a5d5648114ae40191bda7e8a573971617#17f0469a5d5648114ae40191bda7e8a573971617" }
 dependencies = [
     { name = "rfc8785" },
 ]
@@ -773,7 +773,7 @@ dependencies = [
 [[package]]
 name = "dfo-spec-kit-frame-grammar"
 version = "0.1.0"
-source = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184#03d8f5a0f457f4b008f636c484f3bb81e3c98184" }
+source = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=17f0469a5d5648114ae40191bda7e8a573971617#17f0469a5d5648114ae40191bda7e8a573971617" }
 dependencies = [
     { name = "dfo-spec-kit" },
     { name = "pyarrow" },
@@ -1506,7 +1506,7 @@ requires-dist = [
     { name = "cloud-sql-python-connector", extras = ["asyncpg"], specifier = ">=1.15" },
     { name = "common", editable = "packages/common" },
     { name = "data-mcp", editable = "services/data-mcp" },
-    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184" },
+    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=17f0469a5d5648114ae40191bda7e8a573971617" },
     { name = "fastapi", specifier = ">=0.139.1" },
     { name = "fastmcp", specifier = ">=4.0.10,<5" },
     { name = "google-adk", extras = ["db"], specifier = "==2.10.0" },
@@ -2366,8 +2366,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "common", editable = "packages/common" },
-    { name = "dfo-spec-kit", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184" },
-    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=03d8f5a0f457f4b008f636c484f3bb81e3c98184" },
+    { name = "dfo-spec-kit", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=17f0469a5d5648114ae40191bda7e8a573971617" },
+    { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=17f0469a5d5648114ae40191bda7e8a573971617" },
     { name = "fastmcp", extras = ["apps"], specifier = ">=4.0.10,<5" },
     { name = "fonttools", specifier = ">=4.66.1" },
     { name = "httpx2", specifier = ">=2.13.0" },
