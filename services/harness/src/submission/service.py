@@ -119,6 +119,7 @@ from planner.plan import (
     Decision,
     DecisionDraft,
     DecisionFixes,
+    DecisionPick,
     DecisionScope,
     DecisionsUncitedError,
     Decline,
@@ -286,8 +287,8 @@ class SessionView(Protocol):
         """Whether the user has said anything (an answer, an amendment, a new message) since plan `version` was recorded."""
         ...
 
-    def decision_pick(self) -> tuple[str, str] | None:
-        """The `(slot, chosen)` the user picked on the plan card that this proposal's planner entry replans to hold, or `None`."""
+    def decision_pick(self) -> DecisionPick | None:
+        """The option the user picked on the plan card that this proposal's planner entry replans to hold, or `None`."""
         ...
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
@@ -597,7 +598,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     ]
     pick = view.decision_pick()
     released = (
-        _released_by_pick(previous, requirements_after, pick)
+        _released_by_pick(
+            previous,
+            requirements_after,
+            slot=pick.slot,
+            picked=next((d for d in settled if d.slot == pick.slot), None),
+        )
         if pick is not None and previous is not None and not user_spoke
         else frozenset()
     )
@@ -649,10 +655,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         return blocked
     if pick is not None:
         held = _picked_decision(
-            pick,
-            _decisions_after(previous, settled, removed=removed_decisions),
-            proposer,
-            previous=previous,
+            pick, _decisions_after(previous, settled, removed=removed_decisions), proposer
         )
         if not isinstance(held, Decision):
             return held
@@ -6559,30 +6562,50 @@ def _uncited_carried_decisions(
 
 
 def _released_by_pick(
-    previous: Plan, requirements: Sequence[EvidenceRequirement], pick: tuple[str, str]
+    previous: Plan,
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    slot: str,
+    picked: Decision | None,
 ) -> frozenset[str]:
     """The user's decisions of `previous` that a pick on the plan card lets the patch drop.
 
-    The pick speaks for its own slot, and for another user decision only
-    where the pick changed everything that decision rested on: every
-    requirement of `previous` citing it also cited the picked decision, and
-    the plan it asks for (`requirements`) neither cites it nor keeps any of
-    those requirements. A user decision the new plan still cites, that a
-    requirement the pick did not change cited, or that no requirement cited,
-    stands as the user made it (`_user_decision_refused`), however that
-    requirement is renamed.
+    The pick speaks for its own `slot`, and for another user decision only
+    where the picked option settles what that decision settled: `picked`,
+    the decision under `slot` as this proposal states it, with the `fixes`
+    `settle_decisions` read off its requirements, sets every field the
+    other decision's `fixes` set. That decision must also rest on nothing
+    the pick left alone: every requirement of `previous` citing it also
+    cited the picked decision, and the plan the pick asks for
+    (`requirements`) neither cites it nor keeps any of those requirements.
+    A user decision fixing nothing, one fixing a field the picked option
+    does not, one the new plan still cites, one a requirement the pick did
+    not change cited, and one no requirement cited all stand as the user
+    made them (`_user_decision_refused`), however a requirement is renamed.
     """
-    slot = pick[0]
+    released = {slot}
+    if picked is None or picked.fixes is None:
+        return frozenset(released)
+    settles = _fields_set(picked.fixes)
     kept = {requirement.id for requirement in requirements}
     cited = {cited for requirement in requirements for cited in requirement.decision_ids}
-    released = {slot}
     for decision in previous.decisions:
-        if decision.resolved_by is not ResolvedBy.USER or decision.slot in cited:
+        if (
+            decision.resolved_by is not ResolvedBy.USER
+            or decision.slot in cited
+            or decision.fixes is None
+            or not _fields_set(decision.fixes) <= settles
+        ):
             continue
         citing = [r for r in previous.evidence_requirements if decision.slot in r.decision_ids]
         if citing and all(slot in r.decision_ids and r.id not in kept for r in citing):
             released.add(decision.slot)
     return frozenset(released)
+
+
+def _fields_set(fixes: DecisionFixes) -> frozenset[str]:
+    """The names of the fields `fixes` sets."""
+    return frozenset(name for name, value in fixes if value is not None)
 
 
 class _Contradiction(NamedTuple):
@@ -6943,39 +6966,33 @@ def _measure_fixed(
 
 
 def _picked_decision(
-    pick: tuple[str, str],
-    decisions: Sequence[Decision],
-    proposer: Proposer,
-    *,
-    previous: Plan | None,
+    pick: DecisionPick, decisions: Sequence[Decision], proposer: Proposer
 ) -> Decision | dict[str, object]:
     """The decision of `decisions` holding the user's `pick` on the plan card, as theirs, or the refusal.
 
-    `pick` is the `(slot, chosen)` the planner's entry replans to hold
-    (`planner.plan.decision_pick`). The plan holds it when it states a
-    decision under that slot whose `chosen` is the picked label and whose
-    `fixes`, read off the requirements citing it (`settle_decisions`),
-    differ from what the decision fixed in `previous` under another option:
-    a relabelled decision over the same requirements would mark the picked
-    option active while the plan still reads the old one. The fixes may
+    `pick` is the option the planner's entry replans to hold
+    (`planner.plan.decision_pick`), with the decision as the card showed it
+    when the user picked. The plan holds it when it states a decision under
+    that slot whose `chosen` is the picked label and whose `fixes`, read off
+    the requirements citing it (`settle_decisions`), are set and, for a pick
+    of another option, differ from the fixes the card showed: a relabelled
+    decision over the same requirements would mark the picked option active
+    while the plan still reads the old one. Every proposal of the replan is
+    held against what the card showed, so a later one cannot return the old
+    plan under the label an earlier admitted draft stated. The fixes may
     differ in any field, since the pick may change the plan's shape. That
     decision is recorded `resolved_by=user`. Any other plan is refused with
     `USER_PICK_NOT_HELD`, whose `action` calls `proposer` to restate the
     decision.
     """
-    slot, chosen = pick
+    slot, chosen = pick.slot, pick.chosen
     stated = next((decision for decision in decisions if decision.slot == slot), None)
-    before = (
-        next((decision for decision in previous.decisions if decision.slot == slot), None)
-        if previous is not None
-        else None
-    )
-    moved = (
-        before is None
-        or before.chosen == chosen
-        or (stated is not None and stated.fixes is not None and stated.fixes != before.fixes)
-    )
-    if stated is not None and stated.chosen == chosen and moved:
+    if (
+        stated is not None
+        and stated.chosen == chosen
+        and stated.fixes is not None
+        and (pick.origin_chosen == chosen or stated.fixes != pick.origin_fixes)
+    ):
         return stated.model_copy(update={"resolved_by": ResolvedBy.USER})
     if stated is None:
         states = "drops that decision"

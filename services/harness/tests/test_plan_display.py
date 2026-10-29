@@ -34,6 +34,7 @@ from harness.plan_display import (
     choice_id,
     chosen_scope_decision,
     decision_choice_id,
+    decision_option_id,
     listed_together,
     operation_rows,
     pinned_choice_id,
@@ -4591,28 +4592,38 @@ def _fixing_measure(plan: Plan) -> Plan:
 
 
 def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it() -> None:
-    """The row `decision/measure`'s second option is the decision's second
-    option. A row or option the card does not offer picks nothing."""
+    """The row `decision/measure`'s option for a label picks that label, with
+    the decision as the plan states it. A row or option the card does not
+    offer picks nothing."""
     unfixed = scripted_plan("kenya life expectancy", spec_id=None)
     plan = _fixing_measure(unfixed)
-    assert plan.decisions[0].options == ("life expectancy at birth", "healthy life expectancy")
+    (measure,) = plan.decisions
+    birth, healthy = measure.options
+    assert (birth, healthy) == ("life expectancy at birth", "healthy life expectancy")
+    assert measure.fixes is not None
 
     picks = [
         decision_pick(plan, choice_id=choice, option_id=option)
         for choice, option in [
+            ("decision/measure", decision_option_id(healthy)),
+            ("decision/measure", decision_option_id(birth)),
+            ("decision/measure", decision_option_id("life expectancy at 60")),
             ("decision/measure", "option_2"),
-            ("decision/measure", "option_1"),
-            ("decision/measure", "option_3"),
-            ("decision/other", "option_2"),
-            ("measure", "option_2"),
+            ("decision/other", decision_option_id(healthy)),
+            ("measure", decision_option_id(healthy)),
         ]
     ]
 
+    origin = {"origin_chosen": measure.chosen, "origin_fixes": measure.fixes}
     assert picks == [
-        DecisionPick(slot="measure", chosen="healthy life expectancy"),
-        DecisionPick(slot="measure", chosen="life expectancy at birth"),
+        DecisionPick(slot="measure", chosen=healthy, **origin),
+        DecisionPick(slot="measure", chosen=birth, **origin),
+        None,
         None,
         None,
         None,
     ]
-    assert decision_pick(unfixed, choice_id="decision/measure", option_id="option_2") is None
+    assert (
+        decision_pick(unfixed, choice_id="decision/measure", option_id=decision_option_id(healthy))
+        is None
+    )

@@ -9,24 +9,13 @@ pick off the plan the card showed, as the planner states it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from planner.plan import Plan
+from planner.plan import DecisionPick, Plan
 
 from harness.plan_display import (
     DECISION_CHOICE_PREFIX,
     decision_option_id,
     switchable_decision,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class DecisionPick:
-    """The option `chosen` the user picked for the plan decision under `slot`,
-    exactly as the decision's `options` states it."""
-
-    slot: str
-    chosen: str
 
 
 def is_decision_choice(choice_id: str) -> bool:
@@ -37,20 +26,26 @@ def is_decision_choice(choice_id: str) -> bool:
 def decision_pick(plan: Plan, *, choice_id: str, option_id: str) -> DecisionPick | None:
     """The pick a switch of row `choice_id` to option `option_id` makes on `plan`.
 
-    `None` when `choice_id` names no switchable planner decision of `plan`,
-    or `option_id` none of its options.
+    The pick records the decision as `plan` states it, the origin every
+    proposal of the replan is held against. `None` when `choice_id` names no
+    switchable planner decision of `plan`, or `option_id` none of its options.
     """
     if not is_decision_choice(choice_id):
         return None
     slot = choice_id.removeprefix(DECISION_CHOICE_PREFIX)
     decision = next((d for d in plan.decisions if d.slot == slot), None)
-    if decision is None or not switchable_decision(decision):
+    if decision is None or decision.fixes is None or not switchable_decision(decision):
         return None
     return next(
         (
-            DecisionPick(slot=slot, chosen=option)
-            for index, option in enumerate(decision.options)
-            if decision_option_id(index) == option_id
+            DecisionPick(
+                slot=slot,
+                chosen=option,
+                origin_chosen=decision.chosen,
+                origin_fixes=decision.fixes,
+            )
+            for option in decision.options
+            if decision_option_id(option) == option_id
         ),
         None,
     )

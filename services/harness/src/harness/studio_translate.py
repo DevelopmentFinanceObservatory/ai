@@ -1072,16 +1072,14 @@ def _choice_members(
         return {}
     return {
         "choice_id": plan_display.decision_choice_id(decision),
-        "active_option_id": plan_display.decision_option_id(
-            decision.options.index(decision.chosen)
-        ),
+        "active_option_id": plan_display.decision_option_id(decision.chosen),
         "options": [
             PlanDecisionOption(
-                option_id=plan_display.decision_option_id(index),
+                option_id=plan_display.decision_option_id(option),
                 label=named(option),
                 status="available",
             )
-            for index, option in enumerate(decision.options)
+            for option in decision.options
         ],
     }
 
@@ -1416,8 +1414,11 @@ class _Translator:
             # The planner drafts the plan again, an amendment's or an execute
             # replan's, and may reuse the requirement ids the choice ids are
             # built from, so no earlier card's labels describe its choices.
-            self._conversation.turn_choice_baseline = {}
+            # A pick's replan that raises, is stopped or is refused leaves the
+            # plan unchanged, so it drops them only once it lands (below).
             self._pick_replan = bool(started.get("pick"))
+            if not self._pick_replan:
+                self._conversation.turn_choice_baseline = {}
             label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
         output = event.output if isinstance(event.output, dict) else None
@@ -1436,6 +1437,9 @@ class _Translator:
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
+            if event.actions.route == "ok":
+                # A drafted plan, a pick's replan's included.
+                self._conversation.turn_choice_baseline = {}
             frames.extend(self._close_status())
         return frames
 

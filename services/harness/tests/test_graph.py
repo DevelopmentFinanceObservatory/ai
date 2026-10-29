@@ -104,6 +104,7 @@ from harness.graph.switch import (
     SWITCH_STOP,
     SwitchFailedError,
 )
+from harness.plan_display import decision_option_id
 from harness.planner_seam import PlannerSeam, store_aligned_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
@@ -1771,8 +1772,13 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
 
 # A planner decision the card offers to switch (`plan_display.switchable_decision`):
 # `_seam_plan`'s window, fixing the period, and the switch to its other option.
-_PICKED_WINDOW = DecisionPick(slot="window", chosen="2018-2024")
-_PICK_SWITCH = {"choice_id": "decision/window", "option_id": "option_2"}
+_PICKED_WINDOW = DecisionPick(
+    slot="window",
+    chosen="2018-2024",
+    origin_chosen="2015-2024",
+    origin_fixes=DecisionFixes(period=Period(start=2015, end=2024)),
+)
+_PICK_SWITCH = {"choice_id": "decision/window", "option_id": decision_option_id("2018-2024")}
 # A drafting key the replan writes, which a replan that does not land puts back.
 _DRAFTING_KEY = "planner:replan_scratch"
 
@@ -1808,7 +1814,7 @@ class _ReplanSeam(_Seam):
             self.held_snapshot = ctx.state.get(PICK_REPLAN_KEY)
             ctx.state[_DRAFTING_KEY] = "draft"
             if (pick := kwargs.get("pick")) is not None:
-                save_decision_pick(ctx.state, (pick.slot, pick.chosen))
+                save_decision_pick(ctx.state, pick)
             self.replanning.set()
             if self.release is not None:
                 await self.release.wait()
@@ -1940,7 +1946,7 @@ class _AskingOnPickSeam(_ReplanSeam):
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         if len(self.calls) == 1:
             kwargs["ctx"].state[_DRAFTING_KEY] = "draft"
-            save_decision_pick(kwargs["ctx"].state, (kwargs["pick"].slot, kwargs["pick"].chosen))
+            save_decision_pick(kwargs["ctx"].state, kwargs["pick"])
             self.calls.append(kwargs)
             await kwargs["ctx"].run_node(_ask_the_user)
             raise AssertionError("the ask pauses the replan")
@@ -4339,7 +4345,7 @@ class _RefusingPickSeam(_TranslatingSeam):
         ctx = kwargs["ctx"]
         if ctx.resume_inputs:
             return {"refused": {"text": "No plan.", "final": False, "code": "plan_not_ready"}}
-        save_decision_pick(ctx.state, (pick.slot, pick.chosen))
+        save_decision_pick(ctx.state, pick)
         ctx.state[_DRAFTING_KEY] = "draft"
         await ctx.run_node(_ask_the_user)
         raise AssertionError("the ask pauses the replan")

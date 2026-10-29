@@ -585,14 +585,11 @@ class PlannerSeam:
             # amendment on the same test.
             save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
             # The option the user picked on the plan card, which this entry
-            # replans to hold: admission refuses a plan that does not state
-            # it, and lets go of the user's decisions the new plan drops with
-            # all their requirements (`submission.service.admit`). Any other
-            # entry clears it.
-            save_decision_pick(
-                cast(SessionState, ctx.session.state),
-                (pick.slot, pick.chosen) if pick is not None else None,
-            )
+            # replans to hold, with the decision as the card showed it:
+            # admission refuses a plan that does not state it, and lets go of
+            # the user's decisions the picked option settles
+            # (`submission.service.admit`). Any other entry clears it.
+            save_decision_pick(cast(SessionState, ctx.session.state), pick)
             clear_unsupported(cast(SessionState, ctx.session.state))
             for operation in _earned_by_refusal(refusal):
                 record_unsupported(cast(SessionState, ctx.session.state), operation)

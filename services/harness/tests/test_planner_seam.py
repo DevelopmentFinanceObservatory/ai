@@ -105,6 +105,7 @@ from planner.plan import (
     AskBreakdown,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
     FullHistory,
     GrowthRequirement,
@@ -1249,7 +1250,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
         "question": plan.question,
         "readings": [],
         "prior_plan": plan.model_dump(mode="json"),
-        "pick": DecisionPick(*_PICKED),
+        "pick": _PICKED,
         "on_progress": reports.append,
         "stoppable": True,
     }
@@ -2120,7 +2121,12 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
     assert recorded == [False, True, True, False]
 
 
-_PICKED = ("donor_scope", "the top 10 donors")
+_PICKED = DecisionPick(
+    slot="donor_scope",
+    chosen="the top 10 donors",
+    origin_chosen="the DAC total",
+    origin_fixes=DecisionFixes(entities=(Entity(name="DAC countries", role="donor"),)),
+)
 
 
 async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_line() -> None:
@@ -2133,7 +2139,7 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
     seam = _seam()
     llm = ScriptedPlannerLlm(script=["Planned."] * 3)
     seam._agent.model = llm
-    pick = DecisionPick(*_PICKED)
+    pick = _PICKED
     recorded = []
 
     refused = await harness.run(seam, question="kenya aid", readings=[], pick=pick)

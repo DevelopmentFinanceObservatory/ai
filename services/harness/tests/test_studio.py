@@ -77,6 +77,7 @@ from harness.graph.state import (
 )
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
+from harness.plan_display import decision_option_id
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, SeamCode, refusal_sentence
@@ -4691,11 +4692,13 @@ async def test_a_switch_the_card_cannot_take_is_refused_with_its_constraint() ->
 # (`harness.plan_display.switchable_decision`): the DAC total, with the top
 # 10 donors to switch to.
 _DECISION_ID = "decision/donor_scope"
+_DAC_TOTAL = decision_option_id("the DAC total")
+_TOP_TEN = decision_option_id("the top 10 donors")
 _SHOWN_DECISION = _PendingChoice(
-    active="option_1",
+    active=_DAC_TOTAL,
     options={
-        "option_1": _PendingOption(label="the DAC total", status="available"),
-        "option_2": _PendingOption(label="the top 10 donors", status="available"),
+        _DAC_TOTAL: _PendingOption(label="the DAC total", status="available"),
+        _TOP_TEN: _PendingOption(label="the top 10 donors", status="available"),
     },
 )
 
@@ -4712,8 +4715,12 @@ async def test_a_planner_decision_switch_is_checked_as_a_scope_switch_and_resume
         plan = await _plan_with_a_choice(app, client, choices={_DECISION_ID: _SHOWN_DECISION})
         cases = [
             ({"plan_revision": "0" * 64}, 409, "plan_revision_stale"),
-            ({"option_id": "option_3"}, 422, "switch_option_unavailable"),
-            ({"option_id": "option_1"}, 422, "switch_option_unavailable"),
+            (
+                {"option_id": decision_option_id("the top 20 donors")},
+                422,
+                "switch_option_unavailable",
+            ),
+            ({"option_id": _DAC_TOTAL}, 422, "switch_option_unavailable"),
         ]
         refused = [
             await client.post(
@@ -4726,7 +4733,7 @@ async def test_a_planner_decision_switch_is_checked_as_a_scope_switch_and_resume
         await _stream(
             client,
             "/api/studio/interrupt",
-            _switch_body(plan, choice_id=_DECISION_ID, option_id="option_2"),
+            _switch_body(plan, choice_id=_DECISION_ID, option_id=_TOP_TEN),
         )
 
     assert [(r.status_code, r.json().get("constraint_id")) for r in refused] == [

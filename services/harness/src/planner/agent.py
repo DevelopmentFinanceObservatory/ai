@@ -133,6 +133,7 @@ from planner.plan import (
     AnswerMode,
     AskAnswer,
     DecisionDraft,
+    DecisionPick,
     Decline,
     EvidenceRequirement,
     FullHistory,
@@ -1189,7 +1190,7 @@ class ToolContextSession:
         """`_user_spoke_since_recorded` over the call's session."""
         return _user_spoke_since_recorded(self.tool_context, version)
 
-    def decision_pick(self) -> tuple[str, str] | None:
+    def decision_pick(self) -> DecisionPick | None:
         """The pick on the plan card the call's planner entry holds (`planner.plan.decision_pick`)."""
         return decision_pick(self.tool_context.state)
 

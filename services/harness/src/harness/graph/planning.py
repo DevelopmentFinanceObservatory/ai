@@ -335,8 +335,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
 def _pick(payload: dict[str, Any]) -> DecisionPick | None:
     """The planner decision's option the user picked on the plan card, which
     `approve`'s `"amend"` route carries under `pick`, or `None`."""
-    picked = pick_of(payload.get("pick"))
-    return DecisionPick(*picked) if picked is not None else None
+    return pick_of(payload.get("pick"))
 
 
 def _pick_snapshot(ctx: Context) -> dict[str, Any]:
@@ -444,7 +443,7 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
             yield Event(
                 output={
                     "plan": plan.model_dump(mode="json"),
-                    "pick": {"slot": pick.slot, "chosen": pick.chosen},
+                    "pick": pick.model_dump(mode="json"),
                     "switch": switch,
                 },
                 route="amend",

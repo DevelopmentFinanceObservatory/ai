@@ -30,6 +30,7 @@ from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
+from harness.plan_display import decision_option_id
 from harness.planner_seam import PlannerSeamError
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
@@ -412,28 +413,48 @@ def test_a_planner_decision_settling_fields_is_a_row_the_card_can_switch() -> No
 
     rows = {row.id: row for row in frame.decisions}
     switched, plain = rows["measure"], rows["rounding"]
+    birth, healthy = (decision_option_id(label) for label in measure.options)
     assert (switched.choice_id, switched.active_option_id, switched.chosen) == (
         "decision/measure",
-        "option_2",
+        healthy,
         "healthy life expectancy",
     )
     assert switched.options == [
-        PlanDecisionOption(
-            option_id="option_1", label="life expectancy at birth", status="available"
-        ),
-        PlanDecisionOption(
-            option_id="option_2", label="healthy life expectancy", status="available"
-        ),
+        PlanDecisionOption(option_id=birth, label="life expectancy at birth", status="available"),
+        PlanDecisionOption(option_id=healthy, label="healthy life expectancy", status="available"),
     ]
     assert plain.choice_id is plain.options is plain.active_option_id is None
     assert PlanAction.SWITCH in frame.actions
     choices = translator._conversation.pending[frame.interrupt_id].choices
     assert set(choices) == {"decision/measure"}
-    assert choices["decision/measure"].active == "option_2"
+    assert choices["decision/measure"].active == healthy
     assert {k: o.label for k, o in choices["decision/measure"].options.items()} == {
-        "option_1": "life expectancy at birth",
-        "option_2": "healthy life expectancy",
+        birth: "life expectancy at birth",
+        healthy: "healthy life expectancy",
     }
+
+
+def test_a_planner_decision_option_keeps_its_id_when_a_replan_reorders_the_options() -> None:
+    """The card's cross-revision marks compare option ids: a replan listing
+    the measure decision's options in the other order gives each label the
+    id it had."""
+    plan = _fixing_measure(scripted_plan("kenya life expectancy", spec_id=None))
+    (measure,) = plan.decisions
+    reordered = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [measure.model_copy(update={"options": measure.options[::-1]})],
+        }
+    )
+
+    def labels_by_id(shown: Plan) -> dict[str, str]:
+        payload = {**shown.model_dump(mode="json"), "revision": plan_revision(shown)}
+        (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+        (row,) = frame.decisions
+        return {option.option_id: option.label for option in row.options or ()}
+
+    assert labels_by_id(reordered) == labels_by_id(plan)
+    assert len(labels_by_id(plan)) == len(measure.options)
 
 
 def test_a_plan_a_switch_offers_says_what_else_moved_and_a_plain_plan_offers_no_switch() -> None:
@@ -1626,6 +1647,31 @@ def test_a_planner_draft_drops_the_labels_the_turns_switches_kept(revising: bool
     translator.translate(_node_event("planner", planner_started={"revising": revising}))
 
     assert translator._conversation.turn_choice_baseline == {}
+
+
+@pytest.mark.parametrize(
+    ("ending", "kept"),
+    [
+        pytest.param(None, True, id="raised"),
+        pytest.param("pending_refusal", True, id="stopped-or-refused"),
+        pytest.param("ok", False, id="landed"),
+    ],
+)
+def test_a_pick_replan_drops_the_labels_the_turns_switches_kept_only_once_it_lands(
+    ending: str | None, kept: bool
+) -> None:
+    """A replan for a pick on the card that raises, is stopped or is refused
+    leaves the plan unchanged, so an earlier switch's label still names what
+    the approved plan changed. Only a plan the replan drafts drops it."""
+    translator = _translator()
+    baseline = {"aid:sector": "health (CRS 120)"}
+    translator._conversation.turn_choice_baseline = dict(baseline)
+
+    translator.translate(_node_event("planner", planner_started={"revising": True, "pick": True}))
+    if ending is not None:
+        translator.translate(_node_event("planner", route=ending, output={"version": 2}))
+
+    assert translator._conversation.turn_choice_baseline == (baseline if kept else {})
 
 
 def test_the_planner_starting_a_first_draft_opens_working_on_a_plan() -> None:

@@ -50,6 +50,7 @@ same way.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import typing
@@ -1321,11 +1322,15 @@ def decision_choice_id(decision: Decision) -> str:
     return f"{DECISION_CHOICE_PREFIX}{decision.slot}"
 
 
-def decision_option_id(index: int) -> str:
-    """The id the plan card gives the option at `index` of a planner decision's
-    `options`: `"option_<index + 1>"`. The plan's revision, which a switch
-    names, fixes the options' order."""
-    return f"option_{index + 1}"
+def decision_option_id(label: str) -> str:
+    """The id the plan card gives the planner decision option `label`:
+    `"option_"` and the first 12 hex digits of the label's SHA-256.
+
+    The label is the identity the planner gives an option, so the same label
+    keeps its id across revisions however a replan orders the options. A
+    decision's options are distinct (`planner.plan.Decision`), so their ids
+    are distinct within it."""
+    return f"option_{hashlib.sha256(label.encode()).hexdigest()[:12]}"
 
 
 def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | None:

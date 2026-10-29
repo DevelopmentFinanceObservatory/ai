@@ -167,7 +167,7 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
 # The session-state slot holding the option the user picked for a planner
-# decision on the plan card, as `{"slot", "chosen"}`, when the planner's
+# decision on the plan card, as a `DecisionPick` dump, when the planner's
 # current entry replans to hold that pick. `harness.planner_seam.PlannerSeam`
 # writes it, or clears it, with `AMENDMENT_ENTRY_STATE_KEY` when an entry
 # starts, so an ask-the-user resume inside one entry keeps it. Admission
@@ -6295,26 +6295,42 @@ def save_amendment_entry(state: SessionState, amended: bool) -> None:
     state[AMENDMENT_ENTRY_STATE_KEY] = amended
 
 
-def decision_pick(state: SessionState) -> tuple[str, str] | None:
-    """The `(slot, chosen)` the user picked on the plan card that the planner's
-    current entry holds (`DECISION_PICK_STATE_KEY`), or `None`."""
+class DecisionPick(StrictModel):
+    """The option `chosen` the user picked on the plan card for the planner
+    decision under `slot`, exactly as the decision's `options` states it.
+
+    `origin_chosen` and `origin_fixes` are that decision as the card showed
+    it when the user picked: every proposal of the replan is held against
+    them (`submission.service._picked_decision`), so a later proposal cannot
+    return the old plan under the picked label.
+    """
+
+    slot: str
+    chosen: str
+    origin_chosen: str
+    origin_fixes: DecisionFixes
+
+
+def decision_pick(state: SessionState) -> DecisionPick | None:
+    """The pick on the plan card that the planner's current entry holds
+    (`DECISION_PICK_STATE_KEY`), or `None`."""
     return pick_of(state.get(DECISION_PICK_STATE_KEY))
 
 
-def pick_of(raw: object) -> tuple[str, str] | None:
-    """The `(slot, chosen)` a pick stored as `{"slot", "chosen"}` states, or
-    `None` for anything else."""
+def pick_of(raw: object) -> DecisionPick | None:
+    """The `DecisionPick` a pick stored as its JSON dump states, or `None`
+    for anything else."""
     if not isinstance(raw, dict):
         return None
-    slot, chosen = raw.get("slot"), raw.get("chosen")
-    if not (isinstance(slot, str) and isinstance(chosen, str)):
+    try:
+        return DecisionPick.model_validate(raw)
+    except ValidationError:
         return None
-    return slot, chosen
 
 
-def save_decision_pick(state: SessionState, pick: tuple[str, str] | None) -> None:
-    """Record the `(slot, chosen)` pick the planner's current entry holds, or clear it with `None`."""
-    state[DECISION_PICK_STATE_KEY] = None if pick is None else {"slot": pick[0], "chosen": pick[1]}
+def save_decision_pick(state: SessionState, pick: DecisionPick | None) -> None:
+    """Record the pick the planner's current entry holds, or clear it with `None`."""
+    state[DECISION_PICK_STATE_KEY] = None if pick is None else pick.model_dump(mode="json")
 
 
 def load_unsupported(state: SessionState) -> frozenset[UnsupportedOperation]:

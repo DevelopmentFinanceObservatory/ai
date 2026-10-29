@@ -1214,7 +1214,9 @@ class PlanDecision(_WireModel):
     choice_id`), the same on every plan of the conversation that shows the
     choice, switches included. A planner decision that settles requirement
     fields (`harness.plan_display.switchable_decision`) has `choice_id`
-    `"decision/<slot>"` and option ids `"option_<n>"` in its options' order.
+    `"decision/<slot>"` and option ids derived from each option's label
+    (`harness.plan_display.decision_option_id`), the same on every plan
+    that offers that label.
     A decision without `choice_id` cannot be switched.
     """
 
