@@ -92,6 +92,7 @@ from functools import partial
 from http import HTTPStatus
 from typing import Any
 
+from analysis_mcp.runner_client import DerivedUnread
 from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from common.auth import bearer_token
 from common.live_apis import LiveApisError, LiveApisNotConfigured
@@ -100,6 +101,7 @@ from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
     FrameTooLarge,
+    StoredFrameTrace,
     get_store,
 )
 from common.mcp_telemetry import WRITE_TOKEN_KEY
@@ -144,6 +146,7 @@ from presentation_mcp.platform_contract import (
 )
 
 from harness.conversation import current_conversation_caller, current_conversation_id
+from harness.derived_frames import derived_recipe
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
     Lineage,
@@ -175,9 +178,16 @@ from harness.tool_contracts import (
     harness_refusal,
     resolver_digest,
 )
+from harness.wire import RetryMode as WireRetryMode
 
 logger = logging.getLogger(__name__)
 
+
+# A `describe_frame` whose frame's recipe could not be read just now.
+_DESCRIBE_PENDING_MESSAGE = (
+    "Whether this frame follows the latest data could not be worked out just now, so it "
+    "was not described. Asking again shortly may work."
+)
 
 # The source the card names when neither the manifest nor the chart names one.
 _UNKNOWN_SOURCE = "Unknown source"
@@ -444,6 +454,9 @@ def _transient_store_fault(exc: Exception) -> bool:
 # Every fault of the frame store `_store_fault` classifies.
 _STORE_FAULTS = (FrameExpired, FrameIntegrityError, FrameTooLarge, GoogleAPIError, OSError)
 
+# The codes of a derived frame dfo-apis does not hold, or holds no rows of any more.
+_UNHELD_DERIVED_CODES = frozenset({"snapshot_not_found", "snapshot_revoked", "artifact_expired"})
+
 
 def _store_fault(frame: FrameRef, exc: Exception) -> PublishFault:
     """The fault a frame store failure while publishing `frame` is, the same
@@ -473,10 +486,11 @@ def _store_fault(frame: FrameRef, exc: Exception) -> PublishFault:
 
 
 async def _replay_recipe(
-    frame: FrameRef, *, dataset_versions: DatasetVersions | None
+    frame: FrameRef, *, trace: StoredFrameTrace, dataset_versions: DatasetVersions | None
 ) -> dict[str, Any] | PublishFault:
-    """The replay recipe the store's traces build for `frame`, or the fault
-    that kept it from being built (`McpExecutor.publish_result`).
+    """The replay recipe the store's traces build for `frame`, held in the store
+    under `trace`, or the fault that kept it from being built
+    (`McpExecutor.publish_result`).
 
     A root the store holds no mint record for has one rebuilt from its
     dataset's stored versions (`dataset_versions`, through
@@ -494,9 +508,6 @@ async def _replay_recipe(
         else partial(recover_mint_record, dataset_versions=dataset_versions, store=store)
     )
     try:
-        trace = await store.get_trace(frame)
-        if trace is None:
-            return _replay_unavailable(frame, "the store no longer holds it")
         return await build_recipe(frame, store=store, trace=trace, recover=recover)
     except (LiveApisError, LiveApisNotConfigured) as exc:
         retryable = isinstance(exc, LiveApisError) and exc.retryable
@@ -513,6 +524,27 @@ async def _replay_recipe(
         )
     except _STORE_FAULTS as exc:
         return _store_fault(frame, exc)
+
+
+async def _runner_publication(frame: FrameRef) -> FramePublished | PublishFault:
+    """`frame` as dfo-apis' analysis runner published it, with the recipe it
+    stored beside it (`harness.derived_frames.derived_recipe`), or why it holds
+    none: no such frame (`replay_unavailable`), a frame stored without a recipe
+    (`recipe_unbuildable`), and any other failed read under its own code,
+    retryable when dfo-apis says so."""
+    try:
+        recipe = await derived_recipe(frame)
+    except DerivedUnread as exc:
+        if exc.code in _UNHELD_DERIVED_CODES:
+            return _replay_unavailable(frame, f"dfo-apis holds no such frame ({exc.code})")
+        return PublishFault(code=exc.code, reason=exc.detail, retryable=exc.retryable)
+    if recipe is None:
+        return PublishFault(
+            code=HarnessCode.RECIPE_UNBUILDABLE.value,
+            reason=f"dfo-apis stored {frame.spec_id}/{frame.content_version} without a recipe",
+            retryable=False,
+        )
+    return FramePublished(replay_key=recipe["replay_key"])
 
 
 def _replay_unavailable(frame: FrameRef, why: str) -> PublishFault:
@@ -615,20 +647,41 @@ class McpExecutor:
         await self._get_data_clients.aclose()
 
     async def publish_result(self, frame: FrameRef) -> FramePublished | PublishFault:
-        """Publish the derived `frame` to apis with the replay recipe built
-        from the store: the completion gate's publisher
+        """See that the derived `frame` is published to apis with its replay
+        recipe: the completion gate's publisher
         (`executor.completion.ResultPublisher`).
 
-        A store that cannot be reached now, no assembler to publish through
-        (`publish_unavailable`), and a refusal apis says to retry (a
-        transport failure among them) are retryable faults. Every other fault
-        of the store is final (`_store_fault`), as are a recipe that cannot be
-        built from the traces the run wrote (`recipe_unbuildable`), apis
-        holding the frame under a recipe of another normal form
-        (`recipe_normal_form_conflict`), and any other refusal, an oversized
-        recipe's among them.
+        A frame the store does not hold is one dfo-apis' analysis runner
+        computed and stored with its recipe, so its recipe is read back from
+        dfo-apis (`_runner_publication`). A frame the
+        store holds, which an in-process verb computed, is published with the
+        recipe built from the store (`_publish_held`). A store that cannot be
+        reached now is a retryable fault, and every other fault of the store is
+        final (`_store_fault`).
         """
-        recipe = await _replay_recipe(frame, dataset_versions=self._dataset_versions)
+        try:
+            trace = await get_store().get_trace(frame)
+        except _STORE_FAULTS as exc:
+            return _store_fault(frame, exc)
+        if trace is None:
+            return await _runner_publication(frame)
+        return await self._publish_held(frame, trace)
+
+    async def _publish_held(
+        self, frame: FrameRef, trace: StoredFrameTrace
+    ) -> FramePublished | PublishFault:
+        """Publish the derived `frame` the store holds under `trace` with the replay
+        recipe built from the store.
+
+        No assembler to publish through (`publish_unavailable`) and a refusal
+        apis says to retry (a transport failure among them) are retryable
+        faults. A fault of the store is sorted by `_store_fault`. A recipe that
+        cannot be built from the traces the run wrote (`recipe_unbuildable`),
+        apis holding the frame under a recipe of another normal form
+        (`recipe_normal_form_conflict`), and any other refusal, an oversized
+        recipe's among them, are final.
+        """
+        recipe = await _replay_recipe(frame, trace=trace, dataset_versions=self._dataset_versions)
         if isinstance(recipe, PublishFault):
             return recipe
         publisher = self._publisher()
@@ -913,6 +966,26 @@ class McpExecutor:
             **({"served": served} if (served := served_facts(manifest)) is not None else {}),
         }
 
+    async def _described_frame(
+        self, args: Mapping[str, Any], body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The outcome of the `describe_frame` call `args` whose view is `body`, marked
+        `rolling` for a frame whose cards are replayed as data moves
+        (`RollingCards.frame`). A frame whose recipe read failed in a way a retry may
+        mend is refused `transient_unavailable`, since whether it rolls is not known."""
+        frame_ref = args.get("frame_ref")
+        try:
+            rolling = isinstance(frame_ref, Mapping) and await self._rolling_cards.frame(frame_ref)
+        except CardWithheld:
+            refusal = harness_refusal(
+                code=HarnessCode.TRANSIENT_UNAVAILABLE,
+                message=_DESCRIBE_PENDING_MESSAGE,
+                retry_mode=WireRetryMode.RETRY_AFTER_DELAY,
+            )
+            return {"outcome": "refusal", "refusal": refusal}
+        view = {**body, "rolling": True} if rolling else body
+        return {"outcome": "ok", "frame_refs": [], "view": view}
+
     async def _presentation(
         self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None = None
     ) -> dict[str, Any]:
@@ -940,10 +1013,7 @@ class McpExecutor:
             # contract); a transport-level error still arrives as is_error.
             return _refusal_outcome(body, fallback_text=_result_text(result))
         if tool == "describe_frame":
-            frame_ref = args.get("frame_ref")
-            if isinstance(frame_ref, Mapping) and await self._rolling_cards.frame(frame_ref):
-                body = {**body, "rolling": True}
-            return {"outcome": "ok", "frame_refs": [], "view": body}
+            return await self._described_frame(args, body)
         envelope = (result.meta or {}).get(RESOLVED_PAYLOAD_META_KEY)
         if tool == "describe_component":
             # The body is the model vocabulary. The resolved payload holds the

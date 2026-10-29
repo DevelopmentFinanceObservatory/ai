@@ -42,6 +42,7 @@ from analysis_mcp.engine.join import (
     JoinUnknownKeyError,
     run_join,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     canonical_columns_or_refusal,
     derive_frame_content_version,
@@ -419,7 +420,7 @@ async def join(
             ratio=(holds_ratio(left_trace), holds_ratio(right_trace)),
         ),
         digest=lambda: render_join_digest(
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

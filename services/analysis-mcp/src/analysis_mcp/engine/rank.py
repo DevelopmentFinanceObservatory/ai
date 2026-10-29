@@ -15,7 +15,7 @@ Coverage is per entity: the fraction of the window's own "period calendar"
 (every distinct `time_period` any ranked entity contributes) that this
 entity actually has a row for. This engine reports the *overall* grid's own
 coverage -- every entity times every calendar period -- for the tool
-wrapper to check against `settings.aggregate_coverage_floor`, the same
+wrapper to check against `engine.aggregate.COVERAGE_FLOOR`, the same
 floor `aggregate` itself uses, and refuse (reusing `aggregate`'s own
 `coverage_insufficient` shape) when it falls short.
 

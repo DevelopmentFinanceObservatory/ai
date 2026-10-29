@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from analysis_mcp.growth_tool import growth
 from analysis_mcp.rolling_tool import resolve_anchor
+from analysis_mcp.runner_client import DerivedUnread
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from common.recipe import RecipeAnchorError, build_recipe
 from data_mcp.deadline import CallDeadline
@@ -201,6 +202,34 @@ async def test_whether_a_frame_rolls_is_read_from_the_store_alone(scene: Scene) 
     # A pair the store never held has no recipe, so no card on it can roll.
     unknown = {"spec_id": "ops_" + "0" * 32, "content_version": "ocv_" + "0" * 32}
     assert await cards.frame(unknown) is None
+
+
+@pytest.mark.parametrize(
+    ("code", "retryable"),
+    [("upstream_error", True), ("snapshot_not_found", False)],
+    ids=["retryable", "not-served"],
+)
+async def test_a_retryable_failed_recipe_read_withholds_the_card_as_pending(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch, code: str, retryable: bool
+) -> None:
+    """A read of a derived frame's recipe that may succeed later leaves open whether
+    the frame rolls, so the card is withheld as pending; a frame dfo-apis does not
+    serve has no recipe, and its cards are written as fixed."""
+    del scene
+
+    async def unread(ref: FrameRef) -> None:
+        raise DerivedUnread(code=code, retryable=retryable, detail=f"read of {ref.spec_id}")
+
+    monkeypatch.setattr(rolling_cards, "derived_recipe", unread)
+    unknown = {"spec_id": "ops_" + "0" * 32, "content_version": "ocv_" + "0" * 32}
+    cards = RollingCards(replay=None)
+
+    if retryable:
+        with pytest.raises(CardWithheld) as withheld:
+            await cards.frame(unknown)
+        assert withheld.value.refusal["code"] == HarnessCode.ROLLING_REPLAY_PENDING
+    else:
+        assert await cards.frame(unknown) is None
 
 
 async def test_a_card_drawing_the_series_the_frame_counted_is_written_as_asked(

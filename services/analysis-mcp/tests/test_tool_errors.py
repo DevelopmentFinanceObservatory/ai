@@ -144,6 +144,7 @@ def test_every_other_code_is_correct_and_retry() -> None:
         ToolErrorCode.FRAME_INTEGRITY_FAILED,
         ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED,
         ToolErrorCode.SERVICE_UNAVAILABLE,
+        ToolErrorCode.UPSTREAM_ERROR,
     }
     for code in ToolErrorCode:
         if code in _not_correct_and_retry:

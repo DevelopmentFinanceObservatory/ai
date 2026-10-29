@@ -41,25 +41,35 @@ reach a mounted MCP server through it, for tests that cross the seam between
 services. All are fixtures rather than importable helpers because a test module
 importing its own conftest by name is ambiguous when the workspace root has one
 too.
+
+The autouse `runner` fixture answers every call the analysis verbs make to
+dfo-apis' analysis runner, and every read of a frame it stored, from the replies
+recorded in `fixtures/runner_replies.json`, through analysis-mcp's own replay
+(`services/analysis-mcp/tests/runner_replay.py`, which says how to record more).
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
+    Iterator,
     Mapping,
     MutableMapping,
     Sequence,
 )
 from contextlib import asynccontextmanager
+from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 
 import httpx2
 import pytest
+from analysis_mcp.runner_client import runner_holder
 from common import auth as mcp_auth
 from compiler.sources import member_digest
 from data_mcp import node_lookup, resolution
@@ -95,6 +105,31 @@ from planner.workflow import ResolvedEntity, SelectedSource
 from pydantic import Field
 
 SPEC_KENYA = "spec_" + "a" * 32
+
+_RUNNER_REPLIES = Path(__file__).resolve().parent / "fixtures" / "runner_replies.json"
+
+
+def _load_runner_replay() -> ModuleType:
+    """analysis-mcp's `runner_replay`, loaded from its file: that suite's tests are
+    no package another suite imports from."""
+    path = Path(__file__).resolve().parents[2] / "analysis-mcp" / "tests" / "runner_replay.py"
+    spec = importlib.util.spec_from_file_location("harness_tests_runner_replay", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_runner_replay = _load_runner_replay()
+
+
+@pytest.fixture(autouse=True)
+def runner(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    """The analysis runner the verbs call and the derived frames the harness reads,
+    answering from the replies recorded for this suite, so no test reaches a
+    network."""
+    yield _runner_replay.replayed_runner(monkeypatch, replies_path=_RUNNER_REPLIES)
+    runner_holder.set(None)
 
 
 @pytest.fixture(autouse=True)

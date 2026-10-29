@@ -25,7 +25,6 @@ import pyarrow.parquet as pq
 import pytest
 from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
-from common.recipe import build_recipe
 from common.row_budget import RowBudget
 from compiler.compile import compile_plan
 from compiler.sources import member_digest
@@ -45,6 +44,7 @@ from data_mcp.series_statistics import series_statistics_table
 from executor.completion import ResultPublisher
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
+from harness.derived_frames import derived_recipe
 from harness.graph.answer import answer_frames, link_evidence_to_terminal_frames
 from harness.graph.state import ORCHESTRATOR_FRAMES_KEY, frame_id_for, register_frames
 from harness.mcp_client import McpExecutor
@@ -105,6 +105,7 @@ from translator.mechanical import build_translation
 from .canonical_versions import serve_canonical_frames, version_of
 from .replay_support import FakeApis, data_mcp_client
 from .resolved_revision import resolved_revision
+from .runner_frames import result_table
 
 SPEC_ID = "spec_" + "5" * 32
 YEARS = [str(year) for year in range(2015, 2025)]
@@ -128,8 +129,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 async def publisher() -> AsyncIterator[ResultPublisher]:
     """The completion gate's publisher as the deployed app has it,
-    `McpExecutor.publish_result`, publishing each derived frame with the recipe
-    the store's traces build to a fake apis."""
+    `McpExecutor.publish_result`, which finds each derived frame the runner
+    computed stored with its recipe, and publishes nothing."""
     assembler = FakeApis().assembler()
     yield McpExecutor(settings=Settings(), publish_frame=assembler.publish_frame).publish_result
     await assembler.aclose()
@@ -1131,20 +1132,15 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
             approved, surface=surface, publisher=publisher
         )
         assert isinstance(outcome, Accepted), outcome
-        stored_frame, stored_trace = await get_frame_store().get(outcome.results["top_three"])
+        stored = (await result_table(outcome.results["top_three"])).to_pylist()
 
     assert finished.status is PlanStatus.COMPLETED
     assert [step.step_id for step in outcome.steps] == ["oda_disbursed", "top_three"]
-    donor = stored_frame.columns.index("donor")
-    value = stored_frame.columns.index("value")
-    assert {row[donor]: row[value] for row in stored_frame.rows} == {
+    assert {row["donor"]: row["value"] for row in stored} == {
         "country/USA": 64.7,
         "country/DEU": 37.9,
         "country/JPN": 19.6,
     }
-    (cut,) = [e for e in stored_trace.exclusions if e.reason == "beyond_limit"]
-    assert cut.rows == 3
-    assert cut.entities == {"donor": ("country/CAN", "country/FRA", "country/GBR")}
     rank_step = outcome.steps[-1]
     assert rank_step.row_count == 3
     assert "limit 3 (kept 3 of 6 ranked entities)" in rank_step.digest
@@ -1377,7 +1373,7 @@ def run_rolling_plan(
                 _rolling_approved_plan(decision, schemas), surface=surface
             )
             assert isinstance(outcome, Accepted), outcome
-            recipe = await build_recipe(outcome.results["change"], store=get_frame_store())
+            recipe = await derived_recipe(outcome.results["change"])
             _, again = await execute_approved_plan(
                 _rolling_approved_plan(decision, schemas), surface=surface
             )
@@ -1493,9 +1489,16 @@ class _Platform:
 
     @staticmethod
     async def _view(frame_ref: Mapping[str, Any]) -> dict[str, Any]:
-        held = await get_frame_store().get(FrameRef.model_validate(frame_ref))
-        assert held is not None
-        donors = sorted(set(held[0].table.column("donor").to_pylist()))
+        """The view of a frame `get_data` fetched, from the store, or of one the
+        runner computed, from dfo-apis."""
+        ref = FrameRef.model_validate(frame_ref)
+        if ref.spec_id.startswith("ops_"):
+            table = await result_table(ref)
+        else:
+            held = await get_frame_store().get(ref)
+            assert held is not None
+            table = held[0].table
+        donors = sorted(set(table.column("donor").to_pylist()))
         return {
             "dimensions": [
                 {"name": "stat_var", "plural": False, "values": ["dcid:OdaDisbursed"]},
@@ -1538,7 +1541,8 @@ class _Studio:
         }
 
     async def newest_year(self, frame_ref: Mapping[str, Any]) -> str:
-        recipe = await build_recipe(FrameRef.model_validate(frame_ref), store=get_frame_store())
+        recipe = await derived_recipe(FrameRef.model_validate(frame_ref))
+        assert recipe is not None
         return recipe["anchor"]["period"]
 
 
@@ -1549,6 +1553,7 @@ async def studio(
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    runner: Any,
 ) -> AsyncIterator[_Studio]:
     """The orchestrator's tools after the rolling plan ran on the mounted services.
 
@@ -1579,7 +1584,7 @@ async def studio(
         return httpx2.Response(200, json={**mint_response, "definition": definition})
 
     client_holder.set_client(data_mcp_client(mint_handler))
-    apis = FakeApis()
+    apis = FakeApis(runner)
     assembler = apis.assembler()
     replays: list[Sequence[Mapping[str, Any]]] = []
     replay_calls: list[str] = []
@@ -2083,14 +2088,12 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
             approved, surface=surface, publisher=publisher
         )
         assert isinstance(outcome, Accepted), outcome
-        stored_frame, _trace = await get_frame_store().get(outcome.results["top_two"])
+        stored = (await result_table(outcome.results["top_two"])).to_pylist()
 
     assert finished.status is PlanStatus.COMPLETED
     assert [step.step_id for step in outcome.steps] == ["gdp", "countries", "top_two"]
     assert options[0]["columns"][-1] == "observationAbout_type"
-    place = stored_frame.columns.index("observationAbout")
-    value = stored_frame.columns.index("value")
-    assert {row[place]: row[value] for row in stored_frame.rows} == {
+    assert {row["observationAbout"]: row["value"] for row in stored} == {
         "country/USA": 27.0,
         "country/CHN": 18.0,
     }
@@ -2168,11 +2171,10 @@ async def test_a_level_filtered_rank_after_a_plain_read_of_the_same_mint_keeps_t
 
         _finished, outcome = await execute_approved_plan(approved, surface=surface)
         assert isinstance(outcome, Accepted), outcome
-        stored_frame, _trace = await get_frame_store().get(outcome.results["top_two"])
+        stored = (await result_table(outcome.results["top_two"])).to_pylist()
 
     assert fetched == [(GDP_CONTENT_VERSION, False), (GDP_CONTENT_VERSION, True)]
-    place = stored_frame.columns.index("observationAbout")
-    assert {row[place] for row in stored_frame.rows} == {"country/USA", "country/CHN"}
+    assert {row["observationAbout"] for row in stored} == {"country/USA", "country/CHN"}
 
 
 async def test_a_plain_total_after_a_level_filtered_rank_of_the_same_mint_reads_no_type_column(
@@ -2563,7 +2565,10 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     cut = FrameRef(spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT)
     assert answer.presented == cut
     assert answer.store == frame_ref_for(
-        spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT, columns=KIND_COLUMNS
+        spec_id=KENYA_DONORS_SPEC,
+        content_version=KENYA_DONORS_CUT,
+        columns=KIND_COLUMNS,
+        without_party_totals=True,
     )
     # The frame the answer is described and drawn by is the cut version's.
     assert platform.described == [cut.model_dump()]
@@ -2828,9 +2833,7 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
         summed = await total(surface, typed_content["frame_ref"])
         assert not summed.is_error, summed.text
         sum_pair = summed.structured_content or {}
-        summed_held = await get_frame_store().get(
-            FrameRef(spec_id=sum_pair["spec_id"], content_version=sum_pair["content_version"])
-        )
+        summed_table = await result_table(sum_pair)
 
     assert plain_held is not None
     assert plain_held[0].table.column("value").to_pylist() == list(WHOLE_TOTALS.values())
@@ -2847,5 +2850,4 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
         columns=flow_columns,
         enrichment_stamp=_WHOLE_TOTALS_STAMP,
     ).model_dump(mode="json")
-    assert summed_held is not None
-    assert summed_held[0].table.column("value").to_pylist() == pytest.approx([4_578_400_000.0])
+    assert summed_table.column("value").to_pylist() == pytest.approx([4_578_400_000.0])

@@ -91,6 +91,13 @@ from analysis_mcp.engine.common import (
 # `operation_uncovered` refusal, rather than a generic schema error.
 AGGREGATIONS: tuple[str, ...] = ("sum", "mean", "max", "min")
 
+# The least realised coverage fraction (cells present / cells expected for the
+# grouped grain) at which `aggregate` and `rank` return a number: below it they
+# refuse `coverage_insufficient` rather than answer from a grid too sparse to
+# trust. It is the floor dfo-apis' runner applies to the registered tools
+# (`dfo_analysis_engine.calls.DEFAULT_COVERAGE_FLOOR`).
+COVERAGE_FLOOR = 0.5
+
 # Never a valid `group_by` dimension. `value` is what's being reduced;
 # `status` is reserved and always `None` at this grammar version (grouping
 # by it would always yield exactly one, uninformative group); `unit` and the

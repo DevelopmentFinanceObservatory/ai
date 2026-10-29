@@ -6,9 +6,9 @@ replay + execution-identity-perturbation determinism proofs.
 from __future__ import annotations
 
 import json
-import secrets
 
 import pytest
+from analysis_mcp import rank_tool
 from analysis_mcp import server as server_module
 from analysis_mcp.artifact import Interval
 from analysis_mcp.engine.rank import run_rank
@@ -30,6 +30,7 @@ from dfo_frame_grammar import Frame
 from fastmcp import Client
 from fastmcp.tools import ToolResult
 from rolling_support import anchored, second_version
+from runner_replay import frame_digest
 
 
 @pytest.fixture
@@ -65,7 +66,7 @@ def _minimal_trace() -> Trace:
 
 
 async def _seed_custom_frame(store: InMemoryMaterialisationStore, frame: Frame) -> dict[str, str]:
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
@@ -173,11 +174,9 @@ async def test_heterogeneous_unit_frame_refuses(seeded) -> None:
     assert result.structured_content["code"] == "unit_heterogeneous"
 
 
-async def test_coverage_below_the_configured_floor_refuses(
-    seeded, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_coverage_below_the_floor_refuses(seeded, monkeypatch: pytest.MonkeyPatch) -> None:
     _store, handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0.9")  # sparse_coverage_frame realises 0.75
+    monkeypatch.setattr(rank_tool, "COVERAGE_FLOOR", 0.9)  # sparse_coverage_frame realises 0.75
     result = await rank(
         frame_ref=handles.sparse_coverage, rank_by=("recipient",), aggregation="sum"
     )
@@ -271,7 +270,7 @@ async def test_per_period_rank_coverage_floor_check_is_unaffected(
     `RankResult.overall_coverage_fraction`, which `per_period` doesn't
     change the computation of."""
     _store, handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0.9")  # sparse_coverage_frame realises 0.75
+    monkeypatch.setattr(rank_tool, "COVERAGE_FLOOR", 0.9)  # sparse_coverage_frame realises 0.75
     result = await rank(frame_ref=handles.sparse_coverage, rank_by=("recipient",), per_period=True)
     assert result.structured_content["code"] == "coverage_insufficient"
 
@@ -557,7 +556,7 @@ async def test_a_collapsed_rank_labels_and_times_the_windows_observed_extent(
     A window holding one period labels the point and records an
     observation."""
     store, _handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0")
+    monkeypatch.setattr(rank_tool, "COVERAGE_FLOOR", 0)
     frame = Frame.build(
         role_keys=["reporter"],
         rows=[
@@ -611,7 +610,7 @@ async def test_a_rank_over_a_span_frame_keeps_every_entity_and_inherits_its_inte
         ],
     )
     span_interval = build_interval(start="2018", end="2022", observed=["2018", "2020", "2022"])
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(
         ref,

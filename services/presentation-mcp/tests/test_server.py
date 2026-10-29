@@ -38,6 +38,7 @@ from common import refusal as refusal_module
 from common.apis_auth import AuthProvider, IdTokenProvider
 from common.caller import CALLER_HEADER, supplied_caller
 from common.materialisation import content_version as content_version_module
+from common.mcp_telemetry import LOOPBACK_SCOPE_KEY
 from common.refusal import REFUSAL_META_KEY, internal_error_message
 from fastmcp import Client
 from fastmcp.apps import UI_EXTENSION_ID, UI_MIME_TYPE, ResourceCSP
@@ -2023,6 +2024,50 @@ async def test_a_component_id_alone_revises_and_describes_on_the_sessionless_rev
     assert revised.structured_content["revision"] == 2
     assert _envelope(described) == _envelope(revised)
     assert _envelope(described)["revision"] == 2
+
+
+@pytest.mark.parametrize(
+    ("loopback_mark", "expected"),
+    [
+        pytest.param(True, Caller.FIRST_PARTY, id="harness-loopback-mount"),
+        pytest.param(None, Caller.EXTERNAL, id="combined-or-standalone"),
+        pytest.param("yes", Caller.EXTERNAL, id="mark-not-true"),
+    ],
+)
+async def test_a_write_reads_its_caller_from_the_loopback_mark(
+    monkeypatch: pytest.MonkeyPatch, loopback_mark: object, expected: Caller
+) -> None:
+    """Only a request the harness's loopback guard marked writes as first
+    party, so only Studio's cards go out under the publish principal."""
+    seen: list[Caller] = []
+
+    class _SpyAssembler(StubAssembler):
+        async def create_component(self, **kwargs: Any) -> Any:
+            seen.append(kwargs["caller"])
+            return await super().create_component(**kwargs)
+
+        async def revise_component(self, **kwargs: Any) -> Any:
+            seen.append(kwargs["caller"])
+            return await super().revise_component(**kwargs)
+
+    monkeypatch.setattr(server, "PlatformAssembler", _stub_platform_assembler(_SpyAssembler()))
+    monkeypatch.setattr(mcp, "auth", None)
+    inner = mcp.http_app(path="/mcp")
+
+    async def marked(scope: Any, receive: Any, send: Any) -> None:
+        if loopback_mark is not None:
+            scope = {**scope, LOOPBACK_SCOPE_KEY: loopback_mark}
+        await inner(scope, receive, send)
+
+    intent = RELEASE["minimal_intents"]["line_chart"]
+    async with inner.router.lifespan_context(inner), _http_client(marked, caller=None) as client:
+        await client.call_tool("write_component", {"intent": intent})
+        await client.call_tool(
+            "write_component",
+            {"component_id": "cmp_1", "write_token": "cmw_1", "intent": {"title": "New"}},
+        )
+
+    assert seen == [expected, expected]
 
 
 # --- healthz custom route ------------------------------------------------------

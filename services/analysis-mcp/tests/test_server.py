@@ -16,7 +16,10 @@ from analysis_mcp import (
     join_tool,
     quotient_of_tool,
     rank_tool,
+    rolling_tool,
     share_of_tool,
+    sum_of_tool,
+    verbs,
 )
 from analysis_mcp import server as server_module
 from analysis_mcp.aggregate_tool import aggregate
@@ -352,6 +355,36 @@ async def test_lifespan_is_a_no_op_when_a_store_is_already_installed(
     assert build_calls == []
 
 
+_IN_PROCESS_TWINS = {
+    "aggregate": aggregate_tool.aggregate,
+    "compare": compare_tool.compare,
+    "growth": growth_tool.growth,
+    "rank": rank_tool.rank,
+    "share_of": share_of_tool.share_of,
+    "join": join_tool.join,
+    "filter": filter_tool.filter_verb,
+    "sum_of": sum_of_tool.sum_of,
+    "quotient_of": quotient_of_tool.quotient_of,
+    "resolve_anchor": rolling_tool.resolve_anchor,
+}
+
+
+async def test_every_registered_tool_keeps_its_in_process_twins_schema_and_description() -> None:
+    """The registered tools compute on the runner under the arguments and
+    docstring of the in-process functions, so a caller sees the same tools."""
+    twins = FastMCP(name="in-process")
+    for name, fn in _IN_PROCESS_TWINS.items():
+        twins.tool(fn, name=name)
+    async with Client(twins) as twin_client, Client(mcp) as client:
+        expected = {tool.name: tool for tool in await twin_client.list_tools()}
+        registered = {tool.name: tool for tool in await client.list_tools()}
+
+    assert set(registered) == set(expected)
+    for name, tool in registered.items():
+        assert tool.input_schema == expected[name].input_schema, name
+        assert tool.description == expected[name].description, name
+
+
 @pytest.mark.parametrize(("verb_fn", "verb_name"), [(aggregate, "aggregate"), (compare, "compare")])
 async def test_backstop_wrapper_leaves_the_registered_schema_and_description_unchanged(
     verb_fn, verb_name: str
@@ -439,32 +472,28 @@ _SECRET_FAILURE = (
 )
 
 _BACKSTOP_CASES = [
-    (aggregate_tool, "run_aggregate", "aggregate", _aggregate_args),
-    (compare_tool, "run_compare", "compare", _compare_args),
-    (growth_tool, "run_growth", "growth", _growth_args),
-    (rank_tool, "run_rank", "rank", _rank_args),
-    (share_of_tool, "run_share_of", "share_of", _share_of_args),
-    (quotient_of_tool, "run_quotient_of", "quotient_of", _quotient_of_args),
-    (join_tool, "run_join", "join", _join_args),
-    (filter_tool, "run_filter", "filter", _filter_args),
+    ("aggregate", _aggregate_args),
+    ("compare", _compare_args),
+    ("growth", _growth_args),
+    ("rank", _rank_args),
+    ("share_of", _share_of_args),
+    ("quotient_of", _quotient_of_args),
+    ("join", _join_args),
+    ("filter", _filter_args),
 ]
 
 
 @pytest.mark.parametrize(
-    ("module", "engine_attr", "tool_name", "args_builder"),
-    _BACKSTOP_CASES,
-    ids=[case[2] for case in _BACKSTOP_CASES],
+    ("tool_name", "args_builder"), _BACKSTOP_CASES, ids=[case[0] for case in _BACKSTOP_CASES]
 )
 async def test_registration_site_backstop_converts_an_unanticipated_exception(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    module: object,
-    engine_attr: str,
     tool_name: str,
     args_builder,
 ) -> None:
     """An exception no verb's own typed handling anticipates -- injected here
-    by making the verb's own engine call raise a plain `RuntimeError` --
+    by making the verb's runner call raise a plain `RuntimeError` --
     never escapes the registered tool as a raw traceback. `server.py`'s
     registration-site wrapper converts it to an `internal_error` refusal,
     per verb, that carries no trace id and none of the exception's text; the
@@ -481,7 +510,7 @@ async def test_registration_site_backstop_converts_an_unanticipated_exception(
     def _raise(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError(_SECRET_FAILURE)
 
-    monkeypatch.setattr(module, engine_attr, _raise)
+    monkeypatch.setattr(verbs, "run_on_runner", _raise)
     monkeypatch.setattr(refusal_module, "current_trace_id", lambda: _KNOWN_TRACE_ID)
 
     with caplog.at_level(logging.ERROR, logger=server_module.__name__):

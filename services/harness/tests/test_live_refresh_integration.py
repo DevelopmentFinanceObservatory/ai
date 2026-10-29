@@ -1,11 +1,13 @@
 """`POST /api/studio/refresh` against the real services: a card drawn on a
 filter-then-growth frame is refreshed after its dataset moves.
 
-The verbs run through the mounted analysis-mcp app and the root is minted through
-data-mcp's `mint_recorded_root` over a canned mint, as in
+The verbs run through the mounted analysis-mcp app on dfo-apis' analysis runner,
+replayed from its recorded answers (`conftest.runner`), and the root is minted
+through data-mcp's `mint_recorded_root` over a canned mint, as in
 `test_recipe_replay_integration.py`. apis is
 `live_refresh_support.RecordedApis`, whose answers on the live-refresh routes are
-the recorded ones, and the store is the in-memory one. No socket opens.
+the recorded ones and which reads the recipe of a frame the runner stored from
+it, and the store is the in-memory one. No socket opens.
 """
 
 from __future__ import annotations
@@ -17,8 +19,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from common.materialisation import FrameRef, get_store
-from common.recipe import build_recipe
+from common.materialisation import FrameRef
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget
 from compiler.surface import McpSurface, ToolCallResult
 from data_mcp import client_holder, frame_materialisation
@@ -31,6 +32,7 @@ from planner.workflow import ToolId
 
 from .live_refresh_support import CARD, LIVE_PRINCIPAL, RECORDED_RENDER, RecordedApis
 from .replay_support import FIRST, SECOND, SECOND_VALUES, SPEC, Upstream, data_mcp_client, pair
+from .runner_frames import result_table
 
 _KEPT = ["dcid:FRA", "dcid:GBR"]
 _REDRAWN = {"status": "redrawn", "render": RECORDED_RENDER}
@@ -58,11 +60,11 @@ class Harness:
     instance of its own: it shares only the store and apis with the others.
     """
 
-    def __init__(self, app: FastAPI, surface: McpSurface, upstream: Upstream) -> None:
+    def __init__(self, app: FastAPI, surface: McpSurface, upstream: Upstream, runner: Any) -> None:
         self.app = app
         self.surface = surface
         self.upstream = upstream
-        self.apis = RecordedApis()
+        self.apis = RecordedApis(runner)
         self.assembler = self.apis.assembler()
         self.verbs: list[str] = []
         self.replays = 0
@@ -115,8 +117,8 @@ class Harness:
             )
 
     async def draw_card(self) -> FrameRef:
-        """Compute growth over two of the dataset's reporters, publish the frame
-        with its recipe, and store the card on it. Returns the frame."""
+        """Compute growth over two of the dataset's reporters, which the runner
+        stores with its recipe, and store the card on it. Returns the frame."""
         root = (await self.call("data-mcp", "get_data", {"spec_id": SPEC}))["frame_ref"]
         kept = await self.call(
             "analysis-mcp",
@@ -137,10 +139,7 @@ class Harness:
             },
         )
         frame = FrameRef(spec_id=grown["spec_id"], content_version=grown["content_version"])
-        recipe = await build_recipe(frame, store=get_store())
-        assert await self.assembler.publish_frame(
-            spec_id=frame.spec_id, content_version=frame.content_version, recipe=recipe
-        )
+        assert await self.apis.held_recipe(pair(frame)) is not None
         self.apis.store_card(frame)
         self.apis.heads[SPEC] = FIRST
         return frame
@@ -149,8 +148,11 @@ class Harness:
         self.upstream.move(SECOND_VALUES)
         self.apis.heads[SPEC] = SECOND
 
-    def growth_of(self, frame: tuple[str, str]) -> dict[str, float]:
-        return {row["reporter"]: row["value"] for row in self.apis.frames[frame]}
+    async def growth_of(self, frame: tuple[str, str]) -> dict[str, float]:
+        rows = (
+            await result_table(FrameRef(spec_id=frame[0], content_version=frame[1]))
+        ).to_pylist()
+        return {row["reporter"]: row["value"] for row in rows}
 
 
 @pytest.fixture
@@ -158,6 +160,7 @@ async def harness(
     monkeypatch: pytest.MonkeyPatch,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
+    runner: Any,
 ) -> AsyncIterator[Harness]:
     upstream = Upstream()
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", upstream.fetch)
@@ -176,7 +179,7 @@ async def harness(
                 ),
             }
         )
-        made = Harness(app, surface, upstream)
+        made = Harness(app, surface, upstream, runner)
         yield made
         await made.assembler.aclose()
         await surface.aclose()
@@ -219,7 +222,7 @@ async def test_a_moved_card_is_replayed_once_and_later_requests_render_the_store
     assert replayed["normal_form_hash"] == stored["normal_form_hash"]
     assert replayed["roots"][0]["dataset"] == {"spec_id": SPEC, "content_version": SECOND}
     # 2019 to 2022 is 150 to 180 for France and 300 to 330 for Britain at the second version.
-    assert harness.growth_of(target) == pytest.approx({"dcid:FRA": 0.2, "dcid:GBR": 0.1})
+    assert await harness.growth_of(target) == pytest.approx({"dcid:FRA": 0.2, "dcid:GBR": 0.1})
     assert (harness.replays, harness.verbs) == (1, ["filter", "growth"])
 
     # The same instance and another one find the frame under its replay key.
@@ -230,16 +233,8 @@ async def test_a_moved_card_is_replayed_once_and_later_requests_render_the_store
     assert harness.apis.rendered_on() == [target, target]
     assert (harness.replays, harness.verbs) == (1, ["filter", "growth"])
     assert (harness.upstream.mints, len(harness.apis.published())) == (mints, publishes)
-
-    # An instance that started before the first published replays to the same
-    # pairs: every step is in the store, and apis records nothing new.
-    del harness.apis.recipes[target]
-    late = await harness.refresh(harness.service())
-
-    assert late.json() == _REDRAWN
-    assert harness.apis.rendered_on() == [target, target, target]
-    assert (harness.replays, harness.verbs) == (2, ["filter", "growth"])
-    assert harness.apis.recipes[target]["replay_key"] == replayed["replay_key"]
+    # The runner stored the replayed frame as it computed it, so nothing is published.
+    assert publishes == 0
 
 
 async def test_concurrent_requests_for_a_moved_card_replay_it_once(harness: Harness) -> None:
@@ -317,7 +312,7 @@ async def test_a_card_whose_frame_has_no_recipe_and_a_bad_credential_are_refused
     assert (unauthorized.status_code, unauthorized.json()["code"]) == (401, "unauthorized")
     assert len(harness.apis.requests) == asked
 
-    del harness.apis.recipes[pair(original)]
+    harness.apis.withhold(pair(original))
     missing = await harness.refresh(harness.service())
 
     assert (missing.status_code, missing.json()["code"]) == (422, "recipe_missing")

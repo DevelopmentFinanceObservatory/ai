@@ -31,6 +31,8 @@ from common.materialisation.mint_record import (
     MintRecordUnrecoverableError,
     decode_mint_record,
     encode_mint_record,
+    groupby_axes,
+    normal_groupby,
 )
 from common.materialisation.store import (
     FrameExpired,
@@ -80,7 +82,9 @@ __all__ = [
     "frame_to_parquet_bytes",
     "get_content_version_deriver",
     "get_store",
+    "groupby_axes",
     "install_store_if_unset",
+    "normal_groupby",
     "register_content_version_deriver",
     "register_trace_codec",
     "set_store",

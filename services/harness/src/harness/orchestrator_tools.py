@@ -47,13 +47,16 @@ import json
 import logging
 import re
 import weakref
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
 from typing import Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
+import pyarrow as pa
 from analysis_mcp.frame_ref_resolution import read_derived_marker
 from analysis_mcp.identity import OP_SPEC_HASH_PREFIX
 from common.materialisation import FrameRef
@@ -64,7 +67,7 @@ from common.place_type import (
     kind_column,
     type_column,
 )
-from common.row_budget import row_budget
+from common.row_budget import RowBudgetExhausted, row_budget
 from compiler.sources import (
     default_reading,
     is_family,
@@ -74,6 +77,7 @@ from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
 from data_mcp.search_tool import SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar import FrameError
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
 from google.adk.tools import ToolContext
@@ -122,6 +126,7 @@ from harness.chart_binding import (
     top_members,
 )
 from harness.conversation import current_user_message
+from harness.derived_frames import DerivedFile, derived_file
 from harness.dfo_faq import (
     CANNOT_DESCRIBE_DFO,
     DfoFaqUnavailable,
@@ -409,16 +414,28 @@ class FetchScope(GetDataScope):
 _ANSWER_NOW = "Answer with what you have, and say plainly what you could not do."
 
 
-async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[Any, Any], T]) -> T | None:
-    """What `work` makes of the frame the store holds under `ref` and its
-    trace, or None when the store does not hold the frame or cannot read it.
-    `work` runs in a worker thread, off the event loop, and the frame's rows
-    stay claimed on the process's row budget until that thread returns, also
-    when the task awaiting it is cancelled first."""
+@dataclass(frozen=True, kw_only=True)
+class _FrameRows:
+    """A frame's rows, each as a mapping, and whether its values are rank positions."""
+
+    rows: list[dict[str, Any]]
+    rank_positions: bool
+
+
+async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[_FrameRows], T]) -> T | None:
+    """What `work` makes of the rows of the frame `ref` names, or None when they
+    cannot be read. The store holds a frame `get_data` fetched, and a derived
+    (`ops_`) frame an in-process verb computed. A derived frame the store does not
+    hold is read from dfo-apis' analysis runner, which stored it
+    (`harness.derived_frames`). `work` runs in a worker thread, off the
+    event loop, and the frame's rows stay claimed on the process's row budget
+    until that thread returns, also when the task awaiting it is cancelled first."""
     try:
         held = await get_frame_store().open(
             FrameRef(spec_id=ref["spec_id"], content_version=ref["content_version"])
         )
+        if held is None and str(ref["spec_id"]).startswith(OP_SPEC_HASH_PREFIX):
+            return await _derived_frame_work(ref, work)
         if held is None:
             logger.warning("make_charts: the store holds no frame under %s", ref)
             return None
@@ -437,12 +454,83 @@ async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[Any, Any], T]) 
         except Exception:
             logger.warning("make_charts: could not read %s", ref, exc_info=True)
             return None
-        return await claim.hold_through(asyncio.to_thread(work, data, trace))
+
+        def rows_work() -> T:
+            marker = read_derived_marker(trace)
+            rows = [dict(zip(data.columns, row, strict=True)) for row in data.rows]
+            return work(_FrameRows(rows=rows, rank_positions=marker is not None and marker.ordinal))
+
+        return await claim.hold_through(asyncio.to_thread(rows_work))
 
 
-def _rows_of(data: Any) -> list[dict[str, Any]]:
-    """The rows of a stored frame, each as a mapping."""
-    return [dict(zip(data.columns, row, strict=True)) for row in data.rows]
+# The derived files one make_charts call has read, by frame pair, `None` for a
+# read that failed, or no mapping outside a call. A chart can read the same frame
+# for its drawn period, its ranking, its coordinates and its covering select, and
+# a derived frame is immutable, so each pair is read once a call, a failed read
+# included. The held bytes are compressed Parquet, and they go when the call ends.
+_derived_reads: ContextVar[dict[tuple[str, str], DerivedFile | None] | None] = ContextVar(
+    "derived_reads", default=None
+)
+
+
+@contextmanager
+def _derived_reads_once() -> Iterator[None]:
+    """Read each derived frame pair at most once inside the block."""
+    token = _derived_reads.set({})
+    try:
+        yield
+    finally:
+        _derived_reads.reset(token)
+
+
+async def _read_derived(ref: Mapping[str, Any]) -> DerivedFile | None:
+    """The derived file `ref` names, or `None` when it could not be read, from
+    this call's reads when it read the pair before."""
+    pair = (str(ref["spec_id"]), str(ref["content_version"]))
+    reads = _derived_reads.get()
+    if reads is not None and pair in reads:
+        return reads[pair]
+    try:
+        derived = await derived_file(FrameRef(spec_id=pair[0], content_version=pair[1]))
+    except Exception:
+        # As the store's read in `_frame_work`: an unread frame leaves the select as written.
+        logger.warning("make_charts: could not read %s from dfo-apis", ref, exc_info=True)
+        derived = None
+    if reads is not None:
+        reads[pair] = derived
+    return derived
+
+
+async def _derived_frame_work[T](
+    ref: Mapping[str, Any], work: Callable[[_FrameRows], T]
+) -> T | None:
+    """`_frame_work` for a derived frame, read from dfo-apis."""
+    derived = await _read_derived(ref)
+    if derived is None:
+        return None
+    try:
+        claim = row_budget().claim(derived.num_rows)
+    except RowBudgetExhausted:
+        logger.warning("make_charts: no row budget left for %s", ref, exc_info=True)
+        return None
+    with claim:
+
+        def rows_work() -> T | None:
+            try:
+                rows = derived.rows()
+            except (FrameError, pa.ArrowException, KeyError):
+                # dfo-apis served a file this harness cannot decode, a defect on one
+                # side or the other. The select stays as written, as for an unread frame.
+                logger.error(
+                    "make_charts: could not decode the derived frame %s/%s",
+                    ref["spec_id"],
+                    ref["content_version"],
+                    exc_info=True,
+                )
+                return None
+            return work(_FrameRows(rows=rows, rank_positions=derived.rank_positions))
+
+        return await claim.hold_through(asyncio.to_thread(rows_work))
 
 
 def _stated_frames(data: Mapping[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
@@ -460,11 +548,11 @@ def _period_note_entry(held: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _covering_selects(
-    data: Any, _trace: Any, *, selects: Sequence[dict[str, Any]]
+    held: _FrameRows, *, selects: Sequence[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Those of `selects` that bind only dimensions every row of a stored
     frame holds a value on (`covers_every_row`), in their order."""
-    rows = _rows_of(data)
+    rows = held.rows
     return [select for select in selects if covers_every_row(select, rows)]
 
 
@@ -480,10 +568,10 @@ def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, 
     }
 
 
-def _role_cells(data: Any, _trace: Any) -> dict[str, dict[str, str]]:
+def _role_cells(held: _FrameRows) -> dict[str, dict[str, str]]:
     """Each typed role's members' kind or type cells among a stored frame's
     rows, the roles it carries no enrichment column for left out."""
-    rows = _rows_of(data)
+    rows = held.rows
     by_role = {role: _held_cells(role, rows) for role in TYPED_ROLES}
     return {role: cells for role, cells in by_role.items() if cells}
 
@@ -564,8 +652,7 @@ class _Unranked:
 
 
 def _ranked(
-    data: Any,
-    trace: Any,
+    held: _FrameRows,
     *,
     select: dict[str, Any],
     dimension: str,
@@ -580,10 +667,9 @@ def _ranked(
     Rows are ranked without their enrichment columns (`common.place_type`),
     which describe a member and split no series. Rows that give no ranking
     and differ on a dimension `view` declares are `coordinates_differ`."""
-    marker = read_derived_marker(trace)
-    if marker is not None and marker.ordinal:
+    if held.rank_positions:
         return _Unranked("rank_positions")
-    rows = _rows_of(data)
+    rows = held.rows
     cells = None
     if cut and dimension in TYPED_ROLES:
         cells = _held_cells(dimension, rows) or kinds
@@ -805,7 +891,7 @@ async def _card_period(
     return at, {"start": at, "end": at} if pinned else None
 
 
-def _drawn_period(data: Any, _trace: Any, *, select: dict[str, Any]) -> str | None:
+def _drawn_period(held: _FrameRows, *, select: dict[str, Any]) -> str | None:
     """`latest_shared_period` over a stored frame, read without its enrichment
     columns, which describe a member and split no series."""
     rows = [
@@ -814,7 +900,7 @@ def _drawn_period(data: Any, _trace: Any, *, select: dict[str, Any]) -> str | No
             for name, cell in row.items()
             if name in select or enrichment_role(name, roles=TYPED_ROLES) is None
         }
-        for row in _rows_of(data)
+        for row in held.rows
     ]
     return latest_shared_period(rows=rows, select=select)
 
@@ -938,7 +1024,7 @@ def _drawn_store_ref(payload: Mapping[str, Any], frame: Mapping[str, Any]) -> di
     return dict(drawn)
 
 
-def _coordinate_rows(data: Any, _trace: Any, *, series: Sequence[DrawnSeries]) -> list[DrawnSeries]:
+def _coordinate_rows(held: _FrameRows, *, series: Sequence[DrawnSeries]) -> list[DrawnSeries]:
     """`series` with the coordinates a stored frame's rows give those that
     state none (`with_coordinates`). The rows are read without their
     enrichment columns, which describe a member and split no series."""
@@ -948,7 +1034,7 @@ def _coordinate_rows(data: Any, _trace: Any, *, series: Sequence[DrawnSeries]) -
             for name, cell in row.items()
             if enrichment_role(name, roles=TYPED_ROLES) is None
         }
-        for row in _rows_of(data)
+        for row in held.rows
     ]
     return with_coordinates(series, rows)
 
@@ -2424,7 +2510,8 @@ def build_orchestrator_tools(
                     "make_charts needs at least one chart. It only adds charts; it "
                     "cannot remove or clear cards on the canvas. Nothing changed.",
                 )
-            drawn = await _draw(charts, tool_context)
+            with _derived_reads_once():
+                drawn = await _draw(charts, tool_context)
         result: dict[str, Any] = {"charts": drawn}
         if len(charts) > MAX_CHARTS_PER_CALL:
             result["not_drawn"] = (

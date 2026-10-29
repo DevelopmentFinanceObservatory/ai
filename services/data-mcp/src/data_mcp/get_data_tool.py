@@ -331,9 +331,9 @@ class Breakdown(BaseModel):
     def groupby(self) -> dict[str, Any]:
         """The `options.groupby` apis sums this breakdown with: keep the year and the
         code axis, roll each code up to its ancestor at `level`, and sum away every other
-        summable code axis and `stat_var`."""
+        summable code axis and `stat_var`. `by` is sorted, as apis records it."""
         return {
-            "by": ["time_period", self.code_system],
+            "by": sorted(["time_period", self.code_system]),
             "op": "sum",
             "levels": {self.code_system: self.level},
         }
@@ -1078,8 +1078,8 @@ async def _finish_mint_response(
     assert frame_ref is not None  # set on every outcome but a refusal
 
     # apis' pair, not `frame_ref`, keys the description: a frame minted with
-    # `options.columns` or `options.groupby` is held under a pair of its own that apis
-    # never stored.
+    # `options.columns`, `options.groupby` or `options.without_party_totals` is held
+    # under a pair of its own that apis never stored.
     (series_stats, statistics_fetch_failed), description, warning_labels = await asyncio.gather(
         _fetch_statistics_for_digest(manifest, deadline=deadline),
         fetch_version_description(

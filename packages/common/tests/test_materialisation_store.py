@@ -27,6 +27,7 @@ from common.materialisation import (
 )
 from common.materialisation.memory_store import FRAME_TTL
 from common.materialisation.store import MaterialisationStore
+from pydantic import ValidationError
 
 
 @dataclass(frozen=True)
@@ -438,6 +439,28 @@ def test_a_mint_record_encodes_to_the_same_bytes_whatever_order_its_members_were
 
     assert encode_mint_record(one) == encode_mint_record(other)
     assert decode_mint_record(encode_mint_record(one)) == one
+
+
+def test_a_stored_mint_record_keeps_its_groupby_in_the_order_written() -> None:
+    """A stored recipe root decodes as written, so the normal form it was published
+    under does not change under it, whatever order its `by` holds."""
+    ref = _ref()
+    dataset = FrameRef(spec_id=ref.spec_id, content_version="cv_" + "d" * 32)
+    groupby = {"by": ["time_period", "crsPurpose"], "op": "sum", "levels": {"crsPurpose": 0}}
+    record = MintRecord(frame=ref, dataset=dataset, options={"groupby": groupby})
+
+    assert decode_mint_record(encode_mint_record(record)).options["groupby"] == groupby
+
+
+@pytest.mark.parametrize(
+    "groupby", [{"op": "sum"}, {"by": "time_period"}, {"by": [1, "time_period"]}]
+)
+def test_a_mint_record_whose_groupby_names_no_list_of_axes_is_refused(
+    groupby: dict[str, object],
+) -> None:
+    ref = _ref()
+    with pytest.raises(ValidationError):
+        MintRecord(frame=ref, dataset=ref, options={"groupby": groupby})
 
 
 def test_a_stored_mint_record_with_a_member_this_process_never_declared_still_decodes() -> None:

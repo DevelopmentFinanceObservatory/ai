@@ -4101,7 +4101,7 @@ async def test_a_summed_operation_dfo_apis_refuses_returns_rollup_not_summable()
 _SECTOR_BREAKDOWN = {"code_system": "crsPurpose", "level": 0}
 # The `options.groupby` `_SECTOR_BREAKDOWN` mints with.
 _SECTOR_BREAKDOWN_GROUPBY = {
-    "by": ["time_period", "crsPurpose"],
+    "by": ["crsPurpose", "time_period"],
     "op": "sum",
     "levels": {"crsPurpose": 0},
 }
@@ -4141,7 +4141,7 @@ async def test_an_advertised_breakdown_posts_a_levels_groupby_and_describes_the_
             "bundle": False,
             "layout": "frame",
             "groupby": {
-                "by": ["time_period", "crsPurpose"],
+                "by": ["crsPurpose", "time_period"],
                 "op": "sum",
                 "levels": {"crsPurpose": 0},
             },
@@ -5811,10 +5811,13 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
     kept_ref = FrameRef.model_validate(with_totals.structured_content["frame_ref"])
     cut_ref = FrameRef.model_validate(left_out.structured_content["frame_ref"])
     # The manifest names apis' cut version, and the frame is held under the pair its
-    # kinds derive from that version.
+    # kinds and the cut derive from that version.
     assert left_out.structured_content["content_version"] == _FlowMint.CUT_VERSION
     assert cut_ref == frame_ref_for(
-        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=KIND_COLUMNS
+        spec_id=stored.spec_id,
+        content_version=_FlowMint.CUT_VERSION,
+        columns=KIND_COLUMNS,
+        without_party_totals=True,
     )
     assert cut_ref != kept_ref
     # The repeat is a store hit: it fetches nothing and names the same frame.

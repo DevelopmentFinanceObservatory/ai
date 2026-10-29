@@ -5,7 +5,7 @@ Flow mirrors `aggregate_tool.aggregate`: parse/validate the op-spec ->
 resolve `frame_ref` via the shared `analysis_mcp.frame_ref_resolution`
 helpers -> run the engine (`analysis_mcp.engine.rank.run_rank`), translating
 each of its typed exceptions to its own refusal -> check the coverage floor
-(reusing `aggregate`'s own `settings.aggregate_coverage_floor` and
+(reusing `aggregate`'s own `engine.aggregate.COVERAGE_FLOOR` and
 `coverage_insufficient` refusal, see `analysis_mcp.engine.rank`'s own module
 docstring for why) -> mint identity, build the trace, write the store under
 the result's own pair -> render the digest. Every typed failure this
@@ -32,6 +32,7 @@ from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_rank_digest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
+    COVERAGE_FLOOR,
     ComposedUnitSumError,
     NonFiniteAggregateResultError,
     UnsupportedAggregationError,
@@ -50,6 +51,7 @@ from analysis_mcp.engine.rank import (
     RankResult,
     run_rank,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     build_interval,
     canonical_columns_and_resolved_frame,
@@ -485,11 +487,11 @@ async def rank(
     ) as exc:
         return to_tool_result(composite_refusal(_refusal_for_engine_error(exc), [input_trace]))
 
-    if result.overall_coverage_fraction < settings.aggregate_coverage_floor:
+    if result.overall_coverage_fraction < COVERAGE_FLOOR:
         return to_tool_result(
             ToolRefusal.coverage_insufficient(
                 realised_coverage_fraction=result.overall_coverage_fraction,
-                floor=settings.aggregate_coverage_floor,
+                floor=COVERAGE_FLOOR,
                 skipped_cell_count=result.expected_cell_count - result.present_cell_count,
             )
         )
@@ -576,7 +578,7 @@ async def rank(
         step=_rank_step(op_spec, result, trace=output_trace),
         digest=lambda: render_rank_digest(
             rank_by=rank_by,
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

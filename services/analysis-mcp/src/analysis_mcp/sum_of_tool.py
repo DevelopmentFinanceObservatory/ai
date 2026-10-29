@@ -29,6 +29,7 @@ from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_sum_of_digest
 from analysis_mcp.engine.aggregate import ComposedUnitSumError
 from analysis_mcp.engine.sum_of import SumOfResult, run_sum_of
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     canonical_entity_binding,
     derive_frame_content_version,
@@ -285,7 +286,7 @@ async def sum_of(
         trace=output_trace,
         step=_sum_step(op_spec, result, trace=output_trace),
         digest=lambda: render_sum_of_digest(
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

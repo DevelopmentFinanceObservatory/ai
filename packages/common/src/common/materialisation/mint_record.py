@@ -11,15 +11,21 @@ call that registers or finds the frame.
 A record holds:
 
 - `frame`: the pair the store holds the frame under. For a mint with
-  `options.columns` or `options.groupby` set this is the pair
-  `data_mcp.frame_materialisation.frame_ref_for` derives, whose
+  `options.columns`, `options.groupby` or `options.without_party_totals` set this is
+  the pair `data_mcp.frame_materialisation.frame_ref_for` derives, whose
   `content_version` is a one-way hash of the apis `content_version`, the
-  columns and the groupby. For any other mint it is `dataset`, and the frame is
-  that version's canonical frame.
+  columns, the groupby and the cut. For any other mint it is `dataset`, and the frame
+  is that version's canonical frame.
 - `dataset`: the pair apis names the materialisation by, which every
   rendering of it shares.
-- `options`: the mint request's `options` as `get_data` sent them. A mint sent
-  with them again registers the same rendering under the same derivation.
+- `options`: the mint request's `options` as `get_data` sent them. `get_data` sends
+  `groupby.by` sorted (`normal_groupby`), as apis records it, and a record decodes
+  with the options as written, so a stored recipe root keeps the normal form it was
+  published under. A record written before `get_data` sorted `by` keeps its own
+  order, and its frame is held under the pair named with that order, which
+  `data_mcp.frame_materialisation.named_groupbys` lists. A mint sent with them
+  again registers the same rendering, since `frame_ref_for` sorts `by` before it
+  names the pair.
 - `scope`: the mint request's `scope` as `get_data` sent it. `dataset.spec_id`
   is the identity apis served after applying it, and each scope member
   replaces a whole member of the identity, so sending the same scope with
@@ -57,10 +63,11 @@ groupby.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import rfc8785
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from common.materialisation.frame_ref import FrameRef
 
@@ -97,6 +104,38 @@ class MintRecord(BaseModel):
     scope: dict[str, Any] = Field(default_factory=dict)
     stat_var_count: int | None = Field(default=None, ge=0)
     enrichment_stamp: str | None = Field(default=None, exclude_if=lambda stamp: stamp is None)
+
+    @field_validator("options")
+    @classmethod
+    def _groupby_has_axes(cls, options: dict[str, Any]) -> dict[str, Any]:
+        """Refuse a `groupby` whose `by` is no list of axis names. The options are kept as
+        written."""
+        if (groupby := options.get("groupby")) is not None:
+            groupby_axes(groupby)
+        return options
+
+
+def groupby_axes(groupby: object) -> list[str]:
+    """The `by` axes of the `options.groupby` `groupby`, in the order it holds them.
+
+    Raises:
+        ValueError: When `groupby` is no mapping or its `by` is no list of strings.
+    """
+    by = groupby.get("by") if isinstance(groupby, Mapping) else None
+    if isinstance(by, list):
+        axes = [axis for axis in by if isinstance(axis, str)]
+        if len(axes) == len(by):
+            return axes
+    raise ValueError(f"a groupby's `by` must be a list of axis names, not {by!r}")
+
+
+def normal_groupby(groupby: Mapping[str, Any]) -> dict[str, Any]:
+    """`groupby` with its `by` sorted, the form apis records and names a pair by.
+
+    Raises:
+        ValueError: When `by` is no list of strings (`groupby_axes`).
+    """
+    return {**groupby, "by": sorted(groupby_axes(groupby))}
 
 
 class _LenientMintRecord(MintRecord):

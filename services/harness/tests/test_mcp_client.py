@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from analysis_mcp.runner_client import DerivedUnread
 from common.auth import apply_gate
 from common.caller import conversation_caller
 from common.period_note import period_note
@@ -903,6 +904,34 @@ async def test_the_executor_relays_a_platform_write_refusal_as_a_service_refusal
     assert refusal["code"] == "constraint_violation"
     assert refusal["origin"] == "service"
     assert "comparable_units_required" in refusal["advice"]
+
+
+async def test_describe_frame_refuses_a_frame_whose_recipe_read_may_mend_as_transient(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether a derived frame rolls is unknown while its recipe read fails in a
+    way a retry may mend, so the description is refused as a transient failure of
+    the description, not of a card."""
+
+    async def unread(ref: Any) -> None:
+        raise DerivedUnread(code="upstream_error", retryable=True, detail="dfo-apis timed out")
+
+    monkeypatch.setattr("harness.rolling_cards.derived_recipe", unread)
+    scripted_presentation_client([_tool_result({"columns": []}) for _ in range(5)])
+    # The executor retries a refusal of this mode; the sleeps are not waited.
+    executor = McpExecutor(settings=Settings(), sleep=_Sleeps())
+    frame_ref = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "1" * 32}
+
+    result = await executor(tool="describe_frame", args={"frame_ref": frame_ref})
+
+    assert result["outcome"] == "refusal"
+    refusal = result["refusal"]
+    assert (refusal["code"], refusal["retry_mode"]) == (
+        "transient_unavailable",
+        "retry_after_delay",
+    )
+    assert "card" not in refusal["message"]
 
 
 async def test_the_executor_presentation_client_carries_a_finite_call_and_init_deadline(

@@ -43,6 +43,7 @@ from data_mcp.frame_materialisation import (
     MaterialisationOutcome,
     frame_ref_for,
     materialise_and_register,
+    named_groupbys,
 )
 from data_mcp.manifest import Manifest, strip_manifest
 from data_mcp.settings import Settings
@@ -81,7 +82,7 @@ def _parquet_bytes(
     frame in (`frame_to_parquet_bytes`): `stat_var`, one role column
     (`observationAbout`), `time_period`, `value`, and the null `unit`, facet and
     `status` columns. Every row carries `dcid:Test` unless `stat_vars` names one per
-    row. A rendering's decoder (`_frame_from_parquet_bytes`) reads it too.
+    row. A rendering's decoder (`frame_from_parquet_bytes`) reads it too.
     """
     role_values = role_values if role_values is not None else ["country/FRA"]
     time_periods = time_periods if time_periods is not None else ["2020"]
@@ -416,7 +417,7 @@ async def test_a_held_frames_stat_vars_are_read_off_its_rows(
 ) -> None:
     ref = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
     store = _RecordingMaterialisationStore()
-    store.seed(ref, frame=frame_materialisation._frame_from_parquet_bytes(data))
+    store.seed(ref, frame=frame_materialisation.frame_from_parquet_bytes(data))
     set_frame_store(store)
 
     def unreachable(_request: httpx2.Request) -> httpx2.Response:
@@ -440,7 +441,7 @@ async def test_already_held_pair_is_a_no_op_fetch() -> None:
     manifest = _manifest()
     ref = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
     store = _RecordingMaterialisationStore()
-    store.seed(ref, frame=frame_materialisation._frame_from_parquet_bytes(_parquet_bytes()))
+    store.seed(ref, frame=frame_materialisation.frame_from_parquet_bytes(_parquet_bytes()))
     set_frame_store(store)
     scope = {"entities": {"recipient": ["country/UGA"]}}
 
@@ -604,7 +605,7 @@ async def test_a_cache_hit_whose_recomputed_content_version_mismatches_refuses()
     )
     await store.put(
         ref,
-        frame=frame_materialisation._frame_from_parquet_bytes(_parquet_bytes()),
+        frame=frame_materialisation.frame_from_parquet_bytes(_parquet_bytes()),
         trace=MaterialisationTrace(
             upstream_trace={}, spec_id=_SPEC_ID, content_version=_CONTENT_VERSION
         ),
@@ -640,7 +641,7 @@ _LOWERED_MAX_FRAME_ROWS = 100_000
 async def _gcs_store_holding(rows: int, *, record_rows: bool) -> GcsMaterialisationStore:
     """A store holding `rows` copies of `_parquet_bytes`' one row under the manifest's
     pair, with or without the row count `put` records."""
-    one_row = frame_materialisation._frame_from_parquet_bytes(_parquet_bytes())
+    one_row = frame_materialisation.frame_from_parquet_bytes(_parquet_bytes())
     frame = Frame.from_table(columns=one_row.columns, table=one_row.table.take([0] * rows))
     client = _FakeGcsClient()
     store = GcsMaterialisationStore(bucket_name="frames", client=client)
@@ -739,7 +740,7 @@ async def test_a_cache_hit_is_refused_while_the_row_budget_is_full() -> None:
     retryable `service_unavailable` the fetch path refuses, with nothing read."""
     ref = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
     store = _RecordingMaterialisationStore()
-    store.seed(ref, frame=frame_materialisation._frame_from_parquet_bytes(_parquet_bytes()))
+    store.seed(ref, frame=frame_materialisation.frame_from_parquet_bytes(_parquet_bytes()))
     set_frame_store(store)
     set_row_budget(RowBudget(max_rows=1))
 
@@ -887,6 +888,16 @@ async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> Non
 # A done operation lists every rendering apis stores under the pair. Dev listed
 # another caller's groupby sum first, then the plain rendering and its statistics.
 _SUM_GROUPBY: dict[str, object] = {"by": ["time_period", "crsPurpose"], "op": "sum"}
+
+
+def _as_recorded(options: dict[str, object]) -> dict[str, object]:
+    """`options` as a mint record keeps them: with `groupby.by` sorted, as apis records it."""
+    groupby = options.get("groupby")
+    if not isinstance(groupby, dict):
+        return options
+    return options | {"groupby": groupby | {"by": sorted(groupby["by"])}}
+
+
 _SUM_SIBLING_RENDERING: dict[str, object] = {
     "bundle": False,
     "format": "parquet",
@@ -959,7 +970,7 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
     assert outcome.frame_ref == ref
     # The mint record sits under the frame's pair and names apis' own.
     assert await get_frame_store().get_mint_record(ref) == MintRecord(
-        frame=ref, dataset=_FRAME_REF, options=options, stat_var_count=1
+        frame=ref, dataset=_FRAME_REF, options=_as_recorded(options), stat_var_count=1
     )
 
 
@@ -1231,9 +1242,9 @@ async def test_row_count_over_the_ceiling_refuses_before_any_row_is_parsed(
         return httpx2.Response(200, content=data)
 
     def _unreachable(_data: bytes) -> Any:
-        raise AssertionError("_frame_from_parquet_bytes must not be reached over the ceiling")
+        raise AssertionError("frame_from_parquet_bytes must not be reached over the ceiling")
 
-    monkeypatch.setattr(frame_materialisation, "_frame_from_parquet_bytes", _unreachable)
+    monkeypatch.setattr(frame_materialisation, "frame_from_parquet_bytes", _unreachable)
     set_frame_store(InMemoryMaterialisationStore())
 
     async with _client(snapshot_handler) as upstream:
@@ -1513,7 +1524,7 @@ async def test_an_expired_held_entry_is_treated_as_not_held_and_heals_on_put() -
     # verification `get()`'s own two reads.
     clock = iter([seed_time, past_ttl, past_ttl, past_ttl, past_ttl])
     store = InMemoryMaterialisationStore(now=lambda: next(clock))
-    seeded_frame = frame_materialisation._frame_from_parquet_bytes(data)
+    seeded_frame = frame_materialisation.frame_from_parquet_bytes(data)
     seeded_trace = MaterialisationTrace(
         upstream_trace={}, spec_id=_SPEC_ID, content_version=_CONTENT_VERSION
     )
@@ -1696,7 +1707,7 @@ async def test_a_mint_record_write_that_outruns_the_deadline_leaves_the_frame_re
     store = _SlowMintRecordStore(clock)
     await store.put(
         _FRAME_REF,
-        frame=frame_materialisation._frame_from_parquet_bytes(_parquet_bytes()),
+        frame=frame_materialisation.frame_from_parquet_bytes(_parquet_bytes()),
         trace=MaterialisationTrace(
             upstream_trace={}, spec_id=_SPEC_ID, content_version=_CONTENT_VERSION
         ),
@@ -1796,7 +1807,7 @@ def _unit_struct_parquet(unit: dict[str, object]) -> bytes:
 
 
 def _decoded_unit(unit: dict[str, object]) -> object:
-    frame = frame_materialisation._frame_from_parquet_bytes(_unit_struct_parquet(unit))
+    frame = frame_materialisation.frame_from_parquet_bytes(_unit_struct_parquet(unit))
     return frame.rows[0][frame.columns.index("unit")]
 
 
@@ -1826,8 +1837,13 @@ def test_a_unit_struct_with_no_currency_still_refuses_invalid_unit() -> None:
     assert excinfo.value.category == "invalid_unit"
 
 
-def _decoded(*, row_group_size: int | None = None, **columns: pa.Array | None) -> Any:
-    """`_frame_from_parquet_bytes` over a four-row artifact, each column in `columns`
+def _decoded(
+    *,
+    row_group_size: int | None = None,
+    composed_units: bool = False,
+    **columns: pa.Array | None,
+) -> Any:
+    """`frame_from_parquet_bytes` over a four-row artifact, each column in `columns`
     replacing (or, as `None`, dropping) the string-typed default of that name."""
     table_columns: dict[str, pa.Array] = {
         "stat_var": pa.array(["dcid:Test"] * 4),
@@ -1844,7 +1860,9 @@ def _decoded(*, row_group_size: int | None = None, **columns: pa.Array | None) -
             table_columns[name] = column
     buf = io.BytesIO()
     pq.write_table(pa.table(table_columns), buf, row_group_size=row_group_size)
-    return frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+    return frame_materialisation.frame_from_parquet_bytes(
+        buf.getvalue(), composed_units=composed_units
+    )
 
 
 def _cells(frame: Any, column: str) -> dict[str, object]:
@@ -2109,6 +2127,49 @@ def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_
     }
 
 
+def test_a_derived_frame_decodes_composed_units_as_the_runner_writes_them() -> None:
+    """The analysis runner writes a quotient's composed unit as the JCS text of its
+    `{numerator, denominator}` object, beside refs and converted units."""
+    unit = pa.array(
+        [
+            '{"denominator":"dcid:Person","numerator":"dcid:USDollar"}',
+            '{"denominator":{"stat_var":"dcid:Count_Person"},'
+            '"numerator":{"base_year":2024,"currency":"USD","prices":"constant"}}',
+            "dcid:USDollar",
+            None,
+        ]
+    )
+
+    frame = _decoded(unit=unit, composed_units=True)
+
+    assert _unit_cells(frame) == {
+        "country/C0": ComposedUnit(numerator="dcid:USDollar", denominator="dcid:Person"),
+        "country/C1": ComposedUnit(
+            numerator=UnitRequest(currency="USD", prices="constant", base_year=2024),
+            denominator=StatVarPart(stat_var="dcid:Count_Person"),
+        ),
+        "country/C2": "dcid:USDollar",
+        "country/C3": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "category"),
+    [
+        ('{"denominator":"dcid:Person"', "schema_violation"),
+        ('{"denominator":"dcid:Person","numerator":"dcid:USDollar","scale":1}', "invalid_unit"),
+        ('{"denominator":"","numerator":"dcid:USDollar"}', "invalid_unit"),
+        ('{"numerator":"dcid:USDollar"}', "invalid_unit"),
+    ],
+    ids=["truncated", "unknown-member", "empty-side", "missing-side"],
+)
+def test_a_derived_frame_refuses_a_malformed_composed_unit(text: str, category: str) -> None:
+    with pytest.raises(FrameError) as raised:
+        _decoded(unit=pa.array([text] * 4), composed_units=True)
+
+    assert raised.value.category == category
+
+
 @pytest.mark.parametrize(
     ("text", "category"),
     [
@@ -2145,7 +2206,7 @@ def test_an_empty_parquet_file_missing_time_period_raises_key_error() -> None:
     pq.write_table(table, buf)
 
     with pytest.raises(KeyError):
-        frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+        frame_materialisation.frame_from_parquet_bytes(buf.getvalue())
 
 
 @pytest.mark.parametrize("column", ["unit", "measurementMethod", "provenance"])
@@ -2210,7 +2271,7 @@ def test_an_empty_parquet_file_missing_a_required_column_refuses(column: str) ->
     pq.write_table(pa.table(columns), buf)
 
     with pytest.raises((KeyError, FrameError)):
-        frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+        frame_materialisation.frame_from_parquet_bytes(buf.getvalue())
 
 
 @pytest.mark.parametrize("column", ["observationAbout", "time_period", "unit"])
@@ -2227,7 +2288,7 @@ def test_an_empty_parquet_file_with_an_int_typed_column_refuses(column: str) -> 
     pq.write_table(pa.table(columns), buf)
 
     with pytest.raises(FrameError) as raised:
-        frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+        frame_materialisation.frame_from_parquet_bytes(buf.getvalue())
 
     assert raised.value.category == "schema_violation"
 
@@ -2271,7 +2332,7 @@ def _every_place_parquet(
 
 
 def test_a_place_type_column_is_a_role_and_an_empty_cell_reads_untyped() -> None:
-    frame = frame_materialisation._frame_from_parquet_bytes(_every_place_parquet())
+    frame = frame_materialisation.frame_from_parquet_bytes(_every_place_parquet())
 
     role_keys, stat_var_count = frame_materialisation.observed_shape(frame)
     types = dict(
@@ -2310,7 +2371,7 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
     buf = io.BytesIO()
     pq.write_table(table, buf)
 
-    frame = frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+    frame = frame_materialisation.frame_from_parquet_bytes(buf.getvalue())
 
     cells = dict(
         zip(
@@ -2354,7 +2415,7 @@ def test_a_partys_class_and_whole_cells_pass_through_and_an_empty_class_reads_un
     buf = io.BytesIO()
     pq.write_table(table, buf)
 
-    frame = frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+    frame = frame_materialisation.frame_from_parquet_bytes(buf.getvalue())
 
     rows = frame.table.select(
         ["financingProvider", "financingProvider_party_class", "financingProvider_party_whole"]
@@ -2409,7 +2470,7 @@ def test_a_replayed_selection_asks_a_flow_root_for_kinds(
 
 def test_a_place_type_column_of_nulls_reads_untyped() -> None:
     nulls = pa.array([None] * len(_EVERY_PLACE_ROWS), type=pa.string())
-    frame = frame_materialisation._frame_from_parquet_bytes(_every_place_parquet(nulls))
+    frame = frame_materialisation.frame_from_parquet_bytes(_every_place_parquet(nulls))
 
     assert set(frame.table.column("observationAbout_type").to_pylist()) == {"untyped"}
 
@@ -2418,7 +2479,7 @@ def test_a_decoded_code_system_column_survives_beside_the_place_type_column() ->
     # A mint that names only `observationAbout_type` in `options.columns` keeps every default
     # column, so the Parquet carries `stat_var_<code system>` beside the type.
     decoded = {"stat_var_sector": pa.array(["Basic health care"] * len(_EVERY_PLACE_ROWS))}
-    frame = frame_materialisation._frame_from_parquet_bytes(_every_place_parquet(decoded=decoded))
+    frame = frame_materialisation.frame_from_parquet_bytes(_every_place_parquet(decoded=decoded))
 
     role_keys, stat_var_count = frame_materialisation.observed_shape(frame)
 
@@ -2430,6 +2491,34 @@ def test_a_decoded_code_system_column_survives_beside_the_place_type_column() ->
 
 def test_the_default_columns_keep_the_mints_own_pair() -> None:
     assert frame_ref_for(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION) == _FRAME_REF
+
+
+# apis' `tests/datasets_api/test_analysis_roots.py` pins the same pair for the same
+# rendering. Each repo checks its own `frame_ref_for` against its own copy, so a change
+# to the preimage in one repo shows here only once this constant is compared with apis'.
+_SHARED_PAIR = "cv_bb722d06259f357e6961a081f1c1f141"
+# The pair of the same version read with the cut alone: `{"columns": [],
+# "content_version": ..., "without_party_totals": true}`.
+_CUT_ONLY_PAIR = "cv_613c1d4ba3b0c2f1dd76c395584d858c"
+
+
+@pytest.mark.parametrize("by", [["origin", "time_period"], ["time_period", "origin"]])
+def test_a_frame_cut_of_party_totals_is_named_by_the_cut_and_its_groupby_in_any_order(
+    by: list[str],
+) -> None:
+    ref = frame_ref_for(
+        spec_id="spec_" + "a" * 32,
+        content_version="cv_" + "1" * 32,
+        columns=("party_kind",),
+        groupby={"by": by, "op": "sum"},
+        without_party_totals=True,
+    )
+    bare = frame_ref_for(
+        spec_id="spec_" + "a" * 32, content_version="cv_" + "1" * 32, without_party_totals=True
+    )
+
+    assert ref.content_version == _SHARED_PAIR
+    assert bare.content_version == _CUT_ONLY_PAIR
 
 
 def test_extra_columns_name_a_frame_of_their_own() -> None:
@@ -2499,10 +2588,64 @@ def test_a_groupby_names_a_frame_apart_from_the_plain_and_the_typed_pair() -> No
         + hashlib.sha256(
             b'{"columns":[],"content_version":"'
             + _CONTENT_VERSION.encode()
-            + b'","groupby":{"by":["time_period","crsPurpose"],"op":"sum"}}'
+            # `by` sorted, whatever order the mint sent.
+            + b'","groupby":{"by":["crsPurpose","time_period"],"op":"sum"}}'
         ).hexdigest()[:32]
     )
     assert len({ref.content_version for ref in (_FRAME_REF, summed, summed_typed, typed)}) == 4
+    # The pair of a frame registered before `by` was sorted names the order sent.
+    assert (
+        frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            groupby=_SUM_GROUPBY,
+            keep_by_order=True,
+        ).content_version
+        == "cv_"
+        + hashlib.sha256(
+            b'{"columns":[],"content_version":"'
+            + _CONTENT_VERSION.encode()
+            + b'","groupby":{"by":["time_period","crsPurpose"],"op":"sum"}}'
+        ).hexdigest()[:32]
+    )
+
+
+@pytest.mark.parametrize(
+    ("by", "orders"),
+    [
+        (
+            ["time_period", "crsPurpose"],
+            [["crsPurpose", "time_period"], ["time_period", "crsPurpose"]],
+        ),
+        (
+            ["b", "a", "c"],
+            [
+                ["a", "b", "c"],
+                ["b", "a", "c"],
+                ["b", "c", "a"],
+                ["a", "c", "b"],
+                ["c", "b", "a"],
+                ["c", "a", "b"],
+            ],
+        ),
+        (["e", "d", "c", "b", "a"], [["a", "b", "c", "d", "e"], ["e", "d", "c", "b", "a"]]),
+    ],
+    ids=["two-axes", "three-axes-every-order", "five-axes-sorted-and-recorded"],
+)
+def test_a_groupby_is_named_in_its_sorted_and_recorded_order_and_every_order_of_a_short_by(
+    by: list[str], orders: list[list[str]]
+) -> None:
+    assert named_groupbys({"by": by, "op": "sum"}) == tuple(
+        {"by": order, "op": "sum"} for order in orders
+    )
+
+
+@pytest.mark.parametrize(
+    "groupby", [{"op": "sum"}, {"by": "time_period"}, {"by": [1, "time_period"]}]
+)
+def test_a_groupby_without_a_list_of_axes_names_no_pair(groupby: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        frame_ref_for(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, groupby=groupby)
 
 
 _KIND_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["party_kind"]}
@@ -2958,5 +3101,8 @@ async def test_a_groupby_mint_registers_its_rendering_under_the_pair_naming_it(
     assert held[1].options == _SUM_SIBLING_RENDERING
     assert await get_frame_store().get(_FRAME_REF) is None
     assert await get_frame_store().get_mint_record(expected) == MintRecord(
-        frame=expected, dataset=_FRAME_REF, options=_SUM_SIBLING_RENDERING, stat_var_count=1
+        frame=expected,
+        dataset=_FRAME_REF,
+        options=_as_recorded(_SUM_SIBLING_RENDERING),
+        stat_var_count=1,
     )

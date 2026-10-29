@@ -6,7 +6,6 @@ execution record.
 from __future__ import annotations
 
 import json
-import secrets
 
 import pytest
 from analysis_mcp import server as server_module
@@ -21,6 +20,7 @@ from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar import Frame
 from fastmcp import Client
+from runner_replay import ReplayedRunner, frame_digest
 
 
 def _format(value: float) -> str:
@@ -61,7 +61,7 @@ def _minimal_trace() -> Trace:
 
 async def _seed(store: InMemoryMaterialisationStore, rows: list[dict[str, object]]) -> dict:
     frame = Frame.build(role_keys=["reporter"], rows=rows)
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
@@ -78,7 +78,7 @@ def _row(*, year: str = "2020", value: float = 1.0, **extra: object) -> dict[str
 
 
 async def test_two_datasets_sum_through_the_registered_tool(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, runner: ReplayedRunner
 ) -> None:
     """France's bilateral (2010-2024, reported) plus imputed multilateral
     (2011-2023, modelled) aid to Guatemala, through the live FastMCP
@@ -128,19 +128,18 @@ async def test_two_datasets_sum_through_the_registered_tool(
     assert "facet 'provenance' differs between the sides" in digest
     assert "facet 'measurementMethod' differs between the sides" in digest
 
-    stored_frame, stored_trace = await store.get(
-        FrameRef(spec_id=structured["spec_id"], content_version=structured["content_version"])
-    )
-    assert set(stored_frame.table.column("stat_var").to_pylist()) == {
-        f"dcid:{structured['spec_id']}"
-    }
-    assert sorted(stored_trace.input_content_versions) == sorted(
-        [bilateral["content_version"], imputed["content_version"]]
-    )
-    assert stored_trace.applied_policy.detail["left_out"] == [
-        {"time_period": year, "side": "left", "value": reported[year]} for year in ("2010", "2024")
-    ]
-    assert stored_trace.applied_policy.detail["left_coverage_fraction"] == 13 / 15
+    # The reply names the frame the runner stored for this call, computed from
+    # the two seeded frames, and the two years only the left side reports.
+    assert (structured["spec_id"], structured["content_version"]) in runner.stored.values()
+    inputs = runner.requests[-1]["tree"]["inputs"]
+    assert {
+        name: {"spec_id": node["spec_id"], "content_version": node["content_version"]}
+        for name, node in inputs.items()
+    } == {"data": bilateral, "other": imputed}
+    assert [
+        (exclusion["reason"], exclusion["rows"], exclusion["side"])
+        for exclusion in structured["exclusions"]
+    ] == [("period_unmatched", 2, "left")]
 
 
 async def test_replay_from_execution_record_reproduces_the_stored_frame(seeded) -> None:

@@ -7,10 +7,11 @@ refusal's `code` intact, a span per call, injectable transport and sleep, and
 surface probe: the server's startup `release()` fetch already proves the
 surface is mounted before any tool call reaches this client.
 
-The `caller` kwarg on `create_component`/`revise_component` is accepted
-because the `Assembler` Protocol requires it, and never put on the wire --
-it is presentation-mcp's own local truth about its own transport (external
-vs. first-party), not something the platform needs to know.
+The `caller` kwarg on `create_component`/`revise_component` is
+presentation-mcp's own reading of the transport a write arrived on
+(`server._transport_caller`), and decides which caller headers the write
+carries (`PlatformAssembler._card_write_headers`). The kind itself never goes
+on the wire.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
+from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
 from common.materialisation import FrameRef, get_store
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
@@ -95,11 +97,13 @@ _RECIPE_CONFLICT_CONSTRAINTS = frozenset(
     }
 )
 
-# Sent only on the publish call (`_ensure_published_pair`'s own POST to
-# `_PUBLISH_ROUTE`). It is the one apis route this client calls that checks
-# it (`datasets_api.doors.publish`, mirroring the pin door's identical
-# mechanism). Every other route on this surface ignores it, so it is never
-# attached to any other request `request()` issues.
+# Sent on the three calls whose apis route reads it: the publish call
+# (`_ensure_published_pair`'s POST to `_PUBLISH_ROUTE`, which
+# `datasets_api.doors.publish` authorizes by it), and a first-party component
+# create and revise. apis spends one unit of a per-caller daily card allowance
+# on each create and revise, and exempts a principal holding the publish grant,
+# so Studio's conversations, which share the harness's one address, spend
+# none. No other route reads it, so no other call carries it.
 PRINCIPAL_HEADER = "x-dfo-principal"
 
 # Sent only on a revise: the component's write token, which apis checks
@@ -406,6 +410,11 @@ class PlatformAssembler:
         self._read_timeout_s = settings.upstream_read_timeout_s
         self._connect_timeout_s = settings.upstream_connect_timeout_s
         self._publish_principal = settings.datasets_first_party_principal
+        self._caller_principal = (
+            None
+            if settings.dfo_caller_principal is None
+            else settings.dfo_caller_principal.get_secret_value()
+        )
         self._max_frame_rows = settings.max_frame_rows
         self._auth = auth
         self._sleep = sleep
@@ -463,8 +472,8 @@ class PlatformAssembler:
         `write_component` again, which mints a fresh token and can store a
         second draft.
 
-        `caller` is accepted for Protocol conformance and never put on the wire
-        (see this module's own docstring).
+        `caller` picks the headers that name who the card counts against
+        (`_card_write_headers`).
         """
         write_token = _new_write_token()
         # Publish before create: `create_component` never validates
@@ -482,6 +491,7 @@ class PlatformAssembler:
                 _COMPONENTS_ROUTE,
                 route=_COMPONENTS_ROUTE,
                 json={"intent": dict(intent), "write_token": write_token},
+                headers=self._card_write_headers(caller),
             )
         except PlatformError as exc:
             return self._refusal(exc)
@@ -495,8 +505,8 @@ class PlatformAssembler:
         write_token: str,
         caller: Caller,
     ) -> WriteReply | Refusal:
-        # `caller` is accepted for Protocol conformance and never put on the
-        # wire (see this module's own docstring). A revise names the component
+        # `caller` picks the headers that name who the card counts against
+        # (`_card_write_headers`). A revise names the component
         # it targets and merges the same patch into the same stored intent
         # every time -- a repeated identical patch is the platform's
         # structural no-op, so it is safe to retry.
@@ -517,11 +527,29 @@ class PlatformAssembler:
                 path,
                 route=_COMPONENT_ROUTE,
                 json={"intent": dict(patch)},
-                headers={WRITE_TOKEN_HEADER: write_token},
+                headers={**self._card_write_headers(caller), WRITE_TOKEN_HEADER: write_token},
             )
         except PlatformError as exc:
             return self._refusal(exc)
         return self._write_reply(response.json())
+
+    def _card_write_headers(self, caller: Caller) -> dict[str, str]:
+        """The headers that tell dfo-apis whose card allowance a create or revise spends.
+
+        A first-party write, Studio's, carries the publish principal, which
+        dfo-apis exempts. An external write carries the caller principal and
+        the caller the website named, when this process holds the principal
+        and the request's `x-dfo-caller` is an `ip:` digest, so dfo-apis
+        counts that client. Any other external write carries neither, and
+        dfo-apis counts it against the address it sees for this service.
+        """
+        if caller is Caller.FIRST_PARTY:
+            principal = self._publish_principal
+            return {} if principal is None else {PRINCIPAL_HEADER: principal}
+        named = current_caller()
+        if self._caller_principal is None or named is None or not ADDRESS_CALLER.fullmatch(named):
+            return {}
+        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: named}
 
     async def get_frame_view(
         self,
@@ -754,9 +782,13 @@ class PlatformAssembler:
         A `spec_`-prefixed pair is left alone: it names a Datasets
         snapshot, already resolvable through the platform's ordinary
         mint/pin path, and posting it to the publish door (`ops_`-only on
-        the wire) would just be refused. `ops_`/`ocv_` is analysis-mcp's
-        own pair, the one shape `LiveFrameStore` cannot resolve until this
-        door has run for it at least once.
+        the wire) would just be refused. An `ops_`/`ocv_` pair analysis-mcp's
+        verbs return is one dfo-apis' analysis runner computed and
+        published itself, so apis holds it already and the shared store holds
+        nothing to publish. A pair an earlier in-process analysis-mcp wrote to
+        the shared store is published from there when this process has a
+        principal. Without one, the caller's own platform call proceeds and
+        apis answers for the pair.
 
         Memoised per process in `self._published`: a repeat call for a pair
         already published this process's lifetime is a same-request no-op,
@@ -775,10 +807,8 @@ class PlatformAssembler:
         Returns a `Refusal` only when publishing was needed and failed; the
         caller's own platform call proceeds either way otherwise. See
         `frame_publish.publish_body_for` for what "cannot be published"
-        means before any network call, this method's own `except
-        PlatformError` branch for what it means after one, and the
-        `publish_not_configured` branch below for what it means when this
-        process was never given a principal to publish as at all.
+        means before any network call, and this method's own `except
+        PlatformError` branch for what it means after one.
         """
         if not spec_id.startswith("ops_"):
             return None
@@ -787,15 +817,9 @@ class PlatformAssembler:
             return None
 
         if self._publish_principal is None:
-            # Refused locally, before touching the local store or the
-            # network: an unconfigured principal refuses identically on
-            # every call for every pair, so there is nothing this process
-            # could learn by building the body or reaching the platform
-            # first. Reaching the platform anyway would collect apis'
-            # own `publish_not_permitted` 403 -- accurate, but generic ("the
-            # publish permission is not granted to this caller") next to
-            # naming the actual missing setting here.
-            return _PUBLISH_NOT_CONFIGURED
+            # Nothing can be published without a principal, and a runner's
+            # pair needs no publishing, since the platform answers for the pair.
+            return None
 
         # Single-flighted per pair: concurrent first callers for the same
         # pair await the same lock rather than each building a body and
@@ -972,9 +996,9 @@ class PlatformAssembler:
                 attempt. The publish call sends its body this way.
             params: Query parameters.
             principal: The `x-dfo-principal` header value, or `None` to send
-                none at all. `None` everywhere except `_ensure_published_pair`'s
-                own publish call -- see `PRINCIPAL_HEADER`'s own comment for
-                why no other call needs it.
+                none at all. Set on the publish call only; a component create
+                and revise send theirs through `headers`
+                (`_card_write_headers`). `PRINCIPAL_HEADER`'s comment says why.
             headers: Further request headers, sent on every attempt.
                 `revise_component` sends `WRITE_TOKEN_HEADER` here.
 

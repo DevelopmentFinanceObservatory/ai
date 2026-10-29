@@ -7,11 +7,15 @@ of it, keeps this digest text as its step's `StepRecord.digest`, and
 the model needs to act on has to be in this text: the result's own
 `{spec_id, content_version}` pair, the computed numbers, units, coverage,
 warnings, and trace identity. Each `render_*_digest` function reads only
-its own result dataclass's summary tuples (`GroupSummary`, `EntityGrowth`,
-`PeriodComparison`, `PeriodSum`, `PeriodQuotient`, `EntityRank`), never
+its own verb's result facts, as dfo-apis' analysis runner states them in a
+call's `summary` (`GroupSummary`, `EntityGrowth`, `PeriodComparison`,
+`PeriodSum`, `PeriodQuotient`, `EntityRank` and the rest), never
 `frame.rows`. The frame itself never appears in a digest.
+`render_summary_digest` renders a runner summary (`summary.VerbSummary`) with
+its verb's renderer. The in-process tools render their engine result's facts
+(`engine_facts.facts_of`), the same JSON the runner sends.
 
-Every list is capped at `_LIST_CAP` entries, following `data_mcp.digest`'s
+Every list is capped at `LIST_CAP` entries, following `data_mcp.digest`'s
 own discipline of bounding the model-facing text while the full result stays
 reachable, here by resolving the same `{spec_id, content_version}` pair as a
 downstream verb's `frame_ref`. `tests/test_digest_budget.py` catches a leak
@@ -20,77 +24,53 @@ already-caller-ordered `entity_ranks`, since `ascending` states which end of
 the ranking the caller wants. Every other renderer's own order is
 framework-defined (canonical, chronological, or grain-based) rather than
 caller-stated, so those pick the shown entries by magnitude instead
-(`_capped`, or `_capped_positions` over `join`'s columnar matched keys).
+(`summary.capped`).
 Each renderer's `_truncation_note` call names which rule it used.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
-import pyarrow as pa
 from common.time_grain import span_label
 from common.unit_refs import PERCENT_UNIT
-from dfo_frame_grammar import array_kernel
 from dfo_frame_grammar.grammar import UnitCell
 
 from analysis_mcp.artifact import Exclusion, Interval, Time
 from analysis_mcp.disambiguation import truncate_value
-from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary
-from analysis_mcp.engine.common import PooledParties
-from analysis_mcp.engine.compare import CompareResult, PeriodComparison
-from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
-from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
-from analysis_mcp.engine.join import JoinResult, MatchedKey
-from analysis_mcp.engine.quotient_of import KeyPairs, PeriodQuotient, QuotientOfResult
-from analysis_mcp.engine.rank import EntityRank, RankResult
-from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
-from analysis_mcp.engine.sum_of import PeriodSum, SumOfResult
 from analysis_mcp.execution_identity import ExecutionIdentity
+from analysis_mcp.summary import (
+    LIST_CAP,
+    AggregateFacts,
+    CompareFacts,
+    EntityGrowth,
+    EntityRank,
+    FilterFacts,
+    FilterRowSummary,
+    GroupSummary,
+    GrowthFacts,
+    JoinFacts,
+    KeyPairs,
+    MatchedKey,
+    PeriodComparison,
+    PeriodQuotient,
+    PeriodShare,
+    PeriodSum,
+    PooledParties,
+    QuotientOfFacts,
+    RankFacts,
+    ShareOfFacts,
+    SumOfFacts,
+    VerbSummary,
+    capped,
+)
 from analysis_mcp.units import unit_name
 
 # The prefixes of the two lines in the identity block every digest ends with.
 # `harness.graph` drops lines starting with either from a plan step's summary.
 FRAME_REFERENCE_PREFIX = "frame reference: spec_id="
 EXECUTION_IDENTITY_PREFIX = "execution_identity: "
-
-# Bounded without starving the model of entries it's likely to need; see the
-# module docstring for which renderers pick by magnitude vs. position.
-_LIST_CAP = 20
-
-
-def _capped[T](items: Sequence[T], *, magnitude: Callable[[T], float]) -> Sequence[T]:
-    """Up to `_LIST_CAP` entries of `items`, chosen by descending
-    `abs(magnitude(entry))` rather than by position -- for a renderer whose
-    order is not the caller's stated criterion, the largest-magnitude
-    entries are the most likely to be what a model needs from a truncated
-    digest. `render_rank_digest` does not call this function, since its own
-    order already is the caller's criterion.
-
-    Kept entries are returned in `items`' own original order, not sorted by
-    magnitude, so the shown block still reads in the order its verb
-    promises.
-    """
-    if len(items) <= _LIST_CAP:
-        return items
-    kept_positions = sorted(
-        sorted(range(len(items)), key=lambda i: abs(magnitude(items[i])), reverse=True)[:_LIST_CAP]
-    )
-    return [items[i] for i in kept_positions]
-
-
-def _capped_positions(magnitudes: pa.Array) -> list[int]:
-    """`_capped`'s selection over an Arrow array of per-entry magnitudes:
-    the positions of up to `_LIST_CAP` entries by descending absolute
-    magnitude, ties to the earlier position, returned in ascending order.
-    A renderer whose entries stay columnar calls this, so only the kept
-    entries become Python objects."""
-    if len(magnitudes) <= _LIST_CAP:
-        return list(range(len(magnitudes)))
-    # `array_sort_indices` is stable, so equal magnitudes keep position
-    # order, as `sorted(..., reverse=True)` does in `_capped`.
-    order = array_kernel("array_sort_indices", array_kernel("abs", magnitudes), order="descending")
-    return sorted(order.slice(0, _LIST_CAP).to_pylist())
 
 
 def _format_number(value: float) -> str:
@@ -216,7 +196,7 @@ def _private_lines(pooled: Sequence[PooledParties], *, subject: str) -> list[str
 
 
 def _two_sided_pooled_lines(
-    result: QuotientOfResult | ShareOfResult, *, keyed_roles: frozenset[str] = frozenset()
+    result: QuotientOfFacts | ShareOfFacts, *, keyed_roles: frozenset[str] = frozenset()
 ) -> list[str]:
     """The private-party lines of a two-input verb's sums. A denominator that pools a role the
     numerator is keyed by ("each donor's share") divides by the sum of the listed parties, and
@@ -238,7 +218,7 @@ def _two_sided_pooled_lines(
 
 
 _MAGNITUDE_SELECTION = "kept the largest-magnitude entries"
-_RANK_ORDER_SELECTION = f"kept the first {_LIST_CAP} in rank order, rank 1 first"
+_RANK_ORDER_SELECTION = f"kept the first {LIST_CAP} in rank order, rank 1 first"
 
 
 def _truncation_note(shown: Sequence[object], total: int, *, selection: str) -> str:
@@ -391,7 +371,7 @@ def _rank_time_line(
 
     `per_period=True` states which periods were ranked instead, since each
     row carries the period it was ranked in. `None` when `periods_in_window`
-    is empty, which a real call never has but a hand-built `RankResult` in a
+    is empty, which a real call never has but a hand-built `RankFacts` in a
     test may.
     """
     if not periods_in_window:
@@ -500,7 +480,7 @@ def render_aggregate_digest(
     *,
     group_by: Sequence[str],
     aggregation: str,
-    result: AggregateResult,
+    result: AggregateFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -508,7 +488,7 @@ def render_aggregate_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.aggregate.run_aggregate`)
+    """Render `result` (the facts of `analysis_mcp.engine.aggregate.run_aggregate`)
     into the digest text a successful `aggregate` tool call returns.
 
     When every row carries one label (`result.period_label`, set under sum or
@@ -529,7 +509,7 @@ def render_aggregate_digest(
     # group key is the time axis, so a magnitude cap can drop a scattered
     # subset of years out of an otherwise-contiguous run, and a model
     # scanning the shown years reads a gapped chronology as contiguous.
-    shown = _capped(result.group_summaries, magnitude=lambda summary: summary.value)
+    shown = capped(result.group_summaries, magnitude=lambda summary: summary.value)
     group_lines = [_group_line(summary, period_label=result.period_label) for summary in shown]
     groups_block = "\n".join([f"{len(result.group_summaries)} group(s):", *group_lines])
     groups_block += _truncation_note(
@@ -619,7 +599,7 @@ def render_growth_digest(
     window_start: str,
     window_end: str,
     entity_by: Sequence[str],
-    result: GrowthResult,
+    result: GrowthFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -627,7 +607,7 @@ def render_growth_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.growth.run_growth`) into
+    """Render `result` (the facts of `analysis_mcp.engine.growth.run_growth`) into
     the digest text a successful `growth` tool call returns.
 
     When the input carried `DerivedMarker.ordinal` (a per-period rank's own
@@ -643,7 +623,7 @@ def render_growth_digest(
     header = f"growth: {window_start}..{window_end}, entity_by {entity_by_text}"
 
     ordinal = bool(derived and derived.get("ordinal"))
-    shown = _capped(result.entity_growths, magnitude=lambda growth: growth.growth_rate)
+    shown = capped(result.entity_growths, magnitude=lambda growth: growth.growth_rate)
     lines = [_growth_line(growth, change=result.change, ordinal=ordinal) for growth in shown]
     entities_block = "\n".join([f"{len(result.entity_growths)} entit(y/ies):", *lines])
     entities_block += _truncation_note(
@@ -702,13 +682,13 @@ def _comparison_line(comparison: PeriodComparison) -> str:
     )
 
 
-def _difference_label(result: CompareResult) -> str:
+def _difference_label(result: CompareFacts) -> str:
     """What `result`'s StatVar measures, in the order `delta` subtracts.
 
     Two sides holding different StatVars read "<right> minus <left>". Two
     sides holding one StatVar read "<StatVar>, <right entity> minus <left
     entity>" when exactly one entity column both sides hold
-    (`CompareResult.left_entities`, `right_entities`) holds a different
+    (`CompareFacts.left_entities`, `right_entities`) holds a different
     value on each, and "difference in <StatVar>" otherwise. A side names its
     first StatVar and how many more it measured (`_side_refs`).
     """
@@ -732,7 +712,7 @@ def _difference_label(result: CompareResult) -> str:
 
 def render_compare_digest(
     *,
-    result: CompareResult,
+    result: CompareFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -740,7 +720,7 @@ def render_compare_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.compare.run_compare`) into
+    """Render `result` (the facts of `analysis_mcp.engine.compare.run_compare`) into
     the digest text a successful `compare` tool call returns. The label line
     names the result's StatVar by what it subtracts (`_difference_label`)."""
     header = (
@@ -753,7 +733,7 @@ def render_compare_digest(
     # chronologically, not by the caller's own criterion. A magnitude cap
     # drops the smallest-delta periods, which are often the direct answer
     # to "in which years did these two match?"
-    shown = _capped(result.period_comparisons, magnitude=lambda comparison: comparison.delta)
+    shown = capped(result.period_comparisons, magnitude=lambda comparison: comparison.delta)
     lines = [_comparison_line(comparison) for comparison in shown]
     comparisons_block = "\n".join([f"{len(result.period_comparisons)} compared period(s):", *lines])
     comparisons_block += _truncation_note(
@@ -798,14 +778,14 @@ def _sum_line(entry: PeriodSum) -> str:
     )
 
 
-def _left_out_block(result: SumOfResult) -> str:
+def _left_out_block(result: SumOfFacts) -> str:
     """Each period the sum leaves out, the one side reporting it, named by its
-    StatVar, and that side's value there, capped at `_LIST_CAP` in period order."""
+    StatVar, and that side's value there, capped at `LIST_CAP` in period order."""
     left_out = result.left_out
     if not left_out:
         return "left out of the sum: none; both sides report every period"
     measured = {"left": result.left_stat_vars, "right": result.right_stat_vars}
-    shown = left_out[:_LIST_CAP]
+    shown = left_out[:LIST_CAP]
     lines = [
         f"  {entry.time_period}: not in the sum; only the {entry.side} side "
         f"({_side_refs(measured[entry.side])}) reports it: {_format_number(entry.value)}"
@@ -832,7 +812,7 @@ def _period_range_text(periods: Sequence[str]) -> str:
 
 def render_sum_of_digest(
     *,
-    result: SumOfResult,
+    result: SumOfFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -840,7 +820,7 @@ def render_sum_of_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.sum_of.run_sum_of`) into
+    """Render `result` (the facts of `analysis_mcp.engine.sum_of.run_sum_of`) into
     the digest text a successful `sum_of` tool call returns. Each period one
     side alone reports, which the sum leaves out, is named with that side
     and its value there, straight after the label, so a reader keeping only
@@ -856,7 +836,7 @@ def render_sum_of_digest(
     )
 
     # Magnitude, not positional, as `render_compare_digest` caps its periods.
-    shown = _capped(result.period_sums, magnitude=lambda entry: entry.value)
+    shown = capped(result.period_sums, magnitude=lambda entry: entry.value)
     sums_block = "\n".join(
         [f"{len(result.period_sums)} summed period(s):", *(_sum_line(entry) for entry in shown)]
     )
@@ -902,10 +882,10 @@ def _rank_line(rank: EntityRank, *, private: frozenset[tuple[str, str]]) -> str:
 
 def _rank_block(ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, str]]) -> str:
     """`ranks`, already in rank order, as a `_rank_line`-per-entity block
-    capped at `_LIST_CAP` -- shared by the collapse mode's own single block
+    capped at `LIST_CAP` -- shared by the collapse mode's own single block
     and by `_per_period_ranks_block`'s block-per-period call, one period's
     own ranking at a time."""
-    shown = ranks[:_LIST_CAP]
+    shown = ranks[:LIST_CAP]
     lines = [_rank_line(rank, private=private) for rank in shown]
     block = "\n".join([f"{len(ranks)} ranked entit(y/ies):", *lines])
     return block + _truncation_note(shown, len(ranks), selection=_RANK_ORDER_SELECTION)
@@ -937,7 +917,7 @@ def _per_period_ranks_block(
 def render_rank_digest(
     *,
     rank_by: Sequence[str],
-    result: RankResult,
+    result: RankFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -945,7 +925,7 @@ def render_rank_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.rank.run_rank`) into the
+    """Render `result` (the facts of `analysis_mcp.engine.rank.run_rank`) into the
     digest text a successful `rank` tool call returns.
 
     `result.per_period=True` renders one block per period instead of one
@@ -975,7 +955,7 @@ def render_rank_digest(
             f"{len(result.entity_ranks)} ranked {counted})"
         )
 
-    # Positional, not `_capped`: `entity_ranks` is already ordered by the
+    # Positional, not `summary.capped`: `entity_ranks` is already ordered by the
     # caller's own criterion (`ascending`, or its default) within each
     # period, so the head of each block is what a caller asking for "the 20
     # lowest/highest" wants. A magnitude selection would show the opposite
@@ -1047,7 +1027,7 @@ def _key_share_block(key: tuple[tuple[str, str], ...], shares: Sequence[PeriodSh
 
 def render_share_of_digest(
     *,
-    result: ShareOfResult,
+    result: ShareOfFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -1055,7 +1035,7 @@ def render_share_of_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.share_of.run_share_of`)
+    """Render `result` (the facts of `analysis_mcp.engine.share_of.run_share_of`)
     into the digest text a successful `share_of` tool call returns.
 
     Every share prints as its output row holds it, in per cent, which the
@@ -1078,7 +1058,7 @@ def render_share_of_digest(
         for share in result.period_shares:
             grouped.setdefault(share.key, []).append(share)
         keys = list(grouped)
-        shown_keys = _capped(
+        shown_keys = capped(
             keys, magnitude=lambda key: max(abs(share.percent) for share in grouped[key])
         )
         header = (
@@ -1096,7 +1076,7 @@ def render_share_of_digest(
         # chronologically. A magnitude cap hides periods with the smallest
         # share, often the direct answer to "in which periods was this
         # share near zero?"
-        shown = _capped(result.period_shares, magnitude=lambda share: share.percent)
+        shown = capped(result.period_shares, magnitude=lambda share: share.percent)
         lines = [_share_line(share) for share in shown]
         shares_block = "\n".join([f"{len(result.period_shares)} period share(s):", *lines])
         shares_block += _truncation_note(
@@ -1193,7 +1173,7 @@ def _quotient_line(entry: PeriodQuotient) -> str:
     )
 
 
-def _periods_left_out_lines(result: QuotientOfResult | ShareOfResult) -> list[str]:
+def _periods_left_out_lines(result: QuotientOfFacts | ShareOfFacts) -> list[str]:
     """A line for the periods one side reports and the other reports under
     no key, and one for the (key, period) pairs one side alone reports under
     a key that has rows, when there are any. A key's one-sided period goes
@@ -1225,7 +1205,7 @@ def _periods_left_out_lines(result: QuotientOfResult | ShareOfResult) -> list[st
     return lines
 
 
-def _coverage_line(result: QuotientOfResult | ShareOfResult, *, keyed: bool) -> str:
+def _coverage_line(result: QuotientOfFacts | ShareOfFacts, *, keyed: bool) -> str:
     """The periods divided over, each side's offered periods, and each
     side's coverage. A keyed call's coverage counts cells, so a period some
     keys lack lowers it while every period still appears in the ranges."""
@@ -1253,7 +1233,7 @@ _NO_DENOMINATOR_MATCH = "with no denominator match"
 _NO_SHARED_PERIOD = "sharing no period with the denominator"
 
 
-def _quotient_left_out_lines(result: QuotientOfResult) -> list[str]:
+def _quotient_left_out_lines(result: QuotientOfFacts) -> list[str]:
     """One line for each kind of thing the quotient leaves out, when there is
     any: the periods and pairs `_periods_left_out_lines` names, the
     numerator keys the result holds no row for, by why, and cells whose
@@ -1282,7 +1262,7 @@ def _side_text(stat_var: str, unit: UnitCell | None) -> str:
 
 def render_quotient_of_digest(
     *,
-    result: QuotientOfResult,
+    result: QuotientOfFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -1290,7 +1270,7 @@ def render_quotient_of_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.quotient_of.run_quotient_of`)
+    """Render `result` (the facts of `analysis_mcp.engine.quotient_of.run_quotient_of`)
     into the digest text a successful `quotient_of` tool call returns.
 
     Every quotient is a plain number in the composed unit, which the header
@@ -1317,7 +1297,7 @@ def render_quotient_of_digest(
     )
 
     # Magnitude, not positional, as `render_share_of_digest` caps its shares.
-    shown = _capped(quotients, magnitude=lambda entry: entry.quotient)
+    shown = capped(quotients, magnitude=lambda entry: entry.quotient)
     quotients_block = "\n".join(
         [
             f"{len(quotients)} quotient(s), numerator / denominator, in {unit_text}:",
@@ -1368,7 +1348,7 @@ def _matched_key_line(matched: MatchedKey) -> str:
 
 def render_join_digest(
     *,
-    result: JoinResult,
+    result: JoinFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -1376,7 +1356,7 @@ def render_join_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.join.run_join`) into the
+    """Render `result` (the facts of `analysis_mcp.engine.join.run_join`) into the
     digest text a successful `join` tool call returns."""
     join_keys_text = (
         ", ".join(
@@ -1386,25 +1366,17 @@ def render_join_digest(
         or "(none -- time_period only)"
     )
     header = (
-        f"join: on {join_keys_text} + time_period, {len(result.matched_keys)} matched key(s) "
+        f"join: on {join_keys_text} + time_period, {result.matched_key_count} matched key(s) "
         f"({result.left_dropped_key_count} left-only, {result.right_dropped_key_count} "
         "right-only, dropped)"
     )
 
-    matched_keys = result.matched_keys
-    shown = matched_keys.rows(
-        _capped_positions(
-            array_kernel(
-                "max_element_wise",
-                array_kernel("abs", matched_keys.left_values),
-                array_kernel("abs", matched_keys.right_values),
-            )
-        )
-    )
+    # `JoinFacts` holds the keys `capped` shows, ties broken to the earlier key.
+    shown = result.matched_keys
     lines = [_matched_key_line(matched) for matched in shown]
-    matches_block = "\n".join([f"{len(result.matched_keys)} matched key(s):", *lines])
+    matches_block = "\n".join([f"{result.matched_key_count} matched key(s):", *lines])
     matches_block += _truncation_note(
-        shown, len(result.matched_keys), selection=_MAGNITUDE_SELECTION
+        shown, result.matched_key_count, selection=_MAGNITUDE_SELECTION
     )
 
     left_unit_text = _unit_text(result.left_resolved_unit)
@@ -1441,7 +1413,7 @@ def _filter_row_line(summary: FilterRowSummary) -> str:
 def render_filter_digest(
     *,
     predicate_count: int,
-    result: FilterResult,
+    result: FilterFacts,
     op_spec_hash: str,
     content_version: str,
     execution_identity: ExecutionIdentity,
@@ -1449,7 +1421,7 @@ def render_filter_digest(
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
 ) -> str:
-    """Render `result` (from `analysis_mcp.engine.filter.run_filter`) into
+    """Render `result` (the facts of `analysis_mcp.engine.filter.run_filter`) into
     the digest text a successful `filter` tool call returns."""
     header = (
         f"filter: {predicate_count} predicate(s) applied, {result.kept_row_count}/"
@@ -1459,12 +1431,13 @@ def render_filter_digest(
     # Magnitude, not positional: `kept_row_summaries` is ordered by the
     # frame grammar's grain order, not a criterion the caller stated. A
     # predicate filters by a threshold, not by magnitude, so there is no
-    # caller-stated ordering to preserve here.
-    shown = _capped(result.kept_row_summaries, magnitude=lambda summary: summary.value)
+    # caller-stated ordering to preserve here. `FilterFacts` holds the rows
+    # `capped` shows.
+    shown = result.kept_row_summaries
     lines = [_filter_row_line(summary) for summary in shown]
-    rows_block = "\n".join([f"{len(result.kept_row_summaries)} kept row(s):", *lines])
+    rows_block = "\n".join([f"{result.kept_row_summary_count} kept row(s):", *lines])
     rows_block += _truncation_note(
-        shown, len(result.kept_row_summaries), selection=_MAGNITUDE_SELECTION
+        shown, result.kept_row_summary_count, selection=_MAGNITUDE_SELECTION
     )
 
     sections = [header, rows_block]
@@ -1480,3 +1453,55 @@ def render_filter_digest(
         )
     )
     return "\n\n".join(sections)
+
+
+def render_summary_digest(summary: VerbSummary) -> str:
+    """The digest of a verb call the runner `summary` states, rendered by its
+    verb's `render_*_digest` from the summary's facts, canonical parameters,
+    identity, derived marker, exclusions and time."""
+    parameters = summary.parameters
+    result = summary.result
+    render: Callable[..., str]
+    own: dict[str, Any] = {}
+    match result:
+        case AggregateFacts():
+            render = render_aggregate_digest
+            own = {
+                "group_by": parameters.get("group_by", ()),
+                "aggregation": parameters["aggregation"],
+            }
+        case GrowthFacts():
+            render = render_growth_digest
+            own = {
+                "window_start": parameters["window_start"],
+                "window_end": parameters["window_end"],
+                "entity_by": parameters.get("entity_by", ()),
+            }
+        case RankFacts():
+            render = render_rank_digest
+            own = {"rank_by": parameters.get("rank_by", ())}
+        case FilterFacts():
+            render = render_filter_digest
+            own = {"predicate_count": len(parameters.get("predicates", ()))}
+        case CompareFacts():
+            render = render_compare_digest
+        case SumOfFacts():
+            render = render_sum_of_digest
+        case ShareOfFacts():
+            render = render_share_of_digest
+        case QuotientOfFacts():
+            render = render_quotient_of_digest
+        case JoinFacts():
+            render = render_join_digest
+        case _:
+            raise TypeError(f"no digest renders a {type(result).__name__}")
+    return render(
+        result=result,
+        **own,
+        op_spec_hash=summary.spec_id,
+        content_version=summary.content_version,
+        execution_identity=summary.execution_identity,
+        derived=summary.derived,
+        exclusions=summary.exclusions,
+        time=summary.time,
+    )

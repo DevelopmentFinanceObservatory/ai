@@ -49,6 +49,7 @@ from analysis_mcp.engine.compare import (
     ComparisonPeriodsDisjointError,
     run_compare,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     AdmittedFrame,
     canonical_entity_binding,
@@ -460,7 +461,7 @@ async def compare(
             ratio=(holds_ratio(left_trace), holds_ratio(right_trace)),
         ),
         digest=lambda: render_compare_digest(
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

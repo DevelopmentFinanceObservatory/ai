@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from analysis_mcp.runner_client import DerivedUnread
 from common.live_apis import LiveApisTransportError
 from common.materialisation import FrameExpired, FrameIntegrityError, FrameRef, FrameTooLarge
 from common.recipe import (
@@ -130,7 +131,6 @@ def _raising(exc: Exception) -> _Store:
             NormalFormConflict(detail="kept"),
             ("recipe_normal_form_conflict", False),
         ),
-        (_Store(holds=False), _recipe, None, ("replay_unavailable", False)),
         (_raising(FrameExpired(DERIVED)), _recipe, None, ("replay_unavailable", False)),
         (
             _raising(FrameIntegrityError(DERIVED, reason="bad footer")),
@@ -179,6 +179,67 @@ async def test_publish_result_sorts_each_publish_into_published_retryable_or_fin
         assert isinstance(published, PublishFault)
         assert (published.code, published.retryable) == expected
     assert len(sent) == (answer is not None)
+
+
+def _runner_recipe(answer: dict[str, Any] | Exception | None) -> Any:
+    """`derived_recipe` answering `answer`, or raising it."""
+
+    async def read(ref: FrameRef) -> dict[str, Any] | None:
+        assert ref == DERIVED
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return read
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"replay_key": REPLAY_KEY}, _PUBLISHED),
+        (None, ("recipe_unbuildable", False)),
+        (
+            DerivedUnread(code="snapshot_not_found", retryable=False, detail="no such frame"),
+            ("replay_unavailable", False),
+        ),
+        (
+            DerivedUnread(code="artifact_expired", retryable=False, detail="gone"),
+            ("replay_unavailable", False),
+        ),
+        (
+            DerivedUnread(code="upstream_error", retryable=True, detail="unreachable"),
+            ("upstream_error", True),
+        ),
+        (
+            DerivedUnread(code="service_unavailable", retryable=True, detail="busy"),
+            ("service_unavailable", True),
+        ),
+    ],
+)
+async def test_a_frame_the_store_does_not_hold_is_the_runners_and_is_published_no_more(
+    monkeypatch: pytest.MonkeyPatch, answer: Any, expected: Any
+) -> None:
+    """A derived frame the store holds no trace for is one dfo-apis' analysis
+    runner stored with its recipe: its replay key is read back from dfo-apis and
+    nothing is published."""
+    monkeypatch.setattr(mcp_client, "get_store", lambda: _Store(holds=False))
+    monkeypatch.setattr(mcp_client, "derived_recipe", _runner_recipe(answer))
+    sent: list[dict[str, Any]] = []
+
+    async def publish_frame(**kwargs: Any) -> bool:
+        sent.append(kwargs)
+        return True
+
+    executor = McpExecutor(settings=Settings(), publish_frame=publish_frame)
+
+    published = await executor.publish_result(DERIVED)
+
+    if isinstance(expected, FramePublished):
+        assert published == expected
+    else:
+        assert isinstance(published, PublishFault)
+        assert (published.code, published.retryable) == expected
+    assert sent == []
 
 
 async def _rootless(ref: FrameRef, *, recover: Any = None, **_: Any) -> dict[str, Any]:

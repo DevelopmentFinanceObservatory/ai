@@ -6,8 +6,6 @@ count, and determinism. `test_derived_metadata.py` holds the marker rule.
 
 from __future__ import annotations
 
-import secrets
-
 import pytest
 from analysis_mcp import server as server_module
 from analysis_mcp.aggregate_tool import aggregate
@@ -26,6 +24,7 @@ from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_s
 from dfo_frame_grammar import Frame, unit_cell_to_json
 from fastmcp import Client
 from fastmcp.tools import ToolResult
+from runner_replay import ReplayedRunner, frame_digest
 
 GDP = "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
 POPULATION = "dcid:Count_Person"
@@ -89,7 +88,7 @@ async def _seed(
             for period, value in by_period.items()
         ],
     )
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
@@ -105,6 +104,14 @@ def _pair(result: ToolResult) -> dict[str, str]:
 
 async def _stored(store: InMemoryMaterialisationStore, result: ToolResult) -> tuple[Frame, Trace]:
     return await store.get(FrameRef(**_pair(result)))
+
+
+def _input_pairs(runner: ReplayedRunner) -> dict[str, dict[str, str]]:
+    """The frame pair of each input of the last tree the tools sent the runner."""
+    return {
+        name: {"spec_id": node["spec_id"], "content_version": node["content_version"]}
+        for name, node in runner.requests[-1]["tree"]["inputs"].items()
+    }
 
 
 async def _units(store: InMemoryMaterialisationStore, result: ToolResult) -> list[object]:
@@ -152,7 +159,7 @@ def _per_head(aid: dict, population: dict, place: str) -> dict[str, object]:
 
 
 async def test_gdp_per_head_through_the_registered_tool(
-    monkeypatch: pytest.MonkeyPatch, store: InMemoryMaterialisationStore
+    monkeypatch: pytest.MonkeyPatch, store: InMemoryMaterialisationStore, runner: ReplayedRunner
 ) -> None:
     """Guatemala's GDP in US dollars (2019-2022) over its unit-less population
     (2020-2023), through the live FastMCP `Client`: one series over 2020-2022
@@ -180,40 +187,17 @@ async def test_gdp_per_head_through_the_registered_tool(
     assert structured["role_keys"] == []
     assert structured["stat_var_count"] == 1
     assert structured["dropped_key_count"] == 0
-
-    frame, trace = await store.get(
-        FrameRef(spec_id=structured["spec_id"], content_version=structured["content_version"])
-    )
-    rows = [dict(zip(frame.columns, row, strict=True)) for row in frame.rows]
-    assert [(row["time_period"], row["value"]) for row in rows] == [
-        ("2020", 78.0),
-        ("2021", 43.0),
-        ("2022", 38.0),
+    # The reply names the frame the runner stored for this call, computed from
+    # the two seeded frames, and the period each side alone reports.
+    assert (structured["spec_id"], structured["content_version"]) in runner.stored.values()
+    assert _input_pairs(runner) == {"data": gdp, "other": population}
+    assert [
+        (exclusion["reason"], exclusion["rows"], exclusion["side"])
+        for exclusion in structured["exclusions"]
+    ] == [
+        ("period_unmatched", 1, "numerator"),
+        ("period_unmatched", 1, "denominator"),
     ]
-    assert {row["stat_var"] for row in rows} == {f"dcid:{structured['spec_id']}"}
-    assert await _units(store, result) == [USD_PER_PERSON]
-
-    policy = trace.applied_policy
-    assert policy.policy_name == "quotient_of_intersect_periods"
-    assert policy.resolved_unit == USD_PER_PERSON
-    assert policy.realised_coverage_fraction == 0.75
-    assert policy.detail == {
-        "numerator_stat_var": GDP,
-        "denominator_stat_var": POPULATION,
-        "numerator_resolved_unit": USD,
-        "denominator_resolved_unit": None,
-        "numerator_resolved_facets": {},
-        "denominator_resolved_facets": {},
-        "numerator_periods": ["2019", "2020", "2021", "2022"],
-        "denominator_periods": ["2020", "2021", "2022", "2023"],
-        "matched_periods": ["2020", "2021", "2022"],
-        "numerator_coverage_fraction": 0.75,
-        "denominator_coverage_fraction": 0.75,
-        "unmatched_key_count": 0,
-        "keys_without_shared_period_count": 0,
-        "keys_with_zero_denominator_count": 0,
-        "zero_denominator_cell_count": 0,
-    }
 
     digest = result.content[0].text
     assert digest.startswith("quotient_of: 3 matched period(s), in dcid:USDollar per Count_Person")
