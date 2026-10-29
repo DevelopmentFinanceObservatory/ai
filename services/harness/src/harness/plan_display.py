@@ -22,7 +22,8 @@ description, and marks the one step whose result answers (`answer_step`);
 sentence what the answer counts, for whom, when and from which source;
 `card_choice_text`, `card_decision_text` and `CHOICE_NAMES` give a
 decision's words, and `FIXED_VALUE_WORDS` the words for an option the
-planner wrote as a value a decision fixes; `choice_id` gives a scope
+planner wrote as a value a decision fixes, and `place_level_words` the same
+words for the level of place a filter keeps on a role; `choice_id` gives a scope
 choice's row the id every switch keeps; and `switchable_decision`,
 `decision_choice_id` and `decision_option_id` give a planner decision the
 card offers to switch its row's id and its options' ids.
@@ -51,7 +52,6 @@ same way.
 
 from __future__ import annotations
 
-import enum
 import hashlib
 import json
 import re
@@ -81,6 +81,7 @@ from planner.plan import (
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -93,6 +94,7 @@ from planner.plan import (
     ResolvedBy,
     ShareOfRequirement,
     SumOfRequirement,
+    Unit,
     answering_results,
     authored,
     authored_text,
@@ -122,6 +124,7 @@ from planner.records import (
     Reduction,
     RollingWindow,
     StatVarReading,
+    ThresholdOp,
     ValueThreshold,
 )
 from planner.shapes import FrameShape, RoleDimension, TimeLabel, ValueKind
@@ -780,16 +783,39 @@ def _unslugged(text: str) -> str:
     return text.replace("_", " ") if _SLUG.fullmatch(text) else text
 
 
-# The enum each `DecisionFixes` field holding one takes its values from, by field name.
-FIXED_ENUMS: Mapping[str, type[enum.StrEnum]] = {
-    "stat_vars": StatVarReading,
-    "reduction": Reduction,
-    "group_by": GroupBy,
-    "direction": RankDirection,
-    "among": RankAmong,
-    "denominator_scope": DenominatorScope,
-    "change": GrowthChange,
+# The price bases a unit states (`Unit.prices`, `DecisionFixes.prices`).
+_PRICES: tuple[str, ...] = typing.get_args(Unit.model_fields["prices"].annotation)
+
+# The values each `DecisionFixes` field holding an enum or a `Literal` takes,
+# by field name: an enum's members, a `Literal`'s values, and "<field>.<name>"
+# for one a field's model, or each model of its tuple, states
+# ("predicates.level", the `level` of each `PlaceLevel`).
+FIXED_ENUMS: Mapping[str, tuple[str, ...]] = {
+    "stat_vars": tuple(StatVarReading),
+    "reduction": tuple(Reduction),
+    "group_by": tuple(GroupBy),
+    "direction": tuple(RankDirection),
+    "among": tuple(RankAmong),
+    "denominator_scope": tuple(DenominatorScope),
+    "change": tuple(GrowthChange),
+    "prices": _PRICES,
+    "unit.prices": _PRICES,
+    "predicates.level": tuple(PlaceType),
+    "predicates.op": typing.get_args(ThresholdOp),
 }
+
+
+def _fixed_held(fixes: DecisionFixes, field: str) -> object:
+    """What `fixes` holds for `field`, a `FIXED_ENUMS` name: the field's
+    value, or for a nested name, the value its model states, or the values
+    the items of its tuple stating it hold; `None` when none does."""
+    outer, _, inner = field.partition(".")
+    held = getattr(fixes, outer)
+    if not inner or held is None:
+        return held
+    if not isinstance(held, tuple):
+        return getattr(held, inner)
+    return tuple(getattr(item, inner) for item in held if hasattr(item, inner)) or None
 
 
 class _Words(typing.NamedTuple):
@@ -984,31 +1010,82 @@ def _by_breakdown(plan: Plan, decision: Decision) -> str | None:
     return f"by {breakdown.dimension.value}" if breakdown is not None else None
 
 
-# The card's words for each value a decision option can fix, so an option the
-# planner wrote as the value itself ("population") never reads as that value.
-# Lower case, as every option text the card shows is.
-FIXED_VALUE_WORDS: Mapping[enum.StrEnum, _Words] = {
-    StatVarReading.SUM: _Words("summed into one series"),
-    StatVarReading.SEPARATE: _Words("one series per indicator"),
-    Reduction.SUM: _Words("total"),
-    Reduction.MEAN: _Words("average"),
-    Reduction.MAX: _Words("highest value"),
-    Reduction.MIN: _Words("lowest value"),
-    GroupBy.PERIOD: _Words("by year"),
-    GroupBy.ENTITY: _Words("by each party, place or category kept", _by_party),
-    GroupBy.BREAKDOWN: _Words("by category", _by_breakdown),
-    RankDirection.HIGHEST_FIRST: _Words("highest value first"),
-    RankDirection.LOWEST_FIRST: _Words("lowest value first"),
-    RankAmong.POPULATION: _Words("every member the source holds", _rank_population),
-    RankAmong.NAMED: _Words("only those picked by name", _rank_named),
-    DenominatorScope.PER_AXIS: _Words(
-        "each its own total", _denominator_words(DenominatorScope.PER_AXIS)
-    ),
-    DenominatorScope.POOLED: _Words(
-        "one shared total", _denominator_words(DenominatorScope.POOLED)
-    ),
-    GrowthChange.RELATIVE: _Words("percentage change"),
-    GrowthChange.ABSOLUTE: _Words("change in value"),
+def place_level_words(level: PlaceType, *, role: str | None = None) -> str:
+    """What a filter keeping `level` on `role` keeps, as a decision option
+    reads it: "only donor countries", or "only countries" with no role."""
+    kept = pluralize(level_noun(level))
+    return f"only {singular(role)} {kept}" if role else f"only {kept}"
+
+
+def _place_level_built(level: PlaceType) -> Callable[[Plan, Decision], str | None]:
+    """`level` in words on the role every `PlaceLevel` of it the decision
+    fixes narrows (`place_level_words`); `None` where they name different
+    roles or none."""
+
+    def words(plan: Plan, decision: Decision) -> str | None:
+        fixed = decision.fixes.predicates if decision.fixes is not None else None
+        role = _agreed(
+            [p.role for p in fixed or () if isinstance(p, PlaceLevel) and p.level is level]
+        )
+        return place_level_words(level, role=role) if role is not None else None
+
+    return words
+
+
+# The card's words for a price basis, which a unit and a decision fixing
+# prices alone (`DecisionFixes.prices`) share.
+_PRICE_WORDS: Mapping[str, _Words] = {
+    "current": _Words("current prices"),
+    "constant": _Words("constant prices, inflation removed"),
+}
+
+# The card's words for each value a decision option can fix, by the
+# `FIXED_ENUMS` field holding it, so an option the planner wrote as the value
+# itself ("population") never reads as that value. Keyed by field, since two
+# fields can share a value ("sum" in `stat_vars` and `reduction`). Lower
+# case, as every option text the card shows is.
+FIXED_VALUE_WORDS: Mapping[str, Mapping[str, _Words]] = {
+    "stat_vars": {
+        StatVarReading.SUM: _Words("summed into one series"),
+        StatVarReading.SEPARATE: _Words("one series per indicator"),
+    },
+    "reduction": {
+        Reduction.SUM: _Words("total"),
+        Reduction.MEAN: _Words("average"),
+        Reduction.MAX: _Words("highest value"),
+        Reduction.MIN: _Words("lowest value"),
+    },
+    "group_by": {
+        GroupBy.PERIOD: _Words("by year"),
+        GroupBy.ENTITY: _Words("by each party, place or category kept", _by_party),
+        GroupBy.BREAKDOWN: _Words("by category", _by_breakdown),
+    },
+    "direction": {
+        RankDirection.HIGHEST_FIRST: _Words("highest value first"),
+        RankDirection.LOWEST_FIRST: _Words("lowest value first"),
+    },
+    "among": {
+        RankAmong.POPULATION: _Words("every member the source holds", _rank_population),
+        RankAmong.NAMED: _Words("only those picked by name", _rank_named),
+    },
+    "denominator_scope": {
+        DenominatorScope.PER_AXIS: _Words(
+            "each its own total", _denominator_words(DenominatorScope.PER_AXIS)
+        ),
+        DenominatorScope.POOLED: _Words(
+            "one shared total", _denominator_words(DenominatorScope.POOLED)
+        ),
+    },
+    "change": {
+        GrowthChange.RELATIVE: _Words("percentage change"),
+        GrowthChange.ABSOLUTE: _Words("change in value"),
+    },
+    "prices": _PRICE_WORDS,
+    "unit.prices": _PRICE_WORDS,
+    "predicates.level": {
+        level: _Words(place_level_words(level), _place_level_built(level)) for level in PlaceType
+    },
+    "predicates.op": {op: _Words(words) for op, words in _THRESHOLD_WORDS.items()},
 }
 
 
@@ -1019,30 +1096,30 @@ def fixed_value_words(text: str, plan: Plan, decision: Decision) -> str | None:
     other text, so the planner's words stand.
 
     `text` names a value when, read as a slug ("highest first" as
-    `highest_first`), it is one of the values of exactly one field `decision`
-    fixes. `decision.chosen` must name the value that field holds, and any
-    other option a value it does not hold, so the words never contradict
-    what the plan computes.
+    `highest_first`, "Country" as `country`), it is one of the values of
+    exactly one field `decision` fixes, or of a field nested in one
+    (`FIXED_ENUMS`). `decision.chosen` must name a value that field holds,
+    and any other option a value it does not hold, so the words never
+    contradict what the plan computes.
     """
     fixes = decision.fixes
     if fixes is None:
         return None
     slug = re.sub(r"[\s-]+", "_", text.strip().lower())
     matched = [
-        (field, value)
-        for field, kind in FIXED_ENUMS.items()
-        if (held := getattr(fixes, field)) is not None
-        for value in kind
-        if value.value == slug
+        (field, held, value)
+        for field, values in FIXED_ENUMS.items()
+        if (held := _fixed_held(fixes, field)) is not None
+        for value in values
+        if value.lower() == slug
     ]
     if len(matched) != 1:
         return None
-    ((field, value),) = matched
-    held = getattr(fixes, field)
+    ((field, held, value),) = matched
     holds = value in held if isinstance(held, tuple) else value == held
     if holds != (text == decision.chosen):
         return None
-    words = FIXED_VALUE_WORDS[value]
+    words = FIXED_VALUE_WORDS[field][value]
     built = words.build(plan, decision) if words.build is not None else None
     return built or words.fallback
 

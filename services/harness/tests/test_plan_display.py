@@ -125,6 +125,7 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
+from pydantic import BaseModel
 from submission.service import SourceReadings, _card_names
 from translator.mechanical import build_translation
 
@@ -2454,34 +2455,146 @@ def test_a_group_by_option_written_as_entity_names_the_party(
     ] == shown
 
 
-def _enums_in(annotation: object) -> set[type[enum.Enum]]:
-    """Every enum `annotation` names, through unions, tuples and `Annotated`."""
+def _values_in(annotation: object, name: str) -> dict[str, set[str]]:
+    """The values of every enum and `Literal` `annotation` names, through
+    unions, tuples and `Annotated`, by the field holding it: `name`, or
+    "<name>.<field>" for a field of a model `annotation` names. A model's
+    `kind` tag names the model, and a `Literal` of one value offers no
+    choice, so neither counts."""
     if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
-        return {annotation}
-    return {found for arg in typing.get_args(annotation) for found in _enums_in(arg)}
+        return {name: {member.value for member in annotation}}
+    if typing.get_origin(annotation) is typing.Literal:
+        values = typing.get_args(annotation)
+        return {name: set(values)} if len(values) > 1 else {}
+    found: dict[str, set[str]] = {}
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        nested = [
+            (info.annotation, f"{name}.{field}")
+            for field, info in annotation.model_fields.items()
+            if field != "kind"
+        ]
+    else:
+        nested = [(arg, name) for arg in typing.get_args(annotation)]
+    for inner, held in nested:
+        for field, values in _values_in(inner, held).items():
+            found.setdefault(field, set()).update(values)
+    return found
 
 
 def test_every_value_a_decision_can_fix_has_card_words() -> None:
-    # A new enum field on `DecisionFixes`, or a new value of one, fails here
-    # until the card has words for it, with a fallback true in every plan
-    # that never reads as the raw value.
+    # A new enum or `Literal` field on `DecisionFixes`, a new one nested in
+    # one of its fields (`PlaceLevel.level` or a threshold's `op` in
+    # `predicates`), or a new value of one, fails here until the card has
+    # words for it, with a fallback true in every plan that never reads as
+    # the raw value.
     fixed = {
-        name: kinds
+        held: values
         for name, field in DecisionFixes.model_fields.items()
-        if (kinds := _enums_in(field.annotation))
+        for held, values in _values_in(field.annotation, name).items()
     }
-    values = {value for kind in plan_display.FIXED_ENUMS.values() for value in kind}
-    fallbacks = {value: plan_display.FIXED_VALUE_WORDS[value].fallback for value in values}
+    words = plan_display.FIXED_VALUE_WORDS
 
-    assert {name: {kind} for name, kind in plan_display.FIXED_ENUMS.items()} == fixed
-    assert set(plan_display.FIXED_VALUE_WORDS) == values
-    assert [
-        value
-        for value, words in fallbacks.items()
-        if not words or words in {value.value, value.value.replace("_", " ")}
-    ] == []
-    for kind in plan_display.FIXED_ENUMS.values():
-        assert len({fallbacks[value] for value in kind}) == len(kind), kind
+    assert {name: set(values) for name, values in plan_display.FIXED_ENUMS.items()} == fixed
+    assert {name: set(values) for name, values in words.items()} == fixed
+    for name, values in words.items():
+        fallbacks = [held.fallback for held in values.values()]
+        assert [
+            value
+            for value, held in values.items()
+            if not held.fallback
+            or held.fallback.lower() in {value.lower(), value.replace("_", " ")}
+        ] == [], name
+        assert len(set(fallbacks)) == len(fallbacks), name
+
+
+def _bilateral_donors_plan(decision: DecisionFactory) -> Plan:
+    """Kenya's donors in 2022, "now only bilateral aid": the planner narrows
+    the donors to countries by a filter whose decision's options name the
+    level's raw value."""
+    countries = (PlaceLevel(level=PlaceType.COUNTRY, role="donor", strict=True),)
+    return Plan(
+        question="Rank Kenya's top 10 donors by ODA received in 2022, only bilateral aid",
+        decisions=[
+            decision(),
+            decision(
+                slot="donor_type",
+                description="Narrow the donors to bilateral donor countries",
+                options=["Country", "all reporting providers"],
+                chosen="Country",
+                fixes=DecisionFixes(predicates=countries),
+            ),
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="oda_to_kenya",
+                decision_ids=["measure"],
+                measure="official development assistance",
+                entities=[Entity(name="Kenya", role="recipient")],
+                across=("donor",),
+                period=Period(start=2022, end=2022),
+            ),
+            FilterRequirement(
+                id="bilateral_donors",
+                decision_ids=["donor_type"],
+                input_id="oda_to_kenya",
+                predicates=countries,
+            ),
+        ],
+    )
+
+
+def test_a_place_level_option_reads_as_the_level_kept_on_its_role(
+    decision: DecisionFactory,
+) -> None:
+    # The planner copied `PlaceLevel.level`'s value into the option. The card
+    # reads it as the level the filter keeps on the donors; the option naming
+    # no level keeps the planner's words.
+    plan = _bilateral_donors_plan(decision)
+    _, narrowing = plan.decisions
+    roleless = narrowing.model_copy(
+        update={"fixes": DecisionFixes(predicates=(PlaceLevel(level=PlaceType.COUNTRY),))}
+    )
+
+    shown = [
+        card_choice_text(o, plan, options=narrowing.options, decision=narrowing)
+        for o in narrowing.options
+    ]
+
+    assert shown == ["only donor countries", "all reporting providers"]
+    assert card_choice_text("Country", plan, options=(), decision=roleless) == "only countries"
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options", "shown"),
+    [
+        (
+            DecisionFixes(predicates=(ValueThreshold(op="gte", value=1_000_000),)),
+            ["gte", "gt"],
+            ["at least", "more than"],
+        ),
+        (
+            DecisionFixes(stat_vars=StatVarReading.SUM),
+            ["sum", "separate"],
+            ["summed into one series", "one series per indicator"],
+        ),
+        (
+            DecisionFixes(prices="constant"),
+            ["constant", "current"],
+            ["constant prices, inflation removed", "current prices"],
+        ),
+    ],
+    ids=["threshold-op", "stat-vars-sum", "prices"],
+)
+def test_an_option_written_as_a_literal_or_shared_value_reads_as_its_fields_words(
+    decision: DecisionFactory, fixes: DecisionFixes, options: list[str], shown: list[str]
+) -> None:
+    # A threshold's `op` and a price basis are `Literal` values, and "sum" is
+    # a value of both `stat_vars` and `reduction`: each reads as the words of
+    # the field the decision fixes.
+    plan = _bilateral_donors_plan(decision)
+    fixing = decision(options=options, chosen=options[0], fixes=fixes)
+
+    assert [card_choice_text(o, plan, options=options, decision=fixing) for o in options] == shown
 
 
 def test_a_rank_whose_source_does_not_answer_its_party_states_no_count(

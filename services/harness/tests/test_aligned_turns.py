@@ -57,6 +57,7 @@ from .planner.test_agent import (
     _dac_countries,
     _difference,
     _FakeToolContext,
+    _french_dac1,
     _share,
     _show_blocks,
     _tools_reading,
@@ -74,7 +75,7 @@ from .test_graph import (
 )
 from .test_planner_seam import ScriptedPlannerLlm, _SeamHarness
 
-_FRANCE = _another_part(_US_MULTILATERAL)
+_FRANCE = _french_dac1(_US_MULTILATERAL)
 _MULTILATERAL = _US_MULTILATERAL["spec_id"]
 _TOTAL = _US_TOTAL["spec_id"]
 _US = "United States of America"
@@ -452,6 +453,10 @@ async def test_a_declared_wholes_dataset_reaches_a_later_turn_under_the_wholes_o
     assert "US aid to health" not in line
 
 
+# The France block `fixtures/aligned_total_plan_stored.json` was recorded against.
+_STORED_FRANCE = _another_part(_US_MULTILATERAL)
+
+
 async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision() -> None:
     """`fixtures/aligned_total_plan_stored.json` holds the session state the comparison
     above leaves, stored before a requirement recorded what alignment did: the plan,
@@ -470,7 +475,7 @@ async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision()
     assert plan_revision(plan) == recorded["revision"]
     paused = await _compiled(
         plan,
-        {_MULTILATERAL: _US_MULTILATERAL, _FRANCE["spec_id"]: _FRANCE},
+        {_MULTILATERAL: _US_MULTILATERAL, _STORED_FRANCE["spec_id"]: _STORED_FRANCE},
     )
     seam = _Seam([{"plan": paused.model_dump(mode="json"), "summary": {}}])
     surface = _Unreachable()

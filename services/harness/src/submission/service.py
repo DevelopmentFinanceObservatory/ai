@@ -161,6 +161,7 @@ from planner.plan import (
     check_wholes_span_their_totals,
     content_digest,
     cut_user_text,
+    dataset_of,
     dataset_roots,
     exact_codes,
     fix_disagreements,
@@ -4372,7 +4373,7 @@ class _Origin:
     (`_own_flows`), read on first use, since only the provider axis reads it.
     `part` is the spec_id of the part before any choice (`PartScope.base`) and
     `actives` the option each of its choices holds, by axis. The two together
-    are what the origin compiles to.
+    are what the origin compiles to, and `series` the series that is (`_Series`).
     """
 
     block: Mapping[str, Any] | None
@@ -4397,6 +4398,59 @@ class _Origin:
     @functools.cached_property
     def actives(self) -> tuple[tuple[str, str], ...]:
         return tuple((choice.axis, choice.active) for choice in self.scope.choices)
+
+    @functools.cached_property
+    def series(self) -> _Series:
+        return _Series.of(self.scope, self.block)
+
+
+@dataclass(frozen=True)
+class _Series:
+    """The series a pin compiles to: `core`, every field of its compiled identity
+    (`CompiledScope.identity`) but the facets and the years (`dataset_of`), as
+    canonical JSON, and `facets`, the value of each facet its read takes, by axis.
+    A pin's years are those of the search that found it, which alignment runs
+    before re-windowing (`_window_pins`), so the years read are compared apart
+    (`_Reads.period`).
+
+    A facet's value is the one Search resolved for the read (`resolved.facets`),
+    bound or the fallback the data picks, else the one the identity binds. So
+    multilateral ODA searched with its source named, which binds DAC1's
+    provenance, and total ODA compiled onto the multilateral row, which leaves it
+    to the fallback that picks DAC1, are one series under two spec_ids, while CRS
+    health aid and the same aid with imputed multilateral flows, which binds a
+    composite provenance, are two. The order of slots, of a set's codes and of a
+    role's entities does not change the series.
+    """
+
+    core: bytes
+    facets: frozenset[tuple[str, object]]
+
+    @classmethod
+    def of(cls, scope: PartScope, block: Mapping[str, Any] | None) -> _Series:
+        """The series of the part `scope` records, `block` its spec block."""
+        identity = scope.compiled.identity
+        slots = [
+            {**slot, "binding": {**binding, "refs": sorted(binding["refs"])}}
+            if isinstance(binding := slot.get("binding"), Mapping)
+            and isinstance(binding.get("refs"), list)
+            else slot
+            for slot in identity.get("slots") or ()
+        ]
+        core = {
+            **{key: value for key, value in dataset_of(identity).items() if key != "facets"},
+            "slots": sorted(slots, key=rfc8785.dumps),
+            "entities": {
+                role: sorted(refs) for role, refs in (identity.get("entities") or {}).items()
+            },
+        }
+        read = ((block or {}).get("resolved") or {}).get("facets") or {}
+        facets = {
+            axis: facet.get("ref")
+            for axis, facet in {**(identity.get("facets") or {}), **read}.items()
+            if isinstance(facet, Mapping)
+        }
+        return cls(core=rfc8785.dumps(core), facets=frozenset(facets.items()))
 
 
 class _Input(NamedTuple):
@@ -4744,6 +4798,7 @@ def _aligned_bases(
             groups,
             by_axis,
             reads={requirement_id: read.reads for requirement_id, read in inputs.items()},
+            compiles=_compiled_series(compiled),
             view=view,
             proposer=proposer,
         )
@@ -4760,6 +4815,18 @@ def _aligned_bases(
         return exc.problem
     moved = {**wholes, **realigned}
     return _with_found(evidence_requirements, requirements, found, restated=moved.keys()), moved
+
+
+def _compiled_series(
+    compiled: Mapping[tuple[str, tuple[str, ...]], AlignedPin],
+) -> dict[tuple[str, tuple[str, ...]], _Series]:
+    """The series each pin of `compiled` compiles to, under the pin it was compiled
+    from and its options, leaving out a pin whose block states no scope record."""
+    return {
+        key: _Series.of(scope, pin.block)
+        for key, pin in compiled.items()
+        if (scope := part_scope(pin.spec_id, pin.block)) is not None
+    }
 
 
 class _InputGroup(NamedTuple):
@@ -5055,6 +5122,7 @@ def _alignment_targets(
     by_axis: Mapping[str, Mapping[str, _InputBasis]],
     *,
     reads: Mapping[str, _Reads],
+    compiles: Mapping[tuple[str, tuple[str, ...]], _Series],
     view: SessionView,
     proposer: Proposer,
 ) -> dict[tuple[str, str], tuple[str, str]]:
@@ -5068,9 +5136,9 @@ def _alignment_targets(
     Alignment keeps the two sides of a comparison, sum, share or quotient on
     different series, whichever calculation moves them. Once an axis's options
     are chosen, a calculation whose two sides alignment has put on one series,
-    each computed alike from inputs on one part and options
-    (`_sides_one_series`, each input read as `reads` holds it, by requirement
-    id), has every group that moved one of those inputs left unaligned on that axis, and the options are chosen again until no group
+    each computed alike from inputs read as one series (`_sides_one_series`,
+    each input read as `reads` holds it, by requirement id, and each pin compiled
+    so far read as `compiles` holds it), has every group that moved one of those inputs left unaligned on that axis, and the options are chosen again until no group
     changes. The axis is what the calculation
     contrasts, as "what share of US ODA goes to multilaterals" reads US
     multilateral ODA over US total ODA, and counting the total on the
@@ -5121,7 +5189,9 @@ def _alignment_targets(
             moved = {
                 move
                 for candidate in candidates
-                for move in _sides_one_series(candidate.group, bases, reads, axis, targets, counted)
+                for move in _sides_one_series(
+                    candidate.group, bases, reads, axis, targets, counted, compiles=compiles
+                )
             }
             # The inputs of a calculation kept apart stay on their own options.
             aligned = {index for index, _ in aligning}
@@ -5221,6 +5291,8 @@ def _sides_one_series(
     axis: str,
     targets: Mapping[tuple[str, str], tuple[str, str]],
     counted: Mapping[str, Collection[str]],
+    *,
+    compiles: Mapping[tuple[str, tuple[str, ...]], _Series],
 ) -> frozenset[tuple[str, str]]:
     """The moves alignment on `axis` makes that put the two sides of `group`, a
     comparison's, sum's, share's or quotient's, on one series: each input moved
@@ -5229,19 +5301,27 @@ def _sides_one_series(
     Two sides read one series where their derivations (`_side_derivations`)
     hold one shape and each pair of leaves at one position reads one series, so
     a total compared with an average of one series reads two, and a total by
-    year over the series itself reads one. Two leaves read one series where
-    both have a choice on `axis` (`bases`), share a part (`_Origin.part`),
-    read it alike (`_InputBasis.reads`: one period, one set of entities, one
-    frame), and hold one option on every axis (`_Origin.actives`), which on `axis`
-    is an option `counted` gives or the input's own, and on an earlier axis the
-    one in `targets`, or where neither has a choice on `axis`, both pin one
-    spec_id and read it alike (`reads`, by requirement id), or, where `reads`
-    holds nothing for either, as a declared whole, are one requirement. A part and its
-    options are what a pin compiles to. `counted` holds every option any aligning group counts an input on, so a pair is
-    caught on whichever group moves it, in any step order. Two sides on one
-    series before alignment moves an input are left alone, since alignment did
-    not put them there. A group with no sides (`_InputGroup.sides`) has none
-    to keep apart.
+    year over the series itself reads one. Two leaves with a choice on `axis`
+    (`bases`) read one series where they read alike (`_InputBasis.reads`: one
+    period, one set of entities, one frame) and, on the options each is
+    counted on, compile to one series (`_LeafReading`). Those options are, on
+    `axis`, an option `counted` gives or the input's own, on an earlier axis
+    the one in `targets`, and on any other its own (`_Origin.actives`). Where
+    neither has a choice on `axis`, two leaves read one series where both pin
+    one spec_id and read it alike (`reads`, by requirement id), or, where
+    `reads` holds nothing for either, as a declared whole, are one
+    requirement. `counted` holds every option any aligning group counts an
+    input on, so a pair is caught on whichever group moves it, in any step
+    order. Two sides on one series before alignment moves an input are left
+    alone, since alignment did not put them there. A group with no sides
+    (`_InputGroup.sides`) has none to keep apart.
+
+    A leaf on its own options compiles to its pin's series (`_Origin.series`),
+    and one moved to other options to the series of the pin compiled from its
+    pin on them (`compiles`, by that pin and the options moved). Until that pin
+    is compiled, only a leaf of its part on those options is known to read it,
+    so the compile alignment asks for (`Realignment`) is read on the next
+    proposal, and a move onto the other side's series is caught there.
     """
     if group.sides is None:
         return frozenset()
@@ -5257,16 +5337,25 @@ def _sides_one_series(
             read = reads.get(requirement_id)
             # A leaf with nothing read of it, as a declared whole, is only itself.
             return [(None, (pin, read) if read is not None else requirement_id)]
+        actives = dict(basis.held.actives)
         others = {
             held: targets.get((requirement_id, held), (active, ""))[0]
-            for held, active in basis.held.actives
+            for held, active in actives.items()
             if held != axis
         }
-        options = {basis.choice.active, *counted.get(requirement_id, ())}
-        return [
-            (option, (basis.held.part, basis.reads, {**others, axis: option}))
-            for option in sorted(options)
-        ]
+        counted_on: list[tuple[str | None, object]] = []
+        for option in sorted({basis.choice.active, *counted.get(requirement_id, ())}):
+            options = {**others, axis: option}
+            moved = tuple(sorted(o for held, o in options.items() if o != actives[held]))
+            series = compiles.get((basis.pin, moved)) if moved else basis.held.series
+            reading = _LeafReading(
+                reads=basis.reads,
+                part=basis.held.part,
+                options=frozenset(options.items()),
+                series=series,
+            )
+            counted_on.append((option, reading))
+        return counted_on
 
     pairs = list(zip(first.leaves, second.leaves, strict=True))
 
@@ -5281,7 +5370,7 @@ def _sides_one_series(
         for one_reading in [chosen[one[0]]] if one[0] in chosen else readings(one):
             held = {**chosen, one[0]: one_reading}
             for other_reading in [held[other[0]]] if other[0] in held else readings(other):
-                if one_reading[1] == other_reading[1]:
+                if _readings_meet(one_reading[1], other_reading[1]):
                     yield from matched(position + 1, {**held, other[0]: other_reading})
 
     moves = [
@@ -5296,6 +5385,36 @@ def _sides_one_series(
     if not all(moves):
         return frozenset()
     return frozenset().union(*moves)
+
+
+@dataclass(frozen=True)
+class _LeafReading:
+    """One leaf of a calculation's side with a choice on the aligned axis, as it reads
+    on the `options` it is counted on, by axis (`_sides_one_series`): what it
+    reads of its pin (`reads`), its pin's `part`, and the series those options
+    compile to (`series`), `None` where no pin compiled on them is held."""
+
+    reads: _Reads
+    part: str
+    options: frozenset[tuple[str, str]]
+    series: _Series | None
+
+    def one_series(self, other: _LeafReading) -> bool:
+        """Whether `other` reads this series: read alike, and, of one part, on one set
+        of options, which is what a part compiles from, or, of two parts, compiled to
+        one series (`_Series`)."""
+        if self.reads != other.reads:
+            return False
+        if self.part == other.part:
+            return self.options == other.options
+        return self.series is not None and self.series == other.series
+
+
+def _readings_meet(one: object, other: object) -> bool:
+    """Whether two leaves' readings in `_sides_one_series` read one series."""
+    if isinstance(one, _LeafReading) and isinstance(other, _LeafReading):
+        return one.one_series(other)
+    return one == other
 
 
 def _counted_on(basis: _InputBasis, option_id: str) -> _InputBasis:

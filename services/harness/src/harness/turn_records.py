@@ -30,21 +30,24 @@ from typing import Any, Literal, NamedTuple, cast
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
 from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count
-from data_mcp.scope import ScopeAxis
+from data_mcp.scope import ScopeAxis, ScopeEntry, TextOrigin
 from executor.ledger import RunStatus
-from planner.parties import PARTY_ROLES, column_party_roles
+from planner.parties import PARTY_ROLES, column_party_roles, party_role
 from planner.plan import (
     DatasetRequirement,
     Decline,
+    FilterRequirement,
     Plan,
     PlanStatus,
     ResolvedBy,
     UnsupportedOperation,
     cut_user_text,
+    inputs_of,
     plan_revision,
 )
 from planner.records import (
     AmbiguousSourceReading,
+    PlaceLevel,
     ResolvedSourceMention,
     StatVarReading,
     StrictModel,
@@ -133,6 +136,14 @@ class AlignedBasis(StrictModel):
     served: ServedScope | None = Field(default=None, exclude_if=lambda served: served is None)
 
 
+class RoleNarrowing(StrictModel):
+    """The level of place a filter keeps on one `role` of a source's rows,
+    in a decision option's words (`plan_display.place_level_words`)."""
+
+    role: str
+    words: str
+
+
 class PlanSource(StrictModel):
     """One source the compiled plan retrieves.
 
@@ -167,7 +178,11 @@ class PlanSource(StrictModel):
     out when alignment moved none onto it. `aligned_basis` is how the source
     counts those inputs, which `basis_line` states, since the turn holds no
     reading of a compile; left out when alignment moved none onto it or its
-    block carries no scope choices.
+    block carries no scope choices. `narrowed` is the level of place each filter
+    reading the source's rows keeps on a role (`RoleNarrowing`), so the basis
+    line states a stated scope entry Search dropped on that role's axis as
+    read through the filter (`basis_line`); left out when no filter keeps a
+    level on a role.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -198,6 +213,7 @@ class PlanSource(StrictModel):
     windowed_from: str | None = Field(default=None, exclude_if=lambda origin: origin is None)
     aligned_from: tuple[str, ...] = Field(default=(), exclude_if=lambda stated: not stated)
     aligned_basis: AlignedBasis | None = Field(default=None, exclude_if=lambda basis: basis is None)
+    narrowed: tuple[RoleNarrowing, ...] = Field(default=(), exclude_if=lambda kept: not kept)
 
 
 class RecordedIdentity(StrictModel):
@@ -1263,7 +1279,12 @@ def basis_line(
     clauses are the same share them. Otherwise the clauses every part
     holds come first, in the first part's order, and each part's other
     clauses follow its name (`part_name`). Parts left with the same other
-    clauses share one name list; a part left with none goes unnamed:
+    clauses share one name list; a part left with none goes unnamed. An
+    entry the user stated that Search dropped, on the axis of a role a
+    filter of the newest plan narrows the part's rows on, reads as the
+    filter's words (`PlanSource.narrowed`), since the plan met the request
+    another way: "bilateral: read as only donor countries".
+
 
         Counted as: health incl. population and reproductive health
         (CRS 120 + 130) · Africa incl. regional buckets · gross disbursements.
@@ -1282,11 +1303,14 @@ def basis_line(
     used = newest_per_spec_id(
         [reading for reading in _used_readings(readings, plans=plans) if reading.scope is not None]
     )
+    narrowed = _newest_narrowings(plans)
     parts: dict[tuple[str, ...], list[str]] = {}
     for reading in used:
         assert reading.scope is not None
         served = reading.fetch.served if reading.fetch is not None else None
-        clauses = _scope_clauses(reading.scope, served)
+        clauses = _scope_clauses(
+            reading.scope, served, narrowed=narrowed.get(reading.spec_id or "", ())
+        )
         if clauses:
             parts.setdefault(clauses, []).append(
                 part_name(reading, specs.get(reading.spec_id or ""))
@@ -1507,13 +1531,37 @@ def _served_name(block: Mapping[str, Any] | None) -> str | None:
     return label if isinstance(label, str) and label else None
 
 
-def _scope_clauses(scope: PartScope, served: ServedScope | None) -> tuple[str, ...]:
+def _newest_narrowings(
+    plans: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[RoleNarrowing, ...]]:
+    """What the newest of `plans` keeps by filter on each role of each
+    source's rows (`PlanSource.narrowed`), by the source's spec_id and the
+    spec_id a windowed copy was copied from."""
+    if not plans:
+        return {}
+    narrowed: dict[str, tuple[RoleNarrowing, ...]] = {}
+    for source in plans[-1].get("sources") or ():
+        if not isinstance(source, Mapping) or not source.get("narrowed"):
+            continue
+        kept = tuple(RoleNarrowing.model_validate(n) for n in source["narrowed"])
+        for spec_id in (source.get("spec_id"), source.get("windowed_from")):
+            if spec_id is not None:
+                narrowed[str(spec_id)] = kept
+    return narrowed
+
+
+def _scope_clauses(
+    scope: PartScope, served: ServedScope | None, *, narrowed: Sequence[RoleNarrowing] = ()
+) -> tuple[str, ...]:
     """The basis line's clauses for one used part's `scope`: one per scope
     choice that names its active option, then one per entry Search dropped.
 
     A composite frame's `served` components state what its figures count
     (`ServedScope.composite_clause`) in place of the choice on that clause's
-    axis, or after the choices when the part has none on it."""
+    axis, or after the choices when the part has none on it. An entry the
+    user stated reads as what a filter keeps (`narrowed`) on the role its
+    axis names (`planner.parties.party_role`), where one does; otherwise as
+    why it was dropped (`REASON_COPY`)."""
     composite = served.composite_clause() if served is not None else None
     clauses = [
         composite[1]
@@ -1525,6 +1573,14 @@ def _scope_clauses(scope: PartScope, served: ServedScope | None) -> tuple[str, .
     if composite is not None and all(choice.axis != composite[0] for choice in scope.choices):
         clauses.append(composite[1])
     for dropped in scope.dropped_entries:
+        stood_in = (
+            _stood_in(dropped.entry, narrowed)
+            if dropped.code == "stated_choice_not_applied"
+            else None
+        )
+        if stood_in is not None:
+            clauses.append(f"{_asked_words(dropped.entry)}: read as {stood_in}")
+            continue
         label = next(
             (
                 option.label
@@ -1538,6 +1594,25 @@ def _scope_clauses(scope: PartScope, served: ServedScope | None) -> tuple[str, .
         why = REASON_COPY[dropped.code]
         clauses.append(f"{why}: {label}" if label else why)
     return tuple(dict.fromkeys(clauses))
+
+
+def _stood_in(entry: ScopeEntry, narrowed: Sequence[RoleNarrowing]) -> str | None:
+    """The words of the narrowing in `narrowed` on the role `entry`'s axis
+    names ("provider" names the donor), or `None` when none is on it."""
+    role = party_role(entry.axis)
+    if role is None:
+        return None
+    return next((n.words for n in narrowed if party_role(n.role) == role), None)
+
+
+def _asked_words(entry: ScopeEntry) -> str:
+    """The user's words `entry` was read from, else its option's value as
+    words: "bilateral" for `provider:bilateral`."""
+    if isinstance(entry.origin, TextOrigin):
+        asked = entry.origin.text[entry.origin.start : entry.origin.end].strip()
+        if asked:
+            return asked
+    return entry.option_id.partition(":")[2].replace("_", " ")
 
 
 def _choice_clause(choice: ScopeChoice, served: ServedScope | None) -> str | None:
@@ -1956,8 +2031,44 @@ def _sources(
             windowed_from=windowed_from.get(source.spec_id),
             aligned_from=tuple(sorted(aligned_from.get(compiled, ()))),
             aligned_basis=aligned_bases.get(compiled) if compiled in aligned_from else None,
+            narrowed=_narrowed(plan, source.spec_id),
         )
     return tuple(seen.values())
+
+
+def _narrowed(plan: Plan, spec_id: str) -> tuple[RoleNarrowing, ...]:
+    """The level each filter of compiled `plan` reading the rows retrieved
+    from `spec_id`, directly or through other steps, keeps on a role, the
+    first filter's words for each role. A level keeps a class of party
+    ("only donor countries"), which can stand in for a class the user stated;
+    a list of names (`EntityIn`) applies no class, so it is not one."""
+    assert plan.workflow is not None
+    retrieved = {b.requirement_id for b in plan.workflow.evidence_bindings if b.spec_id == spec_id}
+    kept: dict[str, str] = {}
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, FilterRequirement) or not _reads(
+            requirement, retrieved, plan
+        ):
+            continue
+        for predicate in requirement.predicates:
+            if isinstance(predicate, PlaceLevel) and predicate.role is not None:
+                kept.setdefault(
+                    predicate.role,
+                    plan_display.place_level_words(predicate.level, role=predicate.role),
+                )
+    return tuple(RoleNarrowing(role=role, words=words) for role, words in kept.items())
+
+
+def _reads(requirement: FilterRequirement, retrieved: Collection[str], plan: Plan) -> bool:
+    """Whether `requirement` reads the result of a requirement in `retrieved`,
+    directly or through the steps between them."""
+    pending = list(inputs_of(requirement))
+    while pending:
+        upstream = pending.pop()
+        if upstream in retrieved:
+            return True
+        pending.extend(inputs_of(plan.requirement(upstream)))
+    return False
 
 
 def _period_basis(period: PlanPeriod) -> str:

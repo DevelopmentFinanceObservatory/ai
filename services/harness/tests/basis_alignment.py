@@ -46,7 +46,8 @@ def basis_block(
     """Search's France-to-Kenya aid block under `spec_id`, carrying the scope
     choices of a part counted as `active` by `provenance`: US health aid on
     the CRS when `narrow`, else the US donor total, whose part binds no
-    sector and no recipient and offers gross disbursements as `gross`."""
+    sector and no recipient, and compiles to that identity, and offers gross
+    disbursements as `gross`."""
     scope = _switchable_scope()
     base = f"{spec_id}_base"
     scope["id"] = scope["base"]["spec_id"] = base
@@ -55,6 +56,7 @@ def basis_block(
         identity = scope["base"]["identity"]
         identity["slots"] = [s for s in identity["slots"] if s["property"] != "crsPurpose"]
         identity["entities"] = {"origin": ["country/USA"]}
+        scope["compiled"]["identity"] = json.loads(json.dumps(identity))
         scope["choices"] = [c for c in scope["choices"] if c["axis"] == "measure_basis"]
         scope["entries"] = []
     for choice in scope["choices"]:
