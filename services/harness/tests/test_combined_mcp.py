@@ -890,9 +890,9 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
 
 # The most o200k tokens the public tool list may cost, as a client hands it to its
 # model: the compact JSON of each tool's name, description and input schema. Every
-# client pays it on every turn. The bound is the measured count, 19,467, rounded up
+# client pays it on every turn. The bound is the measured count, 16,951, rounded up
 # to the next 500. The list must stay within 20,000; lower the bound as it shrinks.
-_PUBLIC_LIST_TOKEN_BOUND = 19_500
+_PUBLIC_LIST_TOKEN_BOUND = 17_000
 
 
 async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
@@ -955,17 +955,39 @@ def _schema_faults(node: object, path: str = "") -> Iterator[str]:
         yield from _schema_faults(value, f"{path}/{key}")
 
 
-async def test_no_analysis_schema_holds_noise_or_a_nullable_branch(
+async def test_no_public_schema_holds_noise_or_a_nullable_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    analysis = {tool.name for tool in await analysis_server.mcp.list_tools()}
     faults = {
         tool.name: faults
         for tool in await _public_list(monkeypatch)
-        if tool.name in analysis and (faults := list(_schema_faults(tool.input_schema)))
+        if (faults := list(_schema_faults(tool.input_schema)))
     }
 
     assert faults == {}
+
+
+# Names an outside client cannot use: the harness's tools and arguments, and the
+# tools the merged ones replaced.
+_HARNESS_NAMES = re.compile(
+    r"\b(place_types|rolling|anchor_key|resolve_anchor|sum_of|quotient_of|get_skill_file)\b"
+)
+
+
+async def test_no_public_description_or_schema_names_a_harness_tool_or_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    named = {
+        tool.name: sorted(set(found))
+        for tool in await _public_list(monkeypatch)
+        if (
+            found := _HARNESS_NAMES.findall(
+                json.dumps([tool.description, tool.input_schema, tool.title])
+            )
+        )
+    }
+
+    assert named == {}
 
 
 class _ForwardedArguments(Middleware):
@@ -1018,7 +1040,6 @@ async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_type
     assert set(get_data.input_schema["properties"]) == set(served.parameters["properties"]) - {
         "place_types"
     }
-    assert "place_types" not in json.dumps([get_data.description, get_data.input_schema])
     description = get_data.description or ""
     for named in (
         "observationAbout_type",
@@ -1030,8 +1051,8 @@ async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_type
 
 
 async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> None:
-    """analysis-mcp's own mount keeps `rolling` and `anchor_key` for the harness. The
-    public list has neither, nor a sentence naming one."""
+    """analysis-mcp's own mount keeps `rolling` and `anchor_key` for the harness, and
+    the public list has neither."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
 
     async with Client(combined) as client:
@@ -1039,8 +1060,6 @@ async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> Non
     served = {tool.name: tool for tool in await analysis_server.mcp.list_tools()}
 
     for name in ROLLING_ARGUMENT_TOOLS:
-        public = json.dumps({"d": listed[name].description, "s": listed[name].input_schema})
-        assert re.search(r"\b(rolling|anchor_key)\b", public) is None, name
         assert set(listed[name].input_schema["properties"]) == set(
             served[name].parameters["properties"]
         ) - {"rolling", "anchor_key"}

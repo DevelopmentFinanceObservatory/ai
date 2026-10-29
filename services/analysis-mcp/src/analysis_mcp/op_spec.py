@@ -343,11 +343,6 @@ class OrderedThresholdPredicate(BaseModel):
     `time_period` must be a well-formed period string, checked here ahead
     of the engine; a string against any other column passes op-spec
     validation unchecked and reaches the engine's own type check instead.
-
-    `rolling` marks a `time_period` threshold as following the latest period:
-    `value` stays the literal period the comparison runs on. It sits on the
-    predicate because `analysis_mcp.identity` reorders predicates, so nothing
-    outside one could address it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -356,7 +351,19 @@ class OrderedThresholdPredicate(BaseModel):
     column: str = Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)
     op: Literal["gt", "gte", "lt", "lte", "eq", "ne"]
     value: float | Annotated[str, Field(max_length=_MAX_ORDERED_THRESHOLD_STRING_CHARS)]
-    rolling: Annotated[RollingRef | None, HASHED_WHEN_SET] = None
+    # On the predicate because `analysis_mcp.identity` reorders predicates, so
+    # nothing outside one could address it.
+    rolling: Annotated[
+        RollingRef | None,
+        HASHED_WHEN_SET,
+        Field(
+            description=(
+                "Marks a time_period threshold as following the latest period of the data, "
+                "{anchor: 'latest', offset: 0, rule: 'half1'}, with offset counting whole "
+                "periods back: value stays the literal period the comparison runs on."
+            )
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def _validate_value(self) -> OrderedThresholdPredicate:
@@ -422,8 +429,8 @@ class CategoryMatchPredicate(BaseModel):
 class PlaceLevelPredicate(BaseModel):
     """`column`, a place's type enrichment, names a place at `level`.
 
-    Reads a `{role}_type` column such as the `observationAbout_type` column a
-    `get_data(place_types=true)` frame carries (`Country`,
+    Reads a `{role}_type` column such as a frame's `observationAbout_type`
+    column (`Country`,
     `AdministrativeArea1,State`), by `common.place_type.levels_of`: a place sits
     at each of its types, except that one carrying a Eurostat NUTS type is not
     at `Country`. `level="Country"` keeps every country and territory and

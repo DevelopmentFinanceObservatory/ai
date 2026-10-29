@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 
 from common.auth import BearerTokenVerifier, apply_gate
@@ -21,6 +21,7 @@ from common.logging import configure_logging
 from common.materialisation import aclose_store as aclose_frame_store
 from common.materialisation import install_store_if_unset
 from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddleware
+from common.public_shape import PublicShape
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
@@ -41,7 +42,7 @@ from data_mcp.definition_store import (
     set_store,
 )
 from data_mcp.describe_tool import describe
-from data_mcp.get_data_tool import aclose_background_mints, get_data
+from data_mcp.get_data_tool import TYPE_COLUMNS, aclose_background_mints, get_data
 from data_mcp.get_skill_file_tool import get_skill_file
 from data_mcp.get_skill_tool import get_skill
 from data_mcp.manifest import ARTIFACT_URI_TEMPLATE
@@ -151,6 +152,17 @@ _add_declared(get_skill_file, title="Read a skill file")
 _add_declared(sources, title="List data sources")
 mcp.tool(resolve_definition, version="1")
 mcp.tool(catalogue_counts, version="1")
+
+# The public form of each tool the combined server lists differently from this
+# mount (`common.public_shape`). Every public `get_data` frame carries the type
+# columns; the harness asks for them per call.
+PUBLIC_SHAPES: Mapping[str, PublicShape] = {
+    "get_data": PublicShape(
+        paragraphs=(TYPE_COLUMNS,),
+        hidden=frozenset({"place_types"}),
+        forced={"place_types": True},
+    ),
+}
 
 # A templated resource, not a tool -- it surfaces only via
 # `resources/templates/list` discovery, not `resources/list`, so ADK cannot

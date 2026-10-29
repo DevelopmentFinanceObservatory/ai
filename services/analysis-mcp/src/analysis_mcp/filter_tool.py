@@ -186,10 +186,7 @@ async def filter_verb(
                 "observationAbout_type, names a place at that level, such as Country, to keep "
                 "one level of place. A role, a window, or a facet binding is out of this "
                 "grammar: filter narrows by value, and scope is narrowed in get_data's "
-                "scope argument. An ordered_threshold on time_period may carry "
-                "rolling, {anchor: 'latest', offset: 0, rule: 'half1'}, marking its value as "
-                "following the latest period of the data, with offset counting whole periods "
-                "back; the value stays the literal period compared against."
+                "scope argument."
             ),
         ),
     ] = (),
@@ -201,7 +198,11 @@ async def filter_verb(
                 "The populations the latest period is taken over, {population: [{spec_id, "
                 "bindings}]}: one entry for each root dataset of the question, bindings "
                 "narrowing its series as {column: [values]}. Required when a predicate "
-                "carries rolling and refused otherwise."
+                "carries rolling and refused otherwise. A threshold on time_period that "
+                "carries rolling compares against the literal value, as a fixed threshold "
+                "does, and the result's {spec_id, content_version} pair differs from the "
+                "fixed call's. Such a call runs only when the record anchor_key names covers "
+                "it, and refuses rolling_anchor_unresolved otherwise."
             ),
         ),
     ] = None,
@@ -228,7 +229,7 @@ async def filter_verb(
     (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`). A `category_match` tests a column's
     own string cell against a closed set of values. This includes the
     `unit` column itself. A `place_level` reads a place's types, such as
-    the `observationAbout_type` column `get_data(place_types=true)` adds,
+    a frame's `observationAbout_type` column,
     by `common.place_type.levels_of`: a frame that names no place holds
     every level of place, and `place_level` on it with `"Country"` keeps
     the countries. A `category_match` on `unit` is an ordinary way
@@ -243,14 +244,6 @@ async def filter_verb(
     since the span's string says nothing about the periods it covers. A
     `category_match` on the exact span string keeps its rows, and a predicate
     on any other column filters as usual.
-
-    A threshold on `time_period` that carries `rolling` records that its
-    period follows the latest period of the data. The call compares against
-    the literal `value`, as a fixed threshold does, and the result's
-    {spec_id, content_version} pair differs from the fixed call's. Such a call
-    runs only when the record `anchor_key` names covers it
-    (`rolling_tool.anchored_input`), and refuses `rolling_anchor_unresolved`
-    otherwise.
 
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.

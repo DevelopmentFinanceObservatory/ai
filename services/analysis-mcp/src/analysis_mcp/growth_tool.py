@@ -291,7 +291,10 @@ async def growth(
                 "year at their offsets. population is required: one {spec_id, bindings} for "
                 "each root dataset of the question, bindings narrowing its series as {column: "
                 "[values]}; the latest period is taken over those series. Left None, the "
-                "window is fixed."
+                "window is fixed. The call computes over the literal years it is given, as a "
+                "fixed call does, and the result's {spec_id, content_version} pair differs "
+                "from the fixed call's. Such a call runs only when the record anchor_key "
+                "names covers it, and refuses rolling_anchor_unresolved otherwise."
             ),
         ),
     ] = None,
@@ -336,13 +339,6 @@ async def growth(
     `aggregate` or `rank` result over several years, refuses
     (`derived_input_unusable`), because growth reads one row per period.
     Retry over the frame that result was computed from.
-
-    `rolling` records that a window year follows the latest period of the
-    data. The call computes over the literal years it is given, as a fixed
-    call does, and the result's {spec_id, content_version} pair differs from
-    the fixed call's. Such a call runs only when the record `anchor_key` names
-    covers it (`rolling_tool.anchored_input`), and refuses
-    `rolling_anchor_unresolved` otherwise.
 
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.

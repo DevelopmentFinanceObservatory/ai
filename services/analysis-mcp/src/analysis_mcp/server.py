@@ -45,6 +45,7 @@ from common.materialisation import (
     store_is_set,
 )
 from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddleware
+from common.public_shape import PublicShape
 from common.refusal import log_unexpected_error
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
@@ -212,6 +213,14 @@ mcp.add_tool(
             output_schema=RESOLVE_ANCHOR_OUTPUT_SCHEMA,
         )
     )
+)
+
+
+# The public form of each tool the combined server lists differently from this
+# mount (`common.public_shape`). A rolling call needs `resolve_anchor`'s
+# `anchor_key`, and only the harness calls `resolve_anchor`.
+PUBLIC_SHAPES: Mapping[str, PublicShape] = dict.fromkeys(
+    ("growth", "rank", "filter"), PublicShape(hidden=frozenset({"rolling", "anchor_key"}))
 )
 
 

@@ -43,10 +43,10 @@ callers goes. `build_combined_mcp` adds it outermost first:
 - `_ShapeResults` drops `structuredContent` and `search`'s envelope in
   `_meta` from successful results of tools that declare no MCP App view,
   and `outputSchema` from `tools/list`.
-- `_PublicArguments` leaves the harness's rolling arguments and `get_data`'s
-  `place_types` out of `tools/list` (`public_tool`), and sends every
-  `get_data` call with `place_types` true, so a public frame always carries
-  its type columns.
+- `_PublicArguments` lists and calls each tool in the public form its child
+  declares (`PUBLIC_SHAPES`, `common.public_shape`): `get_data` without
+  `place_types` and with it true on every call, and `growth`, `rank` and
+  `filter` without the harness's `rolling` and `anchor_key`.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
   unknown tool name, arguments that fail the tool's input schema, or an
   exception from the tool itself. A resource read that raised an
@@ -79,7 +79,6 @@ knows when an upstream mint has ended (`data_mcp.mint_ledger`).
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import re
@@ -88,11 +87,13 @@ from contextlib import asynccontextmanager, contextmanager
 from importlib import metadata
 from typing import Any, override
 
+from analysis_mcp.server import PUBLIC_SHAPES as ANALYSIS_PUBLIC_SHAPES
 from analysis_mcp.server import healthz as analysis_healthz
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import BearerTokenVerifier
 from common.caller import current_caller
 from common.materialisation import get_store as get_frame_store
+from common.public_shape import PublicShape
 from common.refusal import (
     REFUSAL_META_KEY,
     internal_error_message,
@@ -110,6 +111,7 @@ from data_mcp.deadline import (
 )
 from data_mcp.definition_store import get_store as get_definition_store
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.server import PUBLIC_SHAPES as DATA_PUBLIC_SHAPES
 from data_mcp.server import healthz as data_healthz
 from data_mcp.server import mcp as data_mcp
 from data_mcp.skills_extension import SkillsExtension
@@ -166,7 +168,7 @@ COMBINED_MCP_INSTRUCTIONS = (
 # `sum_of`, `quotient_of` and `get_skill_file`, whose work an outside client
 # reaches through `compare`, `share_of` and `get_skill` (`_MERGED_NAMES`), and
 # `resolve_anchor`, which writes the `rolling` and `anchor_key` arguments the
-# public list leaves out (`_HARNESS_ARGUMENTS`).
+# public list leaves out (`analysis_mcp.server.PUBLIC_SHAPES`).
 HARNESS_ONLY_TOOLS = frozenset(
     {
         "resolve_definition",
@@ -187,28 +189,12 @@ _MERGED_NAMES: dict[str, tuple[str, str | None]] = {
     "get_skill_file": ("get_skill", None),
 }
 
-# The arguments of the rolling path the harness drives, which the public list
-# leaves out of the tools that take them, with every sentence naming them.
-_HARNESS_ARGUMENTS = frozenset({"rolling", "anchor_key"})
-_HARNESS_ARGUMENT_TOOLS = frozenset({"growth", "rank", "filter"})
-_NAMES_HARNESS_ARGUMENT = re.compile(r"\b(?:rolling|anchor_key)\b")
-_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=[A-Z`])")
-
-# Every public `get_data` call asks for the type columns, so its listing drops
-# `place_types` and states what every frame carries instead. data-mcp's own mount
-# keeps the argument, default false, for the harness.
-_PLACE_TYPES = "place_types"
-_NAMES_PLACE_TYPES = re.compile(r"\bplace_types\b")
-_TYPE_COLUMNS = (
-    "Every frame carries place or party types. A frame that names places gets an "
-    "observationAbout_type column. A flow frame gets financingProvider_party_kind and "
-    "financingRecipient_party_kind: party, residual, or total for a group total such as "
-    "Africa, Total. rank, aggregate and share_of read these columns to leave group totals "
-    "out and, with place_level, to keep one level of place."
-)
-# A clause in `without_party_totals`' description that names `place_types`, and what
-# the public listing says in its place.
-_PARTY_CELLS_CLAUSE = ("add the party cells as place_types does", "keep the party cells")
+# How the public list shows and calls each tool whose form differs from its
+# mount's, as each child declares it beside the tool.
+_PUBLIC_SHAPES: dict[str, PublicShape] = {
+    **DATA_PUBLIC_SHAPES,
+    **ANALYSIS_PUBLIC_SHAPES,
+}
 
 # The wait a caller is told before repeating a call the in-flight cap refused. A call
 # runs for up to `EXTERNAL_CALL_LIMIT_S`, and most finish within a few seconds.
@@ -946,9 +932,8 @@ class _ShapeResults(Middleware):
 
 
 class _PublicArguments(Middleware):
-    """Lists each tool as `public_tool` declares it, and sends `get_data` with
-    `place_types` true whatever the call says, so every public frame carries its
-    type columns."""
+    """Lists each tool as `public_tool` declares it, and writes a tool's
+    `PublicShape.forced` arguments over every call's."""
 
     @override
     async def on_list_tools(
@@ -964,104 +949,48 @@ class _PublicArguments(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        if context.message.name != "get_data":
+        shape = _PUBLIC_SHAPES.get(context.message.name)
+        if shape is None or not shape.forced:
             return await call_next(context)
-        arguments = {**(context.message.arguments or {}), "place_types": True}
+        arguments = {**(context.message.arguments or {}), **shape.forced}
         message = context.message.model_copy(update={"arguments": arguments})
         return await call_next(context.copy(message=message))
 
 
 def public_tool(tool: Tool) -> Tool:
-    """`tool` as the combined server lists it. `growth`, `rank` and `filter` lose
-    `_HARNESS_ARGUMENTS` wherever their schema holds them, and every sentence
-    naming one: a paragraph whose first sentence names one goes whole.
-    `get_data` loses `place_types` (`_public_get_data`). Every
-    other tool is listed as its server declares it."""
-    if tool.name == "get_data":
-        return _public_get_data(tool)
-    if tool.name not in _HARNESS_ARGUMENT_TOOLS:
+    """`tool` as the combined server lists it, under its child's `PublicShape`:
+    the shape's paragraphs after the mount's description, and every property the
+    shape hides left out wherever the schema holds one. A tool with no shape is
+    listed as its server declares it."""
+    shape = _PUBLIC_SHAPES.get(tool.name)
+    if shape is None:
         return tool
     return tool.model_copy(
         update={
-            "description": _without_harness_sentences(tool.description or ""),
-            "parameters": _without_harness_arguments(tool.parameters),
+            "description": "\n\n".join((tool.description or "", *shape.paragraphs)),
+            "parameters": _without_properties(tool.parameters, shape.hidden),
         }
     )
 
 
-def _public_get_data(tool: Tool) -> Tool:
-    """`get_data` without `place_types`, its description stating the type columns
-    every public call asks for (`_PublicArguments.on_call_tool`): in the paragraph
-    that first names `place_types`, that sentence and every one after it give way to
-    `_TYPE_COLUMNS`, and any later sentence naming it goes."""
-    parameters = copy.deepcopy(tool.parameters)
-    properties = parameters.get("properties", {})
-    properties.pop(_PLACE_TYPES, None)
-    if "required" in parameters:
-        parameters["required"] = [name for name in parameters["required"] if name != _PLACE_TYPES]
-    for prop in properties.values():
-        if isinstance(prop.get("description"), str):
-            prop["description"] = prop["description"].replace(*_PARTY_CELLS_CLAUSE)
-    return tool.model_copy(
-        update={
-            "description": _with_type_columns(tool.description or ""),
-            "parameters": parameters,
-        }
-    )
-
-
-def _with_type_columns(text: str) -> str:
-    paragraphs: list[str] = []
-    placed = False
-    for paragraph in text.split("\n\n"):
-        sentences = _SENTENCE_BREAK.split(paragraph)
-        named = [bool(_NAMES_PLACE_TYPES.search(sentence)) for sentence in sentences]
-        if not any(named):
-            paragraphs.append(paragraph)
-        elif placed:
-            kept = [sentence for sentence, names in zip(sentences, named, strict=True) if not names]
-            paragraphs.extend([" ".join(kept)] if kept else [])
-        else:
-            before = sentences[: named.index(True)]
-            paragraphs.extend([" ".join(before), _TYPE_COLUMNS] if before else [_TYPE_COLUMNS])
-            placed = True
-    if not placed:
-        paragraphs.append(_TYPE_COLUMNS)
-    return "\n\n".join(paragraphs)
-
-
-def _without_harness_arguments(node: Any) -> Any:
+def _without_properties(node: Any, hidden: frozenset[str]) -> Any:
     if isinstance(node, list):
-        return [_without_harness_arguments(item) for item in node]
+        return [_without_properties(item, hidden) for item in node]
     if not isinstance(node, dict):
         return node
     kept: dict[str, Any] = {}
     for key, value in node.items():
-        if key == "description" and isinstance(value, str):
-            if text := _without_harness_sentences(value):
-                kept[key] = text
-        elif key == "properties" and isinstance(value, dict):
+        if key == "properties" and isinstance(value, dict):
             kept[key] = {
-                name: _without_harness_arguments(prop)
+                name: _without_properties(prop, hidden)
                 for name, prop in value.items()
-                if name not in _HARNESS_ARGUMENTS
+                if name not in hidden
             }
         elif key == "required" and isinstance(value, list):
-            kept[key] = [name for name in value if name not in _HARNESS_ARGUMENTS]
+            kept[key] = [name for name in value if name not in hidden]
         else:
-            kept[key] = _without_harness_arguments(value)
+            kept[key] = _without_properties(value, hidden)
     return kept
-
-
-def _without_harness_sentences(text: str) -> str:
-    paragraphs = []
-    for paragraph in text.split("\n\n"):
-        sentences = _SENTENCE_BREAK.split(paragraph)
-        if _NAMES_HARNESS_ARGUMENT.search(sentences[0]):
-            continue
-        kept = [sentence for sentence in sentences if not _NAMES_HARNESS_ARGUMENT.search(sentence)]
-        paragraphs.append(paragraph if len(kept) == len(sentences) else " ".join(kept))
-    return "\n\n".join(paragraphs)
 
 
 def _declares_app_view(tool: Tool | None) -> bool:

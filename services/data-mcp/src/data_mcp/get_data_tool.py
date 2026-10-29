@@ -227,6 +227,16 @@ logger = logging.getLogger(__name__)
 # The type column of a place-subject frame.
 _PLACE_TYPE_COLUMN = type_column(PLACE_ROLE)
 
+# What every public `get_data` frame carries: the combined server sends each call
+# with `place_types` set and lists the tool without it (`server.PUBLIC_SHAPES`).
+TYPE_COLUMNS = (
+    "Every frame carries place or party types. A frame that names places gets an\n"
+    "observationAbout_type column. A flow frame gets financingProvider_party_kind and\n"
+    "financingRecipient_party_kind: party, residual, or total for a group total such as\n"
+    "Africa, Total. rank, aggregate and share_of read these columns to leave group\n"
+    "totals out and, with place_level, to keep one level of place."
+)
+
 
 class GetDataScope(BaseModel):
     """The scope override to apply before minting, mirroring the mint route's own `scope` block.
@@ -1971,8 +1981,8 @@ async def get_data(
         Field(
             description=(
                 "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
-                "Total or the G7) from each side the spec leaves open, and add the party cells as "
-                "place_types does, so the side's members can be compared or ranked without "
+                "Total or the G7) from each side the spec leaves open, and add the party cells, "
+                "so the side's members can be compared or ranked without "
                 "totals among them. A sum of these members can differ from the source's "
                 "published total. For a total across the whole side, search naming the "
                 'population ("all donors") with no operation over that side. A side the spec '
@@ -2040,12 +2050,7 @@ async def get_data(
 
     A spec that names no place covers every place with data, at every
     level: the world, regions, World Bank groups, countries and their
-    subdivisions. `place_types=true` adds the `observationAbout_type` column,
-    so a `filter` can keep one level before a rank or a total sets a place
-    beside the places inside it. On a flow frame it adds each party's type,
-    kind, class and whole-population mark (`financingProvider_type`,
-    `financingProvider_party_kind`, `financingProvider_party_class`,
-    `financingProvider_party_whole` and the recipient's four) instead.
+    subdivisions.
 
     `breakdown` sums the family within each code of one hierarchical code
     system rolled up to one level, so a question such as "which sectors got
@@ -2065,8 +2070,8 @@ async def get_data(
             each party's type and its kind, class and whole cells on a flow frame, for a
             spec that names no place.
         without_party_totals: Whether a flow frame leaves out the group totals of each side
-            the spec leaves open, to compare or rank its members, and adds the party cells as
-            `place_types` does. On a spec with no flow side it changes nothing.
+            the spec leaves open, to compare or rank its members, and adds the party cells.
+            On a spec with no flow side it changes nothing.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 
