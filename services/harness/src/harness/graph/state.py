@@ -69,6 +69,12 @@ ORCHESTRATOR_SEARCHES_KEY = "orchestrator:searches"
 # Every plan this turn ran, oldest first, as `PlanRecord` JSON, written by
 # `plan_done`; `harness.studio` keeps it with the turn's record.
 ORCHESTRATOR_PLAN_RECORDS_KEY = "orchestrator:plan_records"
+# Compile spec_id -> how a plan step's retrieval of it was served, as
+# `harness.scope_choices.served_facts` JSON, for each compile alignment moved
+# inputs onto (`planner.plan.aligned_pins`), which no search reading holds.
+# Written by `execute` (`record_served_scopes`), read by `plan_done`
+# (`record_plan`) into the plan record's `PlanSource.aligned_basis`.
+ORCHESTRATOR_ALIGNED_SERVED_KEY = "orchestrator:aligned_served"
 # spec_id -> the warnings of the search part that returned it, as `search`
 # stores its block under `ORCHESTRATOR_SPECS_KEY`.
 ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"

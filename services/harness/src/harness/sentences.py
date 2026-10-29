@@ -343,6 +343,9 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
         "The figures the plan combines{at} count different providers' spending, so nothing "
         "was recorded."
     ),
+    ProblemCode.SHARE_OF_ITSELF: (
+        "A share{at} would divide a figure by itself, so nothing was recorded."
+    ),
     ProblemCode.ASK_NOT_UNDERSTOOD: (
         "Part of the request could not be matched to data{at}, so nothing was recorded."
     ),
@@ -396,6 +399,7 @@ SEAM_REASONS: Mapping[SeamCode | ProblemCode, str] = {
     ProblemCode.PROVIDERS_UNALIGNED: (
         "{lead}the figures the plan combines count different providers' spending"
     ),
+    ProblemCode.SHARE_OF_ITSELF: "{lead}a share would divide a figure by itself",
     ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",
     ProblemCode.SURFACE_UNAVAILABLE: "a service the plan needs could not be reached",
@@ -811,6 +815,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ProblemCode.WHOLE_IS_ITS_MEMBER,
             ProblemCode.SHARE_WHOLE_UNDERIVABLE,
             ProblemCode.PROVIDERS_UNALIGNED,
+            ProblemCode.SHARE_OF_ITSELF,
         }
     ),
     FailureClass.SOURCE_GONE: frozenset(

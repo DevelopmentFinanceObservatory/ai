@@ -123,10 +123,12 @@ from planner.plan import (
     UnsupportedOperation,
     WholeOf,
     WindowedPin,
+    aligned_pins,
     clear_unsupported,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
+    held_sources,
     is_dataset,
     is_scope_choice,
     is_search_pin,
@@ -4960,20 +4962,22 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
         if isinstance(r, DatasetRequirement)
     ] == [("health", HEALTH), ("total", TOTAL_GROSS)]
     bases = {
-        d.fixes.source_spec_id: d
+        d.slot: d
         for d in plan.decisions
         if d.scope is not None and d.scope.axis == "measure_basis" and d.fixes is not None
     }
-    assert {pin: d.active_option_id for pin, d in bases.items()} == {
-        HEALTH: "measure_basis:gross",
-        TOTAL_GROSS: "measure_basis:gross",
+    moved_row = "scope_measure_basis_of_total"
+    assert {slot: d.active_option_id for slot, d in bases.items()} == {
+        scope_choice_slot(HEALTH, "measure_basis"): "measure_basis:gross",
+        moved_row: "measure_basis:gross",
     }
-    aligned = bases[TOTAL_GROSS]
+    aligned = bases[moved_row]
     assert aligned.resolved_by is ResolvedBy.PLANNER_DEFAULT
     assert "one basis" in aligned.rationale
     assert aligned.slot in plan.requirement("total").decision_ids
     assert plan.requirement("total").source is None  # type: ignore[union-attr]
-    assert not any(d.fixes is not None and d.fixes.source_spec_id == TOTAL for d in plan.decisions)
+    # The total's grant-equivalent basis row went with the move.
+    assert scope_choice_slot(TOTAL, "measure_basis") not in {d.slot for d in plan.decisions}
 
     # A restatement pinning the total as it was shown takes the compiled pin again.
     again = await _share_of_health(
@@ -6003,16 +6007,10 @@ async def test_a_total_compiled_on_the_bilateral_scope_is_pinned_with_the_planne
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.requirement("total").source_spec_id == TOTAL_BILATERAL  # type: ignore[union-attr]
-    (aligned,) = [
-        d
-        for d in plan.decisions
-        if d.scope is not None
-        and d.scope.axis == "provider"
-        and d.fixes is not None
-        and d.fixes.source_spec_id == TOTAL_BILATERAL
-    ]
+    (aligned,) = [d for d in plan.decisions if d.slot == "scope_provider_of_total"]
     assert aligned.resolved_by is ResolvedBy.PLANNER_DEFAULT
     assert aligned.active_option_id == "provider:bilateral"
+    assert aligned.slot in plan.requirement("total").decision_ids
 
 
 async def test_a_basis_search_read_in_the_planners_words_is_never_the_users(
@@ -6056,7 +6054,8 @@ async def test_no_pin_check_runs_on_a_pin_a_pending_read_will_move(
 ) -> None:
     """US health aid counted gross as a share of a US total the planner pinned no
     dataset for. Search pins the total, then the total is compiled gross. The checks
-    reading the pins run once, on the compiled total."""
+    reading the pins run once, on the total as Search pinned it, before the
+    compile moves it."""
     checked: list[str | None] = []
     check = submission_service._measure_fixed_by_pin
 
@@ -6079,7 +6078,7 @@ async def test_no_pin_check_runs_on_a_pin_a_pending_read_will_move(
 
     assert result["outcome"] == Outcome.OK.value, result
     assert surface.tools == ["search", "resolve_definition"]
-    assert checked == [TOTAL_GROSS]
+    assert checked == [TOTAL]
 
 
 async def test_an_unanswered_referral_is_refused_before_a_search_for_an_unpinned_input(
@@ -6714,12 +6713,15 @@ def _us_block(name: str) -> dict[str, Any]:
 
 
 def _malaria_block() -> dict[str, Any]:
-    """`US_2023`'s health part bound to CRS 12262, malaria control, under a spec_id of its own."""
-    block = json.loads(json.dumps(us_2023_block("health")))
-    block["spec_id"] = f"spec_{'7' * 32}"
-    for slot in block["resolved"]["scope_choices"]["base"]["identity"]["slots"]:
-        if slot["property"] == "crsPurpose":
-            slot["binding"] = {"state": "value", "value": "dcid:CRS/12262"}
+    """`US_2023`'s health part bound to CRS 12262, malaria control, in every identity it
+    states, a part of its own under a spec_id of its own."""
+    health = us_2023_block("health")
+    block = json.loads(json.dumps(health).replace(health["spec_id"], f"spec_{'7' * 32}"))
+    scope = block["resolved"]["scope_choices"]
+    for identity in (scope["base"]["identity"], scope["compiled"]["identity"]):
+        for slot in identity["slots"]:
+            if slot["property"] == "crsPurpose":
+                slot["binding"] = {"state": "value", "value": "dcid:CRS/12262"}
     return block
 
 
@@ -6919,15 +6921,11 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     provenance and the planner's axes are the part's, so a later search carries
     from the whole what it carries from the part. The whole states no scope row of
     its own, since each would restate the part's; a decision of the planner's
-    states it, cited by the whole. The whole's source keeps the provenance its
-    part's source records."""
+    states it, cited by the whole. The whole is held as a compile from its part."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block(part), *([_us_block(whole)] if whole else []))
-    shown = pin_sources(ctx.state)
     part_pin = us_2023_block(part)["spec_id"]
-    provenance = {"provenance_ref": "provenance/OECD_CRS", "provenance_account": "OECD CRS"}
-    save_pin_sources(ctx.state, {**shown, part_pin: shown[part_pin].model_copy(update=provenance)})
 
     result = await _us_2023(
         _tools_reading(surface)["propose_plan"].func,
@@ -6962,12 +6960,12 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
         (_WHOLE, us_2023_block(compiled)["spec_id"]),
     ]
     assert searched_pins(ctx.state) == ()
-    held_source = pin_sources(ctx.state)[us_2023_block(compiled)["spec_id"]]
-    assert (held_source.provenance_ref, held_source.provenance_account) == (
-        provenance["provenance_ref"],
-        provenance["provenance_account"],
+    (whole_compile,) = [pin for pin in aligned_pins(ctx.state) if pin.whole_axis is not None]
+    assert (whole_compile.spec_id, whole_compile.origin) == (
+        us_2023_block(compiled)["spec_id"],
+        part_pin,
     )
-    held = held_source.block
+    held = whole_compile.block
     assert held is not None
     assert PLANNER_AXES_BLOCK_KEY not in held
     assert {
@@ -9356,7 +9354,7 @@ async def test_a_donor_whole_of_an_inclusive_part_is_counted_on_the_scope_search
     assert (provider["option_id"], provider["provenance"]) == ("provider:inclusive", "carried")
     whole_pin = _OPENED_WHOLE["donor"]
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
-    whole_block = pin_sources(ctx.state)[whole_pin].spec_block(whole_pin)
+    whole_block = held_sources(ctx.state)[whole_pin].spec_block(whole_pin)
     assert whole_block is not None
     choices = whole_block["resolved"]["scope_choices"]["choices"]
     assert {c["axis"]: (c["active"], c["provenance"]) for c in choices}["provider"] == (
@@ -9711,7 +9709,7 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
     assert result["outcome"] == Outcome.OK.value, result
     whole_pin = surface.recorded["whole"]["spec_id"]
     assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
-    whole_block = pin_sources(ctx.state)[whole_pin].spec_block(whole_pin)
+    whole_block = held_sources(ctx.state)[whole_pin].spec_block(whole_pin)
     assert whole_block is not None
     held = reading_facts(whole_block)["scope"]["dropped_entries"]
     assert [d["entry"]["option_id"] for d in held] == dropped
@@ -9836,7 +9834,7 @@ async def test_a_dac_donor_whole_searchs_answer_compiles(
     plan = load_plan(ctx.state)
     assert plan is not None
     pins = dict(_pins(ctx))
-    shown = pin_sources(ctx.state)
+    shown = held_sources(ctx.state)
     discovered = {
         rid: source_from_spec_block(cast(Any, shown[spec_id].spec_block(spec_id)))
         for rid, spec_id in pins.items()
@@ -10343,11 +10341,35 @@ def test_a_sum_of_provider_rows_searched_in_words_keeps_each_row(
 
 def _another_part(block: dict[str, Any]) -> dict[str, Any]:
     """A copy of `block` as a part of its own (`PartScope.base`), under a spec_id of its
-    own, as another donor's DAC1 row reads."""
+    own, binding the same donor and compiling to the same identity."""
     part = block["resolved"]["scope_choices"]["base"]["spec_id"]
     text = json.dumps(block)
     for held, other in ((part, f"spec_{'6' * 32}"), (block["spec_id"], f"spec_{'5' * 32}")):
         text = text.replace(held, other)
+    return json.loads(text)
+
+
+def _french_dac1(block: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `block`, one of `_SUM_BLOCKS`' DAC countries' DAC1 rows, as France's
+    row reads: France bound as its donor, as `us_health_to_kenya` binds the United
+    States, so no donor set, under the spec_ids its identities hash to."""
+    text = json.dumps(block)
+    for held, french in (("DACCountriesTotal", "country/FRA"), ("DAC countries, total", "France")):
+        text = text.replace(held, french)
+    copied = json.loads(text)
+    resolved = copied["resolved"]
+    del resolved["entity_groups"]["origin"]
+    for entity in resolved["entities"]:
+        if entity["role"] == "origin":
+            entity["entity_type"] = "Country"
+    scope = resolved["scope_choices"]
+    renamed = {
+        scope["base"]["spec_id"]: spec_id_for(canonicalize(scope["base"]["identity"])),
+        copied["spec_id"]: spec_id_for(canonicalize(scope["compiled"]["identity"])),
+    }
+    text = json.dumps(copied)
+    for held, french in renamed.items():
+        text = text.replace(held, french)
     return json.loads(text)
 
 
@@ -10369,7 +10391,7 @@ def test_provider_rows_of_two_parts_read_in_words_keep_their_own(
     contributions counting no money twice."""
     blocks = {
         _TOTAL: _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"], stated=stated),
-        _PART: _another_part(
+        _PART: _french_dac1(
             _searched_in_words(_SUM_BLOCKS["dac_countries_multilateral"], stated=stated)
         ),
     }
@@ -10510,7 +10532,7 @@ _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
             {
                 "first": _US_MULTILATERAL,
                 "second": _US_TOTAL,
-                "other": _another_part(_US_MULTILATERAL),
+                "other": _french_dac1(_US_MULTILATERAL),
             },
             [_share("first", "second"), _difference("second", "other")],
             None,
@@ -10526,7 +10548,7 @@ _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
                 {
                     "first": _US_MULTILATERAL,
                     "second": _US_TOTAL,
-                    "other": _another_part(
+                    "other": _french_dac1(
                         _searched_in_words(_SUM_BLOCKS["dac_countries_bilateral"])
                     ),
                 },
@@ -10549,7 +10571,7 @@ _US_TOTAL = _searched_in_words(_SUM_BLOCKS["dac_countries_contributions"])
                 "second": _searched_in_words(
                     _SUM_BLOCKS["dac_countries_multilateral"], stated=False
                 ),
-                "other": _another_part(_US_MULTILATERAL),
+                "other": _french_dac1(_US_MULTILATERAL),
             },
             [_added("first", "second"), _share(_SUM, "other")],
             None,
@@ -10624,6 +10646,252 @@ def test_two_sides_never_read_one_series(
     assert [
         step_id for step_id in caveated if differ & set(plan.requirement(step_id).decision_ids)
     ] == caveated
+
+
+def _own_part_with_source(
+    block: dict[str, Any], *, years: tuple[int, int] | None = None
+) -> dict[str, Any]:
+    """`block`, a part compiled onto one provider row, as Search answers that row read
+    in words with its source named ("multilateral ODA from OECD DAC1"): a part of its
+    own, whose base identity binds the row's code and DAC1's provenance facet, and,
+    where `years` are given, was searched over those years, under the spec_id that
+    identity hashes to. The compile of total ODA onto the row leaves the facet to
+    the read, which picks DAC1, so the two read one series."""
+    scope = block["resolved"]["scope_choices"]
+    identity = {
+        **scope["compiled"]["identity"],
+        "facets": {"provenance": {"state": "value", "ref": "provenance/OECDDAC1"}},
+    }
+    if years is not None:
+        identity["requested_window"] = {
+            "kind": "range",
+            "start_year": years[0],
+            "end_year": years[1],
+        }
+    spec_id = spec_id_for(canonicalize(identity))
+    text = json.dumps(block)
+    for held in (scope["base"]["spec_id"], block["spec_id"]):
+        text = text.replace(held, spec_id)
+    own = json.loads(text)
+    own["definition"]["identity"] = identity
+    own_scope = own["resolved"]["scope_choices"]
+    own_scope["base"]["identity"] = own_scope["compiled"]["identity"] = identity
+    return own
+
+
+@pytest.mark.parametrize(
+    "years",
+    [
+        pytest.param(None, id="searched-over-the-years-read"),
+        # The numerator searched over wider years than both inputs read, as a
+        # follow-up's search can be: the pin's years are its search's, so they do not
+        # make it another series.
+        pytest.param((2015, 2019), id="searched-over-other-years"),
+    ],
+)
+def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
+    decision: DecisionFactory, years: tuple[int, int] | None
+) -> None:
+    """ "What share of US ODA went to multilateral organisations?": Search answers
+    multilateral ODA as a part of its own, and the total counted on its multilateral
+    row compiles to that part's series under another spec_id. The compile is held,
+    so the share would divide one series by itself and answer 100%. The total keeps
+    its own row, and the share states that its inputs count different spending."""
+    numerator = _searched_in_words(
+        _own_part_with_source(_SUM_BLOCKS["dac_countries_multilateral"], years=years)
+    )
+    compile_block = _SUM_BLOCKS["dac_countries_multilateral"]
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, numerator, _US_TOTAL)
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin=_US_TOTAL["spec_id"],
+            option_ids=("provider:multilateral",),
+            spec_id=compile_block["spec_id"],
+            digest={"spec_block": compile_block},
+        ),
+    )
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of US ODA went to multilateral organisations?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("first", numerator),
+            _dac_countries("second", _US_TOTAL),
+            _share("first", "second"),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [("first", numerator["spec_id"]), ("second", _US_TOTAL["spec_id"])]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    differ = {d.slot for d in plan.decisions if d.caveat == "providers_differ"}
+    assert differ & set(plan.requirement(_SHARE).decision_ids)
+
+
+# The one entity `_US_TOTAL`'s requirements name, the DAC countries as donors.
+_US_TOTAL_ENTITY = _named(_US_TOTAL)[0].name
+# What a requirement left unpinned searches for, the same for both inputs.
+_UNPINNED = {"source_spec_id": None, "measure": "US ODA"}
+
+
+@pytest.mark.parametrize(
+    ("blocks", "updates", "steps", "refused"),
+    [
+        # "What share of US ODA went to multilateral organisations?": the planner pins
+        # the DAC1 total on both sides, the core contributions it decided on applied to
+        # neither, so the share would divide one series by itself and answer 100%.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _US_TOTAL},
+            {},
+            [_share("first", "second")],
+            ("first", "second"),
+            id="total-over-itself",
+        ),
+        # The same two inputs left unpinned: each sends Search the same words, so both
+        # settle on one series.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _US_TOTAL},
+            {"first": _UNPINNED, "second": _UNPINNED},
+            [_share("first", "second")],
+            ("first", "second"),
+            id="total-over-itself-unpinned",
+        ),
+        # The numerator narrowed to the one entity its single series holds, which
+        # keeps every row of it.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _US_TOTAL},
+            {},
+            [
+                ShareOfRequirement(
+                    id=_SHARE,
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="first", entity=_US_TOTAL_ENTITY),
+                    denominator=RequirementSide(input_id="second"),
+                )
+            ],
+            ("first", "second"),
+            id="total-at-its-only-entity-over-itself",
+        ),
+        # The same total per year over the total: the sum by year leaves one series as
+        # it is, so the share still divides it by itself.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _US_TOTAL},
+            {},
+            [
+                _reduced("by_year", "first", Reduction.SUM, (GroupBy.PERIOD,)),
+                _share("by_year", "second"),
+            ],
+            ("by_year", "second"),
+            id="total-by-year-over-itself",
+        ),
+        # A growth ratio: one series over 2019-2020 divided by itself a year earlier.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _US_TOTAL},
+            {
+                "first": {"period": Period(start=2019, end=2020)},
+                "second": {"period": Period(start=2018, end=2019)},
+            },
+            [
+                QuotientRequirement(
+                    id=_SHARE,
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="first"),
+                    denominator=RequirementSide(input_id="second"),
+                )
+            ],
+            None,
+            id="growth-over-another-year",
+        ),
+        # A part over its whole on another row of the dataset: multilateral ODA over the total.
+        pytest.param(
+            {"first": _US_MULTILATERAL, "second": _US_TOTAL},
+            {},
+            [_share("first", "second")],
+            None,
+            id="part-over-whole",
+        ),
+        # Two different series: one donor's total over another's.
+        pytest.param(
+            {"first": _US_TOTAL, "second": _french_dac1(_US_TOTAL)},
+            {},
+            [_share("first", "second")],
+            None,
+            id="two-series",
+        ),
+    ],
+)
+def test_a_share_of_one_series_over_itself_is_refused(
+    decision: DecisionFactory,
+    blocks: dict[str, dict[str, Any]],
+    updates: dict[str, dict[str, Any]],
+    steps: list[EvidenceRequirement],
+    refused: tuple[str, str] | None,
+) -> None:
+    """A share or quotient whose sides read one series over the same years and
+    entities is refused, whatever put them there, naming both sides, and tells the
+    planner to search for the numerator's part in Search's words for the other
+    provider scopes its pin offers, never an option id it cannot compile. A ratio
+    over other years, a part over its whole and a ratio of two series are recorded."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, *{block["spec_id"]: block for block in blocks.values()}.values())
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of US ODA went to multilateral organisations?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts(
+            [
+                decision(),
+                decision(
+                    slot="multilateral_scope",
+                    description="Which provider scope to measure for multilateral organisations",
+                    options=["core contributions to multilaterals", "all multilateral ODA"],
+                    chosen="core contributions to multilaterals",
+                    rationale="The question asks for core contributions to multilaterals.",
+                ),
+            ]
+        ),
+        evidence_requirements=[
+            *(
+                _dac_countries(rid, block).model_copy(update=updates.get(rid, {}))
+                for rid, block in blocks.items()
+            ),
+            *(
+                step.model_copy(update={"decision_ids": ("measure", "multilateral_scope")})
+                if step.id == _SHARE
+                else step
+                for step in steps
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    if refused is None:
+        assert result["outcome"] == Outcome.OK.value, result
+        return
+    assert result["outcome"] == Outcome.INVALID_INPUT.value, result
+    assert result["code"] == ProblemCode.SHARE_OF_ITSELF.value, result
+    numerator, denominator = refused
+    assert result["detail"] == {
+        "requirement_id": _SHARE,
+        "numerator": numerator,
+        "denominator": denominator,
+    }
+    assert load_plan(ctx.state) is None
+    provider = next(
+        choice
+        for choice in _US_TOTAL["resolved"]["scope_choices"]["choices"]
+        if choice["axis"] == "provider"
+    )
+    others = [o for o in provider["options"] if o["option_id"] != provider["active"]]
+    assert not [o for o in others if o["option_id"] in result["message"]]
+    # A pinned numerator's message words the other scopes its pin offers.
+    if updates.get("first", {}).get("source_spec_id", True) is not None:
+        assert [o for o in others if o["label"] in result["message"]], result["message"]
 
 
 # The US donor total under a second spec_id, on `TOTAL`'s part, counted net by default.
@@ -10847,7 +11115,6 @@ def test_two_unpinned_leaves_read_one_series_only_when_they_are_one_leaf(
         return submission_service._InputBasis(
             requirement_id=requirement_id,
             pin=block["spec_id"],
-            origin=block["spec_id"],
             choice=choice,
             stated=False,
             held=submission_service._Origin(block=block, scope=scope),
@@ -10871,6 +11138,7 @@ def test_two_unpinned_leaves_read_one_series_only_when_they_are_one_leaf(
         "measure_basis",
         {},
         {"second": {"measure_basis:gross"}},
+        compiles={},
     )
 
     assert moved == ({("second", "measure_basis:gross")} if kept_apart else set())
@@ -12358,28 +12626,28 @@ async def test_a_part_alignment_moves_is_held_to_the_user_s_prices(
     assert result["detail"]["part"] == health["spec_id"]
 
 
-def test_a_whole_compiled_from_an_aligned_part_pin_is_held_to_the_user_s_prices(
+def test_a_whole_declared_from_a_priced_part_is_held_to_the_user_s_prices(
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
-    """Alignment compiled the part on another basis, and a declared whole was
-    compiled from that aligned pin. The whole's pin follows the chain back to
-    the part, so stating no unit on it drops the user's constant prices."""
+    """A declared whole is compiled from its part's dataset, whatever pin it
+    carries, so it reads the part the user priced: stating no unit on it drops
+    the user's constant prices."""
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
     sources = _shown_readings(ctx)
-    aligned, whole = "spec_" + "1" * 32, "spec_" + "2" * 32
-    parts = Parts(
-        sources.get,
-        sources.block,
-        shown=pin_sources(ctx.state).keys(),
-        aligned={aligned: _GROSS, whole: aligned},
+    parts = Parts(sources.get, sources.block, shown=pin_sources(ctx.state).keys())
+    part = requirement(id="part", source_spec_id=_GROSS)
+    total = requirement(
+        id="total",
+        source_spec_id="spec_" + "2" * 32,
+        unit=None,
+        whole_of=WholeOf(part="part", axis="sector"),
     )
-    total = requirement(id="total", source_spec_id=whole, unit=None)
 
     refused = prices_decisions(
         {_GROSS: PricesChoice("constant")},
         [total],
-        [total],
+        [total, part],
         parts=parts,
         propose="propose_plan",
     )
@@ -12387,6 +12655,44 @@ def test_a_whole_compiled_from_an_aligned_part_pin_is_held_to_the_user_s_prices(
     assert isinstance(refused, dict), refused
     assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value
     assert refused["detail"]["part"] == _GROSS
+    assert refused["detail"]["requirement_id"] == "total"
+
+
+def test_a_direct_pin_of_an_unshown_compile_is_held_to_the_user_s_prices(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user picked constant prices for gross French aid to Kenya. A pin compiled
+    for another input over the years 2020 to 2024 of that series is held as a
+    compile only, never shown to the planner. A plan pinning it directly, with no
+    unit, reads what the priced part measures, so it is refused as dropping the
+    user's choice."""
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    compiled = copy.deepcopy(_FRANCE_KENYA)
+    compiled["spec_id"] = "spec_" + "3" * 32
+    compiled["definition"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": 2020,
+        "end_year": 2024,
+    }
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin="spec_" + "4" * 32,
+            option_ids=("measure_basis:gross",),
+            spec_id=compiled["spec_id"],
+            digest={"spec_block": compiled},
+        ),
+    )
+    ctx.session.events = _prices_ask_events()
+    dataset, derived = requirements
+    direct = dataset.model_copy(update={"source_spec_id": compiled["spec_id"], "unit": None})
+
+    refused = _propose_one(_tools_by_name(), ctx, decision(), [direct, derived])
+
+    assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
+    assert refused["detail"]["part"] == _GROSS
+    assert refused["detail"]["requirement_id"] == dataset.id
 
 
 def test_an_answer_to_another_question_leaves_the_prices_choice_standing(

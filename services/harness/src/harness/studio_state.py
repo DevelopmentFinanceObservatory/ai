@@ -920,16 +920,23 @@ class ConversationState:
         readings = [*self.turn_readings, *(reading.model_dump(mode="json") for reading in sourced)]
         if readings:
             record["readings"] = readings
-        # Keep the blocks of the sources the turn's plans used and of the source
-        # each windowed copy among them copies: a later turn can pin or fetch
-        # that source through `earlier_block`. A block can run to about 120 KB
-        # and the record is kept for the whole conversation, so no other is kept.
+        # Keep the blocks of the sources the turn's plans used, of the source
+        # each windowed copy among them copies, and of the pin each input
+        # alignment moved states (`PlanSource.aligned_from`): a later turn can
+        # pin or fetch that source through `earlier_block`. A block can run to
+        # about 120 KB and the record is kept for the whole conversation, so no
+        # other is kept.
         identities = _turn_identities(self.turn_specs, plans)
         copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
             {**self._earlier_identities(), **identities},
         )
-        used = {source.spec_id for plan in plans for source in plan.sources} | copied
+        used = {
+            spec_id
+            for plan in plans
+            for source in plan.sources
+            for spec_id in (source.spec_id, *source.aligned_from)
+        } | copied
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
             record["specs"] = specs

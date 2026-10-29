@@ -1495,6 +1495,118 @@ def test_a_partial_option_and_a_dropped_entry_say_why(
     )
 
 
+def _filtered_top_donors(role: str, *, names: list[str] | None = None) -> dict[str, Any]:
+    """The recorded top donors to Guatemala, with a filter between the
+    retrieval and the rank keeping countries on `role`, or, given `names`,
+    the entities of `role` the retrieval names in their place, ranked among
+    those named, as its plan record's JSON."""
+    raw = copy.deepcopy(_FIXTURE["plans"]["guatemala_top_donors"])
+    among = "population" if names is None else "named"
+    for decision in raw["decisions"]:
+        if decision["slot"] == "ranking_scope":
+            decision["fixes"]["among"] = among
+    countries = [
+        {"kind": "place_level", "level": "Country", "role": role, "strict": True}
+        if names is None
+        else {"kind": "entity_in", "names": names, "role": role}
+    ]
+    dataset, rank = raw["evidence_requirements"]
+    named = [{"name": name, "role": role} for name in names or ()]
+    raw["evidence_requirements"] = [
+        {
+            **dataset,
+            "entities": [*dataset["entities"], *named],
+            "across": [word for word in dataset["across"] if not named or word != role],
+        },
+        {
+            "kind": "filter",
+            "id": "kept",
+            "decision_ids": ["ranking_scope"],
+            "input_id": dataset["id"],
+            "predicates": countries,
+        },
+        {**rank, "input_id": "kept", "among": among},
+    ]
+    retrieve, ranked = raw["translation"]["operations"]
+    raw["translation"]["operations"] = [
+        retrieve,
+        {
+            "kind": "filter",
+            "id": "kept",
+            "requirement_id": "kept",
+            "input": retrieve["id"],
+            "predicates": countries,
+        },
+        {**ranked, "input": "kept", "among": among},
+    ]
+    fetch, top = raw["workflow"]["steps"]
+    raw["workflow"]["steps"] = [
+        fetch,
+        {
+            **fetch,
+            "id": "kept",
+            "operation_id": "kept",
+            "tool": {"server": "analysis-mcp", "name": "filter"},
+            "args": {},
+            "bindings": {"frame_ref": {"from_step": fetch["id"], "output": "frame_ref"}},
+        },
+        {**top, "bindings": {"frame_ref": {"from_step": "kept", "output": "frame_ref"}}},
+    ]
+    return PlanRecord.from_plan(Plan.model_validate(raw)).model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("narrowed", "clause"),
+    [
+        ("donor", "bilateral: read as only donor countries"),
+        ("recipient", "the option you asked for is not available here"),
+        ("donor names", "the option you asked for is not available here"),
+        (None, "the option you asked for is not available here"),
+    ],
+    ids=[
+        "filter-on-the-axis-role",
+        "filter-on-another-role",
+        "names-on-the-axis-role",
+        "no-filter",
+    ],
+)
+def test_a_stated_entry_a_plan_filter_met_reads_as_the_filter(
+    narrowed: str | None, clause: str
+) -> None:
+    # "now only bilateral aid" over a per-donor table: Search drops
+    # `provider:bilateral`, which the table has no axis for, and the plan
+    # keeps the donor countries by a filter. The line names that reading.
+    # With no level kept on the donors, or only a list of donors named ("which
+    # G7 donors gave the most bilateral aid"), which applies no class, the
+    # entry still reads as not applied.
+    part = _example_part()
+    part["scope"]["dropped_entries"] = [
+        {
+            "entry": {
+                "axis": "provider",
+                "option_id": "provider:bilateral",
+                "provenance": "explicit",
+                "origin": {"kind": "text", "text": "now only bilateral aid", "start": 9, "end": 18},
+            },
+            "code": "stated_choice_not_applied",
+            "cause": "axis_absent",
+        }
+    ]
+    plans = []
+    if narrowed is not None:
+        record = (
+            _filtered_top_donors("donor", names=["Canada", "France", "Germany", "Italy"])
+            if narrowed == "donor names"
+            else _filtered_top_donors(narrowed)
+        )
+        record["sources"][0]["spec_id"] = part["spec_id"]
+        plans.append(record)
+
+    assert basis_line([_fetched(part)], specs={}, plans=plans) == (
+        f"{_EXAMPLE_LINE.removesuffix('.')} · {clause}."
+    )
+
+
 # Every reason code `resolved.scope_choices` names.
 _CONTRACT_REASON_CODES = {
     "provider_not_offered",

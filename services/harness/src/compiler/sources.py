@@ -189,6 +189,34 @@ def bound_refs(part: Mapping[str, object]) -> tuple[BoundEntity, ...]:
     return tuple(bound)
 
 
+def bound_rows(refs: Mapping[str, object]) -> tuple[BoundEntity, ...]:
+    """`refs`, a mapping from each entity text to the refs it bound, as the
+    `BoundEntity` rows a spec block stores under `_bound_refs`.
+
+    Each entry `text: refs` becomes `BoundEntity(identity=text, text=text,
+    role=None, refs=refs)`: the mapping keeps no row's pinned `dcid`, stated
+    `name` or `role_text`, so `identity` takes the text and `role` is
+    unstated. A reader finds the row by its text, case-folded, with any role
+    fitting, as it read the mapping. Only the string refs of an entry count,
+    each once, and an entry with no text or no such ref is left out. Blocks
+    stored as the mapping are rewritten by this rule too
+    (`harness.bound_refs_migration`), so a stored block holds the same rows
+    whichever way it was written.
+    """
+    rows: list[BoundEntity] = []
+    for text, value in refs.items():
+        strings = (
+            [ref for ref in value if isinstance(ref, str)]
+            if isinstance(value, list | tuple)
+            else []
+        )
+        if text and strings:
+            rows.append(
+                BoundEntity(identity=text, text=text, role=None, refs=tuple(dict.fromkeys(strings)))
+            )
+    return tuple(rows)
+
+
 def outcome_from_envelope(
     envelope: Mapping[str, object], *, entities: Sequence[EntityKey] = ()
 ) -> DiscoveryOutcome:

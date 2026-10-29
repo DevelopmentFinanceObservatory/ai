@@ -1387,11 +1387,14 @@ class PlanApprovedStep(_WireModel):
 
 
 class PlanApprovedChoice(_WireModel):
-    """One choice of the approved plan: its short name (`question`), the
-    option label it holds (`chosen`) and, when a switch of the turn changed
-    it, the label it held on the card the user first switched from
-    (`changed_from`)."""
+    """One choice of the approved plan: its id (`choice_id`, the id the plan
+    card's `PlanDecision.choice_id` carries, `"decision/<slot>"` for a
+    planner decision), its short name (`question`), the option label it holds
+    (`chosen`) and, when a switch of the turn changed it, the label it held
+    on the card the user first switched from (`changed_from`)."""
 
+    # Delta 24 (v1.9): a `plan.approved` stored before it has no `choice_id`.
+    choice_id: str
     question: str
     chosen: str
     changed_from: str | None = None

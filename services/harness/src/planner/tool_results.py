@@ -120,6 +120,10 @@ class ProblemCode(StrEnum):
     # provider scope of its other inputs, which the planner repairs
     # (`submission.service._providers_unaligned`).
     PROVIDERS_UNALIGNED = "providers_unaligned"
+    # A share or quotient whose two sides read one series over the same years and
+    # entities, which divides a figure by itself
+    # (`submission.service._share_of_itself`).
+    SHARE_OF_ITSELF = "share_of_itself"
     MEASURE_FIXED_BY_PIN = "measure_fixed_by_pin"
 
 

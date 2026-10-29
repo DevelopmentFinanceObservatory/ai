@@ -21,10 +21,12 @@ description, and marks the one step whose result answers (`answer_step`);
 `card_title` titles the card by that step's ask; `card_summary` says in one
 sentence what the answer counts, for whom, when and from which source;
 `card_choice_text`, `card_decision_text` and `CHOICE_NAMES` give a
-decision's words; `choice_id` gives a scope choice's row the id every
-switch keeps; and `switchable_decision`, `decision_choice_id` and
-`decision_option_id` give a planner decision the card offers to switch its
-row's id and its options' ids.
+decision's words, and `FIXED_VALUE_WORDS` the words for an option the
+planner wrote as a value a decision fixes, and `place_level_words` the same
+words for the level of place a filter keeps on a role; `choice_id` gives a scope
+choice's row the id every switch keeps; and `switchable_decision`,
+`decision_choice_id` and `decision_option_id` give a planner decision the
+card offers to switch its row's id and its options' ids.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -55,7 +57,7 @@ import json
 import re
 import typing
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 
 from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
@@ -79,6 +81,7 @@ from planner.plan import (
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -91,6 +94,7 @@ from planner.plan import (
     ResolvedBy,
     ShareOfRequirement,
     SumOfRequirement,
+    Unit,
     answering_results,
     authored,
     authored_text,
@@ -115,9 +119,12 @@ from planner.records import (
     PlaceLevel,
     PlaceType,
     Predicate,
+    RankAmong,
+    RankDirection,
     Reduction,
     RollingWindow,
     StatVarReading,
+    ThresholdOp,
     ValueThreshold,
 )
 from planner.shapes import FrameShape, RoleDimension, TimeLabel, ValueKind
@@ -646,39 +653,6 @@ def _sides_phrase(sides: Mapping[str | None, Sequence[str]]) -> str:
     )
 
 
-def source_whole_name(
-    axis: str,
-    *,
-    source: SelectedSource,
-    part: SelectedSource | None,
-    sector: str | None,
-    measure: str | None,
-) -> str | None:
-    """What a declared whole leaving the donor or recipient `axis` open
-    fetches, named off the source Search answered for it alone, with no plan.
-
-    The concept as the plan card names it (`_entity_whole_concept`). Then the
-    parties `source` binds, each side by the named set bound there, else its
-    entities, else the members its open axis holds, and the opened side,
-    still unnamed, as every party there: "official development assistance
-    from DAC countries", "gross disbursements (official development
-    assistance) from official donors (DAC) to Kenya". `None` where `axis` is
-    on no side of a flow or nothing names the concept."""
-    side = flow_side(axis)
-    concept = _entity_whole_concept(source=source, part=part, sector=sector, measure=measure or "")
-    if side is None or not concept:
-        return None
-    sides: dict[str | None, list[str]] = {"giving": [], "receiving": [], None: []}
-    bound = {flow_side(group.role) for group in source.groups}
-    for entity in source.entities:
-        if (entity_side := flow_side(entity.role)) is not None and entity_side not in bound:
-            sides[entity_side].append(entity.label)
-    _source_parties(source, sides)
-    if not sides[side]:
-        sides[side].append(whole_name(axis))
-    return f"{concept} {_sides_phrase(sides)}"
-
-
 def _entity_whole_concept(
     *,
     source: SelectedSource | None,
@@ -687,8 +661,7 @@ def _entity_whole_concept(
     measure: str,
 ) -> str:
     """What a declared whole leaving a donor or recipient axis open fetches,
-    the one rule the plan card (`_concept`) and its stored reading
-    (`source_whole_name`) share, by `concept_name`'s order: the concept
+    as the plan card names it (`_concept`), by `concept_name`'s order: the concept
     Search states for the whole's `source`, else for its part's `part`, else
     the `sector` option the whole was counted on, else the label Search
     composed for `source`'s measure, which differs from the part's where
@@ -739,7 +712,10 @@ def card_choice_text(
 ) -> str:
     """An option a decision chose or offers, as the card shows it.
 
-    As `card_decision_text`, except that a text the planner opened with a
+    An option the planner wrote as a value of a field `decision` fixes
+    ("population" for `among`) reads as the card's words for that value
+    (`fixed_value_words`). Any other reads as `card_decision_text` reads
+    it, except that a text the planner opened with a
     scope option's id ("sector:120+130 health") names only that option, so
     the whole text reads as the option's label, the words Search gives it,
     unless another of `options`, the texts the decision chose and offers,
@@ -747,6 +723,8 @@ def card_choice_text(
     the id ("<label> health for the numerator", "<label> health for the
     total").
     """
+    if decision is not None and (words := fixed_value_words(text, plan, decision)) is not None:
+        return words
     named = with_source_names(text, plan).strip()
     if (labelled := _option_labelled(named, plan, decision)) is None:
         return _unslugged(named)
@@ -803,6 +781,347 @@ def _option_labelled(text: str, plan: Plan, decision: Decision | None) -> tuple[
 def _unslugged(text: str) -> str:
     """`text` as words when it is a slug the planner wrote ("crs_total")."""
     return text.replace("_", " ") if _SLUG.fullmatch(text) else text
+
+
+# The price bases a unit states (`Unit.prices`, `DecisionFixes.prices`).
+_PRICES: tuple[str, ...] = typing.get_args(Unit.model_fields["prices"].annotation)
+
+# The values each `DecisionFixes` field holding an enum or a `Literal` takes,
+# by field name: an enum's members, a `Literal`'s values, and "<field>.<name>"
+# for one a field's model, or each model of its tuple, states
+# ("predicates.level", the `level` of each `PlaceLevel`).
+FIXED_ENUMS: Mapping[str, tuple[str, ...]] = {
+    "stat_vars": tuple(StatVarReading),
+    "reduction": tuple(Reduction),
+    "group_by": tuple(GroupBy),
+    "direction": tuple(RankDirection),
+    "among": tuple(RankAmong),
+    "denominator_scope": tuple(DenominatorScope),
+    "change": tuple(GrowthChange),
+    "prices": _PRICES,
+    "unit.prices": _PRICES,
+    "predicates.level": tuple(PlaceType),
+    "predicates.op": typing.get_args(ThresholdOp),
+}
+
+
+def _fixed_held(fixes: DecisionFixes, field: str) -> object:
+    """What `fixes` holds for `field`, a `FIXED_ENUMS` name: the field's
+    value, or for a nested name, the value its model states, or the values
+    the items of its tuple stating it hold; `None` when none does."""
+    outer, _, inner = field.partition(".")
+    held = getattr(fixes, outer)
+    if not inner or held is None:
+        return held
+    if not isinstance(held, tuple):
+        return getattr(held, inner)
+    return tuple(getattr(item, inner) for item in held if hasattr(item, inner)) or None
+
+
+class _Words(typing.NamedTuple):
+    """The card's words for one value a decision can fix: `fallback`, true of
+    the value in every plan, and `build`, which words it from the plan and
+    the decision fixing it, or returns `None` where the plan cannot say more."""
+
+    fallback: str
+    build: Callable[[Plan, Decision], str | None] | None = None
+
+
+class _Ranked(typing.NamedTuple):
+    """What one rank compares: its `party` in the plural, the `source` it reads
+    them from, how many that source holds (`count`) and the entities the
+    filter narrowing its axis keeps (`kept`)."""
+
+    party: str
+    source: str | None
+    count: int | None
+    kept: tuple[str, ...]
+
+
+def _citing[R: EvidenceRequirement](plan: Plan, decision: Decision, kind: type[R]) -> list[R]:
+    """The requirements of `plan` of `kind` that cite `decision`."""
+    return [
+        r
+        for r in plan.evidence_requirements
+        if isinstance(r, kind) and decision.slot in r.decision_ids
+    ]
+
+
+def _agreed[T](values: Sequence[T]) -> T | None:
+    """The one value every entry of `values` holds; `None` when they differ or there are none."""
+    return values[0] if values and all(value == values[0] for value in values) else None
+
+
+def _ranked(requirement: RankRequirement, plan: Plan) -> _Ranked:
+    """What `requirement` compares, its count as `_sentence_rank` counts it."""
+    role = _axis_role(requirement, plan)
+    datasets = datasets_of(requirement, plan)
+    covering = next((d for d in datasets if role is not None and role in d.across), None)
+    source = next(
+        (
+            s
+            for d in ([covering] if covering is not None else datasets)
+            if (s := _selected_source(d.id, plan)) is not None
+        ),
+        None,
+    )
+    count = (
+        _population_count(covering, role, plan)
+        if covering is not None
+        and role is not None
+        and _place_level_word(requirement, plan) is None
+        else None
+    )
+    return _Ranked(
+        party=_axis_word(requirement, plan),
+        source=(source.published_tables or source.provenance_label) if source else None,
+        count=count,
+        kept=_kept_on_axis(requirement, role, plan),
+    )
+
+
+def _kept_on_axis(requirement: RankRequirement, role: str | None, plan: Plan) -> tuple[str, ...]:
+    """The names the filter nearest `requirement` keeps on its axis: the
+    `EntityIn` of `role`, or of no role, a `named` rank compiles only behind
+    (`planner.plan._rank_shape`). Empty when no filter upstream narrows the axis."""
+    pending = [requirement.input_id]
+    while pending:
+        upstream = plan.requirement(pending.pop(0))
+        if isinstance(upstream, FilterRequirement):
+            names = [
+                name
+                for predicate in upstream.predicates
+                if isinstance(predicate, EntityIn) and predicate.role in (None, role)
+                for name in predicate.names
+            ]
+            if names:
+                return tuple(dict.fromkeys(names))
+        pending.extend(inputs_of(upstream))
+    return ()
+
+
+def _ranks(plan: Plan, decision: Decision) -> tuple[list[_Ranked], str] | None:
+    """What each rank citing `decision` compares, and the party they all
+    rank ("entities" where they differ); `None` when no rank cites it."""
+    ranked = [_ranked(r, plan) for r in _citing(plan, decision, RankRequirement)]
+    if not ranked:
+        return None
+    return ranked, _agreed([r.party for r in ranked]) or "entities"
+
+
+def _rank_population(plan: Plan, decision: Decision) -> str | None:
+    """`RankAmong.POPULATION` in words: every member the ranks' source holds,
+    named and counted only where every rank citing `decision` agrees."""
+    if (ranks := _ranks(plan, decision)) is None:
+        return None
+    ranked, party = ranks
+    source = _agreed([r.source for r in ranked])
+    count = _agreed([r.count for r in ranked])
+    if source is None:
+        return f"all {party} {'the source holds' if len(ranked) == 1 else 'each source holds'}"
+    if count is not None and count > 1:
+        return f"all {count:,} {party} in {source}"
+    return f"all {party} in {source}"
+
+
+def _rank_named(plan: Plan, decision: Decision) -> str | None:
+    """`RankAmong.NAMED` in words: the entities the narrowing filter keeps,
+    where every rank citing `decision` keeps the same ones. A `named` rank
+    compiles only behind such a filter, so with none the option means
+    entities picked by name."""
+    if (ranks := _ranks(plan, decision)) is None:
+        return None
+    ranked, party = ranks
+    kept = _agreed([r.kept for r in ranked])
+    if kept and len(kept) <= _NAMED_SHOWN:
+        return f"only {_joined(kept)}"
+    if kept:
+        return f"only the {len(kept)} {party} the filter keeps"
+    return f"only {party} picked by name"
+
+
+# The most entities `_rank_named` names one by one before counting them.
+_NAMED_SHOWN = 3
+
+
+def _denominator_words(scope: DenominatorScope) -> Callable[[Plan, Decision], str | None]:
+    """`scope` in words, as each keyed share citing the decision divides
+    (`_share_divides_by`), where they all divide alike."""
+
+    def words(plan: Plan, decision: Decision) -> str | None:
+        shares = [s for s in _citing(plan, decision, ShareOfRequirement) if s.axis is not None]
+        divides = [_share_divides_by(share, scope, plan) for share in shares]
+        return None if None in divides else _agreed(divides)
+
+    return words
+
+
+def _share_divides_by(
+    requirement: ShareOfRequirement, scope: DenominatorScope, plan: Plan
+) -> str | None:
+    """What keyed share `requirement` divides each key by under `scope`, as
+    an option names it, with the denominator's measure: "each divided by its
+    own total of GNI", "each divided by one total of GNI", "each divided by
+    the total of GNI for Kenya". `None` where a step before the denominator
+    drops rows, which only its quoted step label names
+    (`denominator_scope_phrase`)."""
+    denominator = plan.requirement(requirement.denominator.input_id)
+    measure = _measure_of(denominator, plan)
+    if scope is DenominatorScope.PER_AXIS:
+        return f"each divided by its own total of {measure}"
+    if (entity := requirement.denominator.entity) is not None:
+        return f"each divided by the total of {measure} for {entity}"
+    if narrowing_step(denominator, plan) is not None:
+        return None
+    return f"each divided by one total of {measure}"
+
+
+def _by_party(plan: Plan, decision: Decision) -> str | None:
+    """`GroupBy.ENTITY` in words: by each dimension every aggregate citing
+    `decision` keeps when it groups by entity, its input's roles but an open
+    `across` one, which it sums away (`planner.shapes.aggregated`): each
+    named party, a breakdown by its dimension ("sector"), and the places
+    named with no role as "each place named". `None` where the aggregates
+    keep different ones, or none cites `decision`."""
+    shapes = frame_shapes(plan)
+    kept = _agreed(
+        [
+            tuple(
+                dict.fromkeys(
+                    role.role for role in shapes[aggregate.input_id].roles if not role.open
+                )
+            )
+            for aggregate in _citing(plan, decision, AggregateRequirement)
+        ]
+    )
+    if not kept:
+        return None
+    parties = [singular(role) for role in kept if role is not None]
+    return f"by {_joined([*parties, *(['each place named'] if None in kept else [])])}"
+
+
+def _by_breakdown(plan: Plan, decision: Decision) -> str | None:
+    """`GroupBy.BREAKDOWN` in words: by the dimension every aggregate citing
+    `decision` reads a breakdown of (`_breakdown_of`), as the step sentence
+    names it; `None` where they read different ones or none."""
+    breakdown = _agreed(
+        [_breakdown_of(r, plan) for r in _citing(plan, decision, AggregateRequirement)]
+    )
+    return f"by {breakdown.dimension.value}" if breakdown is not None else None
+
+
+def place_level_words(level: PlaceType, *, role: str | None = None) -> str:
+    """What a filter keeping `level` on `role` keeps, as a decision option
+    reads it: "only donor countries", or "only countries" with no role."""
+    kept = pluralize(level_noun(level))
+    return f"only {singular(role)} {kept}" if role else f"only {kept}"
+
+
+def _place_level_built(level: PlaceType) -> Callable[[Plan, Decision], str | None]:
+    """`level` in words on the role every `PlaceLevel` of it the decision
+    fixes narrows (`place_level_words`); `None` where they name different
+    roles or none."""
+
+    def words(plan: Plan, decision: Decision) -> str | None:
+        fixed = decision.fixes.predicates if decision.fixes is not None else None
+        role = _agreed(
+            [p.role for p in fixed or () if isinstance(p, PlaceLevel) and p.level is level]
+        )
+        return place_level_words(level, role=role) if role is not None else None
+
+    return words
+
+
+# The card's words for a price basis, which a unit and a decision fixing
+# prices alone (`DecisionFixes.prices`) share.
+_PRICE_WORDS: Mapping[str, _Words] = {
+    "current": _Words("current prices"),
+    "constant": _Words("constant prices, inflation removed"),
+}
+
+# The card's words for each value a decision option can fix, by the
+# `FIXED_ENUMS` field holding it, so an option the planner wrote as the value
+# itself ("population") never reads as that value. Keyed by field, since two
+# fields can share a value ("sum" in `stat_vars` and `reduction`). Lower
+# case, as every option text the card shows is.
+FIXED_VALUE_WORDS: Mapping[str, Mapping[str, _Words]] = {
+    "stat_vars": {
+        StatVarReading.SUM: _Words("summed into one series"),
+        StatVarReading.SEPARATE: _Words("one series per indicator"),
+    },
+    "reduction": {
+        Reduction.SUM: _Words("total"),
+        Reduction.MEAN: _Words("average"),
+        Reduction.MAX: _Words("highest value"),
+        Reduction.MIN: _Words("lowest value"),
+    },
+    "group_by": {
+        GroupBy.PERIOD: _Words("by year"),
+        GroupBy.ENTITY: _Words("by each party, place or category kept", _by_party),
+        GroupBy.BREAKDOWN: _Words("by category", _by_breakdown),
+    },
+    "direction": {
+        RankDirection.HIGHEST_FIRST: _Words("highest value first"),
+        RankDirection.LOWEST_FIRST: _Words("lowest value first"),
+    },
+    "among": {
+        RankAmong.POPULATION: _Words("every member the source holds", _rank_population),
+        RankAmong.NAMED: _Words("only those picked by name", _rank_named),
+    },
+    "denominator_scope": {
+        DenominatorScope.PER_AXIS: _Words(
+            "each its own total", _denominator_words(DenominatorScope.PER_AXIS)
+        ),
+        DenominatorScope.POOLED: _Words(
+            "one shared total", _denominator_words(DenominatorScope.POOLED)
+        ),
+    },
+    "change": {
+        GrowthChange.RELATIVE: _Words("percentage change"),
+        GrowthChange.ABSOLUTE: _Words("change in value"),
+    },
+    "prices": _PRICE_WORDS,
+    "unit.prices": _PRICE_WORDS,
+    "predicates.level": {
+        level: _Words(place_level_words(level), _place_level_built(level)) for level in PlaceType
+    },
+    "predicates.op": {op: _Words(words) for op, words in _THRESHOLD_WORDS.items()},
+}
+
+
+def fixed_value_words(text: str, plan: Plan, decision: Decision) -> str | None:
+    """The card's words (`FIXED_VALUE_WORDS`) for option `text` of `decision`
+    when the planner wrote it as a value of a field `decision` fixes: the
+    words built from the plan, else the value's fallback. `None` for any
+    other text, so the planner's words stand.
+
+    `text` names a value when, read as a slug ("highest first" as
+    `highest_first`, "Country" as `country`), it is one of the values of
+    exactly one field `decision` fixes, or of a field nested in one
+    (`FIXED_ENUMS`). `decision.chosen` must name a value that field holds,
+    and any other option a value it does not hold, so the words never
+    contradict what the plan computes.
+    """
+    fixes = decision.fixes
+    if fixes is None:
+        return None
+    slug = re.sub(r"[\s-]+", "_", text.strip().lower())
+    matched = [
+        (field, held, value)
+        for field, values in FIXED_ENUMS.items()
+        if (held := _fixed_held(fixes, field)) is not None
+        for value in values
+        if value.lower() == slug
+    ]
+    if len(matched) != 1:
+        return None
+    ((field, held, value),) = matched
+    holds = value in held if isinstance(held, tuple) else value == held
+    if holds != (text == decision.chosen):
+        return None
+    words = FIXED_VALUE_WORDS[field][value]
+    built = words.build(plan, decision) if words.build is not None else None
+    return built or words.fallback
 
 
 def concept_name(
@@ -1265,18 +1584,13 @@ def card_questions(plan: Plan) -> dict[str, str]:
 
 
 def _governed_concepts(plan: Plan, decision: Decision, concepts: Mapping[str, str]) -> list[str]:
-    """The names `concepts` gives the retrievals pinning a source the row of scope
-    decision `decision` stands for (`listed_together`), in the order the plan states them."""
-    pinned = {
-        member.fixes.source_spec_id
-        for member in listed_together(plan, decision.slot)
-        if member.fixes is not None and member.fixes.source_spec_id is not None
-    }
+    """The names `concepts` gives the retrievals citing a decision the row of scope
+    decision `decision` stands for (`_row_slots`), in the order the plan states them."""
+    row = _row_slots(plan, decision)
     return [
         name
         for requirement_id, name in concepts.items()
-        if typing.cast(DatasetRequirement, plan.requirement(requirement_id)).source_spec_id
-        in pinned
+        if not row.isdisjoint(plan.requirement(requirement_id).decision_ids)
     ]
 
 
@@ -1294,19 +1608,36 @@ def listed_together(plan: Plan, slot: str) -> tuple[Decision, ...]:
 def choice_id(plan: Plan, decision: Decision) -> str:
     """The id the plan card gives scope decision `decision`'s row: `"<requirement id>:<axis>"`.
 
-    The requirement is the first of `plan` pinning a source the row stands
-    for (`listed_together`). A switch re-pins requirements and keeps their
-    ids, so the row keeps its id through every switch of the conversation,
-    whichever decision of the row is listed. A row whose sources no
-    requirement pins keeps Search's own id for the choice.
+    The requirement is the first of `plan` citing a decision the row stands
+    for (`_row_slots`). Admission derives each requirement's scope decisions
+    on the pin the planner states for it (`submission.service.statement`):
+    its pin's own rows, and for an input alignment moved onto another
+    pin's compile a row of its own on each axis moved
+    (`scope_<axis>_of_<requirement id>`). So the id reads the plan as the
+    planner states it, and a row standing for an aligned input's moved
+    axis takes that input's id, whichever requirement pins the compile. A
+    switch re-pins requirements and keeps their ids, so the row keeps its
+    id through every switch of the conversation, whichever decision of the
+    row is listed. A row no requirement cites keeps Search's own id for the
+    choice.
     """
     assert decision.scope is not None, "only a scope decision has a choice id"
-    pinned = {
-        member.fixes.source_spec_id
-        for member in listed_together(plan, decision.slot) or (decision,)
-        if member.fixes is not None and member.fixes.source_spec_id is not None
-    }
-    return pinned_choice_id(plan, pinned, decision.scope.axis) or decision.scope.choice_id
+    row = _row_slots(plan, decision)
+    first = next(
+        (
+            requirement
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+            and not row.isdisjoint(requirement.decision_ids)
+        ),
+        None,
+    )
+    return f"{first.id}:{decision.scope.axis}" if first is not None else decision.scope.choice_id
+
+
+def _row_slots(plan: Plan, decision: Decision) -> frozenset[str]:
+    """The slots of the decisions the card's row for `decision` stands for (`listed_together`)."""
+    return frozenset(member.slot for member in listed_together(plan, decision.slot) or (decision,))
 
 
 # The prefix of the id a planner decision's row takes (`decision_choice_id`).
@@ -1355,7 +1686,11 @@ def decision_option_id(label: str) -> str:
 def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | None:
     """`"<requirement id>:<axis>"` for the first requirement of `plan` pinning one
     of `pinned`, the id `choice_id` gives a row standing for those sources;
-    `None` when no requirement pins any."""
+    `None` when no requirement pins any.
+
+    `plan` is the plan as the planner states it (`submission.service.statement`),
+    where each requirement pins the source its scope decisions are derived on,
+    so an input alignment moved onto a compile reads as the pin it states."""
     first = next(
         (
             requirement

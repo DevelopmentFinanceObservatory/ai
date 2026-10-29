@@ -47,7 +47,7 @@ from executor.run import (
 )
 from google.adk import Context, Event
 from planner.plan import Plan as PlannerPlan
-from planner.plan import SessionState, plan_revision, windowed_pins
+from planner.plan import SessionState, aligned_pins, plan_revision, windowed_pins
 
 from harness import plan_display
 from harness.conversation import conversation_of
@@ -61,6 +61,7 @@ from harness.graph.answer import (
 )
 from harness.graph.plan_done import StepSummary, authored_report
 from harness.graph.state import (
+    ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     STEP_PROGRESS_KEY,
@@ -88,7 +89,10 @@ def record_served_scopes(
     (`SearchReading.with_served`), as a `fetch` of it would. A record of a
     windowed copy (`planner.plan.windowed_pins`) serves the readings of the
     spec_id it was copied from too, the ones the turn's search read. The
-    readings are written back only when one changed.
+    readings are written back only when one changed. A record of a compile
+    alignment moved inputs onto (`planner.plan.aligned_pins`), which no
+    reading holds, is kept by the compile's spec_id under
+    `ORCHESTRATOR_ALIGNED_SERVED_KEY`, for the plan record's basis of it.
     """
     manifest_of = getattr(tool_surface, "retrieval_manifest", None)
     if manifest_of is None:
@@ -104,6 +108,12 @@ def record_served_scopes(
                 served[origin_of[record.spec_id]] = facts
     if not served:
         return
+    compiles = {pin.spec_id for pin in aligned_pins(state)} & served.keys()
+    if compiles:
+        state[ORCHESTRATOR_ALIGNED_SERVED_KEY] = {
+            **(state.get(ORCHESTRATOR_ALIGNED_SERVED_KEY) or {}),
+            **{spec_id: served[spec_id] for spec_id in compiles},
+        }
     readings = [
         SearchReading.model_validate(stored)
         for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or []
