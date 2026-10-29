@@ -21,10 +21,11 @@ description, and marks the one step whose result answers (`answer_step`);
 `card_title` titles the card by that step's ask; `card_summary` says in one
 sentence what the answer counts, for whom, when and from which source;
 `card_choice_text`, `card_decision_text` and `CHOICE_NAMES` give a
-decision's words; `choice_id` gives a scope choice's row the id every
-switch keeps; and `switchable_decision`, `decision_choice_id` and
-`decision_option_id` give a planner decision the card offers to switch its
-row's id and its options' ids.
+decision's words, and `FIXED_VALUE_WORDS` the words for an option the
+planner wrote as a value a decision fixes; `choice_id` gives a scope
+choice's row the id every switch keeps; and `switchable_decision`,
+`decision_choice_id` and `decision_option_id` give a planner decision the
+card offers to switch its row's id and its options' ids.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -50,12 +51,13 @@ same way.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import json
 import re
 import typing
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 
 from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
@@ -115,6 +117,8 @@ from planner.records import (
     PlaceLevel,
     PlaceType,
     Predicate,
+    RankAmong,
+    RankDirection,
     Reduction,
     RollingWindow,
     StatVarReading,
@@ -739,7 +743,10 @@ def card_choice_text(
 ) -> str:
     """An option a decision chose or offers, as the card shows it.
 
-    As `card_decision_text`, except that a text the planner opened with a
+    An option the planner wrote as a value of a field `decision` fixes
+    ("population" for `among`) reads as the card's words for that value
+    (`fixed_value_words`). Any other reads as `card_decision_text` reads
+    it, except that a text the planner opened with a
     scope option's id ("sector:120+130 health") names only that option, so
     the whole text reads as the option's label, the words Search gives it,
     unless another of `options`, the texts the decision chose and offers,
@@ -747,6 +754,8 @@ def card_choice_text(
     the id ("<label> health for the numerator", "<label> health for the
     total").
     """
+    if decision is not None and (words := fixed_value_words(text, plan, decision)) is not None:
+        return words
     named = with_source_names(text, plan).strip()
     if (labelled := _option_labelled(named, plan, decision)) is None:
         return _unslugged(named)
@@ -803,6 +812,168 @@ def _option_labelled(text: str, plan: Plan, decision: Decision | None) -> tuple[
 def _unslugged(text: str) -> str:
     """`text` as words when it is a slug the planner wrote ("crs_total")."""
     return text.replace("_", " ") if _SLUG.fullmatch(text) else text
+
+
+class FixedValueContext(typing.NamedTuple):
+    """What the card's words for a fixed value name, read off the requirement
+    the decision fixes (`_fixed_value_context`).
+
+    `party` and `member` are the plural and singular of who the step
+    compares or divides ("donors", "donor"), `source` the name of the
+    source a rank reads its population from, `count` how many members that
+    source holds, and `named` the entities the rank's input names on its axis.
+    """
+
+    party: str = "entities"
+    member: str = "entity"
+    source: str | None = None
+    count: int | None = None
+    named: tuple[str, ...] = ()
+
+
+def _rank_population(context: FixedValueContext) -> str:
+    """`RankAmong.POPULATION` in words: every member the source holds, counted where known."""
+    if context.source is None:
+        return f"all {context.party} the source holds"
+    if context.count is not None and context.count > 1:
+        return f"all {context.count:,} {context.party} in {context.source}"
+    return f"all {context.party} in {context.source}"
+
+
+def _rank_named(context: FixedValueContext) -> str:
+    """`RankAmong.NAMED` in words: the named entities by name, or their count past a few."""
+    if 0 < len(context.named) <= _NAMED_SHOWN:
+        return f"only {_joined(context.named)}"
+    if context.named:
+        return f"only the {len(context.named)} {context.party} named"
+    return f"only the {context.party} named"
+
+
+# The most entities `_rank_named` names one by one before counting them.
+_NAMED_SHOWN = 3
+
+# The enum each `DecisionFixes` field holding one takes its values from, by field name.
+FIXED_ENUMS: Mapping[str, type[enum.StrEnum]] = {
+    "stat_vars": StatVarReading,
+    "reduction": Reduction,
+    "group_by": GroupBy,
+    "direction": RankDirection,
+    "among": RankAmong,
+    "denominator_scope": DenominatorScope,
+    "change": GrowthChange,
+}
+
+# The card's words for each value a decision option can fix, so an option the
+# planner wrote as the value itself ("population") reads as what it means.
+# Lower case, as every option text the card shows is.
+FIXED_VALUE_WORDS: Mapping[enum.StrEnum, Callable[[FixedValueContext], str]] = {
+    StatVarReading.SUM: lambda _: "summed into one series",
+    StatVarReading.SEPARATE: lambda _: "one series per indicator",
+    Reduction.SUM: lambda _: "total",
+    Reduction.MEAN: lambda _: "average",
+    Reduction.MAX: lambda _: "highest value",
+    Reduction.MIN: lambda _: "lowest value",
+    GroupBy.PERIOD: lambda _: "by year",
+    GroupBy.ENTITY: lambda context: f"by {context.member}",
+    GroupBy.BREAKDOWN: lambda _: "by category",
+    RankDirection.HIGHEST_FIRST: lambda _: "highest first",
+    RankDirection.LOWEST_FIRST: lambda _: "lowest first",
+    RankAmong.POPULATION: _rank_population,
+    RankAmong.NAMED: _rank_named,
+    DenominatorScope.PER_AXIS: lambda context: f"each {context.member}'s own total",
+    DenominatorScope.POOLED: lambda context: f"one total across all {context.party}",
+    GrowthChange.RELATIVE: lambda _: "percentage change",
+    GrowthChange.ABSOLUTE: lambda _: "change in value",
+}
+
+
+def fixed_value_words(text: str, plan: Plan, decision: Decision) -> str | None:
+    """The card's words (`FIXED_VALUE_WORDS`) for option `text` of `decision`
+    when the planner wrote it as a value of a field `decision` fixes;
+    `None` for any other text.
+
+    `text` names a value when, read as a slug ("highest first" as
+    `highest_first`), it is one of the values of exactly one field `decision`
+    fixes. `decision.chosen` must name the value that field holds, and any
+    other option a value it does not hold, so the words never contradict
+    what the plan computes.
+    """
+    fixes = decision.fixes
+    if fixes is None:
+        return None
+    slug = re.sub(r"[\s-]+", "_", text.strip().lower())
+    matched = [
+        (field, value)
+        for field, kind in FIXED_ENUMS.items()
+        if (held := getattr(fixes, field)) is not None
+        for value in kind
+        if value.value == slug
+    ]
+    if len(matched) != 1:
+        return None
+    ((field, value),) = matched
+    held = getattr(fixes, field)
+    holds = value in held if isinstance(held, tuple) else value == held
+    if holds != (text == decision.chosen):
+        return None
+    return FIXED_VALUE_WORDS[value](_fixed_value_context(field, plan, decision))
+
+
+def _fixed_value_context(field: str, plan: Plan, decision: Decision) -> FixedValueContext:
+    """What the words for a value of `field` name, read off the first
+    requirement citing `decision` that states `field`; the defaults where
+    none does or its kind names no party."""
+    requirement = next(
+        (
+            r
+            for r in plan.evidence_requirements
+            if decision.slot in r.decision_ids and field in type(r).model_fields
+        ),
+        None,
+    )
+    if isinstance(requirement, RankRequirement):
+        return _rank_context(requirement, plan)
+    if isinstance(requirement, ShareOfRequirement) and requirement.axis is not None:
+        return FixedValueContext(
+            party=pluralize(singular(requirement.axis)), member=singular(requirement.axis)
+        )
+    return FixedValueContext()
+
+
+def _rank_context(requirement: RankRequirement, plan: Plan) -> FixedValueContext:
+    """Who `requirement` ranks, the source it reads them from, how many that
+    source holds (as `_sentence_rank` counts them) and those its input names."""
+    role = _axis_role(requirement, plan)
+    datasets = datasets_of(requirement, plan)
+    covering = next((d for d in datasets if role is not None and role in d.across), None)
+    source = (
+        _selected_source(covering.id, plan)
+        if covering is not None
+        else next(
+            (s for d in datasets if (s := _selected_source(d.id, plan)) is not None),
+            None,
+        )
+    )
+    level = _place_level_word(requirement, plan)
+    count = (
+        _population_count(covering, role, plan)
+        if covering is not None and role is not None and level is None
+        else None
+    )
+    return FixedValueContext(
+        party=_axis_word(requirement, plan),
+        member=_axis_word(requirement, plan, plural=False),
+        source=(source.published_tables or source.provenance_label) if source else None,
+        count=count,
+        named=tuple(
+            dict.fromkeys(
+                entity.name
+                for dataset in datasets
+                for entity in dataset.entities
+                if role is not None and entity.role == role
+            )
+        ),
+    )
 
 
 def concept_name(

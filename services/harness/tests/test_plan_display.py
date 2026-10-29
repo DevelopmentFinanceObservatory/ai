@@ -7,6 +7,7 @@ dependency on either, and neither do these tests.
 
 from __future__ import annotations
 
+import enum
 import json
 import os
 import subprocess
@@ -2065,6 +2066,88 @@ def test_a_rank_over_one_of_two_open_parties_states_that_partys_count(
     # A source stating no measure label leaves the label the requirement's measure.
     assert labels[0] == "Fetch education aid for all 140 recipients and all 55 donors"
     assert "ranks all 55 donors the source holds" in sentences["ranked"]
+
+
+def _among_decision(decision: DecisionFactory) -> DecisionFactory:
+    """`decision` with the options a planner writes as `among`'s own values."""
+
+    def _decision(**overrides: Any) -> Decision:
+        written = {
+            "description": "Whether to rank across all reporting donors or a restricted set.",
+            "options": ["population", "named"],
+            "chosen": "population",
+        }
+        return decision(**(written | overrides))
+
+    return _decision
+
+
+def _donor_rank_plan(decision: DecisionFactory) -> Plan:
+    """The top donors to Kenya, ranked among every donor DAC2a holds, by a
+    decision whose options the planner wrote as `among`'s values."""
+    dataset = DatasetRequirement(
+        id="health_spending",
+        decision_ids=["measure"],
+        measure="education aid",
+        entities=[Entity(name="Kenya", role="recipient")],
+        across=("donor",),
+        period=Period(start=2022, end=2022),
+    )
+    kenya = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+    donors = OpenEntityAxis(column="origin", member_count=32)
+    return _open_axis_rank_plan(
+        _among_decision(decision),
+        dataset,
+        axis="donor",
+        reduction=Reduction.SUM,
+        source={"entities": (kenya,), "open_entity_axes": (donors,), "published_tables": "DAC2a"},
+    )
+
+
+def test_a_rank_option_written_as_its_value_reads_as_who_the_rank_compares(
+    decision: DecisionFactory,
+) -> None:
+    # The planner wrote `among`'s values as the options. The card names the
+    # donors DAC2a holds and the ones named; a chosen text naming a value the
+    # decision does not fix keeps the planner's words.
+    plan = _donor_rank_plan(decision)
+    (among,) = plan.decisions
+    contradicted = among.model_copy(update={"chosen": "named"})
+
+    shown = [
+        card_choice_text(o, plan, options=among.options, decision=among) for o in among.options
+    ]
+
+    assert shown == ["all 32 donors in DAC2a", "only the donors named"]
+    assert card_choice_text("named", plan, options=(), decision=contradicted) == "named"
+
+
+def _enums_in(annotation: object) -> set[type[enum.Enum]]:
+    """Every enum `annotation` names, through unions, tuples and `Annotated`."""
+    if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+        return {annotation}
+    return {found for arg in typing.get_args(annotation) for found in _enums_in(arg)}
+
+
+def test_every_value_a_decision_can_fix_has_card_words() -> None:
+    # A new enum field on `DecisionFixes`, or a new value of one, fails here
+    # until the card has words for it.
+    fixed = {
+        name: kinds
+        for name, field in DecisionFixes.model_fields.items()
+        if (kinds := _enums_in(field.annotation))
+    }
+    values = {value for kind in plan_display.FIXED_ENUMS.values() for value in kind}
+    words = {
+        value: plan_display.FIXED_VALUE_WORDS[value](plan_display.FixedValueContext())
+        for value in values
+        if value in plan_display.FIXED_VALUE_WORDS
+    }
+
+    assert {name: {kind} for name, kind in plan_display.FIXED_ENUMS.items()} == fixed
+    assert set(plan_display.FIXED_VALUE_WORDS) == values
+    for kind in plan_display.FIXED_ENUMS.values():
+        assert len({words[value] for value in kind}) == len(kind), kind
 
 
 def test_a_rank_whose_source_does_not_answer_its_party_states_no_count(
