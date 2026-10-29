@@ -29,7 +29,7 @@ from pydantic import ValidationError
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 
 
-async def test_server_exposes_its_eight_tools() -> None:
+async def test_server_exposes_its_nine_tools() -> None:
     async with Client(mcp) as client:
         tools = await client.list_tools()
 
@@ -40,6 +40,7 @@ async def test_server_exposes_its_eight_tools() -> None:
         "get_skill",
         "get_skill_file",
         "sources",
+        "export_data",
         "resolve_definition",
         "catalogue_counts",
     ]
@@ -61,6 +62,7 @@ async def test_every_tool_declares_a_version() -> None:
         "get_skill": "1",
         "get_skill_file": "1",
         "sources": "1",
+        "export_data": "1",
         "resolve_definition": "1",
         "catalogue_counts": "1",
     }
@@ -68,7 +70,15 @@ async def test_every_tool_declares_a_version() -> None:
 
 
 # The tools outside clients reach through the combined server.
-_CATALOGUE_TOOLS = ("search", "get_data", "describe", "get_skill", "get_skill_file", "sources")
+_CATALOGUE_TOOLS = (
+    "search",
+    "get_data",
+    "describe",
+    "get_skill",
+    "get_skill_file",
+    "sources",
+    "export_data",
+)
 
 
 def _nodes(schema: Any) -> list[dict[str, Any]]:

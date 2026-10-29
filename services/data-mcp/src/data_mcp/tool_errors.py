@@ -2,7 +2,7 @@
 
 `ToolRefusal` is the stable code/retry-mode/fix/message contract a tool
 returns via `to_tool_result` instead of letting a raw `UpstreamError`
-propagate. Twenty codes span four retry modes (`RetryMode`), most with a
+propagate. Twenty-four codes span four retry modes (`RetryMode`), most with a
 typed factory whose `fix` payload is the machine-readable detail a calling
 model needs to correct and retry, wait, refresh, or give up.
 
@@ -64,7 +64,7 @@ class RetryMode(StrEnum):
 
 
 class ToolErrorCode(StrEnum):
-    """The twenty refusal codes, each mapped to exactly one `RetryMode`."""
+    """The twenty-four refusal codes, each mapped to exactly one `RetryMode`."""
 
     FACET_NOT_AVAILABLE = "facet_not_available"
     DEFAULT_FACET_UNDEFINED = "default_facet_undefined"
@@ -86,6 +86,10 @@ class ToolErrorCode(StrEnum):
     ROLLUP_NOT_SUMMABLE = "rollup_not_summable"
     OPEN_ROLE_UNAVAILABLE = "open_role_unavailable"
     MEMBER_NOT_RESOLVABLE = "member_not_resolvable"
+    FRAME_REF_INCOMPLETE = "frame_ref_incomplete"
+    ALLOWANCE_EXHAUSTED = "allowance_exhausted"
+    PROVENANCE_UNAVAILABLE = "provenance_unavailable"
+    LICENCE_NOT_REDISTRIBUTABLE = "licence_not_redistributable"
 
 
 # Locked table: two upstream `retryable: false` codes land on different modes
@@ -113,6 +117,12 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.ROLLUP_NOT_SUMMABLE: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.OPEN_ROLE_UNAVAILABLE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.MEMBER_NOT_RESOLVABLE: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.FRAME_REF_INCOMPLETE: RetryMode.CORRECT_AND_RETRY,
+    # The allowance resets at the next UTC midnight; `retry_after_s` names when,
+    # but a model should not hold the conversation open that long.
+    ToolErrorCode.ALLOWANCE_EXHAUSTED: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.PROVENANCE_UNAVAILABLE: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.LICENCE_NOT_REDISTRIBUTABLE: RetryMode.DO_NOT_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
     # A plain `raise` rather than `assert` — `python -O` strips asserts, and
@@ -1028,6 +1038,71 @@ class ToolRefusal:
                 "rows_in_flight_max": max_rows,
             },
             retry_after_s=ROW_BUDGET_RETRY_AFTER_S,
+        )
+
+    @classmethod
+    def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
+        """The frame argument `argument` names `spec_id` with no `content_version`."""
+        return cls(
+            code=ToolErrorCode.FRAME_REF_INCOMPLETE,
+            message=(
+                f"{argument} names spec_id {spec_id!r} without its content_version. Pass the "
+                "full {spec_id, content_version} pair from the get_data or verb result that "
+                "made the frame."
+            ),
+            fix={"argument": argument, "spec_id": spec_id},
+        )
+
+    @classmethod
+    def export_over_ceiling(cls, *, export_format: str, count: int | None, cap: int | None) -> Self:
+        """A CSV or xlsx export of a frame with more rows than either holds. Parquet has no
+        row ceiling, so `fix` names it."""
+        size = f" ({count:,} rows; at most {cap:,})" if count is not None and cap else ""
+        return cls(
+            code=ToolErrorCode.OVER_CEILING,
+            message=(
+                f"This frame has too many rows for {export_format}{size}. "
+                'Call export_data again with format="parquet".'
+            ),
+            fix={"format": "parquet"},
+        )
+
+    @classmethod
+    def allowance_exhausted(cls, *, retry_after_s: float | None, detail: str | None) -> Self:
+        """The caller has spent today's allowance of new exported files."""
+        return cls(
+            code=ToolErrorCode.ALLOWANCE_EXHAUSTED,
+            message=(
+                "This client has used today's allowance of new exported files"
+                f"{f': {detail}' if detail else ''}. It resets at the next UTC midnight; "
+                "files exported earlier keep their links."
+            ),
+            fix={},
+            retry_after_s=retry_after_s,
+        )
+
+    @classmethod
+    def provenance_unavailable(cls, *, spec_id: str) -> Self:
+        """A derived frame stored without a recipe, so its sources cannot be named."""
+        return cls(
+            code=ToolErrorCode.PROVENANCE_UNAVAILABLE,
+            message=(
+                f"{spec_id!r} was stored without the record of how it was made, so its "
+                "sources and their licences cannot be named, and it cannot be exported."
+            ),
+            fix={},
+        )
+
+    @classmethod
+    def licence_not_redistributable(cls, *, detail: str | None) -> Self:
+        """A source of the frame is listed as one whose licence forbids redistribution."""
+        return cls(
+            code=ToolErrorCode.LICENCE_NOT_REDISTRIBUTABLE,
+            message=(
+                "A source of this frame does not allow its data to be redistributed, so "
+                f"the frame cannot be exported{f': {detail}' if detail else ''}."
+            ),
+            fix={},
         )
 
     @classmethod
