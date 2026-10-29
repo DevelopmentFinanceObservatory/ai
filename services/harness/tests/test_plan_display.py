@@ -2166,13 +2166,64 @@ def _two_donor_ranks(decision: DecisionFactory, among: RankAmong, *kept: list[st
     )
 
 
-def _donor_source(tables: str, donors: int) -> SelectedSource:
-    return SelectedSource(
-        spec_id=_SPEC_A,
-        sentence="s",
-        has_data=True,
-        published_tables=tables,
-        open_entity_axes=(OpenEntityAxis(column="origin", member_count=donors),),
+def _compiled_donor_ranks(decision: DecisionFactory, sources: dict[str, tuple[str, int]]) -> Plan:
+    """`_two_donor_ranks` over every donor, compiled: each flow retrieved from
+    the source `sources` gives it, by its published tables and donor count."""
+    draft = _two_donor_ranks(decision, RankAmong.POPULATION)
+    specs = {"oda": _SPEC_A, "private": _SPEC_B}
+    operations: list[Operation] = []
+    steps: list[WorkflowStep] = []
+    for flow, spec in specs.items():
+        rank = typing.cast(RankRequirement, draft.requirement(f"top_{flow}"))
+        operations += [
+            RetrieveOperation(id=flow, requirement_id=flow, spec_id=spec),
+            RankOperation(
+                id=rank.id,
+                requirement_id=rank.id,
+                input=flow,
+                direction=rank.direction,
+                among=rank.among,
+                axis=rank.axis,
+                reduction=rank.reduction,
+            ),
+        ]
+        steps += [
+            WorkflowStep(
+                id=flow,
+                operation_id=flow,
+                tool=ToolId(server="data-mcp", name="get_data"),
+                args={"spec_id": spec},
+                input_schema_hash="hash",
+            ),
+            WorkflowStep(
+                id=rank.id,
+                operation_id=rank.id,
+                tool=ToolId(server="analysis-mcp", name="rank"),
+                bindings={"frame_ref": Binding(from_step=flow, output=ArtifactKind.FRAME_REF)},
+                input_schema_hash="hash",
+            ),
+        ]
+    terminal = ["top_oda", "top_private"]
+    workflow = Workflow(
+        steps=steps,
+        sources=[
+            SelectedSource(
+                spec_id=spec,
+                sentence="s",
+                has_data=True,
+                published_tables=sources[flow][0],
+                open_entity_axes=(OpenEntityAxis(column="origin", member_count=sources[flow][1]),),
+            )
+            for flow, spec in specs.items()
+        ],
+        evidence_bindings=[
+            EvidenceBinding(requirement_id=flow, step_id=flow, spec_id=spec)
+            for flow, spec in specs.items()
+        ],
+        terminal_steps=terminal,
+    )
+    return draft.with_translation(
+        translation=Translation(operations=operations, terminal=terminal), workflow=workflow
     )
 
 
@@ -2192,15 +2243,10 @@ def _donor_source(tables: str, donors: int) -> SelectedSource:
     ],
 )
 def test_ranks_citing_one_decision_are_named_by_what_they_all_share(
-    decision: DecisionFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    sources: dict[str, tuple[str, int]],
-    population: str,
+    decision: DecisionFactory, sources: dict[str, tuple[str, int]], population: str
 ) -> None:
     # Ranks reading different sources are not named by the first one's.
-    plan = _two_donor_ranks(decision, RankAmong.POPULATION)
-    selected = {flow: _donor_source(*source) for flow, source in sources.items()}
-    monkeypatch.setattr(plan_display, "_selected_source", lambda rid, _plan: selected.get(rid))
+    plan = _compiled_donor_ranks(decision, sources)
     (among,) = plan.decisions
 
     shown = [
@@ -2235,10 +2281,11 @@ def test_a_named_rank_option_names_the_donors_its_filter_keeps(
     assert card_choice_text("named", plan, options=among.options, decision=among) == named
 
 
-def _gni_share(decision: DecisionFactory, *denominators: str) -> Plan:
+def _gni_share(decision: DecisionFactory, *denominators: str, narrowed: bool = False) -> Plan:
     """Each donor's ODA to Kenya over Kenya's GNI (and over Kenya's revenue
     for a second denominator), by a decision written as
-    `denominator_scope`'s values."""
+    `denominator_scope`'s values. A `narrowed` denominator is read for Kenya
+    and Uganda and kept to Kenya by a filter."""
     requirements: list[EvidenceRequirement] = [
         DatasetRequirement(
             id="oda",
@@ -2255,14 +2302,30 @@ def _gni_share(decision: DecisionFactory, *denominators: str) -> Plan:
                 id=f"denominator_{index}",
                 decision_ids=["measure"],
                 measure=measure,
-                entities=[Entity(name="Kenya", role="country")],
+                entities=[
+                    Entity(name="Kenya", role="country"),
+                    *([Entity(name="Uganda", role="country")] if narrowed else []),
+                ],
                 period=Period(start=2022, end=2022),
+            ),
+            *(
+                [
+                    _filter(
+                        f"kenya_{index}",
+                        f"denominator_{index}",
+                        EntityIn(names=["Kenya"], role="country"),
+                    )
+                ]
+                if narrowed
+                else []
             ),
             ShareOfRequirement(
                 id=f"share_{index}",
                 decision_ids=["measure"],
                 numerator=RequirementSide(input_id="oda"),
-                denominator=RequirementSide(input_id=f"denominator_{index}"),
+                denominator=RequirementSide(
+                    input_id=f"kenya_{index}" if narrowed else f"denominator_{index}"
+                ),
                 axis="donor",
                 denominator_scope=DenominatorScope.POOLED,
             ),
@@ -2281,26 +2344,36 @@ def _gni_share(decision: DecisionFactory, *denominators: str) -> Plan:
 
 
 @pytest.mark.parametrize(
-    ("denominators", "shown"),
+    ("denominators", "narrowed", "shown"),
     [
         pytest.param(
             ("GNI",),
-            ["each divided by one total of GNI", "each divided by its own total"],
+            False,
+            ["each divided by one total of GNI", "each divided by its own total of GNI"],
             id="one-share",
         ),
         pytest.param(
             ("GNI", "government revenue"),
-            ["pooled", "each divided by its own total"],
+            False,
+            ["one shared total", "each its own total"],
             id="two-denominators",
+        ),
+        pytest.param(
+            ("GNI",),
+            True,
+            ["one shared total", "each divided by its own total of GNI"],
+            id="narrowed",
         ),
     ],
 )
 def test_a_share_option_written_as_its_scope_names_the_denominator(
-    decision: DecisionFactory, denominators: tuple[str, ...], shown: list[str]
+    decision: DecisionFactory, denominators: tuple[str, ...], narrowed: bool, shown: list[str]
 ) -> None:
     # A pooled share over Kenya's GNI divides by GNI, not by a total over the
-    # donors. Shares over different denominators keep the planner's words.
-    plan = _gni_share(decision, *denominators)
+    # donors, and each option names that measure. Shares over different
+    # denominators, and a pooled total over the rows a filter keeps, which
+    # only a quoted step label names, read the value's fallback.
+    plan = _gni_share(decision, *denominators, narrowed=narrowed)
     (scope,) = plan.decisions
 
     assert [
@@ -2308,20 +2381,39 @@ def test_a_share_option_written_as_its_scope_names_the_denominator(
     ] == shown
 
 
+def _oda_to_kenya(*kenya: Entity, across: tuple[str, ...] = ("donor",)) -> DatasetRequirement:
+    """ODA from every donor (`across`) to `kenya`, the input of a total grouped by entity."""
+    return DatasetRequirement(
+        id="debt",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=list(kenya),
+        across=across,
+        period=Period(start=2015, end=2024),
+    )
+
+
 @pytest.mark.parametrize(
     ("dataset", "shown"),
     [
         pytest.param(_debt(), ["by debtor", "by year"], id="one-party"),
         pytest.param(
-            DatasetRequirement(
-                id="debt",
-                decision_ids=["measure"],
-                measure="ODA",
-                entities=[Entity(name="Kenya", role="recipient")],
-                across=("donor",),
-                period=Period(start=2015, end=2024),
+            _oda_to_kenya(Entity(name="Kenya", role="recipient")),
+            ["by recipient", "by year"],
+            id="open-donors",
+        ),
+        pytest.param(
+            _oda_to_kenya(Entity(name="Kenya")),
+            ["by each place named", "by year"],
+            id="roleless-place",
+        ),
+        pytest.param(
+            _oda_to_kenya(
+                Entity(name="Kenya", role="recipient"),
+                Entity(name="France", role="donor"),
+                across=(),
             ),
-            ["entity", "by year"],
+            ["by donor and recipient", "by year"],
             id="two-parties",
         ),
     ],
@@ -2329,8 +2421,9 @@ def test_a_share_option_written_as_its_scope_names_the_denominator(
 def test_a_group_by_option_written_as_entity_names_the_party(
     decision: DecisionFactory, dataset: DatasetRequirement, shown: list[str]
 ) -> None:
-    # "entity" reads as the one party the total groups by, and as the
-    # planner wrote it where the input carries two.
+    # "entity" reads as what a total grouped by entity keeps: each party
+    # named, and the places named with no role. An open `across` party is
+    # summed away, so it names nothing.
     plan = Plan(
         question="q",
         decisions=[
@@ -2359,16 +2452,25 @@ def _enums_in(annotation: object) -> set[type[enum.Enum]]:
 
 def test_every_value_a_decision_can_fix_has_card_words() -> None:
     # A new enum field on `DecisionFixes`, or a new value of one, fails here
-    # until the card has words for it.
+    # until the card has words for it, with a fallback true in every plan
+    # that never reads as the raw value.
     fixed = {
         name: kinds
         for name, field in DecisionFixes.model_fields.items()
         if (kinds := _enums_in(field.annotation))
     }
     values = {value for kind in plan_display.FIXED_ENUMS.values() for value in kind}
+    fallbacks = {value: plan_display.FIXED_VALUE_WORDS[value].fallback for value in values}
 
     assert {name: {kind} for name, kind in plan_display.FIXED_ENUMS.items()} == fixed
     assert set(plan_display.FIXED_VALUE_WORDS) == values
+    assert [
+        value
+        for value, words in fallbacks.items()
+        if not words or words in {value.value, value.value.replace("_", " ")}
+    ] == []
+    for kind in plan_display.FIXED_ENUMS.values():
+        assert len({fallbacks[value] for value in kind}) == len(kind), kind
 
 
 def test_a_rank_whose_source_does_not_answer_its_party_states_no_count(

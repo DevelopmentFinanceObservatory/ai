@@ -825,14 +825,14 @@ FIXED_ENUMS: Mapping[str, type[enum.StrEnum]] = {
     "change": GrowthChange,
 }
 
-# Builds the card's words for one value from the plan and the decision fixing
-# it, or `None` where the plan cannot say what the value means there.
-type _ValueWords = Callable[[Plan, Decision], str | None]
 
+class _Words(typing.NamedTuple):
+    """The card's words for one value a decision can fix: `fallback`, true of
+    the value in every plan, and `build`, which words it from the plan and
+    the decision fixing it, or returns `None` where the plan cannot say more."""
 
-def _said(words: str) -> _ValueWords:
-    """Words for a value whose meaning no plan changes."""
-    return lambda _plan, _decision: words
+    fallback: str
+    build: Callable[[Plan, Decision], str | None] | None = None
 
 
 class _Ranked(typing.NamedTuple):
@@ -908,13 +908,21 @@ def _kept_on_axis(requirement: RankRequirement, role: str | None, plan: Plan) ->
     return ()
 
 
-def _rank_population(plan: Plan, decision: Decision) -> str | None:
-    """`RankAmong.POPULATION` in words: every member the ranks' source holds,
-    named and counted only where every rank citing `decision` agrees."""
+def _ranks(plan: Plan, decision: Decision) -> tuple[list[_Ranked], str] | None:
+    """What each rank citing `decision` compares, and the party they all
+    rank ("entities" where they differ); `None` when no rank cites it."""
     ranked = [_ranked(r, plan) for r in _citing(plan, decision, RankRequirement)]
     if not ranked:
         return None
-    party = _agreed([r.party for r in ranked]) or "entities"
+    return ranked, _agreed([r.party for r in ranked]) or "entities"
+
+
+def _rank_population(plan: Plan, decision: Decision) -> str | None:
+    """`RankAmong.POPULATION` in words: every member the ranks' source holds,
+    named and counted only where every rank citing `decision` agrees."""
+    if (ranks := _ranks(plan, decision)) is None:
+        return None
+    ranked, party = ranks
     source = _agreed([r.source for r in ranked])
     count = _agreed([r.count for r in ranked])
     if source is None:
@@ -929,10 +937,9 @@ def _rank_named(plan: Plan, decision: Decision) -> str | None:
     where every rank citing `decision` keeps the same ones. A `named` rank
     compiles only behind such a filter, so with none the option means
     entities picked by name."""
-    ranked = [_ranked(r, plan) for r in _citing(plan, decision, RankRequirement)]
-    if not ranked:
+    if (ranks := _ranks(plan, decision)) is None:
         return None
-    party = _agreed([r.party for r in ranked]) or "entities"
+    ranked, party = ranks
     kept = _agreed([r.kept for r in ranked])
     if kept and len(kept) <= _NAMED_SHOWN:
         return f"only {_joined(kept)}"
@@ -945,59 +952,96 @@ def _rank_named(plan: Plan, decision: Decision) -> str | None:
 _NAMED_SHOWN = 3
 
 
-def _denominator_words(scope: DenominatorScope) -> _ValueWords:
-    """`scope` in words, as each keyed share citing the decision states it
-    (`_denominator_scope_text`), where they all state it alike."""
+def _denominator_words(scope: DenominatorScope) -> Callable[[Plan, Decision], str | None]:
+    """`scope` in words, as each keyed share citing the decision divides
+    (`_share_divides_by`), where they all divide alike."""
 
     def words(plan: Plan, decision: Decision) -> str | None:
-        return _agreed(
-            [
-                _denominator_scope_text(share, scope, plan)
-                for share in _citing(plan, decision, ShareOfRequirement)
-                if share.axis is not None
-            ]
-        )
+        shares = [s for s in _citing(plan, decision, ShareOfRequirement) if s.axis is not None]
+        divides = [_share_divides_by(share, scope, plan) for share in shares]
+        return None if None in divides else _agreed(divides)
 
     return words
 
 
+def _share_divides_by(
+    requirement: ShareOfRequirement, scope: DenominatorScope, plan: Plan
+) -> str | None:
+    """What keyed share `requirement` divides each key by under `scope`, as
+    an option names it, with the denominator's measure: "each divided by its
+    own total of GNI", "each divided by one total of GNI", "each divided by
+    the total of GNI for Kenya". `None` where a step before the denominator
+    drops rows, which only its quoted step label names
+    (`denominator_scope_phrase`)."""
+    denominator = plan.requirement(requirement.denominator.input_id)
+    measure = _measure_of(denominator, plan)
+    if scope is DenominatorScope.PER_AXIS:
+        return f"each divided by its own total of {measure}"
+    if (entity := requirement.denominator.entity) is not None:
+        return f"each divided by the total of {measure} for {entity}"
+    if narrowing_step(denominator, plan) is not None:
+        return None
+    return f"each divided by one total of {measure}"
+
+
 def _by_party(plan: Plan, decision: Decision) -> str | None:
-    """`GroupBy.ENTITY` in words: by the one party every aggregate citing
-    `decision` reads (`_lone_role`)."""
-    roles = [_lone_role(r, plan) for r in _citing(plan, decision, AggregateRequirement)]
-    role = _agreed(roles)
-    return f"by {singular(role)}" if role is not None else None
+    """`GroupBy.ENTITY` in words: by each dimension every aggregate citing
+    `decision` keeps when it groups by entity, the named roles of its input
+    (an open `across` role is summed away, `planner.shapes.aggregated`), and
+    the places named with no role as "each place named". `None` where the
+    aggregates keep different ones, or none cites `decision`."""
+    shapes = frame_shapes(plan)
+    kept = _agreed(
+        [
+            tuple(
+                dict.fromkeys(
+                    role.role
+                    for role in shapes[aggregate.input_id].roles
+                    if not role.open and not role.breakdown
+                )
+            )
+            for aggregate in _citing(plan, decision, AggregateRequirement)
+        ]
+    )
+    if not kept:
+        return None
+    parties = [singular(role) for role in kept if role is not None]
+    return f"by {_joined([*parties, *(['each place named'] if None in kept else [])])}"
 
 
 # The card's words for each value a decision option can fix, so an option the
-# planner wrote as the value itself ("population") reads as what it means.
+# planner wrote as the value itself ("population") never reads as that value.
 # Lower case, as every option text the card shows is.
-FIXED_VALUE_WORDS: Mapping[enum.StrEnum, _ValueWords] = {
-    StatVarReading.SUM: _said("summed into one series"),
-    StatVarReading.SEPARATE: _said("one series per indicator"),
-    Reduction.SUM: _said("total"),
-    Reduction.MEAN: _said("average"),
-    Reduction.MAX: _said("highest value"),
-    Reduction.MIN: _said("lowest value"),
-    GroupBy.PERIOD: _said("by year"),
-    GroupBy.ENTITY: _by_party,
-    GroupBy.BREAKDOWN: _said("by category"),
-    RankDirection.HIGHEST_FIRST: _said("highest first"),
-    RankDirection.LOWEST_FIRST: _said("lowest first"),
-    RankAmong.POPULATION: _rank_population,
-    RankAmong.NAMED: _rank_named,
-    DenominatorScope.PER_AXIS: _denominator_words(DenominatorScope.PER_AXIS),
-    DenominatorScope.POOLED: _denominator_words(DenominatorScope.POOLED),
-    GrowthChange.RELATIVE: _said("percentage change"),
-    GrowthChange.ABSOLUTE: _said("change in value"),
+FIXED_VALUE_WORDS: Mapping[enum.StrEnum, _Words] = {
+    StatVarReading.SUM: _Words("summed into one series"),
+    StatVarReading.SEPARATE: _Words("one series per indicator"),
+    Reduction.SUM: _Words("total"),
+    Reduction.MEAN: _Words("average"),
+    Reduction.MAX: _Words("highest value"),
+    Reduction.MIN: _Words("lowest value"),
+    GroupBy.PERIOD: _Words("by year"),
+    GroupBy.ENTITY: _Words("by each party or place named", _by_party),
+    GroupBy.BREAKDOWN: _Words("by category"),
+    RankDirection.HIGHEST_FIRST: _Words("highest value first"),
+    RankDirection.LOWEST_FIRST: _Words("lowest value first"),
+    RankAmong.POPULATION: _Words("every member the source holds", _rank_population),
+    RankAmong.NAMED: _Words("only those picked by name", _rank_named),
+    DenominatorScope.PER_AXIS: _Words(
+        "each its own total", _denominator_words(DenominatorScope.PER_AXIS)
+    ),
+    DenominatorScope.POOLED: _Words(
+        "one shared total", _denominator_words(DenominatorScope.POOLED)
+    ),
+    GrowthChange.RELATIVE: _Words("percentage change"),
+    GrowthChange.ABSOLUTE: _Words("change in value"),
 }
 
 
 def fixed_value_words(text: str, plan: Plan, decision: Decision) -> str | None:
     """The card's words (`FIXED_VALUE_WORDS`) for option `text` of `decision`
-    when the planner wrote it as a value of a field `decision` fixes;
-    `None` for any other text, and where the plan cannot say what the value
-    means, so the planner's words stand.
+    when the planner wrote it as a value of a field `decision` fixes: the
+    words built from the plan, else the value's fallback. `None` for any
+    other text, so the planner's words stand.
 
     `text` names a value when, read as a slug ("highest first" as
     `highest_first`), it is one of the values of exactly one field `decision`
@@ -1023,7 +1067,9 @@ def fixed_value_words(text: str, plan: Plan, decision: Decision) -> str | None:
     holds = value in held if isinstance(held, tuple) else value == held
     if holds != (text == decision.chosen):
         return None
-    return FIXED_VALUE_WORDS[value](plan, decision)
+    words = FIXED_VALUE_WORDS[value]
+    built = words.build(plan, decision) if words.build is not None else None
+    return built or words.fallback
 
 
 def concept_name(
@@ -2261,12 +2307,6 @@ def _axis_role(requirement: RankRequirement, plan: Plan) -> str | None:
     `across` carry when the axis is left to infer from a single-role input."""
     if requirement.axis is not None:
         return requirement.axis
-    return _lone_role(requirement, plan)
-
-
-def _lone_role(requirement: EvidenceRequirement, plan: Plan) -> str | None:
-    """The sole role the datasets `requirement` reads name entities in or cover
-    (`across`); `None` when they carry none or more than one."""
     datasets = datasets_of(requirement, plan)
     roles = sorted(
         {entity.role for dataset in datasets for entity in dataset.entities if entity.role}
@@ -2706,28 +2746,19 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     return f"{sentence}; keeps {kept}, {shared_place_phrase(requirement.limit)}."
 
 
-def _denominator_scope_text(
-    requirement: ShareOfRequirement, scope: DenominatorScope | None, plan: Plan
-) -> str:
-    """What keyed share `requirement` divides by under `scope`, in words
-    (`denominator_scope_phrase`), read off its own denominator."""
-    denominator = plan.requirement(requirement.denominator.input_id)
-    narrowing = narrowing_step(denominator, plan)
-    return denominator_scope_phrase(
-        scope,
-        measure=_measure_of(denominator, plan),
-        step=_label(denominator, plan),
-        narrowed_by=None if narrowing is None else _label(narrowing, plan),
-        entity=requirement.denominator.entity,
-    )
-
-
 def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     numerator = plan.requirement(requirement.numerator.input_id)
     measure = _measure_of(numerator, plan)
     denominator = plan.requirement(requirement.denominator.input_id)
     if requirement.axis is not None:
-        scope_text = _denominator_scope_text(requirement, requirement.denominator_scope, plan)
+        narrowing = narrowing_step(denominator, plan)
+        scope_text = denominator_scope_phrase(
+            requirement.denominator_scope,
+            measure=_measure_of(denominator, plan),
+            step=_label(denominator, plan),
+            narrowed_by=None if narrowing is None else _label(narrowing, plan),
+            entity=requirement.denominator.entity,
+        )
         return f"Share of {measure} per {requirement.axis}, {scope_text}."
     divisor = _measure_of(denominator, plan)
     # A denominator narrowed to fewer members than its sources hold names the
