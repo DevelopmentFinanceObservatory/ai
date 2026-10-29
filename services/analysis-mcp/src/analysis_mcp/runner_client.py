@@ -2,12 +2,12 @@
 computes.
 
 `run_tree` posts a request tree (`runner_tree`), with a rolling call's anchor
-roots, to `POST /api/datasets/analysis` and `find_anchor` posts roots and populations to `POST
-/api/datasets/analysis/anchor`. Each returns the runner's answer, or the
-`ToolRefusal` its reply maps to:
+roots, to `POST /api/datasets/analysis`, and `find_anchor` posts roots and
+populations to `POST /api/datasets/analysis/anchor`. Each returns the runner's
+answer, or the `ToolRefusal` its reply maps to:
 
 - 200 from the analysis route is the stored frame's ref and the `summary` of
-  the call (`summary.VerbSummary`); from the anchor route, `AnchorAnswer`.
+  the call (`summary.VerbSummary`). From the anchor route it is `AnchorAnswer`.
 - 202 is a root dataset still building, `ToolRefusal.analysis_pending` with the
   runner's `retry_after_s`.
 - A problem document keeps the runner's `code`, `detail` and `fix` where this
@@ -17,8 +17,8 @@ roots, to `POST /api/datasets/analysis` and `find_anchor` posts roots and popula
   root the call did not name is one behind a derived (`ops_`) input, which the
   runner computes again from its stored recipe, so that input is
   `derived_input_unrecoverable`. `over_ceiling` is `frame_too_large`, and a
-  busy runner's retryable `service_unavailable` keeps its code with a delay. Any other code is
-  `upstream_error` naming it.
+  busy runner's retryable `service_unavailable` keeps its code with a delay.
+  Any other code is `upstream_error` naming it.
 - An answer outside that contract, an unreachable dfo-apis, a timeout and a
   failed credential are `upstream_error`, the last three retryable.
 
@@ -68,7 +68,7 @@ _ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
 # The wait a retryable refusal or a failed transport names when dfo-apis sent none.
 DEFAULT_RETRY_AFTER_S = 5.0
 
-# Codes this service defines for a failure of its own, never a runner's.
+# Codes this service defines for its own failures.
 _LOCAL_CODES = frozenset(
     {
         ToolErrorCode.FRAME_NOT_HELD,
@@ -92,7 +92,7 @@ type Pair = tuple[str, str]
 
 
 class AnchorAnswer(BaseModel):
-    """The anchor route's answer: the latest `period`, its `rule`, and each series
+    """The anchor route's answer, with the latest `period`, its `rule`, and each series
     that holds no value at it, its `root` the index of its population."""
 
     model_config = ConfigDict(extra="ignore", frozen=True)
@@ -327,7 +327,7 @@ async def find_anchor(
 
 
 class DerivedUnread(Exception):  # noqa: N818 -- a read's outcome, as `ToolRefusal` is
-    """A derived frame dfo-apis did not serve: `code` is its problem document's code,
+    """A derived frame dfo-apis did not serve. `code` is its problem document's code,
     `upstream_error` for an answer outside the contract or no answer at all, and
     `retryable` says whether the same read can succeed later."""
 

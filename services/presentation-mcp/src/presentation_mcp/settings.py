@@ -115,14 +115,13 @@ class Settings(FrameServiceSettings):
     conversation through this service shares one client address's allowance.
     No other apis route this service calls reads the header. Must equal
     whatever the apis deployment's own `DATASETS_FIRST_PARTY_PRINCIPAL` env
-    var holds; the two are separate deployments; nothing keeps them in sync
-    but a deployer setting the same value on both. `None` (the default,
+    var holds. The two are separate deployments, and nothing keeps them in
+    sync but a deployer setting the same value on both. `None` (the default,
     including a blank env value) sends no header, so cards spend the client
     address's allowance, and this service publishes nothing ahead of a read
-    or a write: a frame_ref an
-    analysis verb returns is one dfo-apis' analysis runner published already,
-    so the platform answers for it. `publish_frame` refuses
-    `publish_not_configured` without one.
+    or a write, since a frame_ref an analysis verb returns is one dfo-apis'
+    analysis runner published already and the platform answers for it.
+    `publish_frame` refuses `publish_not_configured` without one.
 
     `presentation_public_url` is the URL at which this service's routes are
     reachable from a browser, mount path included: the co-mounted harness

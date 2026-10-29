@@ -794,7 +794,7 @@ class PlatformAssembler:
 
         if self._publish_principal is None:
             # Nothing can be published without a principal, and a runner's
-            # pair needs no publishing: the platform answers for the pair.
+            # pair needs no publishing, since the platform answers for the pair.
             return None
 
         # Single-flighted per pair: concurrent first callers for the same
@@ -973,7 +973,7 @@ class PlatformAssembler:
             params: Query parameters.
             principal: The `x-dfo-principal` header value, or `None` to send
                 none at all. Set on the publish call and on a component create
-                and revise only; `PRINCIPAL_HEADER`'s comment says why.
+                and revise only. `PRINCIPAL_HEADER`'s comment says why.
             headers: Further request headers, sent on every attempt.
                 `revise_component` sends `WRITE_TOKEN_HEADER` here.
 

@@ -1,14 +1,14 @@
 """The request trees dfo-apis' analysis runner computes a tool call from.
 
-A verb call becomes a one-node tree (`verb_tree`): `{verb, arguments, inputs}`,
-where `arguments` are the op-spec's parameters but its frame slots, and `inputs`
-names the frames: `data`, and `other` for the second frame of a two-sided verb.
-`data` and `other` fill the runner's slots as `_SECOND_SLOT` names them:
+A verb call becomes a one-node tree (`verb_tree`) shaped `{verb, arguments,
+inputs}`. The `arguments` are the op-spec's parameters but its frame slots, and
+`inputs` names the frames `data` and, for the second frame of a two-sided verb,
+`other`. They fill the runner's slots as `_SECOND_SLOT` names them:
 `right_frame_ref` for `sum_of` and `join`, `denominator_frame_ref` for `share_of`
 and `quotient_of`. `compare` computes `data` minus `other`, the right side minus
 the left, so its `right_frame_ref` is `data` and its `frame_ref` is `other`. A
 two-sided call with no second frame sends `data` alone, and the runner reads it
-on both sides, as these tools did.
+on both sides.
 
 A frame ref becomes a root node (`root_node`). An `ops_` pair is a frame the
 runner stored, `{spec_id, content_version}`, which it computes again from its
@@ -17,17 +17,15 @@ materialisation store, whose mint record (`common.materialisation.MintRecord`)
 names the dataset version apis holds and the options it was read with. Its root
 is that version with the rendering the options state: `without_party_totals`,
 `columns`, the enrichment columns sorted and each listed once, `[]` when the frame
-has none, and `groupby`
-when the frame was fetched with a `breakdown` or a `stat_vars` sum, which the
-dataset of the mint record is already summed for. A `spec_` pair with no mint
+has none, and `groupby` when the frame was fetched with a `breakdown` or a
+`stat_vars` sum, which the dataset of the mint record is already summed for. A `spec_` pair with no mint
 record is sent as a version read with no columns. A record that does not decode
 refuses `frame_integrity_failed`, and any other failed read of it
 `service_unavailable`, which a retry may mend. The runner reads a root with
 no other option, so a frame fetched with one refuses `rendering_not_recorded`.
 
-`anchor_key` is no part of an op-spec, and the runner checks every rolling
-literal against the latest period it finds itself, so no tree carries one. The
-key names the anchor record `resolve_anchor` stored, whose `roots` are the frames
+The runner checks every rolling literal against the latest period it finds
+itself, so no tree carries `anchor_key`. The key names the anchor record `resolve_anchor` stored, whose `roots` are the frames
 the anchor route was asked about. A rolling call sends them as the request's
 `anchor_roots` (`Tree.anchor_roots`), each the root node `root_node` gives, so the
 runner takes the latest period over the roots the literals were written from,
@@ -97,8 +95,8 @@ async def _mint_record(ref: FrameRef) -> MintRecord | None | ToolRefusal:
             spec_id=ref.spec_id, content_version=ref.content_version, reason=exc.reason
         )
     except Exception:
-        # Broad on purpose, as `presentation_mcp.client._platform_pair` reads it: the
-        # store's failures belong to its backend. Sent as given, the frame pair is
+        # Broad on purpose, as `presentation_mcp.client._platform_pair` reads it, since
+        # the store's failures belong to its backend. Sent as given, the frame pair is
         # one apis does not hold, which would tell the caller its frame is gone.
         logger.warning(
             "mint record of %s/%s unreadable", ref.spec_id, ref.content_version, exc_info=True

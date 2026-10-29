@@ -4,8 +4,8 @@ one classmethod factory per code, and `to_tool_result` to render one.
 
 The verbs and `resolve_anchor` compute in dfo-apis' analysis runner
 (`runner_client`), which refuses with the engine's own codes, retry modes and
-fixes, so a runner refusal maps onto the factory-free fields here: `code`,
-`message`, `fix`, the `retry_after_s` `service_unavailable` and a retryable
+fixes, so a runner refusal maps onto this module's fields: `code`, `message`,
+`fix`, the `retry_after_s` that `service_unavailable` and a retryable
 `upstream_error` set, and `upstream_code`, the runner's own code where this
 module has none for it.
 
@@ -193,7 +193,7 @@ the runner does not read a root with, so no runner call reproduces that frame.
 It is retryable over a frame fetched without the option.
 
 `upstream_error` is a runner refusal under a code this module does not
-define, or an answer the runner could not give: `upstream_code` names the
+define, or an answer the runner could not give. `upstream_code` names the
 runner's code. It is `retry_after_delay` when the refusal was retryable and
 carries a delay, and `do_not_retry` otherwise.
 
@@ -1560,9 +1560,9 @@ class ToolRefusal:
 
     @classmethod
     def analysis_pending(cls, *, retry_after_s: float, operations: Sequence[str]) -> Self:
-        """The runner answered 202: a root dataset of the call is still building,
-        and `operations` are the rebuilds it waits on, none for a call the runner
-        is already computing."""
+        """The runner answered 202 because a root dataset of the call is still
+        building. `operations` are the rebuilds it waits on, none for a call the
+        runner is already computing."""
         queued = f" ({len(operations)} rebuild(s) queued)" if operations else ""
         return cls(
             code=ToolErrorCode.SERVICE_UNAVAILABLE,

@@ -2,15 +2,15 @@
 
 Every analysis verb computes on the runner, which stores the frame it returns
 with its recipe, so the materialisation store holds no `ops_` frame. Each
-harness reader of a verb's result reads it from dfo-apis instead
+harness reader of a verb's result reads it from dfo-apis
 (`analysis_mcp.runner_client`):
 
 - `derived_recipe` is the frame's recipe as the runner stored it, from the
-  frame's manifest: what `harness.rolling_cards` replays and
-  `harness.mcp_client.McpExecutor.publish_result` takes the replay key of.
+  frame's manifest. `harness.rolling_cards` replays it, and
+  `harness.mcp_client.McpExecutor.publish_result` takes its replay key.
 - `derived_file` is the frame's rows as its Parquet file, with whether its
-  values are rank positions (`holds_rank_positions`): what `make_charts` ranks
-  and checks a select against (`harness.orchestrator_tools`).
+  values are rank positions (`holds_rank_positions`). `make_charts` ranks it
+  and checks a select against it (`harness.orchestrator_tools`).
 
 Both raise `analysis_mcp.runner_client.DerivedUnread` for a frame dfo-apis does
 not serve.
@@ -37,8 +37,8 @@ _RANK = "rank"
 
 @dataclass(frozen=True, kw_only=True)
 class DerivedFile:
-    """A derived frame's rows as one Parquet file, read before any row is decoded:
-    `num_rows` from its footer, and whether its values are rank positions."""
+    """A derived frame's rows as one Parquet file, with `num_rows` read from its
+    footer and whether its values are rank positions, before any row is decoded."""
 
     data: bytes
     num_rows: int
@@ -60,11 +60,11 @@ class DerivedFile:
 
 async def derived_recipe(ref: FrameRef) -> dict[str, Any] | None:
     """The recipe the runner stored for `ref`, in the form apis' publish door
-    stores a recipe (`common.recipe`): its manifest's `recipe` with the manifest's
-    `anchor` and `left_out`. `None` for a frame stored without a recipe.
+    stores a recipe (`common.recipe`), which is its manifest's `recipe` with the
+    manifest's `anchor` and `left_out`. `None` for a frame stored without a recipe.
 
-    The tree's nodes carry no `frame`: a derived node is `{op_spec, inputs}` and a
-    root `{root}`, an index into `roots`.
+    A derived node of the tree is `{op_spec, inputs}` and a root node `{root}`, an
+    index into `roots`. Neither carries a `frame`.
     """
     manifest = await read_derived_manifest(ref)
     recipe = manifest.get("recipe")
@@ -82,8 +82,9 @@ async def derived_recipe(ref: FrameRef) -> dict[str, Any] | None:
 
 
 def holds_rank_positions(tree: Mapping[str, Any]) -> bool:
-    """Whether the values of the frame `tree` computes are rank positions: some step
-    is a per-period `rank` with no `limit`, whose rows carry each entity's position.
+    """Whether the values of the frame `tree` computes are rank positions, which
+    holds when some step is a per-period `rank` with no `limit`, whose rows carry
+    each entity's position.
 
     A verb carries that mark from any of its inputs onward, and every verb that
     would read a position as a quantity refuses it, so a step anywhere in the tree

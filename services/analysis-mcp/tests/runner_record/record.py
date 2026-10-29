@@ -3,6 +3,9 @@
     uv run --package analysis_mcp python services/analysis-mcp/tests/runner_record/record.py \\
         <dfo-apis checkout> <scratch dir>
 
+Before recording, sync the dfo-apis archive from its root with
+`uv sync --frozen --extra engine --extra eval --extra datasets --extra graph`.
+
 The fixture and the scratch dir's requests are emptied first, so every reply is
 recorded from dfo-apis afresh. Each round runs the analysis-mcp tests with
 `RUNNER_RECORD` set, so each request with no recorded answer is written with the

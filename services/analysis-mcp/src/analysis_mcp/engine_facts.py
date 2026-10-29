@@ -1,8 +1,8 @@
 """An in-process engine result as the facts a digest renders.
 
-The in-process verb tools (`*_tool.py`), which the registered tools no longer
-call, still render their digests. `facts_of` turns their engine result into the
-JSON dfo-apis' runner sends as a summary's `result` (`_json`, the form
+The in-process verb tools (`*_tool.py`) render their digests, though no
+registered tool calls them. `facts_of` turns their engine result into the JSON
+dfo-apis' runner sends as a summary's `result` (`_json`, the form
 `dfo_analysis_engine.calls._facts` writes) and reads it as `summary`'s facts, so
 both paths render through one parse.
 """
@@ -53,8 +53,8 @@ _FACTS: Mapping[type, type[ResultFacts]] = {
 
 
 def _json(value: object, *, top: bool = False) -> object:
-    """`value`, an engine result or a part of one, as JSON: the top-level frame
-    left out, a unit in its pin form, join's matched keys as their rows."""
+    """`value`, an engine result or a part of one, as JSON, with the top-level frame
+    left out, a unit in its pin form and join's matched keys as their rows."""
     if isinstance(value, MatchedKeys):
         value = value.rows()
     if isinstance(value, UnitRequest | ComposedUnit):

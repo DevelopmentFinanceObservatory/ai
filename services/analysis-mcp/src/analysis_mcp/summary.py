@@ -14,8 +14,8 @@ engine dataclass's own field names, and ignores the rest, so a field the
 engine adds reaches no digest until a renderer reads it.
 
 A result in the paired form a `compare` or `sum_of` with `on` gives
-(`dfo_analysis_engine.engine.paired.PairedResult`) has no facts model here:
-these tools send no `on`.
+(`dfo_analysis_engine.engine.paired.PairedResult`) has no facts model here,
+since these tools send no `on`.
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ class RankFacts(_Facts):
 
     @property
     def kept_ranks(self) -> tuple[EntityRank, ...]:
-        """The ranks the output frame holds: those within `limit`."""
+        """The ranks within `limit`, which the output frame holds."""
         return tuple(r for r in self.entity_ranks if self.limit is None or r.rank <= self.limit)
 
 
@@ -290,7 +290,7 @@ FACTS_BY_VERB: Mapping[str, type[ResultFacts]] = {
 
 
 class VerbSummary(BaseModel):
-    """A verb call's summary: what its digest and its `VerbResult` are built from.
+    """A verb call's summary, from which its digest and its `VerbResult` are built.
 
     `result` is the verb's `*Facts`. `derived` is the derived marker's detail
     (`frame_ref_resolution.DerivedMarker`), `None` when the result carries none.

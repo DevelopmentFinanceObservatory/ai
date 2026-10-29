@@ -647,8 +647,8 @@ class McpExecutor:
         (`executor.completion.ResultPublisher`).
 
         A frame the store does not hold is one dfo-apis' analysis runner
-        computed, and stored with its recipe as it did, so it is read back from
-        dfo-apis and not published again (`_runner_publication`). A frame the
+        computed and stored with its recipe, so its recipe is read back from
+        dfo-apis (`_runner_publication`). A frame the
         store holds, which an in-process verb computed, is published with the
         recipe built from the store (`_publish_held`). A store that cannot be
         reached now is a retryable fault, and every other fault of the store is
@@ -933,10 +933,10 @@ class McpExecutor:
     async def _described_frame(
         self, args: Mapping[str, Any], body: dict[str, Any]
     ) -> dict[str, Any]:
-        """The outcome of the `describe_frame` call `args` whose view is `body`, marked `rolling`
-        for a frame whose cards are replayed as data moves (`RollingCards.frame`). A
-        frame whose recipe read failed in a way a retry may mend is refused
-        `transient_unavailable` instead, since whether it rolls is not known."""
+        """The outcome of the `describe_frame` call `args` whose view is `body`, marked
+        `rolling` for a frame whose cards are replayed as data moves
+        (`RollingCards.frame`). A frame whose recipe read failed in a way a retry may
+        mend is refused `transient_unavailable`, since whether it rolls is not known."""
         frame_ref = args.get("frame_ref")
         try:
             rolling = isinstance(frame_ref, Mapping) and await self._rolling_cards.frame(frame_ref)

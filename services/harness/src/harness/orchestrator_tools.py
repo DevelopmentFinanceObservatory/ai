@@ -420,9 +420,9 @@ class _FrameRows:
 async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[_FrameRows], T]) -> T | None:
     """What `work` makes of the rows of the frame `ref` names, or None when they
     cannot be read. The store holds a frame `get_data` fetched, and a derived
-    (`ops_`) frame an in-process verb computed before the verbs ran on dfo-apis'
-    runner; a derived frame the store does not hold is read from dfo-apis, which
-    stored it (`harness.derived_frames`). `work` runs in a worker thread, off the
+    (`ops_`) frame an in-process verb computed. A derived frame the store does not
+    hold is read from dfo-apis' analysis runner, which stored it
+    (`harness.derived_frames`). `work` runs in a worker thread, off the
     event loop, and the frame's rows stay claimed on the process's row budget
     until that thread returns, also when the task awaiting it is cancelled first."""
     try:
@@ -478,7 +478,7 @@ async def _derived_frame_work[T](
                 rows = derived.rows()
             except (FrameError, pa.ArrowException, KeyError):
                 # dfo-apis served a file this harness cannot decode, a defect on one
-                # side or the other; the select stays as written, as for an unread frame.
+                # side or the other. The select stays as written, as for an unread frame.
                 logger.error(
                     "make_charts: could not decode the derived frame %s/%s",
                     ref["spec_id"],

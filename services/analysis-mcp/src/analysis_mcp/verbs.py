@@ -4,21 +4,20 @@ dfo-apis' analysis runner.
 Each verb tool takes the arguments, signature and docstring of its in-process
 twin (`aggregate_tool.aggregate` and the rest), builds the same op-spec from
 them, and runs it on the runner (`tool_pipeline.run_on_runner`). An argument
-that forms no op-spec refuses `op_spec_invalid` before any call, as it did. A
-rolling `growth`, `rank` or `filter` still needs an `anchor_key`, checked as
-before (`op_spec.with_anchor_key`). The key reaches no request: the call sends
-the roots of the anchor record it names as `anchor_roots`, and the runner checks
-each rolling literal against the latest period it finds over them
+that forms no op-spec refuses `op_spec_invalid` before any call. A rolling
+`growth`, `rank` or `filter` needs an `anchor_key`, checked by
+`op_spec.with_anchor_key`. The key reaches no request. The call sends the roots
+of the anchor record it names as `anchor_roots`, and the runner checks each
+rolling literal against the latest period it finds over them
 (`runner_tree.verb_tree`).
 
 `resolve_anchor` asks the runner's anchor route for the latest period of the
 root frames over the populations, then stores the anchor record and returns its
-`anchor_key`, as the in-process tool did, so a plan that passes the key on
-keeps working. Its argument checks that read no frame run here first
+`anchor_key`. Its argument checks that read no frame run here first
 (`rolling_tool._too_many`, `rolling_tool._unmatched`).
 
-The in-process tool bodies, the engine and the store reads behind them are no
-longer called by any registered tool.
+No registered tool calls the in-process tool bodies, the engine or the store
+reads behind them.
 """
 
 from __future__ import annotations
@@ -67,8 +66,9 @@ type Tool = Callable[..., Awaitable[ToolResult]]
 
 
 def _on_runner(in_process: Tool, build: Callable[[Arguments], OpSpecVariant]) -> Tool:
-    """The registered tool of `in_process`: its signature and docstring, its
-    op-spec built by `build` from the bound arguments, computed by the runner."""
+    """The registered tool for `in_process`. It keeps that tool's signature and
+    docstring, builds its op-spec with `build` from the bound arguments, and
+    computes it on the runner."""
     signature = inspect.signature(in_process)
 
     @functools.wraps(in_process)

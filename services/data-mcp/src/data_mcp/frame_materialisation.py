@@ -1238,7 +1238,7 @@ def _tagged_unit_from_text(text: object, *, composed: bool) -> object:
     `unit_cell_from_json` must read it, so Arrow never drops an unknown member or fails
     on a mistyped one while building the struct. A composed unit (`{numerator,
     denominator}`) is accepted only when `composed` is set, for a frame the analysis
-    runner computed; it is refused `invalid_unit` otherwise, since an artifact apis
+    runner computed. Otherwise it is refused `invalid_unit`, since an artifact apis
     mints holds none.
     """
     if text is None:
@@ -1316,7 +1316,7 @@ def frame_from_parquet_bytes(data: bytes, *, composed_units: bool = False) -> Fr
     A text `unit` column holds unit refs and converted units as JCS object text, each
     decoded into the frame's own unit cell (`_with_text_units_decoded`). A frame the
     analysis runner computed can hold a composed unit too, the JCS text of its
-    `{numerator, denominator}` object, which `composed_units` accepts; a minted artifact
+    `{numerator, denominator}` object, which `composed_units` accepts. A minted artifact
     holds none, so it is refused `invalid_unit` by default.
 
     A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_class` or

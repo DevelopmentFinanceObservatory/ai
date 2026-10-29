@@ -7,9 +7,9 @@ of it, keeps this digest text as its step's `StepRecord.digest`, and
 the model needs to act on has to be in this text: the result's own
 `{spec_id, content_version}` pair, the computed numbers, units, coverage,
 warnings, and trace identity. Each `render_*_digest` function reads only
-its own verb's result facts (`summary`: `GroupSummary`, `EntityGrowth`,
-`PeriodComparison`, `PeriodSum`, `PeriodQuotient`, `EntityRank` and the
-rest), as dfo-apis' analysis runner states them in a call's summary, never
+its own verb's result facts, as dfo-apis' analysis runner states them in a
+call's `summary` (`GroupSummary`, `EntityGrowth`, `PeriodComparison`,
+`PeriodSum`, `PeriodQuotient`, `EntityRank` and the rest), never
 `frame.rows`. The frame itself never appears in a digest.
 `render_summary_digest` renders a runner summary (`summary.VerbSummary`) with
 its verb's renderer. The in-process tools render their engine result's facts
@@ -1388,8 +1388,7 @@ def render_join_digest(
         "right-only, dropped)"
     )
 
-    # `_capped` breaks ties to the earlier key, as the engine's columnar
-    # selection over the same magnitudes did.
+    # `_capped` breaks ties to the earlier key.
     shown = _capped(
         result.matched_keys,
         magnitude=lambda matched: max(abs(matched.left_value), abs(matched.right_value)),

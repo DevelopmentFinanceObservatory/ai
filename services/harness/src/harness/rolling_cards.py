@@ -67,9 +67,9 @@ it was refused, ran past its hard stop, or had no replayer. Each replay has
 `CARD_REPLAY_DEADLINE_S` and is cancelled `_HARD_STOP_GRACE_S` after it.
 
 Whether a frame rolls is read from its recipe alone (`RollingCards.frame`), so it
-is the same answer whenever it is asked: the recipe dfo-apis' analysis runner
-stored with the frame, or for a frame an in-process verb computed, the one the
-materialisation store builds.
+is the same answer whenever it is asked. The recipe is the one dfo-apis'
+analysis runner stored with the frame or, for a frame an in-process verb
+computed, the one the materialisation store builds.
 
 A card, created or revised, that states a relative period on a frame that
 does not roll is refused `relative_period_on_closed_window` when the dataset's definition ends at a
@@ -422,9 +422,10 @@ _ReplayKey = tuple[str, str, bytes]
 
 
 async def _recipe_of(frame: FrameRef) -> dict[str, Any]:
-    """The recipe of the derived frame `frame`: built from the store when it holds
-    the frame, as it does one an in-process verb computed, else the one dfo-apis'
-    analysis runner stored with it (`harness.derived_frames.derived_recipe`).
+    """The recipe of the derived frame `frame`. It is built from the store when the
+    store holds the frame, as it does one an in-process verb computed, and otherwise
+    is the one dfo-apis' analysis runner stored with it
+    (`harness.derived_frames.derived_recipe`).
 
     Raises:
         RecipeError: The store holds the frame and builds no recipe for it.
@@ -570,7 +571,7 @@ class RollingCards:
         ) as exc:
             if isinstance(exc, DerivedUnread) and exc.retryable:
                 # The same read may succeed shortly, so whether the frame rolls is
-                # unknown; a card written now would be fixed or refused wrongly.
+                # unknown, and a card written now would be fixed or refused wrongly.
                 raise _withheld(HarnessCode.ROLLING_REPLAY_PENDING, _PENDING_MESSAGE, exc) from exc
             # Not kept, because the store or dfo-apis may hold the missing part on a
             # later read.

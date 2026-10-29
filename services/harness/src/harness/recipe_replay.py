@@ -26,17 +26,16 @@ again on the data apis holds now:
    new frames of the roots a path through a rolling op-spec reads
    (`common.rolling.rolling_roots`), or of the `anchor_roots` the runner stored on
    a node, which name the roots the period was first taken over in their place,
-   by analysis-mcp's `resolve_anchor`. Each rolling literal is
-   rewritten to that period at its offset, and each rolling call carries the
+   by analysis-mcp's `resolve_anchor`. Each rolling literal is rewritten to that period at its offset, and each rolling call carries the
    returned `anchor_key`. A tree of fixed periods makes no such call.
 4. The tree is walked from its roots up. Each node's verb is called with its
    recorded arguments and its inputs' new pairs. Before a call, the pair it would
    mint is computed with analysis-mcp's own identity functions, and the call is
-   skipped when the store already holds that pair, as it holds a frame an
-   in-process verb computed. The verbs compute on dfo-apis' analysis runner,
-   whose frames the store never holds, so each such step is called, and the
-   runner answers a step it stored before from what it holds: either way a
-   replay cut short is resumed by the next one. Inputs of one node run at once,
+   skipped when the store already holds that pair, as it does for a frame an
+   in-process verb computed. The store holds no frame dfo-apis' analysis runner
+   computed, so each such step is called, and the runner answers a step it
+   stored before from what it holds. Either way, a replay cut short is resumed
+   by the next one. Inputs of one node run at once,
    at most `MAX_CONCURRENT_STEPS` calls at a time. Roots are minted one at a time.
 5. The final frame's recipe is the one the runner stored with it, read from apis
    (`LiveApisClient.read_recipe`). A frame the store holds, which an in-process
@@ -790,9 +789,9 @@ def _parsed(recipe: Mapping[str, Any]) -> tuple[Mapping[str, Any], list[MintReco
 
 
 async def _final_recipe(frame: _Frame, *, replay: _Replay) -> dict[str, Any]:
-    """The recipe of the replay's final frame: the one dfo-apis' analysis runner
-    stored with it, or for a frame the store holds, as an in-process verb left it,
-    the one the store builds.
+    """The recipe of the replay's final frame. It is the one dfo-apis' analysis runner
+    stored with the frame or, for a frame the store holds, as an in-process verb left
+    it, the one the store builds.
 
     Raises:
         _Stopped: `recipe_unbuildable` for a frame with no recipe to be had, and

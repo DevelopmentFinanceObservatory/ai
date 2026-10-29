@@ -12,7 +12,7 @@ already succeeded. What sits between those two halves -- the engine call
 itself, and mapping its own typed exceptions to a refusal -- stays inline in
 each verb tool: that mapping is genuinely each verb's own.
 
-The registered tools (`verbs`) compute in dfo-apis' analysis runner instead:
+The registered tools (`verbs`) compute in dfo-apis' analysis runner.
 `run_on_runner` sends a validated op-spec as a one-node tree
 (`runner_tree.verb_tree`) and turns the runner's summary into the reply, its
 `VerbResult` and its digest (`digest.render_summary_digest`). The rest of this
@@ -213,7 +213,7 @@ async def store_result_and_render(
 
 
 async def run_on_runner(op_spec: OpSpecVariant, *, anchor_key: str | None = None) -> ToolResult:
-    """`op_spec` computed by the runner: the reply every registered verb returns.
+    """The reply every registered verb returns for `op_spec`, computed by the runner.
     A rolling call's `anchor_key` sends the roots of its anchor record beside the
     tree (`runner_tree.verb_tree`).
 

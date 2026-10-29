@@ -5,9 +5,9 @@ the fixture-store lifespan, and the console-script entry point (settings,
 logging, telemetry, transport). Registers the closed nine-verb set, one
 tool per verb, each under an explicit wire name, and `resolve_anchor`, which
 finds the latest period rolling calls follow and computes no frame. Every
-registered tool (`verbs`) computes in dfo-apis' analysis runner. `filter` needs the explicit name because the Python
-function backing it cannot be called `filter` without shadowing the builtin
-(see `filter_tool.py`'s own docstring).
+registered tool (`verbs`) computes in dfo-apis' analysis runner. `filter` needs
+the explicit name because the Python function backing it cannot be called
+`filter` without shadowing the builtin (see `filter_tool.py`'s own docstring).
 
 Refusal policy: every anticipated failure gets its own typed refusal, built
 and returned via `to_tool_result`: an op-spec that does not validate, a frame
@@ -139,7 +139,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     building (and, with it, fixture seeding) entirely rather than replace what's
     already there.
 
-    The store still serves `get_data`'s mint records, which name each root the
+    The store serves `get_data`'s mint records, which name each root the
     runner reads, and `resolve_anchor`'s anchor records. The runner client
     (`runner_client.runner_holder`) is closed on shutdown too.
     """
