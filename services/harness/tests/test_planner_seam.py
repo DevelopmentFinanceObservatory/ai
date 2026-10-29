@@ -2174,10 +2174,10 @@ def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_inv
     """`_is_terminal_refusal` is what `_track_tool_call` uses to stop the
     planner's turn on a `propose_plan` refusal that recorded nothing and
     left nothing to correct within this entry -- `BUDGET_EXHAUSTED`,
-    `QUESTION_FIXED` and `NOTHING_TO_PLAN` alike. `INVALID_PLAN` -- a question-changing amendment
-    under `question_fixed`, say -- is not among them: it is correctable,
-    so the model gets to retry rather than the turn ending on it."""
-    for code in ("budget_exhausted", "question_fixed", "nothing_to_plan"):
+    `QUESTION_FIXED`, `NOTHING_TO_PLAN` and `PRICES_UNSERVED` alike. `INVALID_PLAN` -- a
+    question-changing amendment under `question_fixed`, say -- is not among them: it is
+    correctable, so the model gets to retry rather than the turn ending on it."""
+    for code in ("budget_exhausted", "question_fixed", "nothing_to_plan", "prices_unserved"):
         assert PlannerSeam._is_terminal_refusal({"outcome": "refused", "code": code})
     assert not PlannerSeam._is_terminal_refusal({"outcome": "refused", "code": "invalid_plan"})
     assert not PlannerSeam._is_terminal_refusal({"outcome": "ok", "code": "question_fixed"})

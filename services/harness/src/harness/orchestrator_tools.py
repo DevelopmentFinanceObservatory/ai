@@ -1330,7 +1330,8 @@ def _questions_refusal(
     """The refusal of an `ask_user` call that asks no question or more than
     `MAX_ASK_QUESTIONS`, asks a question with no option, prices a part that
     is none of `parts`, the spec_ids of the readings whose prices are open
-    (`harness.graph.state.open_parts`), offers a spec_id no search result
+    (`harness.graph.state.open_parts`), prices one part in two questions,
+    offers a spec_id no search result
     this turn named (`_named_spec_ids`), or offers one spec_id on two options
     of the call; None when it asks well. `questions` hold the options a
     prices question is given (`harness.graph.state.prices_question`)."""
@@ -1346,6 +1347,12 @@ def _questions_refusal(
         "`open_prices` this turn"
         for question in questions
         if question.prices_of is not None and question.prices_of not in parts
+    ]
+    priced = [question.prices_of for question in questions if question.prices_of is not None]
+    problems += [
+        f"{part} is priced by more than one question"
+        for part in sorted(set(priced))
+        if priced.count(part) > 1
     ]
     problems += [
         f"question {question.question!r} offers no option"

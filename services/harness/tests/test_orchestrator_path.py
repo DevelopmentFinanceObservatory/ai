@@ -18,6 +18,7 @@ from analysis_mcp.execution_identity import current_execution_identity
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
+from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
 from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
@@ -446,6 +447,38 @@ async def test_a_prices_question_takes_its_options_from_its_part_s_open_prices()
         f"({_OTHER}) in constant prices." in asked
     )
     assert f"({_GROSS}) in constant prices" not in asked
+
+
+async def test_two_prices_questions_on_one_part_are_refused():
+    """Two questions pricing one part would let the later answer override the
+    earlier one in silence, so `ask_user` refuses the call and nothing pauses."""
+    runner, _ = orchestrator_runner(
+        call(
+            "ask_user",
+            questions=[
+                {"question": "Aid in which prices?", "prices_of": _GROSS},
+                {"question": "And in which prices again?", "prices_of": _GROSS},
+            ],
+        ),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(
+        runner,
+        **{
+            ORCHESTRATOR_SPECS_KEY: {_GROSS: _usd_block(_GROSS)},
+            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_GROSS)],
+        },
+    )
+
+    events = await run_turn(runner, types.UserContent("Aid, 2018-2022?"))
+
+    assert not [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
+    (refused,) = [
+        r.response for e in events for r in e.get_function_responses() if r.name == "ask_user"
+    ]
+    assert refused is not None
+    assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
+    assert f"{_GROSS} is priced by more than one question" in refused["refusal"]
 
 
 _COUNT_AND_PRICES = [

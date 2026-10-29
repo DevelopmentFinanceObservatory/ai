@@ -787,11 +787,13 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
     `submission.prices_choice`) binds the planner's next ask offering
     `PRICES_OPTIONS` to its part, and the user's pick there sets the part's
     prices: current prices replace the choice, constant prices keep it. Any
-    other `propose_plan` response, the plan landing included, clears the
-    refusal, so no later ask of another kind is read as that one. A message
-    the user typed (`_user_message`) or an amendment of the approval card
-    (`_is_amendment`) releases every choice. An answer to any other question
-    leaves them standing. A Studio turn is one session, so a choice holds for
+    answer to that ask marks the part's choice `asked`, so the planner does
+    not ask it again (`submission.prices_choice`). Any other `propose_plan`
+    response, the plan landing included, clears the refusal, so no later ask
+    of another kind is read as that one. A message the user typed
+    (`_user_message`) releases every choice and clears the refusal, and an
+    amendment of the approval card (`_is_amendment`) releases every choice.
+    An answer to any other question leaves them standing. A Studio turn is one session, so a choice holds for
     the turn it was made in.
     """
     chosen: dict[str, PricesChoice] = {}
@@ -801,6 +803,7 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
     for step in _session_steps(tool_context):
         if step.kind == "message":
             chosen.clear()
+            refused = None
         elif step.kind == "response":
             if step.name == PROPOSE_PLAN:
                 refused = _prices_refused(step.body)
@@ -814,7 +817,9 @@ def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
             answer = _answers(step.body.get("result")).get("q1") or {}
             basis = PRICES_PICKS.get(str(answer.get("spec_id")))
             if answer.get("kind") == "option" and basis is not None:
-                chosen[part] = PricesChoice(basis)
+                chosen[part] = PricesChoice(basis, asked=True)
+            elif part in chosen:
+                chosen[part] = chosen[part]._replace(asked=True)
         else:
             _priced_answers(step.args or {}, step.body, chosen)
     return chosen
