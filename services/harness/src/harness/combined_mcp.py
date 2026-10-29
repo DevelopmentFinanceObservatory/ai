@@ -154,8 +154,9 @@ COMBINED_MCP_INSTRUCTIONS = (
     "(`aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join`) take frames "
     "and return a new frame. `describe_frame` summarises a frame, and "
     "`write_component` turns a frame into a chart, table or card, which "
-    "`describe_component` reads back. A `search` result can list skills: `get_skill` "
-    "loads one, or a file it lists."
+    "`describe_component` reads back. `export_data` turns a frame into a CSV, Excel, "
+    "Parquet or zip file and returns a lasting link to it. A `search` result can list "
+    "skills: `get_skill` loads one, or a file it lists."
 )
 
 # data-mcp's `resolve_definition`, which resolves each Search result a Studio

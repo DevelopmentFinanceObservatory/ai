@@ -112,6 +112,23 @@ DIRECT = (
 )
 PRESENTATION_TOOLS = ("write_component", "describe_frame", "describe_component")
 ROLLING_ARGUMENT_TOOLS = ("growth", "rank", "filter")
+# The public list: what an outside client sees at `/mcp/`.
+PUBLIC_TOOLS = {
+    "search",
+    "get_data",
+    "describe",
+    "sources",
+    "get_skill",
+    "export_data",
+    "aggregate",
+    "compare",
+    "growth",
+    "rank",
+    "share_of",
+    "join",
+    "filter",
+    *PRESENTATION_TOOLS,
+}
 
 REVISIONS = pytest.mark.parametrize(
     ("mode", "revision"),
@@ -476,8 +493,16 @@ async def test_every_listed_tool_has_a_title_and_explicit_annotations(
         assert tool.annotations is not None, tool.name
         for hint in ("read_only_hint", "destructive_hint", "open_world_hint"):
             assert isinstance(getattr(tool.annotations, hint), bool), (tool.name, hint)
-    assert {t.name for t in tools if t.annotations.read_only_hint is False} == {"write_component"}
+    assert {t.name for t in tools if t.annotations.read_only_hint is False} == {
+        "write_component",
+        "export_data",
+    }
     assert {t.name for t in tools if t.annotations.open_world_hint} == {"write_component"}
+    (export_data,) = [t for t in tools if t.name == "export_data"]
+    assert (export_data.annotations.destructive_hint, export_data.annotations.idempotent_hint) == (
+        False,
+        True,
+    )
 
 
 @REVISIONS
@@ -890,9 +915,9 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
 
 # The most o200k tokens the public tool list may cost, as a client hands it to its
 # model: the compact JSON of each tool's name, description and input schema. Every
-# client pays it on every turn. The bound is the measured count, 16,951, rounded up
+# client pays it on every turn. The bound is the measured count, 17,143, rounded up
 # to the next 500. The list must stay within 20,000; lower the bound as it shrinks.
-_PUBLIC_LIST_TOKEN_BOUND = 17_000
+_PUBLIC_LIST_TOKEN_BOUND = 17_500
 
 
 async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
@@ -1064,7 +1089,7 @@ async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> Non
             served[name].parameters["properties"]
         ) - {"rolling", "anchor_key"}
     assert {"rolling", "anchor_key"} <= set(served["growth"].parameters["properties"])
-    assert not {"sum_of", "quotient_of", "get_skill_file", "resolve_anchor"} & listed.keys()
+    assert listed.keys() == PUBLIC_TOOLS
     assert listed["compare"].input_schema["properties"]["operation"]["enum"] == [
         "difference",
         "sum",
