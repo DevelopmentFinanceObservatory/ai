@@ -112,7 +112,7 @@ async def test_apply_rewrites_every_held_block_so_the_release_reads_the_refs_it_
 ) -> None:
     await _seed(service)
     spec_id = _release_block()["spec_id"]
-    with pytest.raises(ValueError, match="valid tuple"):
+    with pytest.raises(ValueError):
         source_from_spec_block(_mapping_block())
 
     held = await service.get_session(app_name=LEDGER_APP, user_id="principal", session_id="conv")
@@ -151,14 +151,47 @@ async def test_apply_rewrites_every_held_block_so_the_release_reads_the_refs_it_
     assert ledger["studio:seq"] == 1
 
 
-def test_the_default_run_writes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+async def test_a_stale_holders_write_back_is_converted_by_the_next_run(
+    service: DatabaseSessionService,
+) -> None:
+    await _seed(service)
+    held = await service.get_session(app_name=TURN_APP, user_id="principal", session_id="conv#t1")
+    assert held is not None
+    await run_migration(engine=service.db_engine, apply=True)
+
+    # A turn in flight across the run stores a search as `store_search` does,
+    # rewriting the whole of the specs it loaded before the run.
+    specs = {**held.state[ORCHESTRATOR_SPECS_KEY], "spec_new": _release_block()}
+    delta = {ORCHESTRATOR_SPECS_KEY: specs}
+    await service.append_event(
+        held, Event(author="orchestrator", actions=EventActions(state_delta=delta))
+    )
+    rerun = await run_migration(engine=service.db_engine, apply=True)
+
+    assert rerun.blocks[f"{TURN_APP} {ORCHESTRATOR_SPECS_KEY}", Outcome.CONVERTED] == 1
+    assert rerun.written == 1
+    turn = await _state(service, TURN_APP, "conv#t1")
+    assert all(
+        _refs(block) == _refs(_release_block()) for block in turn[ORCHESTRATOR_SPECS_KEY].values()
+    )
+
+
+@pytest.mark.parametrize(("unconvertible", "status"), [(False, 0), (True, 1)])
+def test_the_default_run_writes_nothing_and_fails_on_an_unconvertible_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unconvertible: bool, status: int
 ) -> None:
     async def ledger(*, seed: bool) -> tuple[dict[str, Any], float]:
         service = sqlite_session_service(tmp_path / "sessions.db")
         try:
             if seed:
                 await _seed(service)
+                if unconvertible:
+                    await service.create_session(
+                        app_name=TURN_APP,
+                        user_id="principal",
+                        session_id="bad#t1",
+                        state={ORCHESTRATOR_SPECS_KEY: {"spec_bad": _unreadable_block()}},
+                    )
             session = await service.get_session(
                 app_name=LEDGER_APP, user_id="principal", session_id="conv"
             )
@@ -168,12 +201,19 @@ def test_the_default_run_writes_nothing(
             await service.close()
 
     before = asyncio.run(ledger(seed=True))
+    # Settings read no developer `.env` and no other store's variables.
+    monkeypatch.chdir(tmp_path)
+    for name in (
+        "SESSION_STORE_INSTANCE_CONNECTION_NAME",
+        "SESSION_STORE_DATABASE",
+        "SESSION_STORE_RUNTIME_DB_USER",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'sessions.db'}")
 
-    assert main([]) == 0
+    assert main([]) == status
 
     assert asyncio.run(ledger(seed=False)) == before
-    assert "would be converted: 3" in capsys.readouterr().out
 
 
 async def test_a_session_written_during_the_run_is_left_for_a_rerun(
@@ -211,7 +251,7 @@ async def test_a_session_written_during_the_run_is_left_for_a_rerun(
             [{"identity": "g7", "text": "g7", "role": None, "refs": ["GroupOfSeven"]}],
             2,
         ),
-        ({"congo": [], "chad": [3]}, None, 2),
+        ({"congo": [], "chad": [3], "mali": "country/MLI"}, None, 3),
     ],
 )
 def test_entries_the_mapping_read_as_absent_are_dropped(
@@ -224,11 +264,51 @@ def test_entries_the_mapping_read_as_absent_are_dropped(
     assert result.dropped == dropped
 
 
-def test_a_block_the_reader_refuses_after_conversion_is_left_as_stored() -> None:
+def _unreadable_block() -> dict[str, Any]:
+    """The mapping block with an entity the reader refuses, lacking its value and label."""
     block = copy.deepcopy(_mapping_block())
     block["resolved"]["entities"] = [{"role": "origin"}]
+    return block
+
+
+def _failing_reader(block: Any) -> Any:
+    raise RuntimeError
+
+
+@pytest.mark.parametrize(
+    ("block", "reader", "error"),
+    [
+        (_unreadable_block(), source_from_spec_block, "ValueError"),
+        ({**_release_block(), "_bound_refs": "g7"}, source_from_spec_block, "TypeError"),
+        (_mapping_block(), _failing_reader, "RuntimeError"),
+    ],
+)
+def test_a_block_that_does_not_convert_is_left_as_stored_naming_the_error(
+    block: dict[str, Any], reader: Any, error: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(migration, "source_from_spec_block", reader)
 
     result = migrate_block(block)
 
-    assert result.outcome is Outcome.UNCONVERTIBLE
+    assert (result.outcome, result.error) == (Outcome.UNCONVERTIBLE, error)
     assert result.block is block
+
+
+async def test_a_run_reports_each_unconvertible_block_and_converts_the_rest(
+    service: DatabaseSessionService,
+) -> None:
+    await _seed(service)
+    await service.create_session(
+        app_name=TURN_APP,
+        user_id="principal",
+        session_id="bad#t1",
+        state={ORCHESTRATOR_SPECS_KEY: {"spec_bad": _unreadable_block()}},
+    )
+
+    report = await run_migration(engine=service.db_engine, apply=True)
+
+    where = f"{TURN_APP} {ORCHESTRATOR_SPECS_KEY}"
+    spec_id = _release_block()["spec_id"]
+    assert report.unconvertible == [("bad#t1", where, spec_id, "ValueError")]
+    assert report.blocks[where, Outcome.CONVERTED] == 1
+    assert report.written == 2

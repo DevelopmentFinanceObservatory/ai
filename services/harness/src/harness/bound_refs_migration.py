@@ -31,18 +31,30 @@ text=text, role=None, refs=refs)`. The mapping kept neither the row's pinned
 block holds them, so `identity` takes the documented fallback, the text, and
 `role` is unstated. `compiler.evidence.bound_refs_of` then finds the row by
 its text, case-folded, with any role fitting, which is how the mapping was
-read. An entry whose refs hold no string was read as no entry and is
-dropped; a mapping left with no entry removes the key, as a block whose part
+read. An entry's refs are its strings, read with the reader of that release
+(`compiler.sources._strings`); an entry with none was read as no entry and
+is dropped, and so is one whose text is empty, which no entity name
+matches. A mapping left with no entry removes the key, as a block whose part
 bound nothing is written. A list is left alone. A converted block is kept
-only when `source_from_spec_block` reads it, and a block that cannot be
-converted is left as it is and reported with its reason.
+only when `source_from_spec_block` reads it. A block that cannot be
+converted, or whose conversion raises, is left as it is and reported with
+its reason, and the run goes on.
 
 Each session is read and written on its own. A write sets `state` only
-where the row's `update_time` still holds the value read, and keeps that
-`update_time`, so a session another writer appended to in between is left
-for a rerun and an instance holding the session keeps a valid revision
-marker. No event is appended. The job is safe to repeat: a second run finds
-every converted block already a list.
+where the row's `update_time` still holds the value read, so a session
+another writer appended to in between is left for a rerun. The write keeps
+that `update_time`. ADK's `DatabaseSessionService.append_event` raises
+`StaleSessionError` when a held session's revision marker, its
+`update_time`, differs from the stored one, and `Runner.run_async` lets that
+error end the turn, so moving it would fail every turn in flight. An
+instance holding a session from before the write can still write back the
+mapping-form blocks it holds, whole: `harness.graph.state.store_search`
+rewrites all of `orchestrator:specs` and `ConversationState.close_turn`
+copies the turn's blocks into its record. Such a write lands within one
+request, at most Cloud Run's 900-second timeout, so a dry run 15 minutes
+after the `--apply` run shows whether any did, and another `--apply` run
+converts them. No event is appended. The job is safe to repeat: a second
+run finds every converted block already a list.
 
 `--dry-run`, the default, reads every session and writes nothing. `--apply`
 writes. The store comes from the settings the service uses
@@ -55,9 +67,10 @@ runs as a Cloud Run job execution on the release's image, under that
 service account and on that network (deploy/README.md, "Bound refs
 migration").
 
-Exit status: 0 when every session was read and, under `--apply`, every
-change written; 1 when a session changed during the run and was left for a
-rerun; 2 when no database session store is configured.
+Exit status: 0 when every block converted or was already a list and, under
+`--apply`, every change was written; 1 when a block is unconvertible or a
+session changed during the run and was left for a rerun; 2 when no database
+session store is configured.
 """
 
 from __future__ import annotations
@@ -72,7 +85,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from compiler.sources import source_from_spec_block
+from compiler.sources import _strings, source_from_spec_block
 from google.adk.sessions import DatabaseSessionService
 
 # The `sessions` table, whose columns ADK's v0 and v1 schemas share.
@@ -84,9 +97,24 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from harness.graph.state import AGENT_NAME
 from harness.session_store import build_session_service
 from harness.settings import Settings
+from harness.studio_state import (
+    _APPROVAL_ITEM_PREFIX,
+    _COMPONENT_ITEM_PREFIX,
+    _RUN_ITEM_PREFIXES,
+    _TURN_ITEM_PREFIX,
+    _WRITE_TOKEN_ITEM_PREFIX,
+)
 
 TURN_APP = AGENT_NAME
 LEDGER_APP = f"{AGENT_NAME}.ledger"
+# The ledger's per-item keys, each labelled by its prefix in the report.
+_ITEM_PREFIXES = (
+    _TURN_ITEM_PREFIX,
+    _COMPONENT_ITEM_PREFIX,
+    _WRITE_TOKEN_ITEM_PREFIX,
+    _APPROVAL_ITEM_PREFIX,
+    *_RUN_ITEM_PREFIXES,
+)
 
 
 class Outcome(StrEnum):
@@ -99,11 +127,15 @@ class Outcome(StrEnum):
 
 @dataclass(frozen=True)
 class BlockResult:
-    """One block's outcome, its rewritten form when converted, and why it was not."""
+    """One block's outcome, its rewritten form when converted, and why it was not.
+
+    `error` is the name of the exception the conversion or the reader raised,
+    `TypeError` for a `_bound_refs` that is neither a mapping nor a list.
+    """
 
     outcome: Outcome
     block: Mapping[str, Any]
-    reason: str | None = None
+    error: str | None = None
     dropped: int = 0
 
 
@@ -111,34 +143,30 @@ def migrate_block(block: Mapping[str, Any]) -> BlockResult:
     """`block` with a mapping-form `_bound_refs` rewritten as `BoundEntity` rows.
 
     See the module docstring for the conversion. A block whose
-    `_bound_refs` is a list comes back unchanged.
+    `_bound_refs` is a list comes back unchanged. Never raises: a block
+    whose conversion raises comes back unconvertible, naming the exception.
     """
     raw = block.get("_bound_refs")
     if isinstance(raw, list):
         return BlockResult(Outcome.ALREADY_LIST, block)
     if not isinstance(raw, Mapping):
-        return BlockResult(
-            Outcome.UNCONVERTIBLE, block, reason=f"_bound_refs is a {type(raw).__name__}"
-        )
-    rows: list[dict[str, Any]] = []
-    dropped = 0
-    for text, refs in raw.items():
-        listed = refs if isinstance(refs, list | tuple) else ()
-        strings = [ref for ref in listed if isinstance(ref, str)]
-        if not text or not strings:
-            dropped += 1
-            continue
-        row = BoundEntity(identity=text, text=text, role=None, refs=tuple(dict.fromkeys(strings)))
-        rows.append(row.model_dump(mode="json"))
-    converted = {key: value for key, value in block.items() if key != "_bound_refs"}
-    if rows:
-        converted["_bound_refs"] = rows
+        return BlockResult(Outcome.UNCONVERTIBLE, block, error=TypeError.__name__)
     try:
+        rows: list[dict[str, Any]] = []
+        for text, refs in raw.items():
+            if text and (strings := _strings(refs)):
+                row = BoundEntity(
+                    identity=text, text=text, role=None, refs=tuple(dict.fromkeys(strings))
+                )
+                rows.append(row.model_dump(mode="json"))
+        converted = {key: value for key, value in block.items() if key != "_bound_refs"}
+        if rows:
+            converted["_bound_refs"] = rows
         source_from_spec_block(converted)
-    except ValueError as exc:
-        reason = f"unreadable after conversion: {str(exc).splitlines()[0]}"
-        return BlockResult(Outcome.UNCONVERTIBLE, block, reason=reason)
-    return BlockResult(Outcome.CONVERTED, converted, dropped=dropped)
+    except Exception as exc:
+        # Any failure on one block is reported, so a run always reaches its report.
+        return BlockResult(Outcome.UNCONVERTIBLE, block, error=type(exc).__name__)
+    return BlockResult(Outcome.CONVERTED, converted, dropped=len(raw) - len(rows))
 
 
 @dataclass
@@ -149,7 +177,7 @@ class Report:
     sessions: Counter[str] = field(default_factory=Counter)
     blocks: Counter[tuple[str, Outcome]] = field(default_factory=Counter)
     dropped_entries: int = 0
-    unconvertible: list[str] = field(default_factory=list)
+    unconvertible: list[tuple[str, str, str | None, str]] = field(default_factory=list)
     written: int = 0
     changed_during_run: list[str] = field(default_factory=list)
 
@@ -167,7 +195,10 @@ class Report:
             name = label if outcome is Outcome.CONVERTED else outcome.value
             lines.append(f"  {name}: {sum(n for _, n in where)}")
             lines.extend(f"    {at}: {n}" for at, n in where)
-        lines.extend(f"    {line}" for line in self.unconvertible)
+        lines.extend(
+            f"    {session_id} {where} {spec_id}: {error}"
+            for session_id, where, spec_id, error in self.unconvertible
+        )
         lines.append(f"mapping entries with no refs, dropped: {self.dropped_entries}")
         lines.append(f"sessions {'written' if self.apply else 'to write'}: {self.written}")
         lines.append(
@@ -179,9 +210,9 @@ class Report:
 
 def _location(app_name: str, key: str) -> str:
     """Where a block sits, for the report: the app and its state key, a
-    per-item key such as `studio:turn:3` read as `studio:turn:*`."""
-    head, _, _ = key.rpartition(":")
-    return f"{app_name} {head}:*" if head.count(":") else f"{app_name} {key}"
+    ledger item key such as `studio:turn:3` labelled `studio:turn:*`."""
+    prefix = next((prefix for prefix in _ITEM_PREFIXES if key.startswith(prefix)), None)
+    return f"{app_name} {prefix}*" if prefix else f"{app_name} {key}"
 
 
 def _migrate_state(
@@ -193,24 +224,28 @@ def _migrate_state(
     """
 
     def walk(value: Any, where: str) -> Any:
+        """`value` with its blocks converted; `value` itself when none changed."""
         if isinstance(value, Mapping) and "_bound_refs" in value:
             result = migrate_block(value)
             report.blocks[where, result.outcome] += 1
             report.dropped_entries += result.dropped
             if result.outcome is Outcome.UNCONVERTIBLE:
-                spec_id = value.get("spec_id")
-                report.unconvertible.append(f"{session_id} {where} {spec_id}: {result.reason}")
+                assert result.error is not None
+                report.unconvertible.append((session_id, where, value.get("spec_id"), result.error))
             return result.block
         if isinstance(value, Mapping):
-            return {key: walk(item, where) for key, item in value.items()}
+            items = {key: walk(item, where) for key, item in value.items()}
+            changed = any(items[key] is not item for key, item in value.items())
+            return items if changed else value
         if isinstance(value, list):
-            return [walk(item, where) for item in value]
+            listed = [walk(item, where) for item in value]
+            changed = any(new is not old for new, old in zip(listed, value, strict=True))
+            return listed if changed else value
         return value
 
     changed: dict[str, Any] = {}
     for key, value in state.items():
-        rewritten = walk(value, _location(app_name, key))
-        if rewritten != value:
+        if (rewritten := walk(value, _location(app_name, key))) is not value:
             changed[key] = rewritten
     return changed
 
@@ -309,7 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     print(report.render())
-    return 1 if report.changed_during_run else 0
+    return 1 if report.changed_during_run or report.unconvertible else 0
 
 
 if __name__ == "__main__":
