@@ -980,7 +980,7 @@ class DatasetRequirement(TaggedModel):
 
     # The pin `propose_plan`'s alignment moved this requirement from
     # (`submission.service._aligned_bases`), read as its origin wherever
-    # `source_spec_id` is another pin's compile (`submission.service.AlignedPin`).
+    # `source_spec_id` is another pin's compile (`AlignedPin`).
     # Admission writes it and carries it while the pin stands; the planner's
     # schema leaves it out, and a value the planner sends is dropped.
     aligned_from: Annotated[SkipJsonSchema[SpecId | None], HASHED_WHEN_SET] = Field(
@@ -6165,6 +6165,91 @@ def save_pin_sources(state: SessionState, sources: Mapping[str, PinSource]) -> N
     state[PIN_SOURCES_STATE_KEY] = {
         spec_id: source.model_dump(mode="json") for spec_id, source in sources.items()
     }
+
+
+# The session slot holding each pin compiled to put a calculation's inputs on one
+# measure basis or provider scope (`AlignedPin`), which
+# `submission.service._aligned_bases` reads and `planner.agent.with_source_reads`
+# writes.
+ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
+
+
+class AlignedPin(StrictModel):
+    """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
+
+    `option_ids` holds one option per axis moved, measure basis or provider
+    scope, sorted (`submission.service.Realignment.option_ids`). `digest` is
+    Search's answer as a search's digest (`harness.tool_contracts.resolver_digest`), which
+    the planner seam stores as a reading of the conversation.
+
+    A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is
+    the part pinned to `origin` with its choice on `whole_axis` left open
+    and every other choice on the part's options, and moves no option
+    (`option_ids` empty, `submission.service.Realignment.whole_axis`).
+    """
+
+    origin: str
+    option_ids: tuple[str, ...]
+    spec_id: str
+    digest: dict[str, Any]
+    whole_axis: str | None = None
+
+    @property
+    def key(self) -> tuple[str, tuple[str, ...], str | None]:
+        """What this pin was compiled for: its origin, its options and the axis it leaves open."""
+        return self.origin, self.option_ids, self.whole_axis
+
+
+def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
+    """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
+    return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
+
+
+def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
+    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`)."""
+    kept = [held for held in aligned_pins(state) if held.key != pin.key]
+    state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
+
+
+def aligned_source(
+    state: SessionState, requirement: DatasetRequirement, *, plan: Plan
+) -> PinSource | None:
+    """The source alignment compiled `requirement`'s pin as, read off its own `AlignedPin`.
+
+    An input alignment moved (`DatasetRequirement.aligned_from`) reads the pin compiled
+    from that origin, and a declared whole of `plan` (`DatasetRequirement.whole_of`)
+    the one compiled from its part's pin with its axis left open. Either is the
+    source of the pin it was compiled from, as shown (`pin_sources`), holding the
+    compile's block. A compile Search answered with a spec_id the planner was shown
+    leaves that spec_id's source as shown (`planner.agent.compile_on_basis`), so a
+    requirement compiled onto it reads the compile's block, planner axes and warnings
+    here. `None` for any other requirement, or where no such pin or block is held.
+    """
+    pin = requirement.source_spec_id
+    whole = requirement.whole_of
+    part = plan.requirement(whole.part) if whole is not None else None
+    if requirement.aligned_from is not None:
+        origin, axis = requirement.aligned_from, None
+    elif whole is not None and isinstance(part, DatasetRequirement) and part.source_spec_id:
+        origin, axis = part.source_spec_id, whole.axis
+    else:
+        return None
+    held = next(
+        (
+            aligned
+            for aligned in reversed(aligned_pins(state))
+            if (aligned.origin, aligned.spec_id, aligned.whole_axis) == (origin, pin, axis)
+        ),
+        None,
+    )
+    if held is None:
+        return None
+    parts = held.digest.get("part_digests") or ()
+    block = parts[0].get("spec_block") if len(parts) == 1 else None
+    if block is None:
+        return None
+    shown = pin_sources(state).get(origin) or PinSource()
+    return shown.model_copy(update={"block": block, "earlier_turn": False})
 
 
 def dataset_of(identity: Mapping[str, Any]) -> dict[str, Any]:

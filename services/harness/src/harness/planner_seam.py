@@ -114,6 +114,7 @@ from google.genai import types
 from planner.agent import PROPOSE_PLAN, ToolContextSession, declare_ready, with_source_reads
 from planner.operations import OperationKind
 from planner.plan import (
+    ALIGNED_PINS_STATE_KEY,
     AMENDMENT_ENTRY_STATE_KEY,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
@@ -122,12 +123,14 @@ from planner.plan import (
     REDUCTION_REFUSED_ASKS_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
+    AlignedPin,
     AskBreakdown,
     PinSource,
     Plan,
     PlanStatus,
     SessionState,
     UnsupportedOperation,
+    aligned_pins,
     clear_unsupported,
     current_discovery_time_left,
     cut_user_text,
@@ -150,19 +153,16 @@ from planner.records import Severity
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure, SelectedSource
+from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from submission.service import (
-    ALIGNED_PINS_STATE_KEY,
     SEARCHED_PINS_STATE_KEY,
-    AlignedPin,
     Proposal,
     SourceReadings,
-    aligned_pins,
     held_sector,
     pinned_sources,
     searched_pins,
     submit,
 )
-from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
 from translator.referral import USER_DECIDES, ReferralKind
@@ -1867,7 +1867,7 @@ def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
 def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     """Store each pin compiled to put a calculation's inputs on one basis or provider scope as a reading of the conversation.
 
-    `planner_state` holds the pins (`submission.service.aligned_pins`), each
+    `planner_state` holds the pins (`planner.plan.aligned_pins`), each
     with Search's answer as a digest. A pin no reading of the conversation
     names yet joins this turn's readings through `store_search`, as the
     `switch` node stores a switched one: under the words of the reading it

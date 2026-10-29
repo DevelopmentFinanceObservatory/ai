@@ -92,6 +92,7 @@ from planner.plan import (
     PLAN_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
+    AlignedPin,
     AnswerMode,
     AskAnswer,
     AskBreakdown,
@@ -121,6 +122,7 @@ from planner.plan import (
     UnsupportedOperation,
     WholeOf,
     WindowedPin,
+    aligned_pins,
     clear_unsupported,
     current_discovery_time_left,
     current_recorded_identity,
@@ -136,6 +138,7 @@ from planner.plan import (
     plan_revision,
     record_optional_decline,
     record_unsupported,
+    save_aligned_pin,
     save_full_history,
     save_pin_sources,
     save_plan,
@@ -178,7 +181,6 @@ from submission import service as submission_service
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
-    AlignedPin,
     Realignment,
     SourceReadings,
     _choice_not_offered,
@@ -188,10 +190,8 @@ from submission.service import (
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
-    aligned_pins,
     first_year_reads,
     identity_on_record,
-    save_aligned_pin,
     scope_choice_decisions,
     searched_pins,
 )
@@ -199,6 +199,7 @@ from translator.discovery import (
     DefinitionNotResolvedError,
     DiscoveryLog,
     DiscoveryRecord,
+    _resolve_pin_block,
     build_discovery_tools,
     load_log,
     name_pinned_groups,
@@ -4954,6 +4955,8 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
         for r in plan.evidence_requirements
         if isinstance(r, DatasetRequirement)
     ] == [("health", HEALTH), ("total", TOTAL_GROSS)]
+    # The compile joins the datasets shown after them, which keep their order.
+    assert list(pin_sources(ctx.state)) == [HEALTH, TOTAL, TOTAL_GROSS]
     bases = {
         d.fixes.source_spec_id: d
         for d in plan.decisions
@@ -6680,6 +6683,40 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     assert stated.slot in whole_requirement.decision_ids
 
 
+async def test_a_declared_whole_a_search_showed_is_discovered_from_its_compile(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid over the CRS bilateral total, declared the part over every sector
+    and pinned to that total, which a search showed. Search answers the whole compiled
+    from the part with the same spec_id. The shown source stands for that spec_id,
+    and discovery reads the whole from its compile, which takes its choices'
+    provenance and planner axes from the part."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), us_2023_block("whole"))
+    shown = pin_sources(ctx.state)[us_2023_block("whole")["spec_id"]]
+
+    result = await _us_2023(
+        _tools_reading(WholeCompiles())["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="whole",
+        declared=True,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert pin_sources(ctx.state)[us_2023_block("whole")["spec_id"]] == shown
+    (compiled,) = aligned_pins(ctx.state)
+    (part,) = compiled.digest["part_digests"]
+    assert part["spec_block"] != shown.block
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole = plan.requirement(_WHOLE)
+    assert isinstance(whole, DatasetRequirement)
+    assert whole.source_spec_id == compiled.spec_id == us_2023_block("whole")["spec_id"]
+    assert _resolve_pin_block(ctx, plan=plan, requirement=whole) == part["spec_block"]
+
+
 @pytest.mark.parametrize(
     ("quotient", "divides"),
     [(True, "quotient"), (False, "share")],
@@ -8244,6 +8281,60 @@ def test_a_direct_pin_sharing_an_aligned_compiles_spec_id_keeps_its_own_row(
     ]
 
 
+def test_a_requirement_restated_with_another_meaning_on_its_compile_reads_it_as_its_own(
+    decision: DecisionFactory,
+) -> None:
+    """The comparison above moved the US total onto DAC1's multilateral row. The amended
+    plan restates that input on the same pin as US multilateral ODA, a measure of its
+    own: it no longer asks for the total, so it records no origin and reads the row as
+    its own pin."""
+    ctx = _FakeToolContext()
+    france = _another_part(_US_MULTILATERAL)
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL, france)
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin=_US_TOTAL["spec_id"],
+            option_ids=("provider:multilateral",),
+            spec_id=_US_MULTILATERAL["spec_id"],
+            digest={},
+        ),
+    )
+    propose = _tools_by_name()["propose_plan"].func
+    compared = propose(
+        question="How does US ODA compare with France's multilateral ODA?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("second", _US_TOTAL),
+            _dac_countries("other", france),
+            _difference("second", "other"),
+        ],
+        tool_context=ctx,
+    )
+    assert compared["outcome"] == Outcome.OK.value, compared
+
+    result = propose(
+        question="How does US multilateral ODA compare with France's?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("second", _US_MULTILATERAL).model_copy(
+                update={"measure": "US multilateral ODA"}
+            )
+        ],
+        amends_version=1,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    second = plan.requirement("second")
+    assert isinstance(second, DatasetRequirement)
+    assert (second.source_spec_id, second.aligned_from) == (_US_MULTILATERAL["spec_id"], None)
+
+
 def test_an_aligned_from_the_planner_sends_is_dropped(decision: DecisionFactory) -> None:
     """The planner's schema leaves `aligned_from` out, but a model can send it. US
     multilateral ODA, sent as aligned from the US total, as a share of that total:
@@ -8279,13 +8370,18 @@ def test_an_aligned_from_the_planner_sends_is_dropped(decision: DecisionFactory)
     ]
 
 
-def test_a_plan_and_aligned_pin_stored_before_the_origin_record_load_and_translate() -> None:
+def test_a_plan_and_aligned_pin_stored_before_the_origin_record_load_translate_and_amend(
+    decision: DecisionFactory,
+) -> None:
     """`fixtures/aligned_total_plan_stored.json` holds the session state the comparison
     above leaves, as the code stored it before a requirement recorded the pin alignment
     moved it from (`DatasetRequirement.aligned_from`): the plan, its total moved onto
     the multilateral row, and that compile held as an `AlignedPin`. Both load, the
     plan keeps the revision it was stored under, and it translates with each
-    requirement on its stored pin."""
+    requirement on its stored pin. Amended into the share of US ODA going to
+    multilaterals, US multilateral ODA pinned to that row directly, the total reads
+    the compile's origin as its own and goes back to its own pin, so the share does
+    not divide one series by itself."""
     recorded = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "aligned_total_plan_stored.json").read_text()
     )
@@ -8316,6 +8412,29 @@ def test_a_plan_and_aligned_pin_stored_before_the_origin_record_load_and_transla
         "second": _US_MULTILATERAL["spec_id"],
         "other": _another_part(_US_MULTILATERAL)["spec_id"],
     }
+
+    ctx = _FakeToolContext()
+    ctx.state.update(state)
+    _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL, _another_part(_US_MULTILATERAL))
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of US ODA goes to multilaterals?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _dac_countries("first", _US_MULTILATERAL),
+            _dac_countries("second", _US_MULTILATERAL),
+            _share("first", "second"),
+        ],
+        removed_evidence_requirements=["other", _COMPARE],
+        amends_version=plan.version,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _pins(ctx) == [
+        ("second", _US_TOTAL["spec_id"]),
+        ("first", _US_MULTILATERAL["spec_id"]),
+    ]
 
 
 async def test_a_comparison_with_a_total_stating_no_provider_scope_keeps_both_datasets(

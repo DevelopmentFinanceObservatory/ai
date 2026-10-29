@@ -115,6 +115,7 @@ from planner.plan import (
     ASKS_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
+    AlignedPin,
     Coverage,
     DatasetRequirement,
     Decision,
@@ -130,6 +131,7 @@ from planner.plan import (
     open_window,
     plan_revision,
     repinned,
+    save_aligned_pin,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -145,8 +147,6 @@ from planner.records import (
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import ValidationError
 from submission.service import (
-    AlignedPin,
-    save_aligned_pin,
     scope_choice_decisions,
 )
 from translator.discovery import PartFault, PartNotResolvedError

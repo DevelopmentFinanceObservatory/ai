@@ -83,21 +83,18 @@ from submission.service import (
     COMBINE_OPTION,
     WHOLE_COLUMNS,
     Admission,
-    AlignedPin,
     Combination,
     Proposal,
     Realignment,
     ReferralAnswers,
     SearchedPin,
     Unpinned,
-    aligned_pins,
     axis_slot,
     basis_unservable,
     block_parties,
     bound_parties,
     part_scope,
     realignments_wanted,
-    save_aligned_pin,
     save_searched_pin,
     share_whole_underivable,
     submit,
@@ -129,6 +126,7 @@ from planner.declaration import PlanTool
 from planner.plan import (
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
+    AlignedPin,
     AnswerMode,
     AskAnswer,
     DecisionDraft,
@@ -140,6 +138,7 @@ from planner.plan import (
     PlanStatus,
     SessionState,
     UnsupportedOperation,
+    aligned_pins,
     full_histories,
     full_history,
     identity_on_record,
@@ -149,6 +148,7 @@ from planner.plan import (
     record_optional_decline,
     record_reduction_refused_asks,
     record_unsupported,
+    save_aligned_pin,
     save_full_history,
     save_pin_sources,
     save_plan,
@@ -1429,8 +1429,9 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     planner as a source of its own (`planner.plan.save_pin_sources`),
     settled as the pin it was compiled from, unless the planner was shown
     its spec_id already, as a pin the plan may hold for its own reasons,
-    whose source stands as shown. It is held as a
-    `submission.service.AlignedPin` with the answer's digest
+    whose source stands as shown; the requirement moved onto it reads the
+    compile through `planner.plan.aligned_source`. It is held as a
+    `planner.plan.AlignedPin` with the answer's digest
     (`harness.tool_contracts.resolver_digest`), its block marking those
     axes as the planner's, beside any axis the origin's block marks
     (`harness.scope_choices.mark_planner_axes`), so the next proposal pins
@@ -1518,7 +1519,8 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))
     compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    save_pin_sources(state, {spec_id: compiled, **sources})
+    if spec_id not in sources:
+        save_pin_sources(state, {**sources, spec_id: compiled})
     save_aligned_pin(
         state,
         AlignedPin(
@@ -1571,7 +1573,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     (`harness.scope_choices.mark_planner_axes`) those of them the part's
     block marks, so the whole reads as settled the way the part was and a
     later search carries what the part's carries. It is held as a
-    `submission.service.AlignedPin` from the part on that axis, which every
+    `planner.plan.AlignedPin` from the part on that axis, which every
     whole declaring the part and the axis pins.
 
     Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
@@ -1658,7 +1660,8 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
     whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    save_pin_sources(state, {spec_id: whole_source, **sources})
+    if spec_id not in sources:
+        save_pin_sources(state, {**sources, spec_id: whole_source})
     save_aligned_pin(
         state,
         AlignedPin(origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis),

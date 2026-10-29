@@ -41,6 +41,7 @@ import functools
 import hashlib
 import logging
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -106,6 +107,7 @@ from planner.plan import (
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
     AggregateRequirement,
+    AlignedPin,
     AnswerMode,
     AskAnswer,
     AskRoleDroppedError,
@@ -140,6 +142,7 @@ from planner.plan import (
     UnsupportedPlanError,
     WholeIsItsMemberError,
     WindowedPin,
+    aligned_pins,
     amendment_entry,
     authored,
     bound_fixes,
@@ -479,6 +482,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 "evidence_requirements": tuple(unwindowed_requirements),
             }
         )
+    if previous is not None:
+        previous = _with_inferred_origins(previous, aligned_pins(view.state))
     evidence_requirements = _with_aligned_origins(evidence_requirements, previous)
     pins = pin_sources(view.state)
     sources = SourceReadings.of_shown(pins)
@@ -3637,11 +3642,6 @@ def _scope_decisions(
     return [*decisions, *written], patched
 
 
-# The session slot holding each pin compiled to put a calculation's inputs
-# on one measure basis or provider scope (`AlignedPin`), which `_aligned_bases` reads and
-# `planner.agent.with_source_reads` writes.
-ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
-
 # The identity slots whose bound code makes a part a sector or restricted
 # one: the CRS purpose code, type of finance and cooperation modality. They
 # mirror the slots dfo-apis reads a part's shape from for its basis
@@ -3679,43 +3679,6 @@ _PROVIDER_ALIGNED = (
 # The axis a part's sector is chosen on, which names a share's side for the
 # reader (`_side_name`).
 _SECTOR_AXIS = "sector"
-
-
-class AlignedPin(StrictModel):
-    """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
-
-    `option_ids` holds one option per axis moved, measure basis or provider
-    scope, sorted (`Realignment.option_ids`). `digest` is Search's answer
-    as a search's digest (`harness.tool_contracts.resolver_digest`), which
-    the planner seam stores as a reading of the conversation.
-
-    A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is
-    the part pinned to `origin` with its choice on `whole_axis` left open
-    and every other choice on the part's options, and moves no option
-    (`option_ids` empty, `Realignment.whole_axis`).
-    """
-
-    origin: str
-    option_ids: tuple[str, ...]
-    spec_id: str
-    digest: dict[str, Any]
-    whole_axis: str | None = None
-
-    @property
-    def key(self) -> tuple[str, tuple[str, ...], str | None]:
-        """What this pin was compiled for: its origin, its options and the axis it leaves open."""
-        return self.origin, self.option_ids, self.whole_axis
-
-
-def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
-    """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
-    return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
-
-
-def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
-    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`)."""
-    kept = [held for held in aligned_pins(state) if held.key != pin.key]
-    state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
 
 
 # The session slot holding each search code made for a calculation's input
@@ -4452,15 +4415,60 @@ def _aligned_from(read: _Input | None, pin: str) -> str | None:
     return read.origin if read is not None and read.origin != pin else None
 
 
+def _with_inferred_origins(previous: Plan, aligned: Sequence[AlignedPin]) -> Plan:
+    """`previous` with each input alignment moved before requirements recorded it
+    (`DatasetRequirement.aligned_from`) given the origin it was moved from.
+
+    A plan stored before then holds an aligned input on its compiled pin alone, and
+    records no origin on any requirement. An input pinning the spec_id of exactly one
+    origin's compile (`AlignedPin`, not a declared whole's) records that origin,
+    where no other requirement of `previous` pins that spec_id, since one that does
+    may hold it as its own, and none pins the origin, which an input pinned to the
+    compile directly beside its origin's own requirement would. The stored plan keeps
+    its form and revision; only the plan this call admits records the origin.
+    """
+    origins: dict[str, set[str]] = {}
+    for pin in aligned:
+        if pin.whole_axis is None:
+            origins.setdefault(pin.spec_id, set()).add(pin.origin)
+    datasets = [r for r in previous.evidence_requirements if isinstance(r, DatasetRequirement)]
+    if not origins or any(dataset.aligned_from is not None for dataset in datasets):
+        return previous
+    pinning = Counter(dataset.source_spec_id for dataset in datasets)
+    inferred = {
+        dataset.id: origin
+        for dataset in datasets
+        if dataset.source_spec_id is not None
+        and pinning[dataset.source_spec_id] == 1
+        and len(held := origins.get(dataset.source_spec_id, set())) == 1
+        and (origin := next(iter(held))) not in pinning
+    }
+    if not inferred:
+        return previous
+    return previous.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                requirement.model_copy(update={"aligned_from": inferred[requirement.id]})
+                if requirement.id in inferred
+                else requirement
+                for requirement in previous.evidence_requirements
+            )
+        }
+    )
+
+
 def _with_aligned_origins(
     evidence_requirements: Sequence[EvidenceRequirement], previous: Plan | None
 ) -> list[EvidenceRequirement]:
     """This call's requirements, each dataset requirement's `aligned_from` the one the
-    plan `previous` records for it while its pin stands, else unset.
+    plan `previous` records for it where the requirement restates that one unchanged
+    apart from it and its citations (`_asked_content`), else unset.
 
     Alignment alone writes `aligned_from` (`_aligned_bases`). The planner's schema
     leaves it out, so a value the planner sends is dropped, and a requirement it
-    restates on the pin alignment moved it to keeps the origin recorded for it.
+    restates as it stands keeps the origin recorded for it. One restated with any
+    other field changed on the same pin can ask for something else, so it reads its
+    pin as its own.
     """
     held = {
         requirement.id: requirement
@@ -4475,7 +4483,7 @@ def _with_aligned_origins(
         before = held.get(requirement.id)
         origin = (
             before.aligned_from
-            if before is not None and before.source_spec_id == requirement.source_spec_id
+            if before is not None and _asked_content(before) == _asked_content(requirement)
             else None
         )
         restated.append(
@@ -4484,6 +4492,13 @@ def _with_aligned_origins(
             else requirement.model_copy(update={"aligned_from": origin})
         )
     return restated
+
+
+def _asked_content(requirement: DatasetRequirement) -> dict[str, Any]:
+    """What `requirement` asks for, compared across a revision by `_with_aligned_origins`:
+    every field but the origin alignment records and the decisions it cites, which
+    admission adds to (`settle_decisions`) and the planner restates without."""
+    return requirement.model_dump(exclude={"aligned_from", "decision_ids"})
 
 
 class _InputGroup(NamedTuple):

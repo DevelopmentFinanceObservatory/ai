@@ -149,6 +149,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     Unit,
+    aligned_source,
     authored,
     dataset_of,
     discovery_time_left,
@@ -2413,9 +2414,10 @@ def _resolve_pin_block(
     (`planner.plan.pin_sources`) is reused when `requirement` is the only
     dataset requirement in `plan` pinning it as its own. With several, nothing
     tells which one the search that returned it was about. A requirement
-    `propose_plan`'s alignment moved onto the pin (`DatasetRequirement.aligned_from`)
-    reads the pin compiled for it, so it reuses the block and leaves the one
-    pinning it as its own to reuse it too. `None` too when the
+    `propose_plan` compiled its pin for, an input alignment moved or a declared
+    whole, reads that compile's own source (`planner.plan.aligned_source`), its
+    block and warnings, whatever source a search showed under the same spec_id,
+    and is not counted among those pinning it as their own. `None` too when the
     search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
     since one means the search dropped part of the ask and answered a
     narrower one, and when no block was carried forward for it. An earlier
@@ -2425,7 +2427,9 @@ def _resolve_pin_block(
     pin = requirement.source_spec_id
     if pin is None:
         return None
-    source = pin_sources(tool_context.state).get(pin)
+    state = tool_context.state
+    compiled = aligned_source(state, requirement, plan=plan)
+    source = compiled or pin_sources(state).get(pin)
     if source is None or BLOCKING_WARNING_CODES.intersection(source.warnings):
         return None
     pinning = [
@@ -2433,9 +2437,9 @@ def _resolve_pin_block(
         for item in plan.evidence_requirements
         if isinstance(item, DatasetRequirement)
         and item.source_spec_id == pin
-        and item.aligned_from is None
+        and aligned_source(state, item, plan=plan) is None
     ]
-    if requirement.aligned_from is None and len(pinning) != 1:
+    if compiled is None and len(pinning) != 1:
         return None
     return source.spec_block(pin)
 

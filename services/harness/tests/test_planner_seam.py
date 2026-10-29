@@ -100,6 +100,7 @@ from planner.plan import (
     UNSUPPORTED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
+    AlignedPin,
     AnswerMode,
     AskBreakdown,
     DatasetRequirement,
@@ -128,6 +129,7 @@ from planner.plan import (
     pin_sources,
     plan_revision,
     rolls_from_its_start,
+    save_aligned_pin,
     save_pin_sources,
     save_plan,
 )
@@ -148,9 +150,7 @@ from planner.workflow import (
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
 from submission.service import (
-    AlignedPin,
     SourceReadings,
-    save_aligned_pin,
     scope_choice_decisions,
 )
 from translator.discovery import current_cut_calls

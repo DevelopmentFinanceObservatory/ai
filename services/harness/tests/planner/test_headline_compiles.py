@@ -23,13 +23,17 @@ from planner.plan import (
     DatasetRequirement,
     Entity,
     Period,
+    PinSource,
+    Plan,
     Reduction,
     load_plan,
     pin_sources,
+    save_pin_sources,
 )
 from planner.tool_results import Outcome
 from planner.workflow import ToolId, Workflow
-from translator.discovery import build_discovery_tools
+from translator import discovery
+from translator.discovery import BLOCKING_WARNING_CODES, build_discovery_tools
 from translator.mechanical import build_translation
 
 from ..basis_alignment import us_2023_block
@@ -157,11 +161,11 @@ _NET = f"spec_{'7' * 32}"
 def _left_on_net() -> dict[str, Any]:
     """`_GROSS`'s part counted net by default, under the spec_id `_NET`: the measure
     basis no one stated, as Search answers an ask that names none."""
-    block = json.loads(
-        json.dumps(_GROSS)
-        .replace(_GROSS["spec_id"], _NET)
-        .replace('"ref": "Gross"', '"ref": "Net"')
-    )
+    text = json.dumps(_GROSS)
+    for old, new in ((_GROSS["spec_id"], _NET), ('"ref": "Gross"', '"ref": "Net"')):
+        assert old in text, old
+        text = text.replace(old, new)
+    block = json.loads(text)
     scope = block["resolved"]["scope_choices"]
     (basis,) = [c for c in scope["choices"] if c["axis"] == "measure_basis"]
     basis["active"], basis["provenance"] = "measure_basis:net", "default"
@@ -194,16 +198,20 @@ class _GrossCompiles:
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
-async def test_a_gross_total_compared_with_a_net_average_compiles_both_on_gross(
-    decision: DecisionFactory,
+async def _gross_compared_with_net_average(
+    ctx: _FakeToolContext, decision: DecisionFactory, *, warnings: tuple[str, ...] = ()
 ) -> None:
-    """US total ODA in 2023, its total stated gross compared with its average left on
-    net, both on one DAC1 part. The sides differ by their operation, a sum against a
-    mean, so the net input aligned on gross reads no one series twice: the proposal
-    compiles the average's input on gross through the resubmit a switch posts, and
-    the workflow reads both inputs from the gross pin."""
-    ctx = _FakeToolContext()
-    _show_blocks(ctx, _GROSS, _left_on_net())
+    """Propose US total ODA in 2023, its total stated gross, compared with its average
+    left on net, both on one DAC1 part, the gross source shown with the search
+    warnings `warnings`. The sides differ by their operation, a sum against a mean,
+    so the net input is aligned on gross, which Search compiles to the gross pin."""
+    save_pin_sources(
+        ctx.state,
+        {
+            _GROSS["spec_id"]: PinSource(block=_GROSS, settled=True, warnings=warnings),
+            _NET: PinSource(block=_left_on_net(), settled=True),
+        },
+    )
     question = "How does US gross ODA in 2023 compare with its average?"
     ctx.state[ASKS_STATE_KEY] = [question]
     surface = _GrossCompiles()
@@ -234,7 +242,21 @@ async def test_a_gross_total_compared_with_a_net_average_compiles_both_on_gross(
     )
     assert result["outcome"] == Outcome.OK.value, result
     assert len(surface.calls) == 1
-    # The user's gross pin keeps the source they were shown, its basis theirs.
+    assert [
+        (r.id, r.source_spec_id, r.aligned_from)
+        for r in cast(Plan, load_plan(ctx.state)).evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [("first", _GROSS["spec_id"], None), ("second", _GROSS["spec_id"], _NET)]
+
+
+async def test_a_gross_total_compared_with_a_net_average_compiles_both_on_gross(
+    decision: DecisionFactory,
+) -> None:
+    """The proposal compiles the average's input on gross through the resubmit a
+    switch posts, and the workflow reads both inputs from the gross pin. The user's
+    gross pin keeps the source they were shown, its basis theirs."""
+    ctx = _FakeToolContext()
+    await _gross_compared_with_net_average(ctx, decision)
     assert planner_axes(pin_sources(ctx.state)[_GROSS["spec_id"]].block) == frozenset()
 
     workflow = await _compiled(ctx)
@@ -248,3 +270,52 @@ async def test_a_gross_total_compared_with_a_net_average_compiles_both_on_gross(
         "analysis-mcp.compare",
     ]
     assert workflow.terminal_steps == (_COMPARE,)
+
+
+async def test_each_input_on_the_gross_pin_is_discovered_from_its_own_source(
+    decision: DecisionFactory,
+) -> None:
+    """Discovery reads the gross pin's block for each input from the source that
+    put it there: the total from the search the user's words settled, its basis
+    theirs, and the average from the compile alignment made of its net pin, its
+    basis the planner's."""
+    ctx = _FakeToolContext()
+    await _gross_compared_with_net_average(ctx, decision)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+
+    blocks = {
+        rid: discovery._resolve_pin_block(
+            ctx, plan=plan, requirement=cast(DatasetRequirement, plan.requirement(rid))
+        )
+        for rid in ("first", "second")
+    }
+
+    assert {rid: planner_axes(block) for rid, block in blocks.items()} == {
+        "first": frozenset(),
+        "second": frozenset({"measure_basis"}),
+    }
+
+
+async def test_an_aligned_input_reads_its_compiles_warnings_not_the_shown_pins(
+    decision: DecisionFactory,
+) -> None:
+    """The search that showed the gross pin warned that it read part of the ask
+    (`translator.discovery.BLOCKING_WARNING_CODES`), so the total is searched again.
+    The average reads the compile of its net pin, which carries no such warning, and
+    is discovered from it with no search."""
+    ctx = _FakeToolContext()
+    await _gross_compared_with_net_average(
+        ctx, decision, warnings=(sorted(BLOCKING_WARNING_CODES)[0],)
+    )
+    refused = _SearchRefused()
+    (discover_source,) = [
+        tool
+        for tool in build_discovery_tools(surface=cast(ToolSurface, refused))
+        if tool.name == "discover_source"
+    ]
+
+    found = await discover_source.func(requirement_id="second", tool_context=ctx)
+
+    assert found["status"] == "definite", found
+    assert refused.calls == []
