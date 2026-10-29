@@ -24,6 +24,7 @@ from typing import Any, ClassVar, NamedTuple, cast, override
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
+from compiler.caller_clients import MAX_CALLERS
 from compiler.evidence import check_evidence, evidence_from_source
 from compiler.surface import (
     FixtureSurface,
@@ -67,6 +68,7 @@ from harness.chart_binding import (
     over_cap_dimension,
     select_binding_ok,
 )
+from harness.conversation import current_conversation_id
 from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
 from harness.graph import switch as switch_module
@@ -4638,6 +4640,32 @@ async def test_withdrawing_cancels_the_latest_cards_calls_still_waiting_for_a_sl
     await asyncio.gather(*early._tasks, return_exceptions=True)
 
     assert len(sends.sent) == 1
+    assert sends.cancelled == 0
+
+
+async def test_evicting_a_conversation_withdraws_its_calls_still_waiting_for_a_slot(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The oldest conversation's record is dropped once `MAX_CALLERS` newer
+    conversations have offered. Its call already out runs on; its queued
+    calls never start."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+    oldest = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
+    other = _seam_plan(schemas=real_schemas)
+
+    current_conversation_id.set("conversation-0")
+    early.offer(oldest)
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+    for n in range(1, MAX_CALLERS + 1):
+        current_conversation_id.set(f"conversation-{n}")
+        early.offer(other)
+    hold.set()
+    await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert len(sends.sent) == 1 + MAX_CALLERS
     assert sends.cancelled == 0
 
 

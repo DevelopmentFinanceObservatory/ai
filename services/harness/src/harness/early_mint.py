@@ -40,9 +40,10 @@ One set per conversation, keyed by the card's `plan_revision`: an offer of
 the revision already started starts nothing. A new revision replaces the
 record, and the replaced set's calls already sent run on. A call still
 waiting for one of its card's slots is withdrawn, unsent and logged
-`withdrawn`, when a newer revision is offered or the card is approved
-(`withdraw`, called from `harness.graph.planning.approve`): the run then
-asks for the frames itself. Nothing here touches the card,
+`withdrawn`, when a newer revision is offered, the card is approved
+(`withdraw`, called from `harness.graph.planning.approve`), or its
+conversation is evicted past `MAX_CALLERS`: the run then asks for the frames
+itself. Nothing here touches the card,
 the plan or the run ledger. Each call logs one line with its spec_id, the
 revision, its outcome and the seconds since the card was offered, and a
 failure is logged and dropped.
@@ -142,7 +143,8 @@ class EarlyMints:
         self._sets[conversation] = mint_set
         self._sets.move_to_end(conversation)
         while len(self._sets) > MAX_CALLERS:
-            self._sets.popitem(last=False)
+            _, evicted = self._sets.popitem(last=False)
+            self._withdraw(evicted)
         for step in plan.workflow.steps:
             if step.tool != GET_DATA or step.bindings:
                 continue
