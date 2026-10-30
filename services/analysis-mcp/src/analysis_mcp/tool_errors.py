@@ -918,7 +918,7 @@ class ToolRefusal:
         """A share whose numerator and denominator resolved to two units, each a
         unit as the runner's refusal states it: a unit ref, or a converted or
         composed unit's object. Two units make a quotient, so `fix` names that
-        form."""
+        form beside the runner's two units."""
         units = (json.dumps(numerator_unit), json.dumps(denominator_unit))
         return cls(
             code=ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH,
@@ -927,7 +927,11 @@ class ToolRefusal:
                 "numerator is no share of the denominator. Repeat the call with "
                 'operation="quotient" and the same arguments to divide one by the other.'
             ),
-            fix={"operation": "quotient"},
+            fix={
+                "operation": "quotient",
+                "numerator": numerator_unit,
+                "denominator": denominator_unit,
+            },
         )
 
     @classmethod
@@ -1636,16 +1640,22 @@ class ToolRefusal:
         )
 
     @classmethod
-    def latest_year_unresolved(cls, *, fix: Mapping[str, Any]) -> Self:
-        """`rolling_anchor_unresolved` for a call that stated a relative year, which
-        has no `anchor_key` to resolve and retry with. `fix` is the runner's, whose
-        `detail` names the check that failed."""
+    def latest_year_unresolved(cls, *, fix: Mapping[str, Any], derived: Sequence[str] = ()) -> Self:
+        """`rolling_anchor_unresolved` for a call with no `anchor_key` to resolve and
+        retry with. `fix` is the runner's, whose `detail` names the check that failed.
+        A year counted from the latest year stands in the call or in the recipe of one
+        of its `derived` inputs, which the call computes again."""
+        fixed_years = (
+            f"State each such year as a fixed year, in this call and in the calls that made "
+            f"{', '.join(derived)}, then retry with the frame_ref those return."
+            if derived
+            else "State the periods as fixed years instead."
+        )
         return cls(
             code=ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED,
             message=(
                 f"The latest year of the data is not established ({fix.get('detail')}), so "
-                "a year counted from it cannot be worked out. State the periods as fixed "
-                "years instead."
+                f"a year counted from it cannot be worked out. {fixed_years}"
             ),
             fix=dict(fix),
         )

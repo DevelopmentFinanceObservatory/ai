@@ -211,3 +211,23 @@ async def test_a_scope_entry_search_refuses_names_search_s_code() -> None:
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["upstream_code"] == "requested_option_unavailable"
+
+
+async def test_an_invalid_resolve_names_resolve_definition() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            400, content=_problem_body(code="request_invalid", retryable=False, pointer="/input")
+        )
+
+    (entry,) = _SWITCH["request"]["input"]["entries"]
+    result = await _call(
+        handler,
+        {"spec_id": entry["variable_text"], "identity": entry["identity"]},
+        InMemoryDefinitionStore(),
+    )
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "request_invalid"
+    assert result.structured_content["fix"]["tool"] == "resolve_definition"
+    assert result.structured_content["fix"]["accepted"][0] == "spec_id"
+    assert "scope_entries" in result.structured_content["fix"]["accepted"]

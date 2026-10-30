@@ -532,11 +532,13 @@ def _call_deadline(budget_s: float) -> CallDeadline:
 async def resolve_and_register(
     wire: Mapping[str, Any],
     *,
+    tool: str = "search",
     budget_s: float = SEARCH_CALL_BUDGET_S,
     read_timeout_s: float | None = None,
 ) -> dict[str, Any] | ToolResult:
     """POST `wire` to the Search API's resolve route and register every definition its envelope carries.
 
+    `tool` is the calling tool, which an upstream refusal names.
     `budget_s` bounds the call, retries included (`_call_deadline`).
     `read_timeout_s` overrides the client's read timeout
     for each attempt (`Settings.upstream_read_timeout_s` when `None`).
@@ -556,7 +558,7 @@ async def resolve_and_register(
             deadline=_call_deadline(budget_s),
         )
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc, tool="search"))
+        return to_tool_result(from_upstream_error(exc, tool=tool))
     try:
         envelope = response.json()
     except ValueError as exc:

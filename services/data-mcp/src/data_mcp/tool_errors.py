@@ -2,7 +2,7 @@
 
 `ToolRefusal` is the stable code/retry-mode/fix/message contract a tool
 returns via `to_tool_result` instead of letting a raw `UpstreamError`
-propagate. Twenty-five codes span four retry modes (`RetryMode`), most with a
+propagate. Twenty-six codes span four retry modes (`RetryMode`), most with a
 typed factory whose `fix` payload is the machine-readable detail a calling
 model needs to correct and retry, wait, refresh, or give up.
 
@@ -65,7 +65,7 @@ class RetryMode(StrEnum):
 
 
 class ToolErrorCode(StrEnum):
-    """The twenty-six refusal codes, each mapped to exactly one `RetryMode`."""
+    """The refusal codes, each mapped to exactly one `RetryMode`."""
 
     FACET_NOT_AVAILABLE = "facet_not_available"
     DEFAULT_FACET_UNDEFINED = "default_facet_undefined"
@@ -1107,11 +1107,13 @@ class ToolRefusal:
 
     @classmethod
     def provenance_unavailable(cls, *, spec_id: str) -> Self:
-        """A derived frame stored without a recipe, so its sources cannot be named."""
+        """A derived frame stored without a recipe, so its sources cannot be named. The
+        caller's `spec_id` is echoed capped (`echoed_text.truncate_value`)."""
         return cls(
             code=ToolErrorCode.PROVENANCE_UNAVAILABLE,
             message=(
-                f"{spec_id!r} was stored without the record of how it was made, so its "
+                f"{truncate_value(spec_id)!r} was stored without the record of how it was "
+                "made, so its "
                 "sources and their licences cannot be named, and it cannot be exported."
             ),
             fix={},
@@ -1121,13 +1123,15 @@ class ToolRefusal:
     def frame_unavailable(cls, *, spec_id: str, upstream_code: str) -> Self:
         """dfo-apis cannot find or read back the frame `spec_id` names (`upstream_code`).
         A fetched frame comes back from `get_data` and a derived one from the verb calls
-        that made it."""
+        that made it. The caller's `spec_id` is echoed capped
+        (`echoed_text.truncate_value`)."""
         fix: dict[str, Any] = {"next_step": "get_data"} if spec_id.startswith("spec_") else {}
         return cls(
             code=ToolErrorCode.FRAME_UNAVAILABLE,
             message=(
-                f"The platform no longer holds the frame {spec_id!r}. Call get_data with the "
-                "spec_id (spec_...) to register it again and pass the frame_ref it returns; "
+                f"The platform no longer holds the frame {truncate_value(spec_id)!r}. Call "
+                "get_data with the spec_id (spec_...) to register it again and pass the "
+                "frame_ref it returns; "
                 "for an ops_ result, repeat the verb calls that made it."
             ),
             fix=fix,

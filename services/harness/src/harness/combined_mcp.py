@@ -97,6 +97,7 @@ from analysis_mcp.server import healthz as analysis_healthz
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import BearerTokenVerifier
 from common.caller import current_caller
+from common.echoed_text import truncate_value
 from common.materialisation import get_store as get_frame_store
 from common.public_shape import PublicShape
 from common.refusal import (
@@ -1090,7 +1091,9 @@ class _RefuseRaisedErrors(Middleware):
             return _refusal(
                 code="tool_not_found",
                 retry_mode="correct_and_retry",
-                message=f"No tool is named {name!r}. Call one of: {', '.join(tools)}.",
+                message=(
+                    f"No tool is named {truncate_value(name)!r}. Call one of: {', '.join(tools)}."
+                ),
                 fix={"tools": tools},
             )
         except ValidationError as exc:
@@ -1158,18 +1161,20 @@ def _merged_name_refusal(name: str) -> ToolResult:
 def _problems(exc: ValidationError, parameters: dict[str, Any]) -> list[str]:
     """One `field: problem` line per error in the pydantic `ValidationError` fastmcp
     raised `exc` from. A value outside a top-level enum in `parameters` names the
-    values the enum allows."""
+    values the enum allows. What the caller sent, an argument's name included, is
+    echoed capped (`echoed_text.truncate_value`)."""
     cause = exc.__cause__
     if not isinstance(cause, PydanticValidationError):
         return [str(exc)]
     properties = parameters.get("properties", {})
     problems = []
     for error in cause.errors(include_url=False):
-        field = ".".join(str(part) for part in error["loc"])
+        field = truncate_value(".".join(str(part) for part in error["loc"]))
         allowed = properties.get(field, {}).get("enum")
         if error["type"] == "literal_error" and allowed:
             values = ", ".join(str(value) for value in allowed)
-            problems.append(f"{field}: must be one of {values}, not {error['input']!r}")
+            sent = truncate_value(repr(error["input"]))
+            problems.append(f"{field}: must be one of {values}, not {sent}")
         else:
             problems.append(f"{field}: {error['msg']}")
     return problems

@@ -131,6 +131,7 @@ async def resolve_definition(
             entity_groups=entity_groups,
             scope_entries=scope_entries,
         ),
+        tool="resolve_definition",
         budget_s=RESUBMIT_CALL_BUDGET_S,
         read_timeout_s=RESUBMIT_READ_TIMEOUT_S,
     )
