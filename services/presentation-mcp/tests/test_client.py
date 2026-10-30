@@ -51,6 +51,7 @@ from presentation_mcp.client import (
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody
 from presentation_mcp.platform_contract import (
+    FRAME_NOTE_KEY,
     Caller,
     NormalFormConflict,
     Refusal,
@@ -2410,6 +2411,136 @@ async def test_create_component_forwards_a_bare_spec_id_unchanged() -> None:
     assert isinstance(reply, WriteReply)
     (request,) = requests
     assert request.url.path == "/api/presentation/components"
+    assert json.loads(request.content)["intent"] == intent
+
+
+# apis' refusal of a spec_ pair whose version it no longer holds.
+_VERSION_LOST = _problem_body(code="frame_unavailable", retryable=False, status=404)
+
+
+def _sequence_handler(*responses: httpx2.Response) -> tuple[list[httpx2.Request], Handler]:
+    """A handler answering each request with the next of `responses`."""
+    requests: list[httpx2.Request] = []
+    replies = iter(responses)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return next(replies)
+
+    return requests, handler
+
+
+_DERIVED_PATH = f"/api/presentation/frames/{_DERIVED_REF.spec_id}/{_DERIVED_REF.content_version}"
+
+
+@pytest.mark.parametrize(
+    ("record", "pair_path"),
+    [
+        pytest.param(None, _DERIVED_PATH, id="no mint record"),
+        pytest.param(
+            MintRecord(frame=_DERIVED_REF, dataset=_ROOT_REF, options={"columns": ["x"]}),
+            f"/api/presentation/frames/{_ROOT_REF.spec_id}/{_ROOT_REF.content_version}",
+            id="mint record whose dataset pair is lost",
+        ),
+    ],
+)
+async def test_get_frame_view_reads_a_lost_spec_pair_at_its_newest_version(
+    materialisation_store: InMemoryMaterialisationStore,
+    record: MintRecord | None,
+    pair_path: str,
+) -> None:
+    """With `rebuild_lost_frames`, a spec_ pair apis no longer holds is read
+    through the newest-version route, and the view names the version asked
+    for and the one read."""
+    if record is not None:
+        await materialisation_store.put_mint_record(record)
+    body = {"spec_id": _DERIVED_REF.spec_id, "content_version": "cv_9", "dimensions": {}}
+    requests, handler = _sequence_handler(
+        httpx2.Response(404, content=_VERSION_LOST), httpx2.Response(200, json=body)
+    )
+
+    async with _assembler(handler) as assembler:
+        view = await assembler.get_frame_view(
+            frame_ref=_DERIVED_REF.model_dump(), dimension="recipient", rebuild_lost_frames=True
+        )
+
+    assert not isinstance(view, Refusal)
+    assert {k: v for k, v in view.items() if k != FRAME_NOTE_KEY} == body
+    assert _DERIVED_REF.content_version in view[FRAME_NOTE_KEY]
+    assert "cv_9" in view[FRAME_NOTE_KEY]
+    assert [request.url.path for request in requests] == [
+        pair_path,
+        f"/api/presentation/frames/{_DERIVED_REF.spec_id}",
+    ]
+    assert all(dict(r.url.params) == {"dimension": "recipient"} for r in requests)
+
+
+@pytest.mark.usefixtures("materialisation_store")
+@pytest.mark.parametrize(
+    ("status", "code", "retryable", "rebuild_lost_frames"),
+    [
+        pytest.param(404, "frame_unavailable", False, False, id="without rebuild_lost_frames"),
+        pytest.param(503, "frame_unavailable", True, True, id="retryable frame_unavailable"),
+        pytest.param(404, "spec_not_found", False, True, id="another code"),
+    ],
+)
+async def test_get_frame_view_relays_a_spec_pair_refusal_it_does_not_rebuild(
+    status: int, code: str, retryable: bool, rebuild_lost_frames: bool
+) -> None:
+    problem = _problem_body(code=code, retryable=retryable, status=status)
+    requests, handler = _counting_handler(httpx2.Response(status, content=problem))
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.get_frame_view(
+            frame_ref=_DERIVED_REF.model_dump(), rebuild_lost_frames=rebuild_lost_frames
+        )
+
+    assert isinstance(reply, Refusal)
+    assert reply.error == code
+    assert {request.url.path for request in requests} == {_DERIVED_PATH}
+
+
+@pytest.mark.usefixtures("materialisation_store")
+async def test_create_component_draws_a_lost_spec_pair_at_its_newest_version() -> None:
+    """With `rebuild_lost_frames`, a create whose spec_ pair apis no longer
+    holds is sent again with the spec_id alone under the same write token,
+    and the reply names both versions."""
+    envelope = {
+        **ENVELOPE,
+        "provenance": {"inputs": [{"spec_id": _DERIVED_REF.spec_id, "content_version": "cv_9"}]},
+    }
+    requests, handler = _sequence_handler(
+        httpx2.Response(404, content=_VERSION_LOST),
+        httpx2.Response(201, json={**WRITE_BODY, "resolved_payload": envelope}),
+    )
+    intent = {**INTENT, "frame_ref": _DERIVED_REF.model_dump()}
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.create_component(
+            intent=intent, caller=Caller.EXTERNAL, rebuild_lost_frames=True
+        )
+
+    assert isinstance(reply, WriteReply)
+    first, second = (json.loads(request.content) for request in requests)
+    assert first["intent"] == intent
+    assert second["intent"] == {**INTENT, "frame_ref": {"spec_id": _DERIVED_REF.spec_id}}
+    assert second["write_token"] == first["write_token"]
+    assert reply.frame_note is not None
+    assert _DERIVED_REF.content_version in reply.frame_note
+    assert "cv_9" in reply.frame_note
+
+
+@pytest.mark.usefixtures("materialisation_store")
+async def test_create_component_without_rebuild_lost_frames_relays_frame_unavailable() -> None:
+    requests, handler = _counting_handler(httpx2.Response(404, content=_VERSION_LOST))
+    intent = {**INTENT, "frame_ref": _DERIVED_REF.model_dump()}
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.create_component(intent=intent, caller=Caller.EXTERNAL)
+
+    assert isinstance(reply, Refusal)
+    assert reply.error == "frame_unavailable"
+    (request,) = requests
     assert json.loads(request.content)["intent"] == intent
 
 

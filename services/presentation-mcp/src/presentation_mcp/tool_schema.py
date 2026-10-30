@@ -64,6 +64,17 @@ _FRAME_REF_DESCRIPTION = (
 # describe_frame's, whose content_version is optional.
 _BARE_SPEC_ID_SENTENCE = "Leave content_version out to pass a spec_id and have the server fetch it."
 
+# Whether a `spec_` frame the platform no longer holds is read at its newest
+# version (`client.PlatformAssembler`). The public server forces it on
+# (`server.PUBLIC_SHAPES`); the harness never sets it, so a lost frame reaches it
+# as `frame_unavailable`, which its own replay answers. analysis-mcp's verbs
+# take the same argument.
+REBUILD_LOST_FRAMES = "rebuild_lost_frames"
+_REBUILD_LOST_FRAMES_DESCRIPTION = (
+    "True reads a spec_ frame the platform no longer holds at its newest version, "
+    "and the reply names both versions."
+)
+
 _DESCRIBE_COMPONENT_ID_DESCRIPTION = (
     "The id a previous write_component reply returned. The id is the only way back to a component."
 )
@@ -191,6 +202,11 @@ def write_component_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
                 "default": "auto",
                 "description": _INCLUDE_PROJECTION_DESCRIPTION,
             },
+            REBUILD_LOST_FRAMES: {
+                "type": "boolean",
+                "default": False,
+                "description": f"{_REBUILD_LOST_FRAMES_DESCRIPTION} An edit ignores it.",
+            },
         },
         "required": ["intent"],
         "additionalProperties": False,
@@ -232,6 +248,11 @@ def describe_frame_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
             "query": {
                 "type": "string",
                 "description": "Keep only dimension values containing this text.",
+            },
+            REBUILD_LOST_FRAMES: {
+                "type": "boolean",
+                "default": False,
+                "description": _REBUILD_LOST_FRAMES_DESCRIPTION,
             },
         },
         "required": ["frame_ref"],

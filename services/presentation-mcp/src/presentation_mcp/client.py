@@ -40,6 +40,7 @@ from pydantic import ValidationError
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody, PublishBodyNotBuildable, publish_body_for
 from presentation_mcp.platform_contract import (
+    FRAME_NOTE_KEY,
     Caller,
     NormalFormConflict,
     Refusal,
@@ -308,6 +309,32 @@ def _resolves_alone(spec_id: str) -> bool:
     return spec_id.startswith("spec_")
 
 
+def _version_lost(spec_id: str, exc: PlatformError) -> bool:
+    """Whether the platform refused a `spec_id` pair because it no longer holds
+    that version: a `frame_unavailable` that repeating will not change. The
+    Spec's newest version then stands in for it, as the analysis verbs'
+    rebuild fetches it."""
+    return _resolves_alone(spec_id) and exc.code == "frame_unavailable" and not exc.retryable
+
+
+def _newest_version_note(spec_id: str, asked: str, read: object) -> str:
+    """The sentence naming the version a frame_ref asked for and the newest
+    version read in its place, which is `read` when the platform named it."""
+    newest = f"its newest version, {read}," if isinstance(read, str) else "its newest version"
+    return f"The frame {spec_id}, {asked} is no longer held, so {newest} was read in its place."
+
+
+def _input_version(envelope: Mapping[str, Any] | None, spec_id: str) -> object:
+    """The content_version of `spec_id` among the envelope's provenance
+    inputs, `None` when no input names it."""
+    provenance = envelope.get("provenance") if isinstance(envelope, Mapping) else None
+    inputs = provenance.get("inputs") if isinstance(provenance, Mapping) else None
+    for frame in inputs if isinstance(inputs, list) else ():
+        if isinstance(frame, Mapping) and frame.get("spec_id") == spec_id:
+            return frame.get("content_version")
+    return None
+
+
 def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str | None] | Refusal:
     """Return valid frame path segments, or a local refusal before routing.
 
@@ -492,6 +519,7 @@ class PlatformAssembler:
         *,
         intent: Mapping[str, Any],
         caller: Caller,
+        rebuild_lost_frames: bool = False,
     ) -> WriteReply | Refusal:
         """Create a component, retrying transport failures and retryable 5xx replies.
 
@@ -505,6 +533,11 @@ class PlatformAssembler:
 
         `caller` picks the headers that name who the card counts against
         (`_card_write_headers`).
+
+        With `rebuild_lost_frames`, a `spec_` frame_ref whose version the
+        platform no longer holds is created again at the Spec's newest
+        version, and the reply's `frame_note` names both versions. Without
+        it, the platform's `frame_unavailable` is the reply.
         """
         write_token = _new_write_token()
         # A create's intent is complete. The platform resolves a `spec_` id
@@ -527,18 +560,43 @@ class PlatformAssembler:
         presentable = await self._presentable(intent)
         if isinstance(presentable, Refusal):
             return presentable
-        intent = presentable
         try:
-            response = await self.request(
-                "POST",
-                _COMPONENTS_ROUTE,
-                route=_COMPONENTS_ROUTE,
-                json={"intent": dict(intent), "write_token": write_token},
-                headers=self._card_write_headers(caller),
-            )
+            response = await self._post_create(presentable, write_token=write_token, caller=caller)
         except PlatformError as exc:
-            return self._refusal(exc)
+            if not (
+                rebuild_lost_frames
+                and isinstance(frame_ref, Mapping)
+                and isinstance(spec_id := frame_ref.get("spec_id"), str)
+                and isinstance(asked := frame_ref.get("content_version"), str)
+                and _version_lost(spec_id, exc)
+            ):
+                return self._refusal(exc)
+            # The platform no longer holds the version asked for, so the card
+            # draws the Spec's newest one, which a frame_ref with no
+            # content_version names. The refused create stored nothing, so the
+            # same write token keys this one.
+            newest = {key: value for key, value in frame_ref.items() if key != "content_version"}
+            try:
+                response = await self._post_create(
+                    {**intent, "frame_ref": newest}, write_token=write_token, caller=caller
+                )
+            except PlatformError as newest_exc:
+                return self._refusal(newest_exc)
+            reply = self._write_reply(response.json())
+            read = _input_version(reply.resolved_payload, spec_id)
+            return replace(reply, frame_note=_newest_version_note(spec_id, asked, read))
         return self._write_reply(response.json())
+
+    async def _post_create(
+        self, intent: Mapping[str, Any], *, write_token: str, caller: Caller
+    ) -> httpx2.Response:
+        return await self.request(
+            "POST",
+            _COMPONENTS_ROUTE,
+            route=_COMPONENTS_ROUTE,
+            json={"intent": dict(intent), "write_token": write_token},
+            headers=self._card_write_headers(caller),
+        )
 
     async def revise_component(
         self,
@@ -600,29 +658,52 @@ class PlatformAssembler:
         frame_ref: Mapping[str, Any],
         dimension: str | None = None,
         query: str | None = None,
+        rebuild_lost_frames: bool = False,
     ) -> Mapping[str, Any] | Refusal:
         frame_ref_or_refusal = _frame_ref_or_refusal(frame_ref)
         if isinstance(frame_ref_or_refusal, Refusal):
             return frame_ref_or_refusal
         spec_id, content_version = frame_ref_or_refusal
-        if content_version is None:
-            # apis resolves the newest version and names it in the body.
-            route, path = _SPEC_FRAME_ROUTE, _SPEC_FRAME_ROUTE.format(spec_id=spec_id)
-        else:
-            spec_id, content_version = await self._platform_pair(spec_id, content_version)
-            publish_refusal = await self._ensure_published_pair(spec_id, content_version)
-            if publish_refusal is not None:
-                return publish_refusal
-            route = _FRAME_ROUTE
-            path = _FRAME_ROUTE.format(spec_id=spec_id, content_version=content_version)
         params = {
             k: v for k, v in {"dimension": dimension, "query": query}.items() if v is not None
-        }
+        } or None
+        if content_version is None:
+            return await self._newest_frame_view(spec_id, params=params)
+        platform_spec_id, platform_content_version = await self._platform_pair(
+            spec_id, content_version
+        )
+        publish_refusal = await self._ensure_published_pair(
+            platform_spec_id, platform_content_version
+        )
+        if publish_refusal is not None:
+            return publish_refusal
+        path = _FRAME_ROUTE.format(
+            spec_id=platform_spec_id, content_version=platform_content_version
+        )
         try:
-            response = await self.request("GET", path, route=route, params=params or None)
+            response = await self.request("GET", path, route=_FRAME_ROUTE, params=params)
         except PlatformError as exc:
+            if rebuild_lost_frames and _version_lost(spec_id, exc):
+                return await self._newest_frame_view(spec_id, params=params, asked=content_version)
             return self._refusal(exc)
         return response.json()
+
+    async def _newest_frame_view(
+        self, spec_id: str, *, params: Mapping[str, str] | None, asked: str | None = None
+    ) -> Mapping[str, Any] | Refusal:
+        """The view of `spec_id` at its newest version, which apis resolves and
+        names in the body. Read in place of the version `asked`, when given,
+        the view names both under `FRAME_NOTE_KEY`."""
+        path = _SPEC_FRAME_ROUTE.format(spec_id=spec_id)
+        try:
+            response = await self.request("GET", path, route=_SPEC_FRAME_ROUTE, params=params)
+        except PlatformError as exc:
+            return self._refusal(exc)
+        view = response.json()
+        if asked is None:
+            return view
+        note = _newest_version_note(spec_id, asked, view.get("content_version"))
+        return {**view, FRAME_NOTE_KEY: note}
 
     async def get_component(
         self,
@@ -789,11 +870,10 @@ class PlatformAssembler:
         Any other pair is returned as given: an `ops_` pair, a `spec_` pair
         equal to its dataset pair, a `spec_` pair with no mint record, and a
         value that is not a pair the store could hold. The record is written
-        best effort, so a derived pair whose write was given up still refuses
-        `frame_unavailable` until `get_data` is called for it again. A lookup
-        that fails for any reason is logged and the pair returned as given, so
-        a derived pair then refuses `frame_unavailable` as it does with no
-        record.
+        best effort, and a lookup that fails for any reason is logged and the
+        pair returned as given. The platform refuses such a derived pair
+        `frame_unavailable`, and `get_frame_view` and `create_component` with
+        `rebuild_lost_frames` then read the Spec at its newest version.
         """
         if not spec_id.startswith("spec_"):
             return spec_id, content_version

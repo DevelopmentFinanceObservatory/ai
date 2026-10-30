@@ -129,6 +129,7 @@ def test_write_component_schema_top_level_shape() -> None:
         "component_id",
         "write_token",
         "include_projection",
+        "rebuild_lost_frames",
     }
     assert schema["additionalProperties"] is False
 

@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, nullcontext
 from html.parser import HTMLParser
 from importlib.metadata import version
@@ -41,6 +41,7 @@ from common import refusal as refusal_module
 from common.apis_auth import AuthProvider, IdTokenProvider
 from common.caller import CALLER_HEADER, supplied_caller
 from common.declaration import declared_schema
+from common.materialisation import InMemoryMaterialisationStore, set_store
 from common.materialisation import content_version as content_version_module
 from common.mcp_telemetry import LOOPBACK_SCOPE_KEY
 from common.refusal import REFUSAL_META_KEY, internal_error_message, refusal_text
@@ -949,7 +950,8 @@ async def test_a_write_forwards_the_caller_type_and_no_session(
     await _call("write_component", {"intent": intent})
 
     assert len(seen) == 1
-    assert set(seen[0]) == {"intent", "caller"}
+    assert set(seen[0]) == {"intent", "caller", "rebuild_lost_frames"}
+    assert seen[0]["rebuild_lost_frames"] is False
     assert seen[0]["caller"] is Caller.EXTERNAL
 
 
@@ -2089,6 +2091,122 @@ async def test_a_bare_ops_id_refuses_frame_ref_incomplete_in_the_envelope(
     assert envelope["message"].startswith("frame_ref names ops_1 ")
 
 
+_SPEC_ID = "spec_" + "0123456789abcdef" * 2
+_LOST_VERSION = "cv_" + "d" * 32
+_NEWEST_VIEW = {"spec_id": _SPEC_ID, "content_version": "cv_9", "dimensions": {}}
+_LOST = {"code": "frame_unavailable", "retryable": False, "detail": "gone"}
+
+
+def _frame_platform_assembler(
+    frame_requests: list[httpx2.Request], *frame_replies: httpx2.Response
+) -> Any:
+    """A factory for `server.PlatformAssembler` whose platform serves the
+    release and answers each other request, recorded in `frame_requests`, with
+    the next of `frame_replies`."""
+    replies = iter(frame_replies)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/presentation/release":
+            return httpx2.Response(200, json=RELEASE)
+        frame_requests.append(request)
+        return next(replies)
+
+    def factory(*, settings: Settings, auth: AuthProvider | None = None) -> PlatformAssembler:
+        return PlatformAssembler(
+            settings=settings, auth=auth, transport=httpx2.MockTransport(handler)
+        )
+
+    return factory
+
+
+@pytest.fixture
+def frame_store() -> Iterator[None]:
+    """An in-process frame store, so a `spec_` pair's mint record lookup finds none."""
+    set_store(InMemoryMaterialisationStore())
+    try:
+        yield
+    finally:
+        set_store(None)
+
+
+@pytest.mark.usefixtures("frame_store")
+@pytest.mark.parametrize(
+    ("arguments", "frame_replies", "named"),
+    [
+        pytest.param(
+            {"frame_ref": {"spec_id": _SPEC_ID}},
+            (httpx2.Response(200, json=_NEWEST_VIEW),),
+            ("cv_9",),
+            id="bare spec_id",
+        ),
+        pytest.param(
+            {
+                "frame_ref": {"spec_id": _SPEC_ID, "content_version": _LOST_VERSION},
+                "rebuild_lost_frames": True,
+            },
+            (httpx2.Response(404, json=_LOST), httpx2.Response(200, json=_NEWEST_VIEW)),
+            ("cv_9", _LOST_VERSION),
+            id="pair apis no longer holds",
+        ),
+    ],
+)
+async def test_describe_frame_names_the_version_it_read(
+    arguments: dict[str, Any],
+    frame_replies: tuple[httpx2.Response, ...],
+    named: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "PlatformAssembler", _frame_platform_assembler([], *frame_replies))
+
+    async with _client() as client:
+        result = await _call_result(client, "describe_frame", arguments)
+
+    text = _text(result)
+    assert json.loads(text)["content_version"] == "cv_9"
+    for named_version in named:
+        assert named_version in text
+
+
+@pytest.mark.usefixtures("frame_store")
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        (
+            "describe_frame",
+            {"frame_ref": {"spec_id": _SPEC_ID, "content_version": _LOST_VERSION}},
+        ),
+        (
+            "write_component",
+            {
+                "intent": {
+                    "type": "table",
+                    "frame_ref": {"spec_id": _SPEC_ID, "content_version": _LOST_VERSION},
+                    "select": {},
+                }
+            },
+        ),
+    ],
+    ids=["describe_frame", "write_component"],
+)
+async def test_the_mount_refuses_a_lost_spec_pair_frame_unavailable(
+    name: str, arguments: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The harness's call sets no `rebuild_lost_frames`, so a lost pair reaches
+    it as `frame_unavailable` after one request, and its own replay answers."""
+    frame_requests: list[httpx2.Request] = []
+    monkeypatch.setattr(
+        server,
+        "PlatformAssembler",
+        _frame_platform_assembler(frame_requests, httpx2.Response(404, json=_LOST)),
+    )
+
+    async with _client() as client:
+        result = await client.call_tool(name, arguments, raise_on_error=False)
+
+    assert _assert_refusal_envelope(result)["code"] == "frame_unavailable"
+    assert len(frame_requests) == 1
+
+
 async def test_an_apps_client_gets_a_notice_view_for_a_reply_without_an_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2570,7 +2688,9 @@ async def test_a_presentation_fix_names_only_arguments_and_values_its_tool_accep
             jsonschema.validate(value, properties[key])
     if envelope["code"] == "request_invalid":
         assert fix["tool"] == tool
-        assert fix["accepted"] == list(properties)
+        # The public listing, which leaves out what the tool's public shape hides.
+        hidden = server.PUBLIC_SHAPES[tool].hidden if tool in server.PUBLIC_SHAPES else ()
+        assert fix["accepted"] == [name for name in properties if name not in hidden]
         for problem in fix["problems"]:
             field, separator, _ = problem.partition(": ")
             if separator and " " not in field:

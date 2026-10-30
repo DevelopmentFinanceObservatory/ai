@@ -63,6 +63,7 @@ from common.mcp_telemetry import (
     LangfuseSessionMiddleware,
     LangfuseToolIoMiddleware,
 )
+from common.public_shape import PublicShape
 from common.refusal import (
     REFUSAL_META_KEY,
     detail_sentence,
@@ -110,6 +111,7 @@ from presentation_mcp.projection import (
 from presentation_mcp.settings import Settings
 from presentation_mcp.theme import THEME_CSS, THEME_HASH, renderer_csp, renderer_html, renderer_uri
 from presentation_mcp.tool_schema import (
+    REBUILD_LOST_FRAMES,
     describe_component_schema,
     describe_frame_schema,
     write_component_schema,
@@ -179,6 +181,17 @@ _PRESENTATION_ONLY_FIELDS: dict[str, frozenset[str]] = {
 
 type IncludeProjection = Literal["auto", "full", "none"]
 
+# The public form of each tool the combined server lists differently from this
+# mount (`common.public_shape`). A public describe_frame or create reads a `spec_`
+# frame the platform no longer holds at its newest version; the harness keeps
+# `frame_unavailable` and replays the frame itself.
+_PUBLIC_FRAME_TOOL = PublicShape(
+    hidden=frozenset({REBUILD_LOST_FRAMES}), forced={REBUILD_LOST_FRAMES: True}
+)
+PUBLIC_SHAPES: Mapping[str, PublicShape] = dict.fromkeys(
+    ("write_component", "describe_frame"), _PUBLIC_FRAME_TOOL
+)
+
 # Draws the chart images, in a worker process the lifespan starts and stops.
 _chart_worker = ChartWorker(
     timeout_s=settings.chart_render_timeout_s, warm=settings.chart_worker_warm
@@ -199,8 +212,8 @@ def _reply(reply: Mapping[str, Any] | Refusal, *, tool: str) -> ToolResult:
     return ToolResult(content=payload, structured_content=payload)
 
 
-# Each registered tool's advertised arguments, which a `request_invalid`
-# refusal's `fix.accepted` lists. `_register_tools` fills it.
+# Each registered tool's public arguments (`_public_arguments`), which a
+# `request_invalid` refusal's `fix.accepted` lists. `_register_tools` fills it.
 _accepted_arguments: dict[str, tuple[str, ...]] = {}
 
 
@@ -554,6 +567,7 @@ async def write_component(
     component_id: str | None = None,
     write_token: str | None = None,
     include_projection: IncludeProjection = "auto",
+    rebuild_lost_frames: bool = False,
 ) -> ToolResult:
     """Write a component: one of the platform's six typed members, line_chart, stat_card, bar_chart, table, note_narration, or source_card.
 
@@ -591,7 +605,11 @@ async def write_component(
     assembler = get_assembler()
     caller = _transport_caller()
     if component_id is None:
-        reply = await _safely(assembler.create_component(intent=intent, caller=caller))
+        reply = await _safely(
+            assembler.create_component(
+                intent=intent, caller=caller, rebuild_lost_frames=rebuild_lost_frames
+            )
+        )
     elif write_token is None:
         reply = _missing_write_token(component_id)
     else:
@@ -613,6 +631,7 @@ async def describe_frame(
     frame_ref: dict[str, Any],
     dimension: str | None = None,
     query: str | None = None,
+    rebuild_lost_frames: bool = False,
 ) -> ToolResult:
     """Describe a frame: its dimensions, their values, and the periods it covers.
 
@@ -625,7 +644,12 @@ async def describe_frame(
     choose what to chart.
     """
     reply = await _safely(
-        get_assembler().get_frame_view(frame_ref=frame_ref, dimension=dimension, query=query)
+        get_assembler().get_frame_view(
+            frame_ref=frame_ref,
+            dimension=dimension,
+            query=query,
+            rebuild_lost_frames=rebuild_lost_frames,
+        )
     )
     return _reply(reply, tool="describe_frame")
 
@@ -658,6 +682,13 @@ async def describe_component(
         views=_view_support(ctx),
         include_projection=include_projection,
     )
+
+
+def _public_arguments(tool: Tool) -> tuple[str, ...]:
+    """The arguments `tool`'s public listing declares, which a
+    `request_invalid` refusal's `fix.accepted` lists."""
+    shape = PUBLIC_SHAPES.get(tool.name, PublicShape())
+    return tuple(name for name in tool.parameters["properties"] if name not in shape.hidden)
 
 
 def _register_tools(
@@ -698,7 +729,7 @@ def _register_tools(
             write_schema, description=write_tool.description or ""
         )
         mcp.add_tool(write_tool)
-        _accepted_arguments[write_tool.name] = tuple(write_tool.parameters["properties"])
+        _accepted_arguments[write_tool.name] = _public_arguments(write_tool)
         registered.append(write_tool.name)
 
         frame_tool = Tool.from_function(
@@ -710,7 +741,7 @@ def _register_tools(
             frame_schema, description=frame_tool.description or ""
         )
         mcp.add_tool(frame_tool)
-        _accepted_arguments[frame_tool.name] = tuple(frame_tool.parameters["properties"])
+        _accepted_arguments[frame_tool.name] = _public_arguments(frame_tool)
         registered.append(frame_tool.name)
 
         describe_tool = Tool.from_function(
@@ -723,7 +754,7 @@ def _register_tools(
             describe_schema, description=describe_tool.description or ""
         )
         mcp.add_tool(describe_tool)
-        _accepted_arguments[describe_tool.name] = tuple(describe_tool.parameters["properties"])
+        _accepted_arguments[describe_tool.name] = _public_arguments(describe_tool)
         registered.append(describe_tool.name)
     except Exception:
         for name in registered:

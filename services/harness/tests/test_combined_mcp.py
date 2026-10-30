@@ -88,7 +88,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode, format_trace_id
 from opentelemetry.util._once import Once
 from presentation_mcp import server as presentation_server
-from presentation_mcp.client import WRITE_TOKEN_HEADER
+from presentation_mcp.client import WRITE_TOKEN_HEADER, PlatformAssembler
 from presentation_mcp.platform_contract import (
     RESOLVED_PAYLOAD_META_KEY,
     VIEW_STATE_META_KEY,
@@ -213,8 +213,10 @@ class _StubPlatform:
     async def release(self) -> dict[str, Any]:
         return _RELEASE
 
-    async def create_component(self, *, intent: dict[str, Any], caller: Caller) -> WriteReply:
-        del intent, caller
+    async def create_component(
+        self, *, intent: dict[str, Any], caller: Caller, rebuild_lost_frames: bool = False
+    ) -> WriteReply:
+        del intent, caller, rebuild_lost_frames
         return WriteReply(
             component_id="cmp_1",
             revision=1,
@@ -290,15 +292,16 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     assert {"search", "get_data", "aggregate", *PRESENTATION_TOOLS} <= _described(
         combined_tools
     ).keys()
-    # `get_data` is listed without `place_types`, every verb without
-    # `rolling_follows_tree` and `rebuild_lost_frames`, and `growth`, `rank` and
-    # `filter` without the harness's rolling arguments
+    # `get_data` is listed without `place_types`, every verb, `write_component` and
+    # `describe_frame` without `rebuild_lost_frames`, every verb without
+    # `rolling_follows_tree`, and `growth`, `rank` and `filter` without the
+    # harness's rolling arguments
     # (`test_the_public_get_data_lists_the_type_columns_in_place_of_place_types`,
     # `test_the_public_list_leaves_out_the_harness_rolling_arguments`).
     combined_described, direct_described = _described(combined_tools), _described(direct_tools)
     assert [
         name for name in combined_described if combined_described[name] != direct_described[name]
-    ] == ["get_data", *PUBLIC_VERBS]
+    ] == ["get_data", *PUBLIC_VERBS, "write_component", "describe_frame"]
     assert any(tool.output_schema is not None for tool in direct_tools)
     assert [tool.output_schema for tool in combined_tools] == [None] * len(combined_tools)
     assert combined_templates == direct_templates
@@ -1106,6 +1109,77 @@ async def test_a_public_call_refuses_a_hidden_argument_and_overwrites_a_forced_o
         "accepted": list(listed["growth"].input_schema["properties"]),
     }
     assert forwarded.arguments == []
+
+
+_LOST_PAIR = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "d" * 32}
+_NEWEST_VERSION = "cv_" + "9" * 32
+
+
+def _losing_platform(requests: list[httpx2.Request]) -> Callable[..., PlatformAssembler]:
+    """A factory for `presentation_mcp.server.PlatformAssembler` over a platform that
+    serves `_RELEASE`, refuses `_LOST_PAIR` `frame_unavailable`, and reads or draws
+    its Spec at `_NEWEST_VERSION` when the spec_id comes alone. `requests` records
+    every call but the release."""
+    lost = {"code": "frame_unavailable", "retryable": False, "detail": "gone"}
+    envelope = resolved_revision("line_chart", component_id="cmp_1", revision=1)
+    newest = {"spec_id": _LOST_PAIR["spec_id"], "content_version": _NEWEST_VERSION}
+    envelope = {**envelope, "provenance": {**envelope["provenance"], "inputs": [newest]}}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/presentation/release":
+            return httpx2.Response(200, json=_RELEASE)
+        requests.append(request)
+        if request.method == "GET":
+            if request.url.path.endswith(_LOST_PAIR["content_version"]):
+                return httpx2.Response(404, json=lost)
+            return httpx2.Response(200, json={**newest, "dimensions": {}})
+        if "content_version" in json.loads(request.content)["intent"]["frame_ref"]:
+            return httpx2.Response(404, json=lost)
+        body = {
+            "component_id": "cmp_1",
+            "revision": 1,
+            "fact_summary": {},
+            "resolved_payload": envelope,
+            "write_token": "cmw_stub1",
+        }
+        return httpx2.Response(201, json=body)
+
+    def factory(*, settings: Any, auth: Any = None) -> PlatformAssembler:
+        return PlatformAssembler(
+            settings=settings, auth=auth, transport=httpx2.MockTransport(handler)
+        )
+
+    return factory
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("describe_frame", {"frame_ref": _LOST_PAIR}),
+        ("write_component", {"intent": {**LINE_CHART_INTENT, "frame_ref": _LOST_PAIR}}),
+    ],
+    ids=["describe_frame", "write_component"],
+)
+async def test_a_public_presentation_call_reads_a_lost_spec_pair_at_its_newest_version(
+    name: str, arguments: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public server forces `rebuild_lost_frames` and lists the tool without it,
+    so a frame the platform no longer holds is read at its newest version and the
+    reply names both versions. The harness's mount keeps `frame_unavailable`
+    (presentation-mcp's `test_the_mount_refuses_a_lost_spec_pair_frame_unavailable`)."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setattr(presentation_server, "PlatformAssembler", _losing_platform(requests))
+
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+        result = await client.call_tool(name, arguments, raise_on_error=False)
+
+    assert "rebuild_lost_frames" not in listed[name].input_schema["properties"]
+    assert result.is_error is False
+    text = "\n".join(block.text for block in result.content if isinstance(block, mt.TextContent))
+    assert _LOST_PAIR["content_version"] in text
+    assert _NEWEST_VERSION in text
+    assert len(requests) == 2
 
 
 async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_types() -> None:

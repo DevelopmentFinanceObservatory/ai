@@ -30,6 +30,7 @@ class _EchoAssembler:
         *,
         intent: Mapping[str, Any],
         caller: Caller,
+        rebuild_lost_frames: bool = False,
     ) -> WriteReply | Refusal:
         return WriteReply(
             component_id="cmp_1",
@@ -56,6 +57,7 @@ class _EchoAssembler:
         frame_ref: Mapping[str, Any],
         dimension: str | None = None,
         query: str | None = None,
+        rebuild_lost_frames: bool = False,
     ) -> Mapping[str, Any] | Refusal:
         return {
             "frame_ref": dict(frame_ref),

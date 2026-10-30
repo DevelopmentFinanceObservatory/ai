@@ -46,9 +46,10 @@ callers goes. `build_combined_mcp` adds it outermost first:
 - `_PublicArguments` lists and calls each tool in the public form its child
   declares (`PUBLIC_SHAPES`, `common.public_shape`): `get_data` without
   `place_types` and with it true on every call, every verb without
-  `rolling_follows_tree` and `rebuild_lost_frames` and with both true, and
-  `growth`, `rank` and `filter` without the harness's `rolling` and
-  `anchor_key`. A call that sends a hidden argument the public form does not
+  `rolling_follows_tree` and `rebuild_lost_frames` and with both true,
+  `describe_frame` and `write_component` without `rebuild_lost_frames` and
+  with it true, and `growth`, `rank` and `filter` without the harness's
+  `rolling` and `anchor_key`. A call that sends a hidden argument the public form does not
   force is refused as an unknown argument; a forced one is accepted and
   overwritten.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
@@ -132,6 +133,7 @@ from mcp import types as mt
 from mcp.server.context import ServerRequestContext
 from mcp.shared.exceptions import MCPError
 from mcp_types import INTERNAL_ERROR
+from presentation_mcp.server import PUBLIC_SHAPES as PRESENTATION_PUBLIC_SHAPES
 from presentation_mcp.server import healthz as presentation_healthz
 from presentation_mcp.server import mcp as presentation_mcp
 from presentation_mcp.server import view_support
@@ -199,6 +201,7 @@ _MERGED_NAMES: dict[str, tuple[str, str | None]] = {
 _PUBLIC_SHAPES: dict[str, PublicShape] = {
     **DATA_PUBLIC_SHAPES,
     **ANALYSIS_PUBLIC_SHAPES,
+    **PRESENTATION_PUBLIC_SHAPES,
 }
 
 # The wait a caller is told before repeating a call the in-flight cap refused. A call
