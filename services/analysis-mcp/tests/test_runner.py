@@ -1668,6 +1668,15 @@ def _level_column(node: dict[str, Any]) -> str:
             {"data": "observationAbout_type"},
         ),
         (
+            lambda: verbs.aggregate(
+                frame_ref=_FRAME,
+                aggregation="sum",
+                group_by=["financingRecipient"],
+                place_level="Country",
+            ),
+            {"data": "financingRecipient_type"},
+        ),
+        (
             lambda: verbs.share_of(
                 frame_ref=_FRAME,
                 denominator_frame_ref=_OTHER_FRAME,
@@ -1687,7 +1696,13 @@ def _level_column(node: dict[str, Any]) -> str:
             {"data": "financingRecipient_type", "other": "observationAbout_type"},
         ),
     ],
-    ids=["rank", "aggregate-pooled-place", "share_of-each-side", "share_of-pooled-denominator"],
+    ids=[
+        "rank",
+        "aggregate-pooled-place",
+        "aggregate-named-side",
+        "share_of-each-side",
+        "share_of-pooled-denominator",
+    ],
 )
 async def test_place_level_filters_each_input_on_the_type_of_the_role_it_keys_by(
     store: InMemoryMaterialisationStore, call: Callable[[], Any], columns: dict[str, str]
@@ -1698,6 +1713,185 @@ async def test_place_level_filters_each_input_on_the_type_of_the_role_it_keys_by
     inputs = runner.body["tree"]["inputs"]
     assert {name: _level_column(node) for name, node in inputs.items()} == columns
     assert inputs["data"]["inputs"]["data"]["spec_id"] == _SPEC
+
+
+_FLOW_COLUMNS = ["financingProvider", "financingProvider_type", "financingRecipient"]
+_FLOW_COLUMNS += ["financingRecipient_type", "time_period", "value"]
+_FLOW_TYPES = ["financingProvider_type", "financingRecipient_type"]
+
+
+def _predicates_refused(column: str, *, available: list[str] = _FLOW_COLUMNS) -> httpx2.Response:
+    """The runner's answer to a filter step reading `column`, which it does not hold."""
+    fix = {"parameter": "predicates", "columns": [column], "available": available}
+    return _problem(422, "role_ambiguous", fix=fix)
+
+
+@pytest.mark.parametrize(
+    ("call", "column", "available", "candidates"),
+    [
+        (
+            lambda: verbs.aggregate(frame_ref=_FRAME, aggregation="sum", place_level="Country"),
+            "observationAbout_type",
+            _FLOW_COLUMNS,
+            _FLOW_TYPES,
+        ),
+        (
+            lambda: verbs.aggregate(
+                frame_ref=_FRAME, aggregation="sum", group_by=["sector"], place_level="Country"
+            ),
+            "observationAbout_type",
+            _FLOW_COLUMNS,
+            _FLOW_TYPES,
+        ),
+        (
+            lambda: verbs.rank(frame_ref=_FRAME, rank_by=("sector",), place_level="Country"),
+            "observationAbout_type",
+            _FLOW_COLUMNS,
+            _FLOW_TYPES,
+        ),
+        (
+            lambda: verbs.share_of(
+                frame_ref=_FRAME,
+                denominator_frame_ref=_OTHER_FRAME,
+                numerator_by=["financingRecipient"],
+                place_level="Country",
+            ),
+            "observationAbout_type",
+            _FLOW_COLUMNS,
+            _FLOW_TYPES,
+        ),
+        (
+            lambda: verbs.rank(
+                frame_ref=_DERIVED, rank_by=("financingRecipient",), place_level="Country"
+            ),
+            "financingRecipient_type",
+            ["financingRecipient", "time_period", "value"],
+            [],
+        ),
+    ],
+    ids=[
+        "aggregate-no-keys",
+        "aggregate-no-typed-key",
+        "rank-no-typed-key",
+        "share_of-pooled-denominator",
+        "no-type-column-to-name",
+    ],
+)
+async def test_a_refused_place_level_step_names_place_level_and_the_columns_to_choose_from(
+    store: InMemoryMaterialisationStore,
+    call: Callable[[], Any],
+    column: str,
+    available: list[str],
+    candidates: list[str],
+) -> None:
+    _install(_predicates_refused(column, available=available))
+
+    structured = (await call()).structured_content
+
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "role_ambiguous",
+        "correct_and_retry",
+    )
+    assert structured["fix"] == {
+        "parameter": "place_level",
+        "columns": [column],
+        "available": candidates,
+        "retry_without": "place_level",
+    }
+
+
+def _filter_columns(node: dict[str, Any]) -> Iterator[str]:
+    """The column of every predicate of a filter step in the tree under `node`."""
+    if node.get("verb") == "filter":
+        yield from (predicate["column"] for predicate in node["arguments"]["predicates"])
+    for child in node.get("inputs", {}).values():
+        yield from _filter_columns(child)
+
+
+def _flow_frame_runner(body: dict[str, Any]) -> httpx2.Response:
+    """The runner over frames of `_FLOW_COLUMNS`: a filter step on another column
+    refuses, and any other tree is answered."""
+    tree = body["tree"]
+    for column in _filter_columns(tree):
+        if column not in _FLOW_COLUMNS:
+            return _predicates_refused(column)
+    return httpx2.Response(200, json=_recorded_ready(tree["verb"]))
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "frames"),
+    [
+        (verbs.aggregate, {"aggregation": "sum"}, ("frame_ref",)),
+        (verbs.rank, {"rank_by": ("sector",)}, ("frame_ref",)),
+        (verbs.share_of, {}, ("frame_ref", "denominator_frame_ref")),
+    ],
+    ids=["aggregate", "rank", "share_of-pooled-denominator"],
+)
+async def test_the_route_a_place_level_refusal_gives_ends_in_an_answer(
+    store: InMemoryMaterialisationStore,
+    tool: Callable[..., Any],
+    arguments: dict[str, Any],
+    frames: tuple[str, ...],
+) -> None:
+    """Filtering on a listed column and repeating the call with the place_level step
+    left out computes, and repeating it with the step refuses again."""
+    _install(_flow_frame_runner)
+    refs = {"frame_ref": _FRAME, "denominator_frame_ref": _OTHER_FRAME}
+    call = {**arguments, **{name: refs[name] for name in frames}, "place_level": "Country"}
+
+    fix = (await tool(**call)).structured_content["fix"]
+    predicate = {"kind": "place_level", "column": fix["available"][-1], "level": "Country"}
+    kept = {
+        name: await verbs.filter_verb(frame_ref=call[name], predicates=[predicate])
+        for name in frames
+    }
+    assert not any(result.is_error for result in kept.values())
+    filtered = {
+        name: {key: result.structured_content[key] for key in ("spec_id", "content_version")}
+        for name, result in kept.items()
+    }
+    repeated = {**call, **filtered}
+
+    assert (await tool(**repeated)).structured_content["code"] == "role_ambiguous"
+    del repeated[fix["retry_without"]]
+    assert not (await tool(**repeated)).is_error
+
+
+@pytest.mark.parametrize(
+    ("call", "column"),
+    [
+        (
+            lambda: verbs.filter_verb(
+                frame_ref=_FRAME,
+                predicates=[
+                    {"kind": "place_level", "column": "observationAbout_type", "level": "Country"}
+                ],
+            ),
+            "observationAbout_type",
+        ),
+        (lambda: verbs.aggregate(frame_ref=_FRAME, aggregation="sum"), "observationAbout_type"),
+        (
+            lambda: verbs.aggregate(frame_ref=_DERIVED, aggregation="sum", place_level="Country"),
+            "sector_type",
+        ),
+    ],
+    ids=["caller-predicate", "no-place-level", "a-column-no-level-step-reads"],
+)
+async def test_a_predicate_refusal_no_level_step_caused_passes_through(
+    store: InMemoryMaterialisationStore, call: Callable[[], Any], column: str
+) -> None:
+    _install(_predicates_refused(column))
+
+    structured = (await call()).structured_content
+
+    assert structured is not None
+    assert structured["code"] == "role_ambiguous"
+    assert structured["fix"] == {
+        "parameter": "predicates",
+        "columns": [column],
+        "available": _FLOW_COLUMNS,
+    }
 
 
 @pytest.mark.parametrize(

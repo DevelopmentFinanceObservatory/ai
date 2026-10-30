@@ -771,6 +771,8 @@ def test_rank_digest_header_states_the_limit_and_the_kept_count() -> None:
     assert digest.splitlines()[0].endswith(", limit 1 per period (kept 2 of 4 ranked rows)")
     assert "  beyond_limit (ranked beyond the limit): 2 row(s)\n" in f"{digest}\n"
     assert "2 row(s) [" not in digest
+    assert digest.count("1 ranked entit(y/ies):") == 2
+    assert "#2 " not in digest
 
 
 def _share_of_digest(result: ShareOfResult, *, derived: dict[str, object] | None = None) -> str:

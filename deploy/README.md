@@ -56,9 +56,11 @@ The service takes `LIVE_REFRESH_PRINCIPAL` as a second secret (infra
 generates it in the apis stack and mounts one value on apis, this service,
 and the website). It is the bearer of `POST /api/studio/refresh`, which the
 website calls to redraw a live share's derived card, and the principal this
-service presents to apis' frame refresh and render routes. A service
+service presents to apis' frame refresh and render routes. presentation-mcp,
+mounted in the same process, reads the same variable to rebuild a lost summed
+or cut frame for a public `/mcp` client. A service
 without it refuses every refresh with 401 and logs `LIVE REFRESH IS CLOSED` at
-startup. Startup fails when it equals `STUDIO_API_TOKEN`. The route also reads
+startup, and a lost summed or cut frame refuses `rendering_not_recorded`. Startup fails when it equals `STUDIO_API_TOKEN`. The route also reads
 `DFO_APIS_URL` and `DATASETS_FIRST_PARTY_PRINCIPAL`, which the service already
 holds.
 

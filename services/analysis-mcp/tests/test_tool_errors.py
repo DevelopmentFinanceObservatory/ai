@@ -649,6 +649,10 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
         "aggregate",
         {"parameter": "group_by", "columns": ["x"], "available": ["observationAbout"]},
     ),
+    "place_level_side_unnamed": (
+        "aggregate",
+        {"columns": ["observationAbout_type"], "available": ["financingRecipient_type"]},
+    ),
     "operation_uncovered": ("aggregate", {"aggregation": "median", "supported": ["sum", "mean"]}),
     "frame_too_large": ("aggregate", {"row_count": 10, "ceiling": 5}),
     "frame_too_large_before_decode": ("aggregate", {"reason": "r"}),

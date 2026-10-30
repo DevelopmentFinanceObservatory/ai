@@ -22,12 +22,11 @@ A `spec_` pair `get_data` fetched with options, such as the type columns, is hel
 pair of its own, which dfo-apis never stored. The mint record the frame store keeps beside
 that frame names the dataset version dfo-apis holds (`MintRecord.dataset`), and the tool
 exports that version (`_exported_pair`). The result names the pair the caller passed and
-the version exported. That version holds the frame's rows only when the mint selected
-columns or cut party totals. A `groupby` (a `breakdown` or a `stat_vars` sum) can keep the
-base version's pair, whose export holds the unsummed rows, so such a frame refuses before
-any call to dfo-apis. So does a pair no record states the rendering of
-(`common.materialisation.frame_rendering`), since a file of that pair might hold other rows
-than the frame. A failed read of the record refuses `service_unavailable`.
+the version exported. A summed frame (a `breakdown` or a `stat_vars` sum) exports the same
+way: its mint record names the dataset pair whose file holds the summed rows. A pair no
+record states the rendering of (`common.materialisation.frame_rendering`) refuses before
+any call to dfo-apis, since a file of that pair might hold other rows than the frame. A
+failed read of the record refuses `service_unavailable`.
 
 dfo-apis answers `snapshot_not_found`, `artifact_expired` or `spec_not_found` for a frame
 it cannot export, and the tool refuses `frame_unavailable`. It never exports
@@ -135,9 +134,9 @@ async def _exported_pair(spec_id: str, content_version: str) -> tuple[str, str] 
     for a frame no stored version is known to hold the rows of.
 
     An `ops_` pair is its own stored version. A `spec_` pair maps to its mint record's
-    dataset pair (`MintRecord.dataset`). A summed frame refuses, and so does a frame whose
-    rendering cannot be established (`frame_rendering`). A pair that is no frame's goes to
-    dfo-apis, which refuses it.
+    dataset pair (`MintRecord.dataset`), summed or not. A frame whose rendering cannot be
+    established (`frame_rendering`) refuses. A pair that is no frame's goes to dfo-apis,
+    which refuses it.
     """
     if not spec_id.startswith(_FETCHED_PREFIX):
         return spec_id, content_version
@@ -146,9 +145,7 @@ async def _exported_pair(spec_id: str, content_version: str) -> tuple[str, str] 
     except ValidationError:
         return spec_id, content_version
     match await frame_rendering(ref, logger=logger):
-        case FrameRendering(record=record) as known:
-            if known.summed:
-                return ToolRefusal.summed_frame_not_exportable(spec_id=spec_id)
+        case FrameRendering(record=record):
             return record.dataset.spec_id, record.dataset.content_version
         case RenderingUnknown(options=options):
             return ToolRefusal.rendering_not_recorded(

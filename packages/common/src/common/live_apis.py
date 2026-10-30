@@ -1,7 +1,8 @@
 """One async client for the apis routes live Studio shares use.
 
-Three consumers share it: the harness refresh endpoint and replayer, the recipe
-backfill job, and the recovery routine for root frames. Each call is one apis
+Four consumers share it: the harness refresh endpoint and replayer, the recipe
+backfill job, the recovery routine for root frames, and presentation-mcp's rebuild
+of a lost summed or cut frame. Each call is one apis
 route and returns a small typed result or raises `LiveApisError`.
 
 Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):

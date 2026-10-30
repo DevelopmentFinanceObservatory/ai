@@ -288,7 +288,7 @@ def root_identity(dataset: Mapping[str, str], *, enrichment_stamp: str | None) -
     minted from, and the enrichment stamp the frame was named under
     (`MintRecord.enrichment_stamp`) when it has one. apis keeps a version's
     `content_version` across a change of party kinds, so the stamp is what tells two
-    frames of one version apart (`data_mcp.frame_materialisation.frame_ref_for`).
+    frames of one version apart (`common.materialisation.frame_ref_for`).
     Without a stamp the identity is the pair alone."""
     identity = {"spec_id": dataset["spec_id"], "content_version": dataset["content_version"]}
     if enrichment_stamp is not None:

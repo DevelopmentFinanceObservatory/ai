@@ -45,7 +45,7 @@ class MaterialisationTrace:
 
     `options` is the apis mint request's `options` the frame was registered
     from, or `None` for a frame registered before the trace kept them. A frame
-    registered under a pair `data_mcp.frame_materialisation.frame_ref_for` derives
+    registered under a pair `common.materialisation.frame_ref_for` derives
     from its columns and groupby carries what that pair was derived from, which
     `data_mcp.mint_recovery` reads when the frame has no mint record.
 

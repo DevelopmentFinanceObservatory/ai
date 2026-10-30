@@ -128,9 +128,10 @@ class Assembler(Protocol):
 
         With `rebuild_lost_frames`, a frame_ref the platform no longer holds is
         built again, a `spec_` frame at its newest version when that read holds
-        its rows and an `ops_` frame from its recipe on current data, and the
-        reply names both pairs under `FRAME_NOTE_KEY`. A `spec_` frame it cannot
-        build refuses `rendering_not_recorded`.
+        its rows and otherwise at the current frame of its rendering, and an
+        `ops_` frame from its recipe on current data. The reply names both pairs
+        under `FRAME_NOTE_KEY` when they differ. A `spec_` frame it cannot build
+        refuses `rendering_not_recorded`.
         """
         ...
 
@@ -164,7 +165,7 @@ class Assembler(Protocol):
         reads its newest version, which the view names. With
         `rebuild_lost_frames`, a pair the platform no longer holds is built
         again as `create_component` builds it, and the view names both
-        pairs under `FRAME_NOTE_KEY`.
+        pairs under `FRAME_NOTE_KEY` when they differ.
         `dimension` narrows the view to one dimension's values. `query`
         filters those values.
         """

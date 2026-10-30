@@ -22,6 +22,12 @@ from common.materialisation.frame_codec import (
     frame_from_verified_parquet_bytes,
     frame_to_parquet_bytes,
 )
+from common.materialisation.frame_name import (
+    KIND_COLUMNS,
+    WITHOUT_PARTY_TOTALS,
+    frame_ref_for,
+    requests_kinds,
+)
 from common.materialisation.frame_ref import FrameRef
 from common.materialisation.gcs_store import GcsMaterialisationStore
 from common.materialisation.holder import (
@@ -71,6 +77,8 @@ from common.materialisation.trace_codec import (
 
 __all__ = [
     "DEFAULT_MINT_OPTIONS",
+    "KIND_COLUMNS",
+    "WITHOUT_PARTY_TOTALS",
     "AnchorPopulation",
     "AnchorRecord",
     "AnchorRecordIntegrityError",
@@ -104,6 +112,7 @@ __all__ = [
     "encode_trace",
     "frame_from_verified_parquet_bytes",
     "frame_mint_record",
+    "frame_ref_for",
     "frame_rendering",
     "frame_to_parquet_bytes",
     "get_content_version_deriver",
@@ -115,6 +124,7 @@ __all__ = [
     "record_bare_read",
     "register_content_version_deriver",
     "register_trace_codec",
+    "requests_kinds",
     "root_rendering",
     "set_store",
     "store_is_set",
