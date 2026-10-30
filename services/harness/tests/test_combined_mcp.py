@@ -10,6 +10,7 @@ so its three tools mount whatever listens on the platform's address.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib.metadata
 import json
@@ -58,6 +59,7 @@ from data_mcp.mint_ledger import MintLedger
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.skills_extension import SKILLS_EXTENSION_ID, SkillsGetParams, SkillsListParams
+from dfo_spec_kit.registry import REGISTRY
 from fastmcp import Client, FastMCP
 from fastmcp.apps import UI_EXTENSION_ID, UI_MIME_TYPE
 from fastmcp.client.transports import StreamableHttpTransport
@@ -3504,3 +3506,54 @@ async def test_the_guard_passes_an_mcp_error_and_hides_any_other_exception() -> 
     assert raised.value.code == INTERNAL_ERROR
     assert raised.value.message.startswith("internal_error: skills/list failed")
     _assert_no_secret(raised.value.message)
+
+
+def _keyword_string_literals(source: str, *, keyword: str, callee: str | None = None) -> set[str]:
+    """The string literals passed as `keyword=` in the calls `source` makes, to
+    `callee` only when one is named."""
+    return {
+        argument.value.value
+        for call in ast.walk(ast.parse(source))
+        if isinstance(call, ast.Call)
+        and (callee is None or (isinstance(call.func, ast.Name) and call.func.id == callee))
+        for argument in call.keywords
+        if argument.arg == keyword
+        and isinstance(argument.value, ast.Constant)
+        and isinstance(argument.value.value, str)
+    }
+
+
+def _presentation_refusal_codes() -> set[str]:
+    """Every literal `error=` of a `Refusal(...)` in presentation-mcp. A code
+    taken from an apis problem document (`error=exc.code`) is not a literal and
+    is left to the platform that wrote it."""
+    package = Path(presentation_server.__file__).parent
+    return set().union(
+        *(
+            _keyword_string_literals(path.read_text(), keyword="error", callee="Refusal")
+            for path in package.rglob("*.py")
+        )
+    )
+
+
+def _combined_refusal_codes() -> set[str]:
+    """Every literal `code=` the combined server passes to a refusal, and every
+    code `_ERROR_CODES` ranks as an error."""
+    source = Path(combined_mcp.__file__).read_text()
+    return _keyword_string_literals(source, keyword="code") | combined_mcp._ERROR_CODES
+
+
+@pytest.mark.parametrize(
+    "codes",
+    [
+        pytest.param({code.value for code in data_tool_errors.ToolErrorCode}, id="data-mcp"),
+        pytest.param(
+            {code.value for code in analysis_tool_errors.ToolErrorCode}, id="analysis-mcp"
+        ),
+        pytest.param(_presentation_refusal_codes(), id="presentation-mcp"),
+        pytest.param(_combined_refusal_codes(), id="combined-mcp"),
+    ],
+)
+def test_every_refusal_code_a_server_writes_is_in_the_pinned_registry(codes: set[str]) -> None:
+    assert codes
+    assert codes - REGISTRY.codes == set()
