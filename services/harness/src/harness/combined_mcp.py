@@ -45,8 +45,11 @@ callers goes. `build_combined_mcp` adds it outermost first:
   and `outputSchema` from `tools/list`.
 - `_PublicArguments` lists and calls each tool in the public form its child
   declares (`PUBLIC_SHAPES`, `common.public_shape`): `get_data` without
-  `place_types` and with it true on every call, and `growth`, `rank` and
-  `filter` without the harness's `rolling` and `anchor_key`.
+  `place_types` and with it true on every call, every verb without
+  `rolling_follows_tree` and `rebuild_lost_frames` and with both true, and
+  `growth`, `rank` and `filter` without the harness's `rolling` and
+  `anchor_key`. A call that sends
+  an argument the public form hides is refused as an unknown argument.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
   unknown tool name, arguments that fail the tool's input schema, or an
   exception from the tool itself. A resource read that raised an
@@ -273,8 +276,8 @@ def build_combined_mcp(
         ),
         _CallLimit(limit_s=call_limit_s),
         _ShapeResults(server=combined),
-        _PublicArguments(),
         _RefuseRaisedErrors(server=combined),
+        _PublicArguments(),
     ):
         combined.add_middleware(middleware)
     combined.add_extension(
@@ -934,7 +937,11 @@ class _ShapeResults(Middleware):
 
 class _PublicArguments(Middleware):
     """Lists each tool as `public_tool` declares it, and writes a tool's
-    `PublicShape.forced` arguments over every call's."""
+    `PublicShape.forced` arguments over every call's.
+
+    A call that sends an argument the public form hides, forced or not, raises
+    the `ValidationError` an unlisted name raises, so `_RefuseRaisedErrors`
+    refuses it as `request_invalid` before the child validates or runs it."""
 
     @override
     async def on_list_tools(
@@ -950,10 +957,28 @@ class _PublicArguments(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        shape = _PUBLIC_SHAPES.get(context.message.name)
-        if shape is None or not shape.forced:
+        name = context.message.name
+        shape = _PUBLIC_SHAPES.get(name)
+        if shape is None:
             return await call_next(context)
-        arguments = {**(context.message.arguments or {}), **shape.forced}
+        sent = context.message.arguments or {}
+        if hidden := [argument for argument in sent if argument in shape.hidden]:
+            raise ValidationError(f"{name} takes no {', '.join(hidden)}") from (
+                PydanticValidationError.from_exception_data(
+                    name,
+                    [
+                        {
+                            "type": "unexpected_keyword_argument",
+                            "loc": (argument,),
+                            "input": sent[argument],
+                        }
+                        for argument in hidden
+                    ],
+                )
+            )
+        if not shape.forced:
+            return await call_next(context)
+        arguments = {**sent, **shape.forced}
         message = context.message.model_copy(update={"arguments": arguments})
         return await call_next(context.copy(message=message))
 
@@ -1004,8 +1029,8 @@ class _RefuseRaisedErrors(Middleware):
     """Answers a tool call that raised with a refusal in the envelope a model reads.
 
     fastmcp reports a raised call to the client as bare text with no code or
-    retry mode. This middleware sits innermost, so it sees what the call
-    raised:
+    retry mode. This middleware sits inside every other but `_PublicArguments`,
+    so it sees what the call raised and what `_PublicArguments` raised for it:
 
     - `NotFoundError`, a name no tool carries: `tool_not_found`, naming the
       tools `server` serves. The parent resolves the name before any child

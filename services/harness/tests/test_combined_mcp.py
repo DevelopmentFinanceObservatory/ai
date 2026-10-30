@@ -1043,12 +1043,11 @@ class _ForwardedArguments(Middleware):
         return ToolResult(content="recorded")
 
 
-@pytest.mark.parametrize("sent", [{"place_types": False}, {}], ids=["false", "absent"])
-async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str, bool]) -> None:
+async def test_a_public_get_data_always_asks_for_the_type_columns() -> None:
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
     forwarded = _ForwardedArguments()
     combined.add_middleware(forwarded)
-    arguments = {"spec_id": "spec_" + "0" * 32, **sent}
+    arguments = {"spec_id": "spec_" + "0" * 32}
 
     async with Client(combined) as client:
         await client.call_tool("get_data", arguments)
@@ -1063,6 +1062,41 @@ async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str
             "rebuild_lost_frames": True,
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "hidden"),
+    [
+        ("get_data", {"spec_id": "spec_" + "0" * 32, "place_types": False}, "place_types"),
+        (
+            "growth",
+            {"frame_ref": UNHELD_FRAME, "window_start": "2015", "rolling": {"x": 1}},
+            "rolling",
+        ),
+    ],
+    ids=["forced", "hidden"],
+)
+async def test_a_public_call_sending_a_hidden_argument_refuses_it_as_unknown(
+    tool: str, arguments: dict[str, Any], hidden: str
+) -> None:
+    """The child's schema for the argument is never read, and the call never runs."""
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+    forwarded = _ForwardedArguments()
+    combined.add_middleware(forwarded)
+
+    async with Client(combined) as client:
+        listed = {listed.name: listed for listed in await client.list_tools()}
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
+
+    assert result.is_error is True
+    envelope = _envelope(result)
+    assert (envelope["code"], envelope["retry_mode"]) == ("request_invalid", "correct_and_retry")
+    assert envelope["fix"] == {
+        "tool": tool,
+        "problems": [f"{hidden}: Unexpected keyword argument"],
+        "accepted": list(listed[tool].input_schema["properties"]),
+    }
+    assert forwarded.arguments == []
 
 
 async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_types() -> None:
