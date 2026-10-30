@@ -13,9 +13,10 @@ answer, or the `ToolRefusal` its reply maps to:
 - A problem document keeps the runner's `code`, `detail` and `fix` where this
   service defines the code, which holds for every engine code, except that
   `place_levels_mixed` is written again from its `fix`
-  (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. A derived input
-  with no stored recipe (`recipe_not_found`) is `rolling_reanchor_unavailable`,
-  since the runner computes every derived input again. A root the
+  (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. Under
+  `rolling: "tree"`, a derived input with no stored recipe (`recipe_not_found`)
+  is `rolling_reanchor_unavailable`, since it cannot be computed again under the
+  tree's latest year. A root the
   runner cannot read (`snapshot_not_found`, `recipe_not_found`,
   `artifact_expired`) is, in this order: the caller's own frame refs read as
   that root, not held or aged out (`ToolRefusal.frames_lost`, which names
@@ -312,12 +313,17 @@ def _anchor_root_lost(anchor: Anchor, root: Pair, code: str) -> ToolRefusal:
 
 
 async def refusal_for(
-    response: httpx2.Response, *, refs_by_root: RefsByRoot, anchor: Anchor | None = None
+    response: httpx2.Response,
+    *,
+    refs_by_root: RefsByRoot,
+    anchor: Anchor | None = None,
+    tree_rolling: bool = False,
 ) -> ToolRefusal:
     """The refusal a runner's non-2xx `response` maps to. See the module docstring.
 
     `refs_by_root` maps each root pair the request named as a frame to the
-    caller's frame refs, and `anchor` is a rolling call's anchor record.
+    caller's frame refs, `anchor` is a rolling call's anchor record, and
+    `tree_rolling` says the request sent `rolling: "tree"`.
     """
     problem = _json(response)
     if problem is None or not isinstance(problem.get("code"), str):
@@ -337,7 +343,8 @@ async def refusal_for(
     elif code in RUNNER_CODES:
         refusal = ToolRefusal(code=ToolErrorCode(code), message=detail, fix=fix)
     elif (
-        code == _RECIPE_MISSING_CODE
+        tree_rolling
+        and code == _RECIPE_MISSING_CODE
         and root[0].startswith("ops_")
         and (refs := refs_by_root.get(root))
     ):
@@ -465,14 +472,16 @@ async def run_tree(
     With `follows_tree`, a tree with a derived input sends `rolling: "tree"`, so the
     input's rolling years follow the one latest year of the whole tree. Any other
     request omits the field: a dfo-apis that does not know it still answers, and
-    the harness's rolling steps keep the populations they state. An input whose recipe
-    is missing refuses `rolling_reanchor_unavailable`. The summary's `rolling`
-    names the latest year the answer's `resolved_periods` were filled from and
-    each derived input the runner computed again under another year than its
-    own (`_rolling`)."""
+    the harness's rolling steps keep the populations they state. Under
+    `rolling: "tree"`, an input whose recipe is missing refuses
+    `rolling_reanchor_unavailable`. The summary's `rolling` names the latest year
+    the answer's `resolved_periods` were filled from and, under `rolling: "tree"`
+    alone, each derived input the runner computed again under another year than
+    its own (`_rolling`)."""
     derived = _derived_refs(refs_by_root)
+    tree_rolling = follows_tree and bool(derived)
     request: dict[str, Any] = {"tree": node, "latest": False}
-    if follows_tree and derived:
+    if tree_rolling:
         request["rolling"] = "tree"
     if anchor is not None:
         request["anchor_roots"] = list(anchor.nodes)
@@ -482,13 +491,15 @@ async def run_tree(
     if response.status_code == httpx2.codes.ACCEPTED:
         return _pending(response)
     if not response.is_success:
-        return await refusal_for(response, refs_by_root=refs_by_root, anchor=anchor)
+        return await refusal_for(
+            response, refs_by_root=refs_by_root, anchor=anchor, tree_rolling=tree_rolling
+        )
     body = _json(response)
     summary = _ready_summary(body, anchor=anchor)
     if isinstance(summary, ToolRefusal):
         return summary
     assert body is not None
-    rolling = await _rolling(body.get("resolved_periods"), derived=derived)
+    rolling = await _rolling(body.get("resolved_periods"), derived=derived if tree_rolling else ())
     if isinstance(rolling, ToolRefusal):
         return rolling
     return summary if rolling is None else summary.model_copy(update={"rolling": rolling})
@@ -502,13 +513,19 @@ def _derived_refs(refs_by_root: RefsByRoot) -> tuple[FrameRef, ...]:
 
 
 async def _own_latest(ref: FrameRef) -> RecomputedInput | None:
-    """`ref` with its top verb and the latest year its own recipe was filled from,
-    both `None` when its manifest cannot be read; `None` for a recipe with no
-    rolling year."""
+    """`ref` with its top verb and the latest year its own recipe was filled from;
+    `None` for a recipe with no rolling year, and for a manifest that cannot be
+    read, which is logged, since whether the input was computed again is unknown."""
     try:
         manifest = await read_derived_manifest(ref)
-    except DerivedUnread:
-        return RecomputedInput(**ref.model_dump(), verb=None, latest=None)
+    except DerivedUnread as exc:
+        logger.warning(
+            "derived input %s/%s unchecked for a recomputed year: %s",
+            ref.spec_id,
+            ref.content_version,
+            exc,
+        )
+        return None
     anchor = manifest.get("anchor")
     period = anchor.get("period") if isinstance(anchor, Mapping) else None
     if not isinstance(period, str):
@@ -527,9 +544,10 @@ async def _rolling(
 ) -> Rolling | None | ToolRefusal:
     """The latest year the answer's `resolved` periods were filled from, `None`
     when it names none, with each of the `derived` inputs whose own recipe took
-    another latest year, or whose manifest cannot be read. A derived input with no
-    rolling year of its own, or one that took the same year, is computed as it was
-    and is not named."""
+    another latest year. `derived` is empty unless the request sent
+    `rolling: "tree"`, since without it each input keeps its stored periods. A
+    derived input with no rolling year of its own, one that took the same year,
+    and one whose manifest cannot be read are not named."""
     if not resolved:
         return None
     try:

@@ -443,15 +443,15 @@ class ResolvedPeriod(BaseModel):
 
 class RecomputedInput(BaseModel):
     """A derived input the runner computed again under the call's latest year:
-    its pair, its top verb, and the latest year it took alone, `None` when its
-    manifest could not be read."""
+    its pair, its top verb (`None` when its recipe names none), and the latest
+    year it took alone."""
 
     model_config = ConfigDict(frozen=True)
 
     spec_id: str
     content_version: str
     verb: str | None
-    latest: str | None
+    latest: str
 
 
 class Rolling(BaseModel):

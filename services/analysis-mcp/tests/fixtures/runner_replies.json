@@ -2033,6 +2033,247 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"],\"window_end\":{\"anchor\":\"latest\",\"offset\":0},\"window_start\":{\"anchor\":\"latest\",\"offset\":-1}},\"inputs\":{\"data\":{\"arguments\":{\"predicates\":[{\"column\":\"observationAbout_type\",\"kind\":\"place_level\",\"level\":\"Country\",\"strict\":false}]},\"inputs\":{\"data\":{\"content_version\":\"cv_d40ef3794003dee1416356d2ede47d90\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_d40ef3794003dee1416356d2ede47d90\"}},\"verb\":\"filter\"}},\"verb\":\"rank\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then rank.",
+            "spec": {
+              "spec_id": "ops_05ffd324417e7a41ceecf5ce8bd1cd3e",
+              "recipe": {
+                "normal_form_hash": "rnf_3a36f0a01a8ec85de470bf9d059057d1",
+                "replay_key": "rpk_e35f01a6be8235d185be42e864c39c7c"
+              }
+            },
+            "content_version": "ocv_d04d1fe8e6a9ee6f2fa65a07961551af",
+            "output_digest": "out_8827f8b14064a3e977ffe7cfb9951b76",
+            "roots": [
+              {
+                "spec_id": "spec_d40ef3794003dee1416356d2ede47d90",
+                "content_version": "cv_d40ef3794003dee1416356d2ede47d90",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [
+              {
+                "anchor": "latest",
+                "offset": -1,
+                "rule": "half1",
+                "period": "2023"
+              },
+              {
+                "anchor": "latest",
+                "offset": 0,
+                "rule": "half1",
+                "period": "2024"
+              }
+            ],
+            "artifact": {
+              "digest": "sha256:97ff68cc6aa162dc41ce2257ffe5ca2a2cfed82434a606b195004a5733b0086c",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_03a6ef462ba37f5611b35fea13f7b5ce",
+      "output_digest": "out_8827f8b14064a3e977ffe7cfb9951b76",
+      "summary": {
+        "verb": "rank",
+        "spec_id": "ops_05ffd324417e7a41ceecf5ce8bd1cd3e",
+        "content_version": "ocv_d04d1fe8e6a9ee6f2fa65a07961551af",
+        "frame_content_version": "cv_03a6ef462ba37f5611b35fea13f7b5ce",
+        "rows": 1,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "outside_window",
+            "rows": 5,
+            "entities": {
+              "observationAbout": [
+                "country/KEN"
+              ],
+              "observationAbout_type": [
+                "Country"
+              ]
+            },
+            "entities_truncated": false,
+            "side": null
+          }
+        ],
+        "time": {
+          "kind": "interval",
+          "start": "2023",
+          "end": "2024",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "ascending": false,
+          "per_period": false,
+          "rank_by": [
+            "observationAbout"
+          ],
+          "rolling": {
+            "population": [
+              {
+                "bindings": {},
+                "levels": {
+                  "observationAbout_type": "Country"
+                },
+                "spec_id": "spec_d40ef3794003dee1416356d2ede47d90"
+              }
+            ],
+            "window_end": {
+              "anchor": "latest",
+              "offset": 0,
+              "rule": "half1"
+            },
+            "window_start": {
+              "anchor": "latest",
+              "offset": -1,
+              "rule": "half1"
+            }
+          },
+          "unit": null,
+          "window_end": "2024",
+          "window_start": "2023"
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "aggregation": "sum",
+          "window_start": "2023",
+          "window_end": "2024",
+          "periods_in_window": [
+            "2023",
+            "2024"
+          ],
+          "expected_cell_count": 2,
+          "present_cell_count": 2,
+          "overall_coverage_fraction": 1.0,
+          "entity_ranks": [
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/KEN"
+                ]
+              ],
+              "value": 47.0,
+              "rank": 1,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2023/2024",
+              "period_count": 2
+            }
+          ],
+          "per_period": false,
+          "limit": null,
+          "exclusions": {
+            "records": [
+              {
+                "reason": "outside_window",
+                "row_count": 5,
+                "entities": {
+                  "observationAbout": [
+                    "country/KEN"
+                  ],
+                  "observationAbout_type": [
+                    "Country"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": null,
+                "parties": null
+              }
+            ]
+          },
+          "window_period_count": 2,
+          "private_parties": []
+        }
+      },
+      "rows": 1,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "outside_window",
+          "rows": 5,
+          "entities": {
+            "observationAbout": [
+              "country/KEN"
+            ],
+            "observationAbout_type": [
+              "Country"
+            ]
+          },
+          "entities_truncated": false,
+          "side": null
+        }
+      ],
+      "time": {
+        "kind": "interval",
+        "start": "2023",
+        "end": "2024",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -1,
+          "rule": "half1",
+          "period": "2023"
+        },
+        {
+          "anchor": "latest",
+          "offset": 0,
+          "rule": "half1",
+          "period": "2024"
+        }
+      ]
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"]},\"inputs\":{\"data\":{\"arguments\":{\"predicates\":[{\"column\":\"observationAbout_type\",\"kind\":\"place_level\",\"level\":\"Country\",\"strict\":false}]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"filter\"}},\"verb\":\"rank\"}}": {
     "status": 200,
     "body": {

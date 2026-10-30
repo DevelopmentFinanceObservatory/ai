@@ -1464,7 +1464,7 @@ def _relative_name(offset: int) -> str:
 def _recomputed_name(recomputed: RecomputedInput) -> str:
     pair = f"{recomputed.spec_id}, {recomputed.content_version}"
     named = pair if recomputed.verb is None else f"{recomputed.verb} {pair}"
-    return named if recomputed.latest is None else f"{named} (alone, latest {recomputed.latest})"
+    return f"{named} (alone, latest {recomputed.latest})"
 
 
 def _rolling_section(rolling: Rolling) -> str:

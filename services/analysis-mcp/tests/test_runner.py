@@ -261,8 +261,12 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
 
     assert result.is_error is False, result.content
     # The harness's step states its populations, which a derived input's own
-    # overlay keeps: the request leaves the input's rolling years as stored.
+    # overlay keeps: the request leaves the input's rolling years as stored, so no
+    # input's manifest is read and none is named as computed again.
     assert "rolling" not in runner.body
+    assert [request.method for request in runner.requests] == ["POST"]
+    assert "Rolling: the latest year is" in result.content[0].text
+    assert "computed its rolling inputs again" not in result.content[0].text
     tree = runner.body["tree"]
     assert tree["verb"] == "growth"
     assert tree["arguments"]["window_start"] == "2021"
@@ -797,19 +801,55 @@ async def test_a_lost_root_behind_a_derived_input_refuses_that_input_unrecoverab
     }
 
 
-async def test_a_derived_input_with_no_recipe_refuses_reanchor_unavailable(
+@pytest.mark.parametrize(
+    ("follows_tree", "code", "fix"),
+    [
+        (True, "rolling_reanchor_unavailable", {"frame_refs": [_DERIVED], "tool": "get_data"}),
+        # A call that keeps each input's stored years refuses as the frame lost.
+        (False, "frame_not_held", None),
+    ],
+    ids=["following-the-tree", "harness"],
+)
+async def test_a_derived_input_with_no_recipe_refuses_by_whether_it_follows_the_tree(
     store: InMemoryMaterialisationStore,
+    follows_tree: bool,
+    code: str,
+    fix: dict[str, Any] | None,
 ) -> None:
     _install(_problem(404, "recipe_not_found", fix=_DERIVED))
-    result = await verbs.compare(frame_ref=_FRAME, right_frame_ref=_DERIVED)
+    result = await verbs.compare(
+        frame_ref=_FRAME, right_frame_ref=_DERIVED, rolling_follows_tree=follows_tree
+    )
 
     structured = result.structured_content
     assert structured is not None
-    assert (structured["code"], structured["retry_mode"]) == (
-        "rolling_reanchor_unavailable",
-        "correct_and_retry",
+    assert (structured["code"], structured["retry_mode"]) == (code, "correct_and_retry")
+    if fix is not None:
+        assert structured["fix"] == fix
+
+
+async def test_an_input_whose_manifest_cannot_be_read_is_not_named_as_computed_again(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    ready = _recorded_ready("growth")
+    assert ready["resolved_periods"]
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        return (
+            _problem(404, "snapshot_not_found")
+            if "get" in body
+            else httpx2.Response(200, json=ready)
+        )
+
+    runner = _install(answer)
+    result = await verbs.compare(
+        frame_ref=_FRAME, right_frame_ref=_DERIVED, rolling_follows_tree=True
     )
-    assert structured["fix"] == {"frame_refs": [_DERIVED], "tool": "get_data"}
+
+    assert [request.method for request in runner.requests] == ["POST", "GET"]
+    text = result.content[0].text
+    assert "Rolling: the latest year is" in text
+    assert "computed its rolling inputs again" not in text
 
 
 @pytest.mark.parametrize(
