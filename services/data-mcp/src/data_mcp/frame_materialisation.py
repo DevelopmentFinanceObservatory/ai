@@ -218,9 +218,9 @@ def coverage_roles(manifest: Manifest) -> tuple[str, ...]:
 def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mapping[str, Any]:
     """`options` as the rendering apis minted for them. An `enrichment: "default"` request
     is the `rendering` of the one data artifact the mint's manifest lists for it, which
-    names the columns apis resolved the enrichment to: the artifact whose rendering, its
-    columns aside, is the request's, and whose columns hold every requested one. A mint
-    response lists the rendering it served and the series statistics, nothing else. Any
+    names the columns apis resolved the enrichment to. That artifact's rendering, its
+    columns aside, is the request's, and its columns hold every requested one. A mint
+    response lists only the rendering it served and the series statistics. Any
     other `options`, and a manifest listing no such artifact or more than one, are returned
     as sent, so the frame read refuses for want of its rendering.
     """
@@ -242,8 +242,8 @@ def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mappi
 
 def names_flow_role(identity: Mapping[str, Any] | None) -> bool:
     """Whether `identity` names a flow axis, as an entity or an open role, by its role word
-    (`origin`) or its column (`financingRecipient`): the spec whose open party roles
-    `without_party_totals` cuts the group totals of."""
+    (`origin`) or its column (`financingRecipient`). `without_party_totals` cuts the group
+    totals from the open party roles of such a spec."""
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
     return bool(roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES))
 

@@ -5726,7 +5726,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
 async def test_a_typed_flow_frame_is_named_by_the_enrichment_of_its_own_roles(
     monkeypatch: pytest.MonkeyPatch, identity: dict[str, Any]
 ) -> None:
-    """The frame's role columns, not the identity, choose its columns, so a flow spec that
+    """The frame's role columns choose its columns, so a flow spec that
     binds and opens no role gets its parties' types and kinds, and a spec naming a flow
     axis keeps the pair it was named by when data-mcp listed those columns itself."""
     monkeypatch.undo()  # the real `materialise_and_register`

@@ -132,7 +132,7 @@ async def healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-# `export_data` writes: it renders a file and pins it, spending the caller's
+# `export_data` writes. It renders a file and pins it, spending the caller's
 # allowance for a new file. A repeat call returns the same file and spends nothing.
 _EXPORT = ToolAnnotations(
     read_only_hint=False,
@@ -170,7 +170,7 @@ mcp.tool(catalogue_counts, version="1")
 
 # The public form of each tool the combined server lists differently from this
 # mount (`common.public_shape`). Every public `get_data` frame carries the type
-# columns; the harness asks for them per call.
+# columns, and the harness asks for them per call.
 PUBLIC_SHAPES: Mapping[str, PublicShape] = {
     "get_data": PublicShape(
         paragraphs=(TYPE_COLUMNS,),

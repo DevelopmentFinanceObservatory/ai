@@ -227,8 +227,8 @@ _open_mint_posts: dict[str, asyncio.Future[_MintOutcome | None]] = {}
 
 logger = logging.getLogger(__name__)
 
-# What every public `get_data` frame carries: the combined server sends each call
-# with `place_types` set and lists the tool without it (`server.PUBLIC_SHAPES`).
+# The combined server sends each call with `place_types` set and lists the tool without
+# it (`server.PUBLIC_SHAPES`), so every public `get_data` frame carries these columns.
 TYPE_COLUMNS = (
     "Every frame carries place or party types. A frame that names places gets an\n"
     "observationAbout_type column. A flow frame gets financingProvider_party_kind and\n"
@@ -1392,13 +1392,13 @@ async def _attempt_mint(
     With one contributor the two frames are the same bytes under one `content_version`.
     A `breakdown` adds its own `Breakdown.groupby` instead, which sums the StatVars
     within each code at the breakdown's level.
-    `place_types` sends `options.enrichment: "default"`: apis adds the enrichment the
+    `place_types` sends `options.enrichment: "default"`. apis adds the enrichment the
     version's own role columns take to the default columns, and the frame is named by
     the columns it resolved to (`frame_materialisation.resolved_options`), a
     `content_version` of its own when there are any (`frame_materialisation.frame_ref_for`).
     A manifest whose frame holds a flow party role but whose rendering holds no kinds is
-    refused: a flow frame without kinds would let a sum count party totals beside their
-    parties. `without_party_totals` on a spec naming a flow axis
+    refused, since a flow frame without kinds would let a sum count party totals beside
+    their parties. `without_party_totals` on a spec naming a flow axis
     (`frame_materialisation.names_flow_role`) asks for the kinds alone (`KIND_COLUMNS`) when
     `place_types` is not set, and sends `options.without_party_totals`: apis leaves out the group
     totals of the

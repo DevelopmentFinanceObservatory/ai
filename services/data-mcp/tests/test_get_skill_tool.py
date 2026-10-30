@@ -150,7 +150,7 @@ _LONG = ("y" * 99 + "\n") * (2 * PAGE_CHARS // 100 + 7)
 async def test_a_path_answers_as_get_skill_file_does_naming_get_skill(
     references: dict[str, str] | None, arguments: dict[str, Any]
 ) -> None:
-    """Every call either tool prints names itself; the rest of the answer is the same."""
+    """Every call either tool prints names itself. The rest of the answer is the same."""
     handler = serving_skill(references=references)
     arguments = {"skill_id": SKILL_ID, **arguments}
 

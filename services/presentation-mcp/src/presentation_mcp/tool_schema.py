@@ -66,8 +66,8 @@ _BARE_SPEC_ID_SENTENCE = "Leave content_version out to pass a spec_id and have t
 
 # Whether a frame the platform no longer holds is built again
 # (`client.PlatformAssembler`). The public server forces it on
-# (`server.PUBLIC_SHAPES`); the harness never sets it, so a lost frame reaches it
-# as `frame_unavailable`, which its own replay answers. analysis-mcp's verbs
+# (`server.PUBLIC_SHAPES`). The harness leaves it unset, so a lost frame reaches
+# it as `frame_unavailable`, which its own replay answers. analysis-mcp's verbs
 # take the same argument.
 REBUILD_LOST_FRAMES = "rebuild_lost_frames"
 _REBUILD_LOST_FRAMES_DESCRIPTION = (
@@ -218,7 +218,7 @@ def describe_frame_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
     """The advertised `inputSchema` for `describe_frame`.
 
     `frame_ref` is lifted from the shared `$defs` with only `spec_id`
-    required: a `spec_` id alone reads the frame's newest version.
+    required, since a `spec_` id alone reads the frame's newest version.
 
     Args:
         release: The platform's release document, carrying

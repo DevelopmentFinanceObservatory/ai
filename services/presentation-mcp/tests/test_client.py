@@ -350,8 +350,8 @@ async def test_create_component_posts_intent_and_write_token_no_composition_id()
     ids=["title", "bare-spec-id"],
 )
 async def test_revise_component_patches_the_component_id(patch: dict[str, Any]) -> None:
-    """A patch goes to the platform unchanged, a frame_ref naming only a
-    spec_id among them: the platform merges it into the stored frame_ref."""
+    """A patch goes to the platform unchanged, including a frame_ref that names
+    only a spec_id, which the platform merges into the stored frame_ref."""
     requests, handler = _counting_handler(httpx2.Response(200, json=WRITE_BODY | {"revision": 2}))
 
     async with _assembler(handler) as assembler:
@@ -2348,8 +2348,8 @@ async def test_pointer_passes_through_unrepaired() -> None:
 
 async def test_a_bare_ops_id_refuses_frame_ref_incomplete_without_a_call() -> None:
     """An ops_ frame_ref with no content_version, to describe_frame or in a
-    create's intent, refuses before any request: the platform resolves only a
-    spec_ id passed alone."""
+    create's intent, refuses before any request, since the platform resolves only
+    a spec_ id passed alone."""
     calls, handler = _counting_handler(httpx2.Response(200, json={}))
     intent = {"type": "line_chart", "frame_ref": {"spec_id": "ops_1"}, "select": {}}
 
@@ -2414,8 +2414,8 @@ async def test_create_component_forwards_a_bare_spec_id_unchanged() -> None:
     assert json.loads(request.content)["intent"] == intent
 
 
-# apis' refusals of a pair it no longer holds: lost, and expired, which apis
-# marks retryable.
+# apis' refusals of a pair it no longer holds, lost or expired (apis marks an
+# expired frame retryable).
 _VERSION_LOST = _problem_body(code="frame_unavailable", retryable=False, status=404)
 _FRAME_EXPIRED = _problem_body(code="frame_unavailable", retryable=True, status=404)
 _LOST_BODIES = [
@@ -2677,7 +2677,7 @@ async def test_a_lost_ops_pair_whose_replay_computes_nothing_refuses(
     retry: RetryMode,
     retry_after_s: float | None,
 ) -> None:
-    """A replay that must wait refuses with its delay; one that failed refuses as
+    """A replay that must wait refuses with its delay. One that failed refuses as
     the lost pair did."""
     reply, requests = await _rebuilt_ops(call, replay)
 

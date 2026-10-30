@@ -1,6 +1,6 @@
 """The `export_data` tool: a frame as a file the user keeps, behind a public link.
 
-The tool asks dfo-apis to prepare the export (`POST /api/datasets/exports`): dfo-apis
+The tool asks dfo-apis to prepare the export (`POST /api/datasets/exports`). dfo-apis
 renders the exact frame version as CSV, xlsx or Parquet, alone or in a zip bundle,
 copies the file to its pinned tier and answers the file's facts with the link's path,
 `/api/datasets/exports/{export_id}`. The tool puts that path on the public site
@@ -169,8 +169,8 @@ def _render_digest(facts: ExportFacts, *, url: str, frame_ref: dict[str, str]) -
 
 
 def _refusal(exc: UpstreamError, *, frame: ExportFrameRef, export_format: str) -> ToolRefusal:
-    """The refusal for a prepare dfo-apis refused. Codes the exports door owns map here;
-    every other code maps as it does for `get_data`."""
+    """The refusal for a prepare dfo-apis refused. Codes the exports door owns map here.
+    Every other code maps as it does for `get_data`."""
     match exc.code:
         case "over_ceiling":
             count = exc.extensions.get("count")

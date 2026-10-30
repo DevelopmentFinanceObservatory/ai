@@ -110,7 +110,7 @@ retry only for a Datasets-family (`spec_...`) pair; a durable, bucket-backed
 store never raises it, since a pair its lifecycle rule has deleted comes
 back as the same `frame_not_held` a pair that was never registered would.
 `frame_ref_incomplete` fires when a frame argument names a derived (`ops_`) or
-malformed `spec_id` with no `content_version`; the call is retryable with the
+malformed `spec_id` with no `content_version`. The call is retryable with the
 full pair. A bare `spec_` id is fetched (`runner_tree.spec_root`).
 A frame the runner lost is fetched or computed again before either refusal
 reaches a caller (`tool_pipeline.run_on_runner`). When that fails the refusal
@@ -166,8 +166,9 @@ side by side. A type outside `PLACE_LEVELS`, such as `Place`,
 `ProvisionalNode` or `UNGeoRegion`, names no level, so places sharing only
 that type are refused, and one place alone passes whatever its type. It is
 retryable with `place_level` set, which `rank`, `aggregate` and `share_of` take,
-and `fix["place_level"]` names a level some of the places sit at. On a flow party role (`financingProvider`,
-`financingRecipient`) the verbs leave out the parties whose
+and `fix["place_level"]` names a level some of the places sit at. On a flow
+party role (`financingProvider`, `financingRecipient`) the verbs leave out the
+parties whose
 `{role}_party_kind` cell is `total` and record them as `party_total`
 exclusions; the refusal fires there only when several parties include one
 with no kind or a cell no kind names, are all totals on a role the verb pools

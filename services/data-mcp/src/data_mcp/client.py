@@ -164,7 +164,7 @@ def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
 def _retry_after_s(response: httpx2.Response) -> float | None:
     """The response's `Retry-After` as seconds, or `None` when it names none.
 
-    apis writes delay-seconds; an HTTP-date form reads as `None`.
+    apis writes delay-seconds. An HTTP-date form reads as `None`.
     """
     value = response.headers.get("Retry-After", "").strip()
     return float(value) if value.isdigit() else None

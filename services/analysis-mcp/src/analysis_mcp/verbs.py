@@ -11,7 +11,7 @@ argument naming a `spec_` id alone is read at the Spec's newest version
 `place_level`, which no in-process twin has: it filters each input to one level
 of place on the runner (`runner_tree.verb_tree`). `compare`
 takes `sum_of`'s form under `operation="sum"`, and `share_of` takes
-`quotient_of`'s under `operation="quotient"`: the form picks the op-spec, so each
+`quotient_of`'s under `operation="quotient"`. The form picks the op-spec, so each
 keeps its own runner call, result and refusals. A share whose sides hold two
 units refuses with `fix` naming the quotient form. A window bound or a
 `time_period` threshold given as a relative year (`op_spec.RelativeYear`) goes
@@ -126,8 +126,8 @@ def frame_ref_incomplete(arguments: Arguments) -> ToolRefusal | None:
 
 # The argument that lets a derived input's rolling years follow the call's tree
 # (`runner_client.run_tree`). The public server forces it on
-# (`server.PUBLIC_SHAPES`); the harness never sets it, so its requests and the
-# latest years of its anchor records are as they were.
+# (`server.PUBLIC_SHAPES`). The harness leaves it unset, so its requests omit
+# `rolling` and its anchor records keep their own latest years.
 FOLLOWS_TREE = "rolling_follows_tree"
 _FOLLOWS_TREE_TYPE = Annotated[
     bool,
@@ -155,7 +155,7 @@ def _held_newest(arguments: Arguments) -> tuple[dict[str, Any], tuple[str, ...]]
 
 # Whether a frame the runner no longer holds is rebuilt and the call sent again
 # (`tool_pipeline.run_on_runner`). The public server forces it on
-# (`server.PUBLIC_SHAPES`); the harness never sets it, so a lost frame reaches it
+# (`server.PUBLIC_SHAPES`). The harness leaves it unset, so a lost frame reaches it
 # as the runner's refusal, which its own replay answers.
 REBUILD_LOST_FRAMES = "rebuild_lost_frames"
 _REBUILD_LOST_FRAMES_TYPE = Annotated[
@@ -329,8 +329,8 @@ def _quotient_for_two_units(a: Arguments, refusal: ToolRefusal) -> ToolRefusal:
     """A share's `cross_frame_unit_mismatch` between two unit refs, rewritten to name
     the quotient form. The runner's `fix` names each side's unit under its label, a
     ref as a string. A converted or composed unit, or a side already in per cent,
-    keeps the runner's refusal, since a quotient of those reads as a share it is
-    not or refuses itself."""
+    keeps the runner's refusal, since a quotient of those would either read as a
+    share or refuse itself."""
     if a["operation"] != "share" or refusal.code != ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH:
         return refusal
     units = (refusal.fix.get("numerator"), refusal.fix.get("denominator"))

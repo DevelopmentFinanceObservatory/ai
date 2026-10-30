@@ -48,7 +48,7 @@ class UpstreamError(Exception):
         self.body = body
         self.extensions: dict[str, Any] = dict(extensions or {})
         # The response's `Retry-After` in seconds, when it named one. `export_data`
-        # reads it; every other tool derives its wait from the two fields below.
+        # reads it. Every other tool derives its wait from the two fields below.
         self.retry_after_s = retry_after_s
         # Filled in by the retry loop. #26's `retry_after_delay` derives its
         # interval from them.

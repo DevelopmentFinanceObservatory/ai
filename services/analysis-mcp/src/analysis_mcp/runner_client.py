@@ -45,7 +45,7 @@ so the check covers a derived input as it covers a fetched frame.
 recipe with `latest: true`, which reads its roots at their datasets' current
 versions, and returns the pair it computed (`common.derived_replay`, which
 presentation-mcp shares). A call whose derived input lost a
-root sends the replayed pair in its place (`tool_pipeline.run_on_runner`); every
+root sends the replayed pair in its place (`tool_pipeline.run_on_runner`). Every
 other call sends `latest: false`, reading each root at the version it names.
 
 A call with relative years states no anchor record: the runner fills them from

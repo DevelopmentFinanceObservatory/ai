@@ -119,12 +119,12 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.OPEN_ROLE_UNAVAILABLE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.MEMBER_NOT_RESOLVABLE: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.FRAME_REF_INCOMPLETE: RetryMode.CORRECT_AND_RETRY,
-    # The allowance resets at the next UTC midnight; `retry_after_s` names when,
+    # The allowance resets at the next UTC midnight and `retry_after_s` names when,
     # but a model should not hold the conversation open that long.
     ToolErrorCode.ALLOWANCE_EXHAUSTED: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.PROVENANCE_UNAVAILABLE: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.LICENCE_NOT_REDISTRIBUTABLE: RetryMode.DO_NOT_RETRY,
-    # The mode every server gives this code: the receiver fetches the frame again,
+    # Every server gives this code this mode. The receiver fetches the frame again,
     # then retries with the frame_ref that fetch returns.
     ToolErrorCode.FRAME_UNAVAILABLE: RetryMode.REFRESH_THEN_RETRY,
 }
@@ -1116,8 +1116,8 @@ class ToolRefusal:
     @classmethod
     def frame_unavailable(cls, *, spec_id: str, upstream_code: str) -> Self:
         """dfo-apis cannot find or read back the frame `spec_id` names (`upstream_code`).
-        A fetched frame comes back from `get_data`; a derived one from the verb calls that
-        made it."""
+        A fetched frame comes back from `get_data` and a derived one from the verb calls
+        that made it."""
         fix: dict[str, Any] = {"next_step": "get_data"} if spec_id.startswith("spec_") else {}
         return cls(
             code=ToolErrorCode.FRAME_UNAVAILABLE,
@@ -1461,9 +1461,9 @@ def _definition_not_reproducible_refusal(exc: UpstreamError, *, tool: str) -> To
     the message points to the two moves `get_data` can make: rerun `search`
     for a fresh spec_id, or retry `get_data` with those roles left out of
     `scope.entities`. A body that names no role, such as a failed operation
-    with no stored refusal, offers only the `search` move. `fix` is
-    `request_invalid`'s: one problem per role, or one on `spec_id` when the
-    body names none.
+    with no stored refusal, offers only the `search` move. `fix` takes
+    `request_invalid`'s shape, with one problem per role, or one on `spec_id`
+    when the body names none.
     """
     roles = list(dict.fromkeys(_issue_axes(exc.extensions)))
     problems = [

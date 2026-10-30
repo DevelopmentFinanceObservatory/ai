@@ -2005,7 +2005,7 @@ _REFUSAL_SHAPES = {
 def _assert_refusal_envelope(result: CallToolResult) -> dict[str, Any]:
     """Assert `result` is an error whose `structuredContent` is the refusal
     envelope, whose one text block is `refusal_text` of it, and whose `_meta`
-    names its code; return the envelope."""
+    names its code. Return the envelope."""
     assert result.is_error
     envelope = dict(result.structured_content or {})
     assert set(envelope) - {"retry_after_s"} == {"code", "retry_mode", "message", "fix"}

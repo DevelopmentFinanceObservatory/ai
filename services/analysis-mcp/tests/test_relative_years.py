@@ -124,7 +124,7 @@ async def test_a_relative_threshold_reaches_the_runner_as_given(
 async def test_a_combination_of_rolling_frames_computes_both_under_one_latest_year(
     store: InMemoryMaterialisationStore, runner: ReplayedRunner
 ) -> None:
-    # Alone, ODA's latest year is 2024 and GDP's 2025; together it is 2024.
+    # Alone, ODA's latest year is 2024 and GDP's is 2025. Together it is 2024.
     oda = await _held(store, "dcid:ODA", range(2010, 2025))
     gdp = await _held(store, "dcid:GDP", range(2010, 2026))
     oda_growth = await verbs.growth(frame_ref=oda, window_start=_NINE_BACK, window_end=_LATEST)

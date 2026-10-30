@@ -245,10 +245,10 @@ async def test_entity_parameter_schema_declares_an_optional_object() -> None:
     """`compare`'s `left_entity`/`right_entity` and `share_of`'s
     `numerator_entity`/`denominator_entity` are `dict[str, str] | None = None`
     at the tool boundary, not `dict[str, str] = {}`, and declared as an
-    optional object with no null branch (`common.declaration`) -- pins the
-    schema shape a real MCP client receives off the registered `server.mcp`
-    tools, rather than a reconstruction or a stand-in tool defined only in
-    this test.
+    optional object with no null branch (`common.declaration`). The test pins
+    the schema shape a real MCP client receives off the registered
+    `server.mcp` tools, rather than a reconstruction or a stand-in tool
+    defined only in this test.
     """
     async with Client(mcp) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}

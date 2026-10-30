@@ -2107,7 +2107,8 @@ def _serve_gdp_in_both_renderings(
 ) -> list[tuple[str, bool]]:
     """Answer GDP's mint with the type column when `options.enrichment` asks for it, and
     without otherwise, under one `content_version`. The plain manifest lists both
-    renderings, the typed one first; the typed manifest lists its own alone. Returns the frame fetches as `(content_version, typed)`, in order: the plain read
+    renderings, the typed one first. The typed manifest lists its own alone. Returns
+    the frame fetches as `(content_version, typed)`, in order: the plain read
     fetches the version's canonical frame, and the typed read its rendering."""
     renderings = {
         typed: _register_statistics(stats_registry, _gdp_mint_response(place_types=typed))

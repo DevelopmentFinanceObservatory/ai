@@ -483,7 +483,7 @@ def _candidate_piece(candidate: Mapping[str, Any]) -> str:
 def _render_unsupported_part(part: Mapping[str, Any]) -> str:
     unsupported = part.get("unsupported") or {}
     code = unsupported.get("code")
-    # The engine writes `detail` as a fragment meant to continue a sentence; the
+    # The engine writes `detail` as a fragment meant to continue a sentence. The
     # digest gives it a sentence of its own.
     detail = detail_sentence(unsupported.get("detail") or "")
     field = _unsupported_field_name(unsupported.get("pointer") or "")

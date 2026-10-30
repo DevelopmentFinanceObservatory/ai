@@ -55,7 +55,7 @@ def refusal_text(
 
 
 def detail_sentence(detail: str) -> str:
-    """`detail`, an upstream fragment, as its own sentence: a capital first letter and a
+    """`detail`, an upstream fragment, as its own sentence, with a capital first letter and a
     closing stop. A fragment that opens with an identifier, a first word holding `_` or
     `.` such as `frame_ref`, keeps it as written. An empty fragment stays empty."""
     text = detail.strip()

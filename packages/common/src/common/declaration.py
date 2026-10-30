@@ -9,7 +9,7 @@ returns the schema with:
 1. every `$comment` removed;
 2. every empty `required: []` removed;
 3. each optional property written as its own type, keeping a non-null
-   `default`: an absent optional property already means null;
+   `default`, since an absent optional property already means null;
 4. each sentence of seven words or more kept once across the description and
    the schema, the first occurrence staying, in the description when it is
    there. Sentences compare with whitespace collapsed, since a description
@@ -45,7 +45,7 @@ def declared_tool(tool: Tool, *, hidden: Iterable[str] = ()) -> Tool:
     """`tool` with its parameters replaced by `declared_schema`, less `hidden`.
 
     A hidden argument stays in the function signature, so a call that sends
-    it still parses; the declared schema no longer offers it. It is dropped
+    it still parses. The declared schema no longer offers it. It is dropped
     before sentences are compared, so no listed sentence gives way to it.
     """
     parameters = copy.deepcopy(tool.parameters)
@@ -146,7 +146,7 @@ def _without_null(prop: Schema) -> Schema:
     """`prop` without its null branch and without a `default` of null.
 
     Where both the property and its one remaining branch carry a description,
-    the property's own wins: it is the one written for this argument, and the
+    the property's own wins. It is written for this argument, and the
     branch's is the docstring of a type the argument shares.
     """
     branches = [branch for branch in prop["anyOf"] if branch != _NULL]
@@ -170,7 +170,7 @@ def _drop_repeated_sentences(schema: Schema, *, description: str) -> None:
     """Keep each sentence of `_MIN_WORDS` words or more once, in reading order.
 
     A schema description that loses a sentence is rejoined with single
-    spaces; one that loses none keeps its text as written.
+    spaces. One that loses none keeps its text as written.
     """
     seen = {
         _normalised(sentence)

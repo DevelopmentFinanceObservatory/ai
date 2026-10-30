@@ -15,7 +15,7 @@ An answer is one of:
 - `ReplayFailed`, any other answer, or a 200 that names no single frame, whose
   `code` is then `RESPONSE_INVALID`.
 
-The first two refusals pass back with the delay the runner named, and a
+`ReplayPending` and `ReplayBusy` carry the delay the runner named, and a
 `ReplayFailed` is logged with the replayed pair.
 """
 
@@ -41,14 +41,14 @@ RESPONSE_INVALID = "response_invalid"
 
 _BUSY_CODE = "service_unavailable"
 
-# A client's POST of a JSON body to a dfo-apis path: the response for any answered
-# call, or the client's own refusal for a call that got none.
+# A client's POST of a JSON body to a dfo-apis path. It returns the response for any
+# answered call, or the client's own refusal for a call that got none.
 type Post[U] = Callable[[str, Mapping[str, Any]], Awaitable[httpx2.Response | U]]
 
 
 @dataclass(frozen=True, kw_only=True)
 class ReplayPending:
-    """The runner answered 202: a root dataset is still building. `operations`
+    """The runner answered 202 because a root dataset is still building. `operations`
     are the rebuilds it waits on."""
 
     retry_after_s: float

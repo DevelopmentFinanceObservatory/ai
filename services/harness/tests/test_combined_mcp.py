@@ -927,10 +927,10 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
     "presentation-mcp/tests/fixtures/release.json"
 )
 
-# The most o200k tokens the public tool list may cost, as a client hands it to its
-# model: the compact JSON of each tool's name, description and input schema. Every
+# The most o200k tokens the public tool list may cost as a client hands it to its
+# model (the compact JSON of each tool's name, description and input schema). Every
 # client pays it on every turn. The bound is the measured count, 17,878, rounded up
-# to the next 500. The list must stay within 20,000; lower the bound as it shrinks.
+# to the next 500. The list must stay within 20,000. Lower the bound as it shrinks.
 _PUBLIC_LIST_TOKEN_BOUND = 18_000
 
 
@@ -1006,8 +1006,8 @@ async def test_no_public_schema_holds_noise_or_a_nullable_branch(
     assert faults == {}
 
 
-# Names an outside client cannot use: the harness's tools and arguments, and the
-# tools the merged ones replaced.
+# The harness's tools and arguments, and the tools the merged ones replaced, none of
+# which an outside client can use.
 _HARNESS_NAMES = re.compile(
     r"\b(place_types|rolling|anchor_key|resolve_anchor|sum_of|quotient_of|get_skill_file)\b"
 )
@@ -1030,8 +1030,8 @@ async def test_no_public_description_or_schema_names_a_harness_tool_or_argument(
 
 
 class _ForwardedArguments(Middleware):
-    """Innermost: records each call's arguments as the parent forwards them to a
-    child, and answers without running the tool."""
+    """The innermost middleware. It records each call's arguments as the parent
+    forwards them to a child, and answers without running the tool."""
 
     def __init__(self) -> None:
         self.arguments: list[dict[str, Any]] = []
@@ -1124,11 +1124,10 @@ def _losing_platform(
     requests: list[httpx2.Request], lost: dict[str, str], *, status: int, retryable: bool
 ) -> Callable[..., PlatformAssembler]:
     """A factory for `presentation_mcp.server.PlatformAssembler` over a platform that
-    serves `_RELEASE`, refuses `lost` `frame_unavailable` with `status` and
-    `retryable`, and holds `_rebuilt_pair`
-    of it: the Spec's newest version, read or drawn when the spec_id comes alone, or
-    the pair the analysis runner's replay computes. `requests` records every call but
-    the release."""
+    serves `_RELEASE`, refuses `lost` as `frame_unavailable` with `status` and
+    `retryable`, and holds `_rebuilt_pair` of it. That is the Spec's newest version,
+    read or drawn when the spec_id comes alone, or the pair the analysis runner's
+    replay computes. `requests` records every call but the release."""
     refused = httpx2.Response(
         status, json={"code": "frame_unavailable", "retryable": retryable, "detail": "gone"}
     )
@@ -1224,8 +1223,8 @@ async def test_a_public_presentation_call_builds_a_lost_frame_again(
 async def test_a_public_presentation_call_passes_back_a_503_frame_unavailable(
     name: str, lost: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 503 `frame_unavailable` is a read that failed, not a lost frame, so the
-    public call refuses it as retryable and builds nothing."""
+    """A 503 `frame_unavailable` is a failed read, so the public call refuses it as
+    retryable and builds nothing."""
     requests: list[httpx2.Request] = []
     monkeypatch.setattr(
         presentation_server,
@@ -1248,7 +1247,7 @@ async def test_a_public_presentation_call_passes_back_a_503_frame_unavailable(
 
 async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_types() -> None:
     """data-mcp's own mount keeps `place_types` for the harness. The public listing
-    names neither the argument nor a sentence about it, and its description names
+    omits the argument and any sentence about it, and its description names
     the columns and party kinds every public frame carries."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
 

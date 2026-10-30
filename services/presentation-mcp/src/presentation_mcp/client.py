@@ -311,12 +311,12 @@ def _resolves_alone(spec_id: str) -> bool:
 
 
 def _frame_lost(exc: PlatformError) -> bool:
-    """Whether the platform refused a pair because it no longer holds it: a 404
-    `frame_unavailable`, whatever its `retryable` flag, since apis marks an
+    """Whether the platform refused a pair because it no longer holds it. That is a
+    404 `frame_unavailable`, whatever its `retryable` flag, since apis marks an
     expired frame retryable. A 503 `frame_unavailable` (a failed read, a recipe
     still pending or unreadable) passes back as the retryable refusal it is. With
     `rebuild_lost_frames`, the frame is then built again as the analysis verbs'
-    rebuild builds it: a `spec_` frame read at its newest version, an `ops_`
+    rebuild builds it, a `spec_` frame read at its newest version and an `ops_`
     frame computed again from its recipe (`common.derived_replay`)."""
     return exc.code == "frame_unavailable" and exc.status == httpx2.codes.NOT_FOUND
 
@@ -355,9 +355,9 @@ def _replay_waits(spec_id: str, asked: str, waiting: ReplayPending | ReplayBusy)
 
 @dataclass(frozen=True, kw_only=True)
 class _Rebuild:
-    """A create's intent with its lost frame_ref built again: `how` the frame
-    `spec_id`, `asked` was built, and the version `read` in its place, `None`
-    when the create's reply names it."""
+    """A create's intent with its lost frame_ref built again, with `how` the frame
+    `spec_id`, `asked` was built and the version `read` in its place (`None` when
+    the create's reply names it)."""
 
     intent: Mapping[str, Any]
     spec_id: str
@@ -682,9 +682,9 @@ class PlatformAssembler:
         return replayed
 
     async def _post_analysis(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | Refusal:
-        """POST `body` to apis' analysis `path` once, for `common.derived_replay`:
-        the response, whatever its status, or `transient_unavailable` for a call
-        that got none. It names the caller as an external create does
+        """POST `body` to apis' analysis `path` once, for `common.derived_replay`.
+        Returns the response whatever its status, or `transient_unavailable` for a
+        call that got none. It names the caller as an external create does
         (`_card_write_headers`), since only a public call replays, and waits as
         long as a whole presentation call may."""
         try:
@@ -808,9 +808,9 @@ class PlatformAssembler:
         params: Mapping[str, str] | None,
     ) -> Mapping[str, Any] | Refusal:
         """The view of the frame `spec_id`, `asked`, which the platform refused as
-        `lost`, built again, with both versions under `FRAME_NOTE_KEY`: a `spec_`
-        frame at its newest version, an `ops_` frame at the pair its replay
-        computed."""
+        `lost`, built again, with both versions under `FRAME_NOTE_KEY`. A `spec_`
+        frame is read at its newest version, an `ops_` frame at the pair its
+        replay computed."""
         if _resolves_alone(spec_id):
             view = await self._newest_frame_view(spec_id, params=params)
             how, read = _FETCHED_AGAIN, None
@@ -997,7 +997,7 @@ class PlatformAssembler:
         (`common.materialisation.dataset_pair`).
 
         A pair apis never stored, whose lookup failed or found no record, goes to the
-        platform as given, which refuses it `frame_unavailable`; `get_frame_view` and
+        platform as given, which refuses it `frame_unavailable`. `get_frame_view` and
         `create_component` with `rebuild_lost_frames` then build it again.
         """
         return await dataset_pair(spec_id, content_version, logger=logger)

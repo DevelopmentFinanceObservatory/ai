@@ -84,7 +84,7 @@ async def dataset_pair(
     `columns`, a `groupby` or a party-total cut is held under a pair of its own, which apis
     never stored. The frame's record (`frame_mint_record`) names the pair apis does hold
     (`MintRecord.dataset`): the rendering's own dataset version, or the version apis mints
-    for a collapse or a cut. That pair is returned when the record names one; any other
+    for a collapse or a cut. That pair is returned when the record names one. Any other
     pair is returned as given.
     """
     record = await frame_mint_record(spec_id, content_version, logger=logger)

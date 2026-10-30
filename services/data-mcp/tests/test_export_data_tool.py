@@ -347,13 +347,13 @@ async def test_a_frame_the_platform_cannot_export_refuses_frame_unavailable(
         upstream_code,
         fix,
     )
-    # No fallback to another version: the one prepare is the only export call.
+    # No fallback to another version. The one prepare is the only export call.
     assert [r.method for r in requests if r.url.path == "/api/datasets/exports"] == ["POST"]
 
 
 async def test_a_prepare_route_that_answers_not_found_refuses_capability_unavailable() -> None:
     """A deployment without the exports route answers 404 `not_found` on its path while the
-    Datasets surface is mounted; the frame itself is not in question."""
+    Datasets surface is mounted. The frame itself is not in question."""
     result = await _call(_refusing(404, "not_found"), {"frame_ref": FETCHED})
 
     envelope = result.structured_content
@@ -367,7 +367,7 @@ async def test_a_prepare_route_that_answers_not_found_refuses_capability_unavail
 async def test_a_frame_fetched_with_options_exports_the_dataset_version_its_mint_record_names() -> (
     None
 ):
-    """A get_data frame with type columns is held under a pair dfo-apis never stored; the
+    """A get_data frame with type columns is held under a pair dfo-apis never stored. The
     prepare names the dataset pair, and the result names both."""
     held = {"spec_id": FETCHED["spec_id"], "content_version": "cv_" + "6" * 32}
     store = InMemoryMaterialisationStore()

@@ -317,8 +317,8 @@ async def run_on_runner(
     first. `follows_tree` lets a derived input's rolling years follow the call's
     tree (`run_tree`). `newest` are the Specs passed as bare `spec_id`s, held in
     `op_spec` under `runner_tree.newest_ref` and read at their newest version. With
-    `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring);
-    without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
+    `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring).
+    Without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
     refusal before it is returned.
 
     `structured_content` is the summary's `VerbResult` fields and `content` the

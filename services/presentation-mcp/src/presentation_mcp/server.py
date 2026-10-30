@@ -183,7 +183,7 @@ type IncludeProjection = Literal["auto", "full", "none"]
 
 # The public form of each tool the combined server lists differently from this
 # mount (`common.public_shape`). A public describe_frame or create builds a frame
-# the platform no longer holds again; the harness keeps `frame_unavailable` and
+# the platform no longer holds again. The harness keeps `frame_unavailable` and
 # replays the frame itself.
 _PUBLIC_FRAME_TOOL = PublicShape(
     hidden=frozenset({REBUILD_LOST_FRAMES}), forced={REBUILD_LOST_FRAMES: True}
@@ -226,14 +226,14 @@ def _refusal_result(
     and `retry_after_s` when set, or `view` when given. `content` is
     `common.refusal.refusal_text` of it. The message is `refusal.detail`,
     followed by `refusal.fix` when that is display text. `fix` holds only
-    what a corrected call can use: for `request_invalid`, `tool`, one
+    what a corrected call can use. For `request_invalid` that is `tool`, one
     `field: problem` line and the arguments `tool` accepts, as the combined
-    server's validation refusal does; otherwise `refusal.fix` when it is a
-    mapping, and `{}`.
+    server's validation refusal does. Otherwise it is `refusal.fix` when that
+    is a mapping, and `{}`.
 
     `_meta` is `refusal_meta` of the code, beside `detail`, `advice` and
-    `values`: the refusal's detail, display-text fix and mapping fix as the
-    assembler gave them, which the harness reads.
+    `values`. These are the refusal's detail, display-text fix and mapping fix
+    as the assembler gave them, which the harness reads.
     """
     advice = refusal.fix if isinstance(refusal.fix, str) else None
     values = dict(refusal.fix) if isinstance(refusal.fix, Mapping) else None
@@ -267,7 +267,8 @@ def _refusal_result(
 
 
 def _request_invalid_fix(refusal: Refusal, *, tool: str) -> dict[str, Any]:
-    """`request_invalid`'s fix: `tool`, its accepted arguments, and one problem.
+    """The fix of a `request_invalid` refusal, holding `tool`, its accepted
+    arguments, and one problem.
 
     The problem names the field `refusal.pointer` points at when the pointer
     starts at one of `tool`'s arguments. A pointer elsewhere, such as into a
@@ -700,7 +701,7 @@ def _register_tools(
     """Publish the three tools from already-assembled schemas.
 
     FastMCP keeps parsing incoming arguments against the function signatures,
-    which stay permissive on purpose; only what is advertised changes. Each
+    which stay permissive on purpose. Only what is advertised changes. Each
     advertised schema is `common.declaration.declared_schema` of the
     assembled one, against the tool's own description.
 
@@ -709,7 +710,7 @@ def _register_tools(
 
     Schema assembly happens in the caller, before any tool is added here.
     What this function can still fail partway through is registration
-    itself; on any such failure it unregisters whatever of the three it had
+    itself. On any such failure it unregisters whatever of the three it had
     already added before re-raising, so a partial failure never leaves `mcp`
     with, say, `write_component` mounted but not the others.
 

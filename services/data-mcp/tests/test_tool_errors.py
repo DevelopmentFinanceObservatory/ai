@@ -823,7 +823,7 @@ async def test_invalid_role_ref_maps_to_request_invalid_with_the_role() -> None:
     )
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
     assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
-    # apis' mint envelope wraps the scope as `/input/scope`; the problem names
+    # apis' mint envelope wraps the scope as `/input/scope`. The problem names
     # get_data's own `scope` argument.
     assert refusal.fix == {
         "tool": "get_data",
@@ -1165,8 +1165,8 @@ async def test_a_failed_operations_refusal_carries_the_operations_own_detail(
     cause_code: str, code: ToolErrorCode, fix: dict[str, object], message: str
 ) -> None:
     """The cause carries no detail of its own, so the fix and the message hold
-    the poll route's sentence about the operation: `fix.detail`, or the one
-    problem of a `request_invalid`."""
+    the poll route's sentence about the operation, as `fix.detail` or, for a
+    `request_invalid`, as its one problem."""
     detail = f"operation 'op_1' did not complete successfully: {cause_code}"
     refusal = await _refusal_from(
         500, code="operation_failed", retryable=False, detail=detail, cause={"code": cause_code}
@@ -1946,9 +1946,9 @@ def test_every_factory_and_every_code_has_a_fix_sample() -> None:
 @pytest.mark.parametrize("sample", [*_FIX_SAMPLES, *_UPSTREAM_FIX_SAMPLES])
 async def test_a_fix_names_only_arguments_and_values_its_tool_accepts(sample: str) -> None:
     """A fix key that is an argument of any data tool is one of this tool's, with a
-    value its schema accepts; a key that names an argument names one of this tool's;
-    and a `request_invalid` fix names the tool, its accepted arguments, and problems
-    on those arguments."""
+    value its schema accepts. A key that names an argument names one of this tool's.
+    A `request_invalid` fix names the tool, its accepted arguments, and problems on
+    those arguments."""
     schemas = await _public_schemas()
     arguments = set().union(*(schema["properties"] for schema in schemas.values()))
     tool, refusal = _sampled_refusals()[sample]
