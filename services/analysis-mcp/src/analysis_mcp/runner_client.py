@@ -465,20 +465,40 @@ def _ready_summary(
         return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
 
 
-async def replay_derived(ref: FrameRef) -> FrameRef | None:
+async def replay_derived(ref: FrameRef) -> FrameRef | ToolRefusal:
     """The pair of the derived frame `ref` computed again from its stored recipe on
-    its datasets' current versions, or `None` when the runner computes no frame."""
+    its datasets' current versions, or the refusal for a runner that computes no
+    frame: 202 is `analysis_pending` and a busy runner `service_unavailable`, each
+    with its delay. Any other refusal is logged with `ref`."""
     response = await runner_holder.get().post(
         ANALYSIS_PATH, {"tree": ref.model_dump(), "latest": True}
     )
-    if isinstance(response, ToolRefusal) or response.status_code != httpx2.codes.OK:
-        return None
+    replayed = await _replayed(response)
+    if isinstance(replayed, ToolRefusal) and replayed.code is not ToolErrorCode.SERVICE_UNAVAILABLE:
+        logger.warning(
+            "replay of derived frame %s, %s refused: status %s, %s",
+            ref.spec_id,
+            ref.content_version,
+            None if isinstance(response, ToolRefusal) else response.status_code,
+            replayed.code,
+        )
+    return replayed
+
+
+async def _replayed(response: httpx2.Response | ToolRefusal) -> FrameRef | ToolRefusal:
+    """The pair a replay's `response` names, or its refusal."""
+    if isinstance(response, ToolRefusal):
+        return response
+    if response.status_code == httpx2.codes.ACCEPTED:
+        return _pending(response)
+    if response.status_code != httpx2.codes.OK:
+        return await refusal_for(response, refs_by_root={})
     body = _json(response) or {}
     ref_body = body.get("ref")
     members = ref_body.get("members") if isinstance(ref_body, Mapping) else None
-    if not isinstance(members, list) or len(members) != 1 or not isinstance(members[0], Mapping):
-        return None
-    member = members[0]
+    member = members[0] if isinstance(members, list) and len(members) == 1 else None
+    if not isinstance(member, Mapping):
+        return _unusable("the replayed analysis answer names no single frame")
     spec = member.get("spec")
     try:
         return FrameRef.model_validate(
@@ -488,7 +508,7 @@ async def replay_derived(ref: FrameRef) -> FrameRef | None:
             }
         )
     except ValidationError:
-        return None
+        return _unusable("the replayed analysis answer names no single frame")
 
 
 async def find_anchor(

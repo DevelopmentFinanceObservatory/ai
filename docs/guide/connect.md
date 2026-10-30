@@ -88,13 +88,14 @@ No token is needed. The site forwards each request to the DFO AI service with it
 
 ### Tools
 
-One endpoint serves fifteen tools:
+One endpoint serves sixteen tools:
 
 | Purpose                                        | Tools                                                                  |
 | ---------------------------------------------- | ---------------------------------------------------------------------- |
 | Find, fetch and explain data                   | `search`, `get_data`, `describe`, `sources`, `get_skill`               |
 | Analyse data returned by `get_data`            | `aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join` |
 | Turn a result into a chart, table or stat card | `describe_frame`, `write_component`, `describe_component`              |
+| Take the data away as a file                   | `export_data`                                                          |
 
 A few notes:
 
@@ -102,6 +103,7 @@ A few notes:
 - `get_skill` with a `path` reads one file from a skill it loaded.
 - `compare` subtracts one series from another, period by period, or adds them with `operation` set to `sum`.
 - `share_of` gives a share in per cent, or with `operation` set to `quotient` divides one measure by another, such as GDP by population.
+- `export_data` writes a fetched or derived frame as CSV, xlsx or Parquet and returns a public link that needs no key and does not expire. CSV and xlsx hold up to 250,000 rows.
 
 ### How components are returned
 

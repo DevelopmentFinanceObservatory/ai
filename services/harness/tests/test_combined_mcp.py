@@ -112,6 +112,8 @@ DIRECT = (
 )
 PRESENTATION_TOOLS = ("write_component", "describe_frame", "describe_component")
 ROLLING_ARGUMENT_TOOLS = ("growth", "rank", "filter")
+# The public verbs, each listed without `rebuild_lost_frames` and called with it on.
+REBUILDING_TOOLS = ("aggregate", "compare", "growth", "rank", "share_of", "join", "filter")
 # The public list: what an outside client sees at `/mcp/`.
 PUBLIC_TOOLS = {
     "search",
@@ -144,6 +146,9 @@ CONTRADICTORY_GET_DATA = {
     "breakdown": {"code_system": "crsPurpose", "level": 0},
 }
 UNHELD_FRAME = {"spec_id": "spec_" + "0" * 32, "content_version": "cv_" + "0" * 32}
+# A derived frame named without its content_version, which every verb refuses
+# before it reads the store or reaches apis.
+_BARE_OPS = "ops_" + "0" * 32
 
 
 @pytest.fixture(autouse=True)
@@ -283,14 +288,15 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     assert {"search", "get_data", "aggregate", *PRESENTATION_TOOLS} <= _described(
         combined_tools
     ).keys()
-    # `get_data` is listed without `place_types`, and `growth`, `rank` and `filter`
-    # without the harness's rolling arguments
+    # `get_data` is listed without `place_types`, every verb without
+    # `rebuild_lost_frames`, and `growth`, `rank` and `filter` without the harness's
+    # rolling arguments
     # (`test_the_public_get_data_lists_the_type_columns_in_place_of_place_types`,
     # `test_the_public_list_leaves_out_the_harness_rolling_arguments`).
     combined_described, direct_described = _described(combined_tools), _described(direct_tools)
     assert [
         name for name in combined_described if combined_described[name] != direct_described[name]
-    ] == ["get_data", *ROLLING_ARGUMENT_TOOLS]
+    ] == ["get_data", *REBUILDING_TOOLS]
     assert any(tool.output_schema is not None for tool in direct_tools)
     assert [tool.output_schema for tool in combined_tools] == [None] * len(combined_tools)
     assert combined_templates == direct_templates
@@ -329,7 +335,7 @@ async def test_the_combined_server_refuses_as_the_direct_mounts_do(
     app = create_app(settings=Settings(mcp_api_token=TOKEN))
     calls = (
         (DIRECT[0], "get_data", CONTRADICTORY_GET_DATA),
-        (DIRECT[1], "aggregate", {"frame_ref": UNHELD_FRAME, "aggregation": "sum"}),
+        (DIRECT[1], "aggregate", {"frame_ref": {"spec_id": _BARE_OPS}, "aggregation": "sum"}),
     )
 
     async with running_lifespan(app):
@@ -837,7 +843,10 @@ async def test_arguments_that_fail_the_input_schema_refuse_in_the_envelope(
     assert [problem.split(":")[0] for problem in envelope["fix"]["problems"]] == ["aggregation"]
     aggregate = await analysis_server.mcp.get_tool("aggregate")
     assert aggregate is not None
-    assert envelope["fix"]["accepted"] == list(aggregate.parameters["properties"])
+    hidden = analysis_server.PUBLIC_SHAPES["aggregate"].hidden
+    assert envelope["fix"]["accepted"] == [
+        name for name in aggregate.parameters["properties"] if name not in hidden
+    ]
 
 
 @REVISIONS
@@ -1045,7 +1054,7 @@ async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str
 
     assert forwarded.arguments == [
         {**arguments, "place_types": True},
-        {"frame_ref": UNHELD_FRAME, "aggregation": "sum"},
+        {"frame_ref": UNHELD_FRAME, "aggregation": "sum", "rebuild_lost_frames": True},
     ]
 
 
@@ -1076,18 +1085,22 @@ async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_type
 
 
 async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> None:
-    """analysis-mcp's own mount keeps `rolling` and `anchor_key` for the harness, and
-    the public list has neither."""
+    """analysis-mcp's own mount keeps `rolling`, `anchor_key` and
+    `rebuild_lost_frames` for the harness, and the public list has none of them."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
 
     async with Client(combined) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
     served = {tool.name: tool for tool in await analysis_server.mcp.list_tools()}
 
-    for name in ROLLING_ARGUMENT_TOOLS:
-        assert set(listed[name].input_schema["properties"]) == set(
-            served[name].parameters["properties"]
-        ) - {"rolling", "anchor_key"}
+    for name in REBUILDING_TOOLS:
+        hidden = {"rebuild_lost_frames"}
+        if name in ROLLING_ARGUMENT_TOOLS:
+            hidden |= {"rolling", "anchor_key"}
+        assert set(listed[name].input_schema["properties"]) == (
+            set(served[name].parameters["properties"]) - hidden
+        ), name
+        assert "rebuild_lost_frames" in served[name].parameters["properties"], name
     assert {"rolling", "anchor_key"} <= set(served["growth"].parameters["properties"])
     assert listed.keys() == PUBLIC_TOOLS
     assert listed["compare"].input_schema["properties"]["operation"]["enum"] == [

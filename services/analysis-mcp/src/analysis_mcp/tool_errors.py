@@ -243,6 +243,7 @@ from analysis_mcp.disambiguation import (
     MAX_LABEL_CHARS,
     DisambiguationCandidate,
     DisambiguationPayload,
+    truncate_value,
 )
 from analysis_mcp.units import unit_json, unit_name
 
@@ -788,15 +789,17 @@ class ToolRefusal:
     @classmethod
     def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
         """The frame argument `argument` names `spec_id`, which is no `spec_` id, with
-        no `content_version`."""
+        no `content_version`. The caller's `spec_id` is echoed capped
+        (`disambiguation.truncate_value`)."""
+        shown = truncate_value(spec_id)
         return cls(
             code=ToolErrorCode.FRAME_REF_INCOMPLETE,
             message=(
-                f"{argument} names {spec_id!r} without its content_version, and only a "
+                f"{argument} names {shown!r} without its content_version, and only a "
                 "spec_ id is fetched by itself. Pass the full {spec_id, content_version} "
                 "pair from the result that made the frame."
             ),
-            fix={"argument": argument, "spec_id": spec_id},
+            fix={"argument": argument, "spec_id": shown},
         )
 
     @classmethod
@@ -1560,9 +1563,10 @@ class ToolRefusal:
                 message=(
                     f"The {role} parties in this frame cannot be pooled or ranked: the frame "
                     f"carries no {column!r} column, so its parties cannot be told apart from "
-                    "the group totals that hold them. Call get_data again for this spec_id "
-                    "(it adds the party kinds by default) and repeat the call with the "
-                    "frame_ref it returns."
+                    "the group totals that hold them. Call get_data again for this spec_id, "
+                    "with place_types=true where get_data takes that argument (otherwise it "
+                    "adds the party kinds by default), and repeat the call with the frame_ref "
+                    f"it returns, or filter the frame to a single {role} party."
                 ),
                 fix={"column": column, "types": []},
             )

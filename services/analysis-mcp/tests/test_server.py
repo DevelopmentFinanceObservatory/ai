@@ -383,14 +383,19 @@ async def test_every_registered_tool_keeps_its_in_process_twins_schema_and_descr
 
     assert set(registered) == set(expected)
     leveled = set()
+    rebuilding = set()
     for name, tool in registered.items():
         schema = copy.deepcopy(tool.input_schema)
         if schema["properties"].pop("place_level", None) is not None:
             leveled.add(name)
+        if schema["properties"].pop("rebuild_lost_frames", None) is not None:
+            rebuilding.add(name)
         assert schema == expected[name].input_schema, name
         assert tool.description == expected[name].description, name
-    # `place_level` is the registered tools' own: it builds a runner filter step.
+    # `place_level` and `rebuild_lost_frames` are the registered tools' own: one
+    # builds a runner filter step, the other rebuilds a frame the runner lost.
     assert leveled == {"aggregate", "rank", "share_of"}
+    assert rebuilding == set(_IN_PROCESS_TWINS) - {"resolve_anchor"}
 
 
 @pytest.mark.parametrize(("verb_fn", "verb_name"), [(aggregate, "aggregate"), (compare, "compare")])

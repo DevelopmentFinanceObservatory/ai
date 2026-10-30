@@ -157,7 +157,7 @@ async def test_a_frame_lost_with_its_mint_record_is_fetched_again(
     store: _RecordingStore, runner: ReplayedRunner
 ) -> None:
     lost = await _fetch(store, recorded=False)
-    rebuilt = await verbs.growth(frame_ref=lost, **_WINDOW)
+    rebuilt = await verbs.growth(frame_ref=lost, rebuild_lost_frames=True, **_WINDOW)
     bare = await verbs.growth(frame_ref={"spec_id": lost["spec_id"]}, **_WINDOW)
 
     assert [request["tree"]["inputs"]["data"] for request in runner.requests[:2]] == [

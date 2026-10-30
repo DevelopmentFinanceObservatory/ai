@@ -41,6 +41,7 @@ from typing import Annotated, Any
 from common.materialisation import AnchorRecord, FrameRef, get_store
 from common.place_type import PlaceLevel
 from common.rolling import canonical_roots
+from common.unit_refs import PERCENT_UNIT
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
@@ -133,6 +134,23 @@ def _held_newest(arguments: Arguments) -> tuple[dict[str, Any], tuple[str, ...]]
     return held, tuple(newest)
 
 
+# Whether a frame the runner no longer holds is rebuilt and the call sent again
+# (`tool_pipeline.run_on_runner`). The public server forces it on
+# (`server.PUBLIC_SHAPES`); the harness never sets it, so a lost frame reaches it
+# as the runner's refusal, which its own replay answers.
+REBUILD_LOST_FRAMES = "rebuild_lost_frames"
+_REBUILD_LOST_FRAMES_TYPE = Annotated[
+    bool,
+    Field(
+        description=(
+            "True fetches a frame the analysis service no longer holds again and repeats "
+            "the call: a spec_ frame at its newest version, an ops_ frame from its recipe "
+            "on current data."
+        )
+    ),
+]
+
+
 def _on_runner(
     in_process: Tool,
     build: Callable[[Arguments], OpSpecVariant],
@@ -141,11 +159,18 @@ def _on_runner(
     place_level_description: str | None = None,
 ) -> Tool:
     """The registered tool for `in_process`. It keeps that tool's signature and
-    docstring, builds its op-spec with `build` from the bound arguments, and
-    computes it on the runner. `refine` rewrites a runner refusal given the
-    call's arguments. `place_level_description`, when given, adds `place_level` to the
-    signature with that description."""
+    docstring, with `REBUILD_LOST_FRAMES` added, builds its op-spec with `build` from
+    the bound arguments, and computes it on the runner. `refine` rewrites a runner
+    refusal given the call's arguments. `place_level_description`, when given, adds
+    `place_level` to the signature with that description."""
     signature = inspect.signature(in_process)
+    rebuild = inspect.Parameter(
+        REBUILD_LOST_FRAMES,
+        inspect.Parameter.KEYWORD_ONLY,
+        default=False,
+        annotation=_REBUILD_LOST_FRAMES_TYPE,
+    )
+    signature = signature.replace(parameters=[*signature.parameters.values(), rebuild])
 
     @functools.wraps(in_process)
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:
@@ -166,15 +191,18 @@ def _on_runner(
             anchor_key=arguments.get("anchor_key"),
             place_level=place_level,
             newest=newest,
+            rebuild_lost_frames=arguments[REBUILD_LOST_FRAMES],
             refine=None if refine is None else functools.partial(refine, arguments),
         )
 
+    listed = signature
+    annotations = {**in_process.__annotations__, REBUILD_LOST_FRAMES: _REBUILD_LOST_FRAMES_TYPE}
     if place_level_description is not None:
         place_level = _place_level(place_level_description)
-        tool.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]  # inspect reads it
-            parameters=[*signature.parameters.values(), place_level]
-        )
-        tool.__annotations__ = {**in_process.__annotations__, "place_level": place_level.annotation}
+        listed = signature.replace(parameters=[*signature.parameters.values(), place_level])
+        annotations["place_level"] = place_level.annotation
+    tool.__signature__ = listed  # ty: ignore[unresolved-attribute]  # inspect reads it
+    tool.__annotations__ = annotations
     return tool
 
 
@@ -274,14 +302,17 @@ def _share_of(a: Arguments) -> ShareOfOpSpec | QuotientOfOpSpec:
 
 
 def _quotient_for_two_units(a: Arguments, refusal: ToolRefusal) -> ToolRefusal:
-    """A share's `cross_frame_unit_mismatch`, rewritten to name the quotient form.
-    The runner's `fix` names each side's unit under its label."""
+    """A share's `cross_frame_unit_mismatch` between two unit refs, rewritten to name
+    the quotient form. The runner's `fix` names each side's unit under its label, a
+    ref as a string. A converted or composed unit, or a side already in per cent,
+    keeps the runner's refusal, since a quotient of those reads as a share it is
+    not or refuses itself."""
     if a["operation"] != "share" or refusal.code != ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH:
         return refusal
-    return ToolRefusal.share_units_differ(
-        numerator_unit=refusal.fix.get("numerator"),
-        denominator_unit=refusal.fix.get("denominator"),
-    )
+    units = (refusal.fix.get("numerator"), refusal.fix.get("denominator"))
+    if not all(isinstance(unit, str) and unit != PERCENT_UNIT for unit in units):
+        return refusal
+    return ToolRefusal.share_units_differ(numerator_unit=units[0], denominator_unit=units[1])
 
 
 def _join(a: Arguments) -> JoinOpSpec:

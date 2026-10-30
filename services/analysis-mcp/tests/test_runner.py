@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
@@ -13,8 +14,14 @@ import httpx2
 import pytest
 from analysis_mcp import verbs
 from analysis_mcp.digest import render_summary_digest
-from analysis_mcp.runner_client import RunnerClient, read_derived_manifest, runner_holder
+from analysis_mcp.runner_client import (
+    DEFAULT_RETRY_AFTER_S,
+    RunnerClient,
+    read_derived_manifest,
+    runner_holder,
+)
 from analysis_mcp.summary import LIST_CAP, VerbSummary
+from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from common.caller import supplied_caller
 from common.materialisation import (
     AnchorRecord,
@@ -880,6 +887,10 @@ async def test_an_op_spec_that_does_not_validate_refuses_before_any_call(
     [
         (lambda: verbs.aggregate(frame_ref={"spec_id": _OPS}, aggregation="sum"), "frame_ref"),
         (
+            lambda: verbs.aggregate(frame_ref={"spec_id": "x" * 100_000}, aggregation="sum"),
+            "frame_ref",
+        ),
+        (
             lambda: verbs.compare(frame_ref=_FRAME, right_frame_ref={"spec_id": _OPS}),
             "right_frame_ref",
         ),
@@ -888,7 +899,7 @@ async def test_an_op_spec_that_does_not_validate_refuses_before_any_call(
             "denominator_frame_ref",
         ),
     ],
-    ids=["frame_ref", "right_frame_ref", "denominator_frame_ref"],
+    ids=["frame_ref", "long-id", "right_frame_ref", "denominator_frame_ref"],
 )
 async def test_a_frame_argument_without_its_content_version_refuses_before_any_call(
     store: InMemoryMaterialisationStore, call: Callable[[], Any], argument: str
@@ -902,6 +913,8 @@ async def test_a_frame_argument_without_its_content_version_refuses_before_any_c
         "correct_and_retry",
     )
     assert result.structured_content["fix"]["argument"] == argument
+    # A caller's id is echoed capped, so no argument makes the refusal any size.
+    assert len(_text(result)) < 1_000
     assert runner.requests == []
 
 
@@ -1014,7 +1027,7 @@ async def test_a_frame_the_runner_lost_is_fetched_again_at_its_newest_version(
         return _reading_spec(body)
 
     runner = _install(answer)
-    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum", rebuild_lost_frames=True)
 
     assert result.is_error is False, _text(result)
     assert _posts(runner)[-1]["tree"]["inputs"] == {"data": fetched}
@@ -1037,7 +1050,7 @@ async def test_a_derived_input_that_lost_its_root_is_computed_again_on_current_d
         return httpx2.Response(200, json=_recorded_ready("aggregate"))
 
     runner = _install(answer)
-    result = await verbs.aggregate(frame_ref=_DERIVED, aggregation="sum")
+    result = await verbs.aggregate(frame_ref=_DERIVED, aggregation="sum", rebuild_lost_frames=True)
 
     bodies = [json.loads(request.content) for request in runner.requests]
     assert result.is_error is False, _text(result)
@@ -1069,13 +1082,103 @@ async def test_a_frame_the_server_cannot_rebuild_refuses_as_the_first_call_did(
     retry_mode: str,
 ) -> None:
     runner = _install(_problem(404, "snapshot_not_found", fix=lost))
-    unrebuilt = await verbs.aggregate(frame_ref=frame_ref, aggregation="sum")
+    unrebuilt = await verbs.aggregate(
+        frame_ref=frame_ref, aggregation="sum", rebuild_lost_frames=True
+    )
 
     structured = unrebuilt.structured_content
     assert structured is not None
     assert (structured["code"], structured["retry_mode"]) == (code, retry_mode)
     # The call, then one rebuild: the Spec fetched again, or the recipe replayed.
     assert len(runner.requests) == 2
+
+
+def _losing_dataset_versions(body: dict[str, Any]) -> httpx2.Response:
+    """The runner's answer when it holds no dataset version: like `resolve_roots`, it
+    refuses on the first side read at one, and reads a Spec root at its newest."""
+    if "get" in body:
+        return _reading_spec(body)
+    for node in body["tree"]["inputs"].values():
+        if "content_version" in node:
+            pair = {"spec_id": node["spec_id"], "content_version": node["content_version"]}
+            return _problem(404, "snapshot_not_found", fix=pair)
+    return _reading_spec(body)
+
+
+async def test_a_call_whose_two_sides_were_both_lost_rebuilds_each_side(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    runner = _install(_losing_dataset_versions)
+    result = await verbs.share_of(
+        frame_ref=_FRAME, denominator_frame_ref=_OTHER_FRAME, rebuild_lost_frames=True
+    )
+
+    assert result.is_error is False, _text(result)
+    assert _posts(runner)[-1]["tree"]["inputs"] == {
+        "data": {"spec_id": _SPEC},
+        "other": {"spec_id": _OTHER_SPEC},
+    }
+
+
+async def test_a_lost_frame_on_a_call_that_does_not_rebuild_returns_the_runners_refusal(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    runner = _install(_losing_dataset_versions)
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    unchanged = to_tool_result(ToolRefusal.frames_lost(frame_refs=[_FRAME], expired=False))
+    assert result.structured_content == unchanged.structured_content
+    assert _text(result) == _text(unchanged)
+    assert len(runner.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("replay", "code", "retry_after_s", "logged"),
+    [
+        (
+            httpx2.Response(202, json={"status": "pending", "retry_after_s": 4.0}),
+            "service_unavailable",
+            4.0,
+            False,
+        ),
+        (
+            _problem(503, "service_unavailable", retryable=True),
+            "service_unavailable",
+            DEFAULT_RETRY_AFTER_S,
+            False,
+        ),
+        (
+            _problem(500, "internal_error"),
+            "derived_input_unrecoverable",
+            None,
+            True,
+        ),
+    ],
+    ids=["pending", "busy", "failed"],
+)
+async def test_a_derived_input_whose_replay_cannot_run_yet_refuses_with_its_delay(
+    store: InMemoryMaterialisationStore,
+    caplog: pytest.LogCaptureFixture,
+    replay: httpx2.Response,
+    code: str,
+    retry_after_s: float | None,
+    logged: bool,
+) -> None:
+    lost_root = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        return replay if body["latest"] else _problem(404, "snapshot_not_found", fix=lost_root)
+
+    _install(answer)
+    with caplog.at_level(logging.WARNING, logger="analysis_mcp.runner_client"):
+        result = await verbs.aggregate(
+            frame_ref=_DERIVED, aggregation="sum", rebuild_lost_frames=True
+        )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured.get("retry_after_s")) == (code, retry_after_s)
+    assert any(_OPS in record.getMessage() for record in caplog.records) is logged
 
 
 def _level_column(node: dict[str, Any]) -> str:
@@ -1146,8 +1249,9 @@ async def test_a_runner_place_levels_mixed_names_the_level_to_keep(
     assert structured is not None
     assert structured["code"] == "place_levels_mixed"
     assert structured["fix"].get("place_level") == place_level
-    # The public get_data takes no place_types: the engine's own message names it.
-    assert "place_types" not in structured["message"]
+    # The message is this service's, written from the fix: the engine's names calls
+    # this service's tools do not take.
+    assert "place_levels_mixed detail" not in structured["message"]
 
 
 # The merged forms ------------------------------------------------------------------
@@ -1214,10 +1318,35 @@ async def test_a_merged_form_sends_and_replies_as_its_own_tool(
     assert replies[0].is_error is replies[1].is_error is (answer == "refused")
 
 
-async def test_a_share_across_two_units_refuses_naming_the_quotient_form(
-    store: InMemoryMaterialisationStore,
+_CONVERTED = {"base": "dcid:USDollar", "price_basis": "constant", "base_year": 2022}
+_COMPOSED = {"numerator": "dcid:USDollar", "denominator": "dcid:Person"}
+
+
+@pytest.mark.parametrize(
+    ("units", "fix"),
+    [
+        (
+            {"numerator": "dcid:CurrencyUSD", "denominator": "dcid:USDollar"},
+            {"operation": "quotient"},
+        ),
+        (
+            {"numerator": _CONVERTED, "denominator": "dcid:USDollar"},
+            {"numerator": _CONVERTED, "denominator": "dcid:USDollar"},
+        ),
+        (
+            {"numerator": _COMPOSED, "denominator": "dcid:USDollar"},
+            {"numerator": _COMPOSED, "denominator": "dcid:USDollar"},
+        ),
+        (
+            {"numerator": "Percent", "denominator": "dcid:USDollar"},
+            {"numerator": "Percent", "denominator": "dcid:USDollar"},
+        ),
+    ],
+    ids=["two-refs", "converted", "composed", "percent"],
+)
+async def test_a_share_across_two_unit_refs_refuses_naming_the_quotient_form(
+    store: InMemoryMaterialisationStore, units: dict[str, Any], fix: dict[str, Any]
 ) -> None:
-    units = {"numerator": "dcid:CurrencyUSD", "denominator": "dcid:USDollar"}
     _install(_problem(422, "cross_frame_unit_mismatch", fix=units))
     share = await verbs.share_of(frame_ref=_FRAME, denominator_frame_ref=_DERIVED)
     _install(_problem(422, "cross_frame_unit_mismatch", fix={"left": "a", "right": "b"}))
@@ -1226,7 +1355,7 @@ async def test_a_share_across_two_units_refuses_naming_the_quotient_form(
     assert share.structured_content is not None
     assert (share.structured_content["code"], share.structured_content["fix"]) == (
         "cross_frame_unit_mismatch",
-        {"operation": "quotient"},
+        fix,
     )
     assert difference.structured_content is not None
     assert difference.structured_content["fix"] == {"left": "a", "right": "b"}

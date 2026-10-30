@@ -17,13 +17,17 @@ The registered tools (`verbs`) compute in dfo-apis' analysis runner.
 (`runner_tree.verb_tree`) and turns the runner's summary into the reply, its
 `VerbResult` and its digest (`digest.render_summary_digest`).
 
-A frame the runner no longer holds (`ToolRefusal.lost_frames`) is rebuilt and the
-call sent once more: a `spec_` frame as the Spec root that fetches it at its
-newest version (`runner_tree.spec_root`), an `ops_` frame as the pair the runner
-computes from its stored recipe on current data (`runner_client.replay_derived`).
-When a rebuild fails, or the call sent again refuses for any reason but the
-engine's over the data or a busy runner's, the call refuses with the first
-refusal and the sentence that says so (`ToolRefusal.not_rebuilt`).
+On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
+(`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
+as the Spec root that fetches it at its newest version (`runner_tree.spec_root`),
+an `ops_` frame as the pair the runner computes from its stored recipe on current
+data (`runner_client.replay_derived`). The runner names one lost dataset per
+refusal, so a call over two lost datasets is sent again once per side, at most
+once per distinct frame argument. A replay the runner cannot run yet refuses with
+its `service_unavailable` and delay. When any other rebuild fails, or the call
+sent again refuses for any reason but the engine's over the data or a busy
+runner's, the call refuses with the last lost-frame refusal and the sentence that
+says so (`ToolRefusal.not_rebuilt`).
 The frame each bare `spec_id` and each fetched-again `spec_` frame was read as is
 recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
 opens with a sentence naming that frame's pair, and one naming the old and the
@@ -237,12 +241,12 @@ class _Rebuilt:
     node: dict[str, Any]
 
 
-async def _rebuilt(ref: FrameRef) -> _Rebuilt | None:
-    """The root that rebuilds the lost frame `ref`, or `None` when none can."""
+async def _rebuilt(ref: FrameRef) -> _Rebuilt | ToolRefusal:
+    """The root that rebuilds the lost frame `ref`, or the refusal of its replay."""
     if ref.spec_id.startswith("ops_"):
         replayed = await replay_derived(ref)
-        if replayed is None:
-            return None
+        if isinstance(replayed, ToolRefusal):
+            return replayed
         return _Rebuilt(ref=ref, node=replayed.model_dump())
     return _Rebuilt(ref=ref, node=await spec_root(ref))
 
@@ -276,6 +280,17 @@ def _newest_sentence(spec_id: str, read: Mapping[str, tuple[FrameRef, ...]]) -> 
     return f"{spec_id} was read at its newest version as content_version {_versions(frames)}."
 
 
+def _frame_count(op_spec: OpSpecVariant) -> int:
+    """How many distinct frames `op_spec`'s frame arguments name."""
+    return len(
+        {
+            (value.spec_id, value.content_version)
+            for _, value in op_spec
+            if isinstance(value, FrameRef)
+        }
+    )
+
+
 def _not_rebuilt(refusal: ToolRefusal) -> bool:
     """Whether the call sent again over rebuilt frames refused for want of them: any
     refusal but the engine's over the data it read and a busy or still-building
@@ -291,6 +306,7 @@ async def run_on_runner(
     anchor_key: str | None = None,
     place_level: PlaceLevel | None = None,
     newest: Collection[str] = (),
+    rebuild_lost_frames: bool = False,
     refine: Callable[[ToolRefusal], ToolRefusal] | None = None,
 ) -> ToolResult:
     """The reply every registered verb returns for `op_spec`, computed by the runner.
@@ -298,8 +314,9 @@ async def run_on_runner(
     tree (`runner_tree.verb_tree`), and its answer is checked against them
     (`runner_client.run_tree`). `place_level` filters each input to that level
     first. `newest` are the Specs passed as bare `spec_id`s, held in `op_spec`
-    under `runner_tree.newest_ref` and read at their newest version. A lost frame
-    is rebuilt (see the module docstring). `refine`, when given, rewrites a runner
+    under `runner_tree.newest_ref` and read at their newest version. With
+    `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring);
+    without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
     refusal before it is returned.
 
     `structured_content` is the summary's `VerbResult` fields and `content` the
@@ -311,7 +328,7 @@ async def run_on_runner(
         (spec_id, newest_ref(spec_id).content_version): {"spec_id": spec_id} for spec_id in newest
     }
 
-    async def run(replaced: Mapping[Pair, dict[str, Any]]) -> VerbSummary | ToolRefusal:
+    async def run() -> VerbSummary | ToolRefusal:
         tree = await verb_tree(
             op_spec, anchor_key=anchor_key, place_level=place_level, replaced=replaced
         )
@@ -319,25 +336,34 @@ async def run_on_runner(
             return tree
         return await run_tree(tree.node, anchor=tree.anchor, refs_by_root=tree.refs_by_root)
 
-    answer = await run(replaced)
-    rebuilt: list[_Rebuilt] = []
-    if isinstance(answer, ToolRefusal) and answer.lost_frames:
+    answer = await run()
+    rebuilt: dict[Pair, _Rebuilt] = {}
+    lost: ToolRefusal | None = None
+    frames = _frame_count(op_spec) if rebuild_lost_frames else 0
+    while isinstance(answer, ToolRefusal) and len(rebuilt) < frames:
+        fresh = {
+            pair: ref
+            for ref in answer.lost_frames
+            if (pair := (ref.spec_id, ref.content_version)) not in rebuilt
+        }
+        if not fresh:
+            break
         lost = answer
-        pairs = {(ref.spec_id, ref.content_version): ref for ref in lost.lost_frames}
-        for ref in pairs.values():
-            if (root := await _rebuilt(ref)) is None:
-                return to_tool_result(lost.not_rebuilt())
-            rebuilt.append(root)
-        answer = await run(
-            {**replaced, **{pair: root.node for pair, root in zip(pairs, rebuilt, strict=True)}}
-        )
-        if isinstance(answer, ToolRefusal) and _not_rebuilt(answer):
-            return to_tool_result(lost.not_rebuilt())
+        for pair, ref in fresh.items():
+            root = await _rebuilt(ref)
+            if isinstance(root, ToolRefusal):
+                busy = root.code is ToolErrorCode.SERVICE_UNAVAILABLE
+                return to_tool_result(root if busy else lost.not_rebuilt())
+            rebuilt[pair] = root
+            replaced[pair] = root.node
+        answer = await run()
+    if lost is not None and isinstance(answer, ToolRefusal) and _not_rebuilt(answer):
+        return to_tool_result((answer if answer.lost_frames else lost).not_rebuilt())
     if isinstance(answer, ToolRefusal):
         return to_tool_result(answer if refine is None else refine(answer))
     fetched = {
         *newest,
-        *(root.ref.spec_id for root in rebuilt if "content_version" not in root.node),
+        *(root.ref.spec_id for root in rebuilt.values() if "content_version" not in root.node),
     }
     read = (
         await record_spec_reads(
@@ -351,7 +377,7 @@ async def run_on_runner(
         sentence
         for sentence in (
             *(_newest_sentence(spec_id, read) for spec_id in newest),
-            *(_rebuilt_sentence(root, read) for root in rebuilt),
+            *(_rebuilt_sentence(root, read) for root in rebuilt.values()),
         )
         if sentence is not None
     ]

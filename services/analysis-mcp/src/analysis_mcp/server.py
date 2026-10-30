@@ -63,6 +63,7 @@ from analysis_mcp.runner_client import runner_holder
 from analysis_mcp.settings import Settings
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.verbs import (
+    REBUILD_LOST_FRAMES,
     aggregate,
     compare,
     filter_verb,
@@ -218,10 +219,17 @@ mcp.add_tool(
 
 # The public form of each tool the combined server lists differently from this
 # mount (`common.public_shape`). A rolling call needs `resolve_anchor`'s
-# `anchor_key`, and only the harness calls `resolve_anchor`.
-PUBLIC_SHAPES: Mapping[str, PublicShape] = dict.fromkeys(
-    ("growth", "rank", "filter"), PublicShape(hidden=frozenset({"rolling", "anchor_key"}))
+# `anchor_key`, and only the harness calls `resolve_anchor`. Every public verb
+# rebuilds a frame the runner no longer holds.
+_REBUILDS = PublicShape(hidden=frozenset({REBUILD_LOST_FRAMES}), forced={REBUILD_LOST_FRAMES: True})
+_ROLLING_REBUILDS = PublicShape(
+    hidden=frozenset({"rolling", "anchor_key", REBUILD_LOST_FRAMES}),
+    forced={REBUILD_LOST_FRAMES: True},
 )
+PUBLIC_SHAPES: Mapping[str, PublicShape] = {
+    **dict.fromkeys(("aggregate", "compare", "share_of", "join"), _REBUILDS),
+    **dict.fromkeys(("growth", "rank", "filter"), _ROLLING_REBUILDS),
+}
 
 
 class _NameUnknownVerbsMiddleware(Middleware):
