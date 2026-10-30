@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Literal, NotRequired, TypedDict
 
-from common.materialisation import FrameRef, get_store
+from common.materialisation import frame_mint_record
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
@@ -125,31 +125,12 @@ async def _exported_pair(spec_id: str, content_version: str) -> tuple[str, str] 
     """The pair dfo-apis exports for the frame `{spec_id, content_version}`, or the refusal
     for a frame whose rows no stored version holds.
 
-    A `spec_` pair with a mint record maps to the record's dataset pair
+    A frame with a mint record (`frame_mint_record`) maps to the record's dataset pair
     (`MintRecord.dataset`) when its options preserve the version's rows
-    (`_ROW_PRESERVING_OPTIONS`), and refuses otherwise. Any other pair is exported as
-    given: an `ops_` pair, a pair with no record, and a value that is not a pair the store
-    could hold. A lookup that fails is logged and the pair exported as given, which
-    dfo-apis refuses as `frame_unavailable` when it never stored the pair.
+    (`_ROW_PRESERVING_OPTIONS`), and refuses otherwise. A frame without one is exported as
+    given, and dfo-apis refuses it as `frame_unavailable` when it never stored the pair.
     """
-    if not spec_id.startswith(_FETCHED_PREFIX):
-        return spec_id, content_version
-    try:
-        ref = FrameRef(spec_id=spec_id, content_version=content_version)
-    except ValidationError:
-        return spec_id, content_version
-    try:
-        record = await get_store().get_mint_record(ref)
-    except Exception:
-        # Broad on purpose: the store's failure modes belong to its backend (the storage
-        # client, its auth and its transport), and the lookup only ever improves a call.
-        logger.warning(
-            "mint record of %s/%s unreadable; sending the pair as given",
-            spec_id,
-            content_version,
-            exc_info=True,
-        )
-        return spec_id, content_version
+    record = await frame_mint_record(spec_id, content_version, logger=logger)
     if record is None:
         return spec_id, content_version
     if set(record.options) - _ROW_PRESERVING_OPTIONS:

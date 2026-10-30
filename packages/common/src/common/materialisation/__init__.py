@@ -27,6 +27,7 @@ from common.materialisation.gcs_store import GcsMaterialisationStore
 from common.materialisation.holder import (
     aclose_store,
     dataset_pair,
+    frame_mint_record,
     get_store,
     set_store,
     store_is_set,
@@ -86,6 +87,7 @@ __all__ = [
     "encode_mint_record",
     "encode_trace",
     "frame_from_verified_parquet_bytes",
+    "frame_mint_record",
     "frame_to_parquet_bytes",
     "get_content_version_deriver",
     "get_store",
