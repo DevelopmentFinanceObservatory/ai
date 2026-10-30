@@ -474,7 +474,8 @@ class _Replay:
         A record with no `stat_var_count` cannot be tested for the first case and is
         replayed as recorded: refusing it would refuse every older root that has
         always held several StatVars. Such a record either holds the `options` the
-        mint sent, written before the count was kept, or was rebuilt by
+        mint sent, written before the count was kept, was written by a bare read
+        (`common.materialisation.record_bare_read`) with no `groupby`, or was rebuilt by
         `data_mcp.mint_recovery` for a `groupby` sum with a version of its own,
         whose `groupby` apis recorded. Recovery counts or refuses every root
         under an unsummed version, where the first case arises. The second case

@@ -127,9 +127,10 @@ class Assembler(Protocol):
         """Resolve a complete intent against its frame and mint revision 1.
 
         With `rebuild_lost_frames`, a frame_ref the platform no longer holds is
-        built again, a `spec_` frame at its newest version and an `ops_` frame
-        from its recipe on current data, and the reply names both versions
-        under `FRAME_NOTE_KEY`.
+        built again, a `spec_` frame at its newest version when that read holds
+        its rows and an `ops_` frame from its recipe on current data, and the
+        reply names both pairs under `FRAME_NOTE_KEY`. A `spec_` frame it cannot
+        build refuses `rendering_not_recorded`.
         """
         ...
 
@@ -163,7 +164,7 @@ class Assembler(Protocol):
         reads its newest version, which the view names. With
         `rebuild_lost_frames`, a pair the platform no longer holds is built
         again as `create_component` builds it, and the view names both
-        versions under `FRAME_NOTE_KEY`.
+        pairs under `FRAME_NOTE_KEY`.
         `dimension` narrows the view to one dimension's values. `query`
         filters those values.
         """

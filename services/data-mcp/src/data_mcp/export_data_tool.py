@@ -14,8 +14,9 @@ nothing for a repeat. The caller the website named rides on the call
 A fetched frame (`spec_`) exports its long layout, with a `_label` column beside each
 code. A derived frame (`ops_`) exports its own columns, which carry no labels. A bare
 `spec_id` goes to dfo-apis alone, which exports the newest version it holds and names the
-pair it resolved; the result names that pair. Any other bare id refuses
-`frame_ref_incomplete`.
+pair it resolved; the result names that pair, and the tool writes its mint record
+(`common.materialisation.record_bare_read`), so a later call can export it by name. Any
+other bare id refuses `frame_ref_incomplete`.
 
 A `spec_` pair `get_data` fetched with options, such as the type columns, is held under a
 pair of its own, which dfo-apis never stored. The mint record the frame store keeps beside
@@ -24,7 +25,9 @@ exports that version (`_exported_pair`). The result names the pair the caller pa
 the version exported. That version holds the frame's rows only when the mint selected
 columns or cut party totals. A `groupby` (a `breakdown` or a `stat_vars` sum) can keep the
 base version's pair, whose export holds the unsummed rows, so such a frame refuses before
-any call to dfo-apis.
+any call to dfo-apis. So does a pair no record states the rendering of
+(`common.materialisation.frame_rendering`), since a file of that pair might hold other rows
+than the frame. A failed read of the record refuses `service_unavailable`.
 
 dfo-apis answers `snapshot_not_found`, `artifact_expired` or `spec_not_found` for a frame
 it cannot export, and the tool refuses `frame_unavailable`. It never exports
@@ -36,7 +39,14 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Literal, NotRequired, TypedDict
 
-from common.materialisation import frame_mint_record
+from common.derived_replay import DEFAULT_RETRY_AFTER_S
+from common.materialisation import (
+    FrameRef,
+    FrameRendering,
+    RenderingUnknown,
+    frame_rendering,
+    record_bare_read,
+)
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
@@ -57,12 +67,6 @@ _PREPARE_ROUTE = f"{DATASETS_PREFIX}/exports"
 _PREPARE_DEADLINE_S = EXTERNAL_CALL_LIMIT_S - EXTERNAL_CALL_MARGIN_S
 
 _FORMAT_NAMES = {"csv": "CSV", "xlsx": "Excel (xlsx)", "parquet": "Parquet"}
-
-# The mint options whose frame holds its dataset version's rows: the rendering keys,
-# the columns selected, and the party-total cut, which mints a version of its own.
-_ROW_PRESERVING_OPTIONS = frozenset(
-    {"format", "bundle", "layout", "columns", "without_party_totals"}
-)
 
 _DERIVED_PREFIX = "ops_"
 _FETCHED_PREFIX = "spec_"
@@ -123,24 +127,40 @@ def _licence_line(licence: ExportLicence) -> str:
 
 async def _exported_pair(spec_id: str, content_version: str) -> tuple[str, str] | ToolRefusal:
     """The pair dfo-apis exports for the frame `{spec_id, content_version}`, or the refusal
-    for a frame whose rows no stored version holds.
+    for a frame no stored version is known to hold the rows of.
 
-    A frame with a mint record (`frame_mint_record`) maps to the record's dataset pair
-    (`MintRecord.dataset`) when its options preserve the version's rows
-    (`_ROW_PRESERVING_OPTIONS`), and refuses otherwise. A frame without one is exported as
-    given, and dfo-apis refuses it as `frame_unavailable` when it never stored the pair.
+    An `ops_` pair is its own stored version. A `spec_` pair maps to its mint record's
+    dataset pair (`MintRecord.dataset`). A summed frame refuses, and so does a frame whose
+    rendering cannot be established (`frame_rendering`). A pair that is no frame's goes to
+    dfo-apis, which refuses it.
     """
-    record = await frame_mint_record(spec_id, content_version, logger=logger)
-    if record is None:
+    if not spec_id.startswith(_FETCHED_PREFIX):
         return spec_id, content_version
-    if set(record.options) - _ROW_PRESERVING_OPTIONS:
-        return ToolRefusal.summed_frame_not_exportable(spec_id=spec_id)
-    return record.dataset.spec_id, record.dataset.content_version
+    try:
+        ref = FrameRef(spec_id=spec_id, content_version=content_version)
+    except ValidationError:
+        return spec_id, content_version
+    match await frame_rendering(ref, logger=logger):
+        case FrameRendering(record=record) as known:
+            if known.summed:
+                return ToolRefusal.summed_frame_not_exportable(spec_id=spec_id)
+            return record.dataset.spec_id, record.dataset.content_version
+        case RenderingUnknown(options=options):
+            return ToolRefusal.rendering_not_recorded(
+                spec_id=spec_id, content_version=content_version, options=options
+            )
+        case _:
+            return ToolRefusal.service_unavailable(
+                service="the frame store",
+                retry_after_s=DEFAULT_RETRY_AFTER_S,
+                detail=f"the record of {spec_id}, {content_version} could not be read",
+            )
 
 
 def _render_digest(facts: ExportFacts, *, url: str, frame_ref: dict[str, str]) -> str:
-    """The digest: file, format, shape, size, link, citation, licences, how long the file
-    is kept, the frame and the stored version exported, and which columns the file holds."""
+    """The digest: file, format, shape, size, hash, link, citation, licences, how long the
+    file is kept, the frame and the stored version exported, and which columns the file
+    holds."""
     file_format = _FORMAT_NAMES[facts.format]
     if facts.bundle:
         file_format += " in a zip with README.md, datapackage.json and CITATION.cff"
@@ -149,6 +169,7 @@ def _render_digest(facts: ExportFacts, *, url: str, frame_ref: dict[str, str]) -
         f"Format: {file_format}",
         f"Rows and columns: {facts.rows:,} rows, {facts.columns:,} columns",
         f"Size: {_size(facts.bytes)}",
+        f"SHA-256: {facts.sha256}",
         f"Link: {url}",
         f"Citation: {facts.citation}",
         "Licences:",
@@ -269,6 +290,10 @@ async def export_data(
             ToolRefusal.upstream_response_unusable(
                 detail=f"the export response did not match the shape this service expects: {exc}"
             )
+        )
+    if not content_version:
+        await record_bare_read(
+            facts.frame["spec_id"], facts.frame["content_version"], logger=logger
         )
     url = client.public_url(facts.url_path)
     # The caller's pair, or the one dfo-apis resolved a bare spec_id to.

@@ -41,6 +41,16 @@ from common.materialisation.mint_record import (
     groupby_axes,
     normal_groupby,
 )
+from common.materialisation.rendering import (
+    DEFAULT_MINT_OPTIONS,
+    FrameRendering,
+    RecordUnread,
+    RenderingUnknown,
+    frame_rendering,
+    record_bare_read,
+    root_rendering,
+    unread_options,
+)
 from common.materialisation.store import (
     FrameExpired,
     FrameIntegrityError,
@@ -58,6 +68,7 @@ from common.materialisation.trace_codec import (
 )
 
 __all__ = [
+    "DEFAULT_MINT_OPTIONS",
     "AnchorPopulation",
     "AnchorRecord",
     "AnchorRecordIntegrityError",
@@ -66,6 +77,7 @@ __all__ = [
     "FrameIntegrityError",
     "FrameListing",
     "FrameRef",
+    "FrameRendering",
     "FrameTooLarge",
     "GcsMaterialisationStore",
     "HeldFrame",
@@ -75,6 +87,8 @@ __all__ = [
     "MaterialisationTrace",
     "MintRecord",
     "MintRecordUnrecoverableError",
+    "RecordUnread",
+    "RenderingUnknown",
     "StoredFrameTrace",
     "TraceCodecUnknown",
     "aclose_store",
@@ -88,14 +102,18 @@ __all__ = [
     "encode_trace",
     "frame_from_verified_parquet_bytes",
     "frame_mint_record",
+    "frame_rendering",
     "frame_to_parquet_bytes",
     "get_content_version_deriver",
     "get_store",
     "groupby_axes",
     "install_store_if_unset",
     "normal_groupby",
+    "record_bare_read",
     "register_content_version_deriver",
     "register_trace_codec",
+    "root_rendering",
     "set_store",
     "store_is_set",
+    "unread_options",
 ]

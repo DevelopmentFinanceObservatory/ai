@@ -37,6 +37,7 @@ from common import auth as mcp_auth
 from common import refusal as refusal_module
 from common import telemetry
 from common.logging import configure_logging
+from common.materialisation import FrameRef, MintRecord
 from common.materialisation import get_store as get_frame_store
 from common.refusal import internal_error_message, refusal_meta
 from common.uri_redaction import UriRedactingExporter
@@ -753,7 +754,7 @@ async def test_the_rate_limit_counts_tool_calls_alone(
         admitted = await client.call_tool("aggregate", arguments, raise_on_error=False)
         refused = await client.call_tool("aggregate", arguments, raise_on_error=False)
 
-    assert _envelope(admitted)["code"] == "frame_not_held"
+    assert _envelope(admitted)["code"] == "rendering_not_recorded"
     assert _envelope(refused)["code"] == "rate_limited"
 
 
@@ -1146,7 +1147,13 @@ def _losing_platform(
     read or drawn when the spec_id comes alone, or the pair the analysis runner's
     replay computes. `requests` records every call but the release."""
     refused = httpx2.Response(
-        status, json={"code": "frame_unavailable", "retryable": retryable, "detail": "gone"}
+        status,
+        json={
+            "code": "frame_unavailable",
+            "retryable": retryable,
+            "detail": "gone",
+            "cause": {"code": "expired" if retryable else "unknown"},
+        },
     )
     rebuilt = _rebuilt_pair(lost)
     envelope = resolved_revision("line_chart", component_id="cmp_1", revision=1)
@@ -1222,6 +1229,11 @@ async def test_a_public_presentation_call_builds_a_lost_frame_again(
     )
 
     async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        if lost is _LOST_SPEC:
+            frame = FrameRef(**lost)
+            await get_frame_store().put_mint_record(
+                MintRecord(frame=frame, dataset=frame, options={})
+            )
         listed = {tool.name: tool for tool in await client.list_tools()}
         result = await client.call_tool(
             name, _lost_frame_arguments(name, lost), raise_on_error=False
@@ -1535,7 +1547,7 @@ async def test_a_tool_call_over_the_rate_limit_refuses_in_the_envelope(
         async with Client(mounted_mcp_transport(app, DIRECT[1], token=TOKEN), mode=mode) as client:
             direct = await client.call_tool("aggregate", arguments, raise_on_error=False)
 
-    assert _envelope(results[0])["code"] == "frame_not_held"
+    assert _envelope(results[0])["code"] == "rendering_not_recorded"
     assert (
         results[-1]
         .content[0]
@@ -2368,7 +2380,7 @@ async def test_each_call_through_the_combined_server_is_logged(
         *(
             f"combined mcp call tool=aggregate outcome={outcome} revision={revision} "
             f"caller=ip:test trace_id=<id> {call_host}"
-            for outcome in ("ok", "frame_not_held")
+            for outcome in ("ok", "rendering_not_recorded")
         ),
     ]
     trace_ids = [re.findall(r"trace_id=([0-9a-f]{32})", message) for message in messages]

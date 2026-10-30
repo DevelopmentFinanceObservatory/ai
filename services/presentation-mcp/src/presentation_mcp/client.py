@@ -32,9 +32,22 @@ from typing import Any, Self
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
 from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
-from common.derived_replay import ReplayBusy, ReplayFailed, ReplayPending, replay_derived
+from common.derived_replay import (
+    DEFAULT_RETRY_AFTER_S,
+    ReplayBusy,
+    ReplayFailed,
+    ReplayPending,
+    replay_derived,
+)
 from common.echoed_text import truncate_value
-from common.materialisation import FrameRef, dataset_pair
+from common.materialisation import (
+    FrameRef,
+    FrameRendering,
+    RecordUnread,
+    dataset_pair,
+    frame_rendering,
+    record_bare_read,
+)
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
 from pydantic import ValidationError
@@ -312,15 +325,28 @@ def _resolves_alone(spec_id: str) -> bool:
     return spec_id.startswith("spec_")
 
 
+# The `frame_unavailable` causes of a frame apis does not hold, which a rebuild can
+# stand in for. dfo-apis names every other cause for a frame it refuses to serve.
+_LOST_CAUSES = frozenset({"unknown", "expired", "ops_unsupported"})
+
+
 def _frame_lost(exc: PlatformError) -> bool:
     """Whether the platform refused a pair because it no longer holds it. That is a
-    404 `frame_unavailable`, whatever its `retryable` flag, since apis marks an
-    expired frame retryable. A 503 `frame_unavailable` (a failed read, a recipe
-    still pending or unreadable) passes back as the retryable refusal it is. With
+    404 `frame_unavailable` whose `cause.code` is in `_LOST_CAUSES`, whatever its
+    `retryable` flag, since apis marks an expired frame retryable. Any other 404
+    stays the platform's refusal: a revoked, quarantined or digest-mismatched frame
+    must not be read again under a newer version. A 503 `frame_unavailable` (a failed
+    read, a recipe still pending or unreadable) passes back as the retryable refusal
+    it is. With
     `rebuild_lost_frames`, the frame is then built again as the analysis verbs'
-    rebuild builds it, a `spec_` frame read at its newest version and an `ops_`
-    frame computed again from its recipe (`common.derived_replay`)."""
-    return exc.code == "frame_unavailable" and exc.status == httpx2.codes.NOT_FOUND
+    rebuild builds it, a `spec_` frame read at its newest version when that read
+    holds its rows (`_bare_read_refusal`) and an `ops_` frame computed again from its
+    recipe (`common.derived_replay`)."""
+    return (
+        exc.code == "frame_unavailable"
+        and exc.status == httpx2.codes.NOT_FOUND
+        and exc.cause_code in _LOST_CAUSES
+    )
 
 
 # How a lost frame was built again, by its id's kind, as the frame note says.
@@ -328,11 +354,30 @@ _FETCHED_AGAIN = "fetched again at its newest version"
 _COMPUTED_AGAIN = "computed again from its recipe on current data"
 
 
-def _rebuilt_note(spec_id: str, asked: str, *, how: str, read: object) -> str:
-    """The sentence naming the version a frame_ref asked for and the one built
-    in its place, which is `read` when the platform named it."""
+def _rebuilt_note(spec_id: str, asked: str, *, how: str, read: tuple[object, object]) -> str:
+    """The sentence naming the frame a frame_ref asked for and the pair built in its
+    place, `read`, when the platform named it. A replay can mint a new `ops_` id, so
+    the version alone would name a pair no store holds."""
     lead = f"The frame {spec_id}, {asked} was no longer held, so it was {how}"
-    return f"{lead}: {read} in place of {asked}." if isinstance(read, str) else f"{lead}."
+    read_spec_id, version = read
+    if isinstance(read_spec_id, str) and isinstance(version, str):
+        return f"{lead}: {read_spec_id}, {version} in place of {asked}."
+    return f"{lead}."
+
+
+def _rendering_not_recorded(spec_id: str, asked: str) -> Refusal:
+    """The refusal for a lost `spec_` frame whose rows the platform's newest read of
+    `spec_id` is not known to hold. That read has no rendering of its own."""
+    return Refusal(
+        error="rendering_not_recorded",
+        retry=RetryMode.CORRECT_AND_RETRY,
+        detail=(
+            f"The frame {spec_id}, {asked} is no longer held, and its newest version cannot "
+            "be read with the same rows: it was summed or cut, or no record states how it "
+            "was fetched."
+        ),
+        fix="Call get_data for the same data and pass the frame_ref it returns.",
+    )
 
 
 def _replay_waits(spec_id: str, asked: str, waiting: ReplayPending | ReplayBusy) -> Refusal:
@@ -358,14 +403,14 @@ def _replay_waits(spec_id: str, asked: str, waiting: ReplayPending | ReplayBusy)
 @dataclass(frozen=True, kw_only=True)
 class _Rebuild:
     """A create's intent with its lost frame_ref built again, with `how` the frame
-    `spec_id`, `asked` was built and the version `read` in its place (`None` when
-    the create's reply names it)."""
+    `spec_id`, `asked` was built and the pair `read` in its place (`None` when the
+    create's reply names it)."""
 
     intent: Mapping[str, Any]
     spec_id: str
     asked: str
     how: str
-    read: str | None
+    read: tuple[str, str] | None
 
 
 def _input_version(envelope: Mapping[str, Any] | None, spec_id: str) -> object:
@@ -377,6 +422,14 @@ def _input_version(envelope: Mapping[str, Any] | None, spec_id: str) -> object:
         if isinstance(frame, Mapping) and frame.get("spec_id") == spec_id:
             return frame.get("content_version")
     return None
+
+
+async def _record_drawn_pair(spec_id: str, reply: WriteReply) -> None:
+    """Write the mint record of the pair a create resolved the bare `spec_id` to, which
+    the reply's provenance names (`common.materialisation.record_bare_read`)."""
+    version = _input_version(reply.resolved_payload, spec_id)
+    if isinstance(version, str):
+        await record_bare_read(spec_id, version, logger=logger)
 
 
 def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str | None] | Refusal:
@@ -430,6 +483,13 @@ def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
     if not isinstance(parsed.get("retryable"), bool):
         return None
     return parsed
+
+
+def _cause_code(problem: Mapping[str, Any]) -> str | None:
+    """The `cause.code` of the problem document `problem`, `None` without one."""
+    cause = problem.get("cause")
+    code = cause.get("code") if isinstance(cause, Mapping) else None
+    return code if isinstance(code, str) else None
 
 
 def _render_alternatives(alternatives: Sequence[Mapping[str, Any]]) -> str:
@@ -614,7 +674,14 @@ class PlatformAssembler:
                 return rebuild
             # The refused create stored nothing, so the same write token keys this one.
             return await self._create_rebuilt(rebuild, write_token=write_token, caller=caller)
-        return self._write_reply(response.json())
+        reply = self._write_reply(response.json())
+        if (
+            isinstance(frame_ref, Mapping)
+            and isinstance(bare_id := frame_ref.get("spec_id"), str)
+            and frame_ref.get("content_version") is None
+        ):
+            await _record_drawn_pair(bare_id, reply)
+        return reply
 
     async def _create_rebuilt(
         self, rebuild: _Rebuild, *, write_token: str, caller: Caller
@@ -627,7 +694,12 @@ class PlatformAssembler:
         except PlatformError as exc:
             return self._refusal(exc)
         reply = self._write_reply(response.json())
-        read = rebuild.read or _input_version(reply.resolved_payload, rebuild.spec_id)
+        if rebuild.read is None:
+            await _record_drawn_pair(rebuild.spec_id, reply)
+        read = rebuild.read or (
+            rebuild.spec_id,
+            _input_version(reply.resolved_payload, rebuild.spec_id),
+        )
         note = _rebuilt_note(rebuild.spec_id, rebuild.asked, how=rebuild.how, read=read)
         return replace(reply, frame_note=note)
 
@@ -635,10 +707,11 @@ class PlatformAssembler:
         self, intent: Mapping[str, Any], lost: PlatformError
     ) -> _Rebuild | Refusal | None:
         """`intent` with the frame_ref the platform refused as `lost` built again,
-        the refusal of a replay that could not, or `None` when the refusal is no
+        the refusal of a rebuild that could not, or `None` when the refusal is no
         lost frame. A `spec_` frame_ref loses its content_version, which the
-        platform reads as the Spec's newest version. An `ops_` frame_ref names
-        the pair its replay computed."""
+        platform reads as the Spec's newest version, when that read holds its rows
+        (`_bare_read_refusal`). An `ops_` frame_ref names the pair its replay
+        computed."""
         frame_ref = intent.get("frame_ref")
         if not (
             _frame_lost(lost)
@@ -648,6 +721,9 @@ class PlatformAssembler:
         ):
             return None
         if _resolves_alone(spec_id):
+            refusal = await self._bare_read_refusal(spec_id, asked, lost)
+            if refusal is not None:
+                return refusal
             newest = {key: value for key, value in frame_ref.items() if key != "content_version"}
             return _Rebuild(
                 intent={**intent, "frame_ref": newest},
@@ -664,8 +740,36 @@ class PlatformAssembler:
             spec_id=spec_id,
             asked=asked,
             how=_COMPUTED_AGAIN,
-            read=replayed.content_version,
+            read=(replayed.spec_id, replayed.content_version),
         )
+
+    async def _bare_read_refusal(
+        self, spec_id: str, asked: str, lost: PlatformError
+    ) -> Refusal | None:
+        """The refusal for a lost `spec_` frame a read of `spec_id` alone would not stand
+        for, `None` when it would. No route reads a Spec in a named rendering, and an
+        analysis tree cannot be a Spec root alone, so a bare read holds the frame's rows
+        only when its mint record states the default rows. A pair that is no frame's
+        refuses as `lost`."""
+        try:
+            ref = FrameRef(spec_id=spec_id, content_version=asked)
+        except ValidationError:
+            return self._refusal(lost)
+        match await frame_rendering(ref, logger=logger):
+            case FrameRendering() as known if known.default_rows:
+                return None
+            case RecordUnread():
+                return Refusal(
+                    error="transient_unavailable",
+                    retry=RetryMode.RETRY_AFTER_DELAY,
+                    detail=(
+                        f"The record of the frame {spec_id}, {asked} could not be read just "
+                        f"now. Retry the same call after {DEFAULT_RETRY_AFTER_S:.1f}s."
+                    ),
+                    retry_after_s=DEFAULT_RETRY_AFTER_S,
+                )
+            case _:
+                return _rendering_not_recorded(spec_id, asked)
 
     async def _replayed(self, spec_id: str, asked: str, lost: PlatformError) -> FrameRef | Refusal:
         """The pair the runner computed the lost derived frame `spec_id`, `asked`
@@ -810,31 +914,43 @@ class PlatformAssembler:
         params: Mapping[str, str] | None,
     ) -> Mapping[str, Any] | Refusal:
         """The view of the frame `spec_id`, `asked`, which the platform refused as
-        `lost`, built again, with both versions under `FRAME_NOTE_KEY`. A `spec_`
-        frame is read at its newest version, an `ops_` frame at the pair its
-        replay computed."""
+        `lost`, built again, with both pairs under `FRAME_NOTE_KEY`. A `spec_`
+        frame is read at its newest version when that read holds its rows
+        (`_bare_read_refusal`), an `ops_` frame at the pair its replay computed."""
         if _resolves_alone(spec_id):
+            refusal = await self._bare_read_refusal(spec_id, asked, lost)
+            if refusal is not None:
+                return refusal
             view = await self._newest_frame_view(spec_id, params=params)
-            how, read = _FETCHED_AGAIN, None
+            if isinstance(view, Refusal):
+                return view
+            how = _FETCHED_AGAIN
+            read = (view.get("spec_id"), view.get("content_version"))
         else:
             replayed = await self._replayed(spec_id, asked, lost)
             if isinstance(replayed, Refusal):
                 return replayed
             path = _FRAME_ROUTE.format(**replayed.model_dump())
             view = await self._frame_view(path, route=_FRAME_ROUTE, params=params)
-            how, read = _COMPUTED_AGAIN, replayed.content_version
-        if isinstance(view, Refusal):
-            return view
-        note = _rebuilt_note(spec_id, asked, how=how, read=read or view.get("content_version"))
+            if isinstance(view, Refusal):
+                return view
+            how = _COMPUTED_AGAIN
+            read = (replayed.spec_id, replayed.content_version)
+        note = _rebuilt_note(spec_id, asked, how=how, read=read)
         return {**view, FRAME_NOTE_KEY: note}
 
     async def _newest_frame_view(
         self, spec_id: str, *, params: Mapping[str, str] | None
     ) -> Mapping[str, Any] | Refusal:
         """The view of `spec_id` at its newest version, which apis resolves and
-        names in the body."""
+        names in the body. The pair it names gets a mint record
+        (`common.materialisation.record_bare_read`), so a later call can name it."""
         path = _SPEC_FRAME_ROUTE.format(spec_id=spec_id)
-        return await self._frame_view(path, route=_SPEC_FRAME_ROUTE, params=params)
+        view = await self._frame_view(path, route=_SPEC_FRAME_ROUTE, params=params)
+        match view:
+            case {"spec_id": str(read_id), "content_version": str(version)}:
+                await record_bare_read(read_id, version, logger=logger)
+        return view
 
     async def _frame_view(
         self, path: str, *, route: str, params: Mapping[str, str] | None
@@ -1382,6 +1498,7 @@ class PlatformAssembler:
             constraint_id=problem.get("constraint_id"),
             truncated=bool(problem.get("truncated", False)),
             trace_id=problem.get("trace_id"),
+            cause_code=_cause_code(problem),
         )
 
     def _should_retry(self, error: PlatformError) -> bool:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx2
@@ -105,6 +105,22 @@ def _refusing(status: int, code: str, **extra: object) -> Handler:
     return handler
 
 
+@pytest.fixture(autouse=True)
+async def _fetched_frame_recorded() -> AsyncIterator[None]:
+    """`FETCHED` has the mint record `get_data` writes for a default mint."""
+    store = InMemoryMaterialisationStore()
+    await store.put_mint_record(
+        MintRecord(
+            frame=FrameRef(**FETCHED),
+            dataset=FrameRef(**FETCHED),
+            options={"format": "parquet", "bundle": False, "layout": "frame"},
+        )
+    )
+    set_store(store)
+    yield
+    set_store(None)
+
+
 async def _call(handler: Handler, arguments: dict[str, Any], **settings: object) -> CallToolResult:
     async with _client(handler, settings=_settings(dfo_site_origin=SITE, **settings)) as upstream:
         client_holder.set_client(upstream)
@@ -164,6 +180,7 @@ async def test_the_digest_states_the_file_facts_in_order() -> None:
         "Format",
         "Rows and columns",
         "Size",
+        "SHA-256",
         "Link",
         "Citation",
         "Licences",
@@ -174,6 +191,7 @@ async def test_the_digest_states_the_file_facts_in_order() -> None:
     licence_lines = [line for line in lines if line.startswith("- ")]
     assert lines.index(licence_lines[0]) == labels.index("Licences") + 1
     assert len(licence_lines) == 2
+    assert f"SHA-256: {'f' * 64}" in lines
 
 
 async def test_no_signed_url_reaches_the_result() -> None:
@@ -200,6 +218,26 @@ async def test_a_bare_spec_id_exports_the_version_the_platform_resolves() -> Non
     assert result.structured_content is not None
     assert result.structured_content["frame_ref"] == resolved
     assert f"Frame: {FETCHED['spec_id']} at content_version {NEWEST}" in text_of(result)
+
+
+async def test_the_pair_a_bare_export_names_exports_on_a_later_call() -> None:
+    store = InMemoryMaterialisationStore()
+    named = {"spec_id": FETCHED["spec_id"], "content_version": NEWEST}
+    requests: list[httpx2.Request] = []
+
+    set_store(store)
+    bare = await _call(_door(requests), {"frame_ref": {"spec_id": named["spec_id"]}})
+    # The server's lifespan closes the store it found.
+    set_store(store)
+    later = await _call(_door(requests), {"frame_ref": named})
+
+    assert bare.structured_content is not None
+    assert later.structured_content is not None
+    assert later.structured_content["frame_ref"] == bare.structured_content["frame_ref"] == named
+    assert [json.loads(r.content)["frame"] for r in requests] == [
+        {"spec_id": named["spec_id"]},
+        named,
+    ]
 
 
 async def test_a_bare_derived_id_refuses_frame_ref_incomplete_without_a_call() -> None:
@@ -400,6 +438,55 @@ async def test_a_frame_fetched_with_options_exports_the_dataset_version_its_mint
         f"Exported version: {FETCHED['spec_id']} at content_version {FETCHED['content_version']}"
         in digest
     )
+
+
+class _UnreadableMintRecords(InMemoryMaterialisationStore):
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        raise OSError("store unreachable")
+
+
+@pytest.mark.parametrize(
+    ("options", "fix_options"),
+    [(None, []), ({"format": "parquet", "currency": "EUR"}, ["currency"])],
+    ids=["no-record", "option-no-root-reads"],
+)
+async def test_a_frame_whose_rendering_cannot_be_established_refuses_without_a_prepare(
+    options: dict[str, Any] | None, fix_options: list[str]
+) -> None:
+    held = {"spec_id": FETCHED["spec_id"], "content_version": "cv_" + "6" * 32}
+    store = InMemoryMaterialisationStore()
+    if options is not None:
+        await store.put_mint_record(
+            MintRecord(frame=FrameRef(**held), dataset=FrameRef(**FETCHED), options=options)
+        )
+    set_store(store)
+    requests: list[httpx2.Request] = []
+
+    result = await _call(_door(requests), {"frame_ref": held})
+
+    envelope = result.structured_content
+    assert envelope is not None
+    assert (envelope["code"], envelope["retry_mode"], envelope["fix"]) == (
+        "rendering_not_recorded",
+        "correct_and_retry",
+        {"next_step": "get_data", "options": fix_options},
+    )
+    assert requests == []
+
+
+async def test_a_failed_read_of_the_mint_record_refuses_retryably_without_a_prepare() -> None:
+    set_store(_UnreadableMintRecords())
+    requests: list[httpx2.Request] = []
+
+    result = await _call(_door(requests), {"frame_ref": FETCHED})
+
+    envelope = result.structured_content
+    assert envelope is not None
+    assert (envelope["code"], envelope["retry_mode"]) == (
+        "service_unavailable",
+        "retry_after_delay",
+    )
+    assert requests == []
 
 
 @pytest.mark.parametrize(

@@ -153,18 +153,17 @@ async def test_the_pair_a_bare_call_names_reads_the_frame_that_call_read(
     assert _ids(named) == _ids(bare)
 
 
-async def test_a_frame_lost_with_its_mint_record_is_fetched_again(
+async def test_a_frame_lost_with_its_mint_record_refuses_for_want_of_its_rendering(
     store: _RecordingStore, runner: ReplayedRunner
 ) -> None:
     lost = await _fetch(store, recorded=False)
-    rebuilt = await verbs.growth(frame_ref=lost, rebuild_lost_frames=True, **_WINDOW)
-    bare = await verbs.growth(frame_ref={"spec_id": lost["spec_id"]}, **_WINDOW)
+    refused = await verbs.growth(frame_ref=lost, rebuild_lost_frames=True, **_WINDOW)
 
-    assert [request["tree"]["inputs"]["data"] for request in runner.requests[:2]] == [
+    assert refused.structured_content is not None
+    assert refused.structured_content["code"] == "rendering_not_recorded"
+    assert [request["tree"]["inputs"]["data"] for request in runner.requests] == [
         {**lost, "rendering": {"without_party_totals": False, "columns": []}},
-        {"spec_id": lost["spec_id"]},
     ]
-    assert _ids(rebuilt) == _ids(bare)
 
 
 # place_level ----------------------------------------------------------------------------

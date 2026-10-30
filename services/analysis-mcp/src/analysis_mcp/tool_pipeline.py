@@ -19,19 +19,20 @@ The registered tools (`verbs`) compute in dfo-apis' analysis runner.
 
 On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
 (`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
-as the Spec root that fetches it at its newest version (`runner_tree.spec_root`),
-an `ops_` frame as the pair the runner computes from its stored recipe on current
-data (`runner_client.replay_derived`). The runner names one lost dataset per
-refusal, so a call over two lost datasets is sent again once per side, at most
-once per distinct frame argument. A replay the runner cannot run yet refuses with
-its `service_unavailable` and delay. When any other rebuild fails, or the call
-sent again refuses for any reason but the engine's over the data or a busy
-runner's, the call refuses with the last lost-frame refusal and the sentence that
-says so (`ToolRefusal.not_rebuilt`).
+as the Spec root that fetches it at its newest version in its recorded rendering
+(`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its
+stored recipe on current data (`runner_client.replay_derived`). The runner names one
+lost dataset per refusal, so a call over two lost datasets is sent again once per
+side, at most once per distinct frame argument. A `spec_` frame whose rendering
+cannot be established refuses as `spec_root` says. A replay the runner cannot run
+yet refuses with its own delay. When any other replay fails, or the call sent again
+refuses for any reason but the engine's over the data or a transient failure, the
+call refuses with the last lost-frame refusal and the sentence that says so
+(`ToolRefusal.not_rebuilt`). A transient refusal stays itself, with its delay.
 The frame each bare `spec_id` and each fetched-again `spec_` frame was read as is
 recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
-opens with a sentence naming that frame's pair, and one naming the old and the
-new version of each rebuilt frame whose version moved.
+opens with a sentence naming that frame's pair, and one naming the pair each rebuilt
+frame was read as when it moved, since a replay can mint a new `ops_` id.
 
 The rest of this module serves the in-process tools, which no registered tool
 calls.
@@ -241,23 +242,32 @@ class _Rebuilt:
     node: dict[str, Any]
 
 
-async def _rebuilt(ref: FrameRef) -> _Rebuilt | ToolRefusal:
-    """The root that rebuilds the lost frame `ref`, or the refusal of its replay."""
+def _transient(refusal: ToolRefusal) -> bool:
+    """Whether `refusal` is a busy, still-building or failing service's, which the same
+    call outlives."""
+    return refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE or refusal.retry_after_s is not None
+
+
+async def _rebuilt(ref: FrameRef, *, lost: ToolRefusal) -> _Rebuilt | ToolRefusal:
+    """The root that rebuilds `ref`, which the refusal `lost` names, or the refusal the
+    call answers when no root can."""
     if ref.spec_id.startswith("ops_"):
         replayed = await replay_derived(ref)
         if isinstance(replayed, ToolRefusal):
-            return replayed
+            return replayed if _transient(replayed) else lost.not_rebuilt()
         return _Rebuilt(ref=ref, node=replayed.model_dump())
-    return _Rebuilt(ref=ref, node=await spec_root(ref))
+    root = await spec_root(ref)
+    return root if isinstance(root, ToolRefusal) else _Rebuilt(ref=ref, node=root)
 
 
-def _versions(frames: tuple[FrameRef, ...]) -> str:
-    return ", ".join(frame.content_version for frame in frames)
+def _pairs(frames: tuple[FrameRef, ...]) -> str:
+    """Each frame as the `spec_id` and `content_version` a later call names it by."""
+    return "; ".join(f"{frame.spec_id}, {frame.content_version}" for frame in frames)
 
 
 def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]]) -> str | None:
-    """The sentence naming a rebuilt frame's old and new version, `None` when its
-    version did not move or the new one is unknown."""
+    """The sentence naming a rebuilt frame's old and new pair, `None` when its pair
+    did not move or the new one is unknown."""
     ref = rebuilt.ref
     if "content_version" in rebuilt.node:
         now = (FrameRef.model_validate(rebuilt.node),)
@@ -265,11 +275,11 @@ def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]
     else:
         now = read.get(ref.spec_id, ())
         how = "fetched again at its newest version"
-    if not now or [frame.content_version for frame in now] == [ref.content_version]:
+    if not now or now == (ref,):
         return None
     return (
         f"The frame {ref.spec_id}, {ref.content_version} was no longer held, so it was "
-        f"{how}: {_versions(now)} in place of {ref.content_version}."
+        f"{how}: {_pairs(now)} in place of {ref.content_version}."
     )
 
 
@@ -277,7 +287,8 @@ def _newest_sentence(spec_id: str, read: Mapping[str, tuple[FrameRef, ...]]) -> 
     """The sentence naming the frame a bare `spec_id` was read as."""
     if not (frames := read.get(spec_id)):
         return f"{spec_id} was read at its newest version."
-    return f"{spec_id} was read at its newest version as content_version {_versions(frames)}."
+    versions = ", ".join(frame.content_version for frame in frames)
+    return f"{spec_id} was read at its newest version as content_version {versions}."
 
 
 def _frame_count(op_spec: OpSpecVariant) -> int:
@@ -293,11 +304,8 @@ def _frame_count(op_spec: OpSpecVariant) -> int:
 
 def _not_rebuilt(refusal: ToolRefusal) -> bool:
     """Whether the call sent again over rebuilt frames refused for want of them: any
-    refusal but the engine's over the data it read and a busy or still-building
-    runner's, which the same call outlives."""
-    return (
-        refusal.code not in RUNNER_CODES and refusal.code is not ToolErrorCode.SERVICE_UNAVAILABLE
-    )
+    refusal but the engine's over the data it read and a transient one."""
+    return refusal.code not in RUNNER_CODES and not _transient(refusal)
 
 
 async def run_on_runner(
@@ -357,10 +365,9 @@ async def run_on_runner(
             break
         lost = answer
         for pair, ref in fresh.items():
-            root = await _rebuilt(ref)
+            root = await _rebuilt(ref, lost=lost)
             if isinstance(root, ToolRefusal):
-                busy = root.code is ToolErrorCode.SERVICE_UNAVAILABLE
-                return to_tool_result(root if busy else lost.not_rebuilt())
+                return to_tool_result(root)
             rebuilt[pair] = root
             replaced[pair] = root.node
         answer = await run()
