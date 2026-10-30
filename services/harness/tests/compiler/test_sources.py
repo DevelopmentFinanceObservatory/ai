@@ -21,6 +21,7 @@ from compiler.sources import (
     total_reading,
     wire_groups,
 )
+from harness.tool_contracts import resolver_digest
 from planner.records import Period
 from planner.workflow import OpenEntityAxis
 
@@ -111,6 +112,100 @@ def test_each_entity_text_maps_to_the_refs_it_bound(
     part: dict[str, Any], expected: dict[str, tuple[str, ...]]
 ) -> None:
     assert bound_refs(part) == expected
+
+
+_RELEASE_ROWS = json.loads(
+    (Path(__file__).parent.parent / "fixtures" / "bound_refs_release_rows.json").read_text()
+)["cases"]
+
+
+def _restated(*texts: str, entity_refs: list[dict[str, Any]]) -> dict[str, Any]:
+    """A part restating one entity row per text, with the `entity_refs` Search states beside it."""
+    return {
+        "restatement": {"entities": [{"text": text} for text in texts]},
+        "entity_refs": entity_refs,
+    }
+
+
+# "aid from G7 to Africa and Africa": Search states one `entity_refs` entry per
+# distinct text, so the restatement holds one row more than the entries.
+_REPEATED_TEXT = _restated(
+    "G7",
+    "Africa",
+    "Africa",
+    entity_refs=[
+        {"text": "G7", "refs": ["GroupOfSeven"]},
+        {"text": "Africa", "refs": ["DACAfrica"]},
+    ],
+)
+
+
+def test_a_definite_parts_block_stores_one_bound_row_per_text() -> None:
+    """The release reads `_bound_refs` only as `BoundEntity` rows. A block stored
+    here holds one per text, the rows the migration writes for a stored mapping."""
+    envelope = _envelope("definite", spec=_spec(), **_REPEATED_TEXT)
+
+    assert resolver_digest(envelope)["spec_block"]["_bound_refs"] == [
+        {"identity": "g7", "text": "g7", "role": None, "refs": ["GroupOfSeven"]},
+        {"identity": "africa", "text": "africa", "role": None, "refs": ["DACAfrica"]},
+    ]
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        _REPEATED_TEXT,
+        _restated(
+            "G7",
+            "Atlantis",
+            entity_refs=[
+                {"text": "G7", "refs": ["GroupOfSeven"]},
+                {"text": "Atlantis", "refs": []},
+            ],
+        ),
+    ],
+    ids=["repeated-text", "unbound-text"],
+)
+def test_a_part_binds_the_same_refs_live_and_from_its_stored_block(part: dict[str, Any]) -> None:
+    envelope = _envelope("definite", spec=_spec(), **part)
+
+    (live,) = outcome_from_envelope(envelope).sources
+    stored = source_from_spec_block(resolver_digest(envelope)["spec_block"])
+
+    assert live.bound_refs
+    assert stored.bound_refs == live.bound_refs
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (
+            {"g7": ["GroupOfSeven"], "africa": ["DACAfrica"]},
+            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+        ),
+        (
+            _RELEASE_ROWS[0]["bound_refs"],
+            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+        ),
+        # Two rows written alike bind every ref either row states.
+        (_RELEASE_ROWS[1]["bound_refs"], {"congo": ("country/COD", "country/COG")}),
+        (None, {}),
+    ],
+    ids=["mapping", "rows", "rows-written-alike", "absent"],
+)
+def test_a_stored_block_reads_its_bound_refs_as_rows_or_as_the_older_mapping(
+    stored: Any, expected: dict[str, tuple[str, ...]]
+) -> None:
+    block = _spec() if stored is None else {**_spec(), "_bound_refs": stored}
+
+    assert source_from_spec_block(block).bound_refs == expected
+
+
+def test_a_stored_bound_row_missing_its_refs_makes_the_block_unusable() -> None:
+    block = {**_spec(), "_bound_refs": [{"identity": "G7", "text": "G7", "refs": []}]}
+
+    with pytest.raises(ValueError, match="not usable as a source"):
+        source_from_spec_block(block)
 
 
 def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:

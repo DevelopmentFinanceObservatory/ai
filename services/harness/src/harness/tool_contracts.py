@@ -21,6 +21,7 @@ from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
     block_groups,
     bound_refs,
+    bound_rows,
     open_entity_axes_of,
     resolved_source_mentions,
     total_reading,
@@ -485,7 +486,8 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     `harness.graph.state.store_search` stores them, so `fetch` and the
     planner's pins read a part's or a picked candidate's block with no
     second `search` call. Each block a part carries holds the refs the
-    part's entity texts bound (`compiler.sources.bound_refs`) under
+    part's entity texts bound (`compiler.sources.bound_refs`), one
+    `BoundEntity` per text (`compiler.sources.bound_rows`), under
     `_bound_refs`, which `compiler.sources.source_from_spec_block` reads
     back, so a pin names an entity by the refs its text bound. The
     top-level `spec_block` holds the first part's block the same way. `kind` is what the envelope says
@@ -497,18 +499,19 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     raw_parts = envelope.get("parts") or []
     raw_part = raw_parts[0] if raw_parts else {}
     digest["spec_block"] = (
-        _with_bound_refs(raw_part, raw_part.get("spec"))
+        _with_bound_refs(raw_part.get("spec"), _stored_rows(raw_part))
         if digest.get("status") == "definite"
         else None
     )
     for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
+        rows = _stored_rows(part)
         summary["spec_block"] = (
-            _with_bound_refs(part, part.get("spec"))
+            _with_bound_refs(part.get("spec"), rows)
             if summary.get("status") == "definite"
             else None
         )
         summary["candidate_blocks"] = {
-            spec["spec_id"]: _with_bound_refs(part, spec)
+            spec["spec_id"]: _with_bound_refs(spec, rows)
             for spec in _offered_specs(part)
             if spec.get("spec_id")
         }
@@ -516,10 +519,16 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     return digest
 
 
-def _with_bound_refs(part: Mapping[str, Any], spec: Any) -> Any:
-    """`spec`, a block `part` carries, with the part's `bound_refs` under `_bound_refs` when it has any."""
-    refs = bound_refs(part)
-    return {**spec, "_bound_refs": refs} if refs and isinstance(spec, Mapping) else spec
+def _stored_rows(part: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """`part`'s `bound_refs` as the JSON rows (`bound_rows`) each block it carries stores."""
+    return [row.model_dump(mode="json") for row in bound_rows(bound_refs(part))]
+
+
+def _with_bound_refs(spec: Any, rows: list[dict[str, Any]]) -> Any:
+    """`spec`, a block a part carries, with the part's stored `rows` under `_bound_refs` when it has any."""
+    if not rows or not isinstance(spec, Mapping):
+        return spec
+    return {**spec, "_bound_refs": rows}
 
 
 def _offered_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:

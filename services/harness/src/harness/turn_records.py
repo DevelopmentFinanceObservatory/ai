@@ -28,6 +28,7 @@ from typing import Any, Literal, NamedTuple, cast
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency
 from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
+from data_mcp.scope import ScopeAxis
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles
 from planner.plan import (
@@ -51,6 +52,7 @@ from pydantic import ConfigDict, Field, model_validator
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
+from harness.scope_choices import PartScope, ServedScope
 from harness.tool_contracts import requested_range, series_description
 
 # Where a source or reading came from: the orchestrator's `search`, the
@@ -598,10 +600,19 @@ class YearCount(StrictModel):
 
 
 class FetchReading(StrictModel):
-    """What a `fetch` of the reading's spec_id returned: its summary, or a refusal code."""
+    """What a retrieval of the reading's spec_id returned: a `fetch`'s summary
+    or refusal code, or, when `plan_step`, a plan step's retrieval, which the
+    planner's ledger text does not show (`render_readings`). `served` is how
+    the figures served were counted, and `args` the arguments that shaped
+    each distinct `fetch` of the reading that returned data, oldest first, as
+    JSON. `plan_step`, `served` and `args` arrive only on records a later
+    release stored; nothing here sets them."""
 
     summary: str | None = None
     refusal_code: str | None = None
+    plan_step: bool = Field(default=False, exclude_if=lambda plan_step: not plan_step)
+    served: ServedScope | None = Field(default=None, exclude_if=lambda served: served is None)
+    args: tuple[dict[str, Any], ...] = Field(default=(), exclude_if=lambda args: not args)
 
 
 # The reading statuses whose own spec_id a search settled on: a `definite`
@@ -640,8 +651,13 @@ class SearchReading(StrictModel):
     among its `alternatives` or `other_prices`, set on the reading a `fetch`
     of such a spec_id gains (`harness.orchestrator_tools`), whose
     `counted_as` is then the count it reads: the offered count, or the
-    offering reading's own in other prices. `observed_at` is stored and not
-    rendered.
+    offering reading's own in other prices. `scope` is how search counted
+    the part (`harness.scope_choices.PartScope`), `planner_axes` the scope
+    axes the planner's own words settled on it, `entity_groups` the named
+    sets its places were asked for as, and `entity_groups_unreadable` true
+    when its block named sets whose posted identity could not be read. Those
+    four arrive only on records a later release stored; nothing here sets or
+    renders them. `observed_at` is stored and not rendered.
     """
 
     text: str | None
@@ -681,6 +697,14 @@ class SearchReading(StrictModel):
         default=(), exclude_if=lambda prices: not prices
     )
     sibling_of: SiblingReading | None = Field(default=None, exclude_if=lambda link: link is None)
+    scope: PartScope | None = Field(default=None, exclude_if=lambda scope: scope is None)
+    planner_axes: tuple[ScopeAxis, ...] = Field(default=(), exclude_if=lambda axes: not axes)
+    entity_groups: tuple[ResolvedGroup, ...] = Field(
+        default=(), exclude_if=lambda groups: not groups
+    )
+    entity_groups_unreadable: bool = Field(
+        default=False, exclude_if=lambda unreadable: not unreadable
+    )
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -791,12 +815,19 @@ class SearchReading(StrictModel):
         )
 
     def with_fetch(self, result: Mapping[str, Any]) -> SearchReading:
-        """This reading with the outcome of a `fetch` result for its spec_id."""
-        if result.get("code"):
-            fetched = FetchReading(refusal_code=str(result["code"]))
-        else:
-            fetched = FetchReading(summary=_str_or_none(result.get("summary")))
-        return self.model_copy(update={"fetch": fetched})
+        """This reading with the outcome of a `fetch` result for its spec_id.
+
+        The fetch's `served` and `args`, which a later release stores, are
+        kept. It is no longer only a plan step's retrieval (`plan_step`)."""
+        refused = bool(result.get("code"))
+        outcome: dict[str, Any] = {
+            "summary": None if refused else _str_or_none(result.get("summary")),
+            "refusal_code": str(result["code"]) if refused else None,
+            "plan_step": False,
+        }
+        return self.model_copy(
+            update={"fetch": (self.fetch or FetchReading()).model_copy(update=outcome)}
+        )
 
 
 def _offers(offers: Sequence[Any] | None) -> tuple[CandidateReading, ...]:
@@ -1090,7 +1121,7 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         head += f" (from {reading.origin})"
     codes = _warning_codes(reading)
     if folded:
-        if reading.fetch is not None:
+        if reading.fetch is not None and not reading.fetch.plan_step:
             head += "; fetch refused" if reading.fetch.refusal_code else "; fetched"
         if refusal := _refusal_context(reading, detail=3):
             head += f"; {refusal}"
@@ -1119,7 +1150,7 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         lines.append(f"   {sibling}")
     if codes:
         lines.append(f"   warnings: {codes}")
-    if reading.fetch is not None:
+    if reading.fetch is not None and not reading.fetch.plan_step:
         if reading.fetch.refusal_code:
             lines.append(f"   fetch refused: {reading.fetch.refusal_code}")
         else:

@@ -620,6 +620,59 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
     assert lines[-1] == "   fetch refused: frame_too_large"
 
 
+def test_a_stored_plan_step_retrieval_renders_as_no_fetch() -> None:
+    """A later release stores a plan step's retrieval on the reading as a fetch
+    marked `plan_step`, which the planner's ledger text leaves out."""
+    stored = json.loads(
+        (Path(__file__).parent / "fixtures" / "ledger_turn_later_release.json").read_text()
+    )["readings"][1]
+    assert stored["fetch"] == {"plan_step": True, "summary": None, "refusal_code": None}
+    planned = SearchReading.model_validate(stored)
+    unfetched = planned.model_copy(update={"fetch": None})
+
+    assert render_readings([planned], budget=10_000) == render_readings([unfetched], budget=10_000)
+
+
+@pytest.mark.parametrize(
+    ("result", "summary", "refusal_code"),
+    [
+        ({"summary": "3 series"}, "3 series", None),
+        ({"refusal": "too large", "code": "frame_too_large"}, None, "frame_too_large"),
+    ],
+    ids=["returned", "refused"],
+)
+def test_a_fetch_of_a_stored_reading_keeps_how_a_later_release_counted_it(
+    result: dict[str, Any], summary: str | None, refusal_code: str | None
+) -> None:
+    """A later release stores how a fetch's figures were counted (`served`) and the
+    arguments that shaped it (`args`). A fetch recorded here keeps both."""
+    stored = json.loads(
+        (Path(__file__).parent / "fixtures" / "ledger_turn_later_release.json").read_text()
+    )["readings"][0]
+    reading = SearchReading.model_validate(stored)
+
+    fetched = reading.with_fetch({"spec_id": reading.spec_id, **result}).model_dump(mode="json")
+
+    assert fetched["fetch"] == {
+        **stored["fetch"],
+        "summary": summary,
+        "refusal_code": refusal_code,
+    }
+
+
+def test_a_fetch_of_a_plan_steps_reading_shows_in_the_ledger() -> None:
+    stored = json.loads(
+        (Path(__file__).parent / "fixtures" / "ledger_turn_later_release.json").read_text()
+    )["readings"][1]
+    reading = SearchReading.model_validate(stored)
+
+    fetched = reading.with_fetch({"spec_id": reading.spec_id, "summary": "3 series"})
+
+    assert fetched.fetch is not None
+    assert not fetched.fetch.plan_step
+    assert render_readings([fetched], budget=10_000).text.endswith("   fetched: 3 series")
+
+
 def test_a_reading_with_no_text_heads_its_line_with_its_status() -> None:
     """A seed's reading has no question text, so its head names no quoted text."""
     reading = SearchReading.from_part(
