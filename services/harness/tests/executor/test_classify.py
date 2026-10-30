@@ -325,7 +325,8 @@ def test_a_row_ceiling_is_a_method_choice_when_its_body_names_the_kind(
     status: int, code: str, extensions: dict[str, object], expected: Disposition
 ) -> None:
     refusal = from_upstream_error(
-        UpstreamError(status=status, code=code, detail=_ROW_CEILING_DETAIL, extensions=extensions)
+        UpstreamError(status=status, code=code, detail=_ROW_CEILING_DETAIL, extensions=extensions),
+        tool="get_data",
     )
     payload = to_tool_result(refusal).structured_content
     assert payload is not None

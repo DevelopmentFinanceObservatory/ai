@@ -142,7 +142,7 @@ def _refusal(exc: UpstreamError, *, frame: ExportFrameRef, export_format: str) -
                 trace_id=exc.trace_id,
                 capability_version=exc.capability_version,
             )
-    return from_upstream_error(exc)
+    return from_upstream_error(exc, tool="export_data")
 
 
 async def export_data(

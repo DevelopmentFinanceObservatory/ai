@@ -64,6 +64,7 @@ from common.mcp_telemetry import (
     LangfuseToolIoMiddleware,
 )
 from common.refusal import (
+    REFUSAL_META_KEY,
     internal_error_message,
     log_unexpected_error,
     refusal_meta,
@@ -187,53 +188,97 @@ _chart_worker = ChartWorker(
 _health: dict[str, Any] = {"status": "starting"}
 
 
-def _reply(reply: Mapping[str, Any] | Refusal) -> ToolResult:
+def _reply(reply: Mapping[str, Any] | Refusal, *, tool: str) -> ToolResult:
     """A describe_frame reply as a `ToolResult`: a refusal as
     `_refusal_result`, and a mapping as its JSON in both `content` and
     `structuredContent`, with `is_error` false and no `_meta`."""
     if isinstance(reply, Refusal):
-        return _refusal_result(reply)
+        return _refusal_result(reply, tool=tool)
     payload = dict(reply)
     return ToolResult(content=payload, structured_content=payload)
 
 
-def _refusal_result(refusal: Refusal, *, view: dict[str, Any] | None = None) -> ToolResult:
-    """`refusal` as an MCP error result in the DFO refusal envelope.
+# Each registered tool's advertised arguments, which a `request_invalid`
+# refusal's `fix.accepted` lists. `_register_tools` fills it.
+_accepted_arguments: dict[str, tuple[str, ...]] = {}
+
+
+def _refusal_result(
+    refusal: Refusal, *, tool: str, view: dict[str, Any] | None = None
+) -> ToolResult:
+    """`refusal` from `tool` as an MCP error result in the DFO refusal envelope.
 
     `structuredContent` is the envelope, `{code, retry_mode, message, fix}`
     and `retry_after_s` when set, or `view` when given. `content` is
-    `common.refusal.refusal_text` of it, and `_meta` is `refusal_meta` of
-    its code. `fix` is `refusal.fix` as an object: a mapping as is, display
-    text under `advice`, and `refusal.pointer` under `pointer`.
+    `common.refusal.refusal_text` of it. The message is `refusal.detail`,
+    followed by `refusal.fix` when that is display text. `fix` holds only
+    what a corrected call can use: for `request_invalid`, `tool`, one
+    `field: problem` line and the arguments `tool` accepts, as the combined
+    server's validation refusal does; otherwise `refusal.fix` when it is a
+    mapping, and `{}`.
+
+    `_meta` is `refusal_meta` of the code, beside `detail`, `advice` and
+    `values`: the refusal's detail, display-text fix and mapping fix as the
+    assembler gave them, which the harness reads.
     """
-    if refusal.fix is None:
-        fix: dict[str, Any] = {}
-    elif isinstance(refusal.fix, str):
-        fix = {"advice": refusal.fix}
+    advice = refusal.fix if isinstance(refusal.fix, str) else None
+    values = dict(refusal.fix) if isinstance(refusal.fix, Mapping) else None
+    message = _refusal_message(refusal)
+    if refusal.error == "request_invalid":
+        fix: dict[str, Any] = _request_invalid_fix(refusal, tool=tool)
     else:
-        fix = dict(refusal.fix)
-    if refusal.pointer is not None:
-        fix["pointer"] = refusal.pointer
+        fix = values or {}
     envelope: dict[str, Any] = {
         "code": refusal.error,
         "retry_mode": refusal.retry.value,
-        "message": refusal.detail,
+        "message": message,
         "fix": fix,
     }
     if refusal.retry_after_s is not None:
         envelope["retry_after_s"] = refusal.retry_after_s
+    meta = refusal_meta(code=refusal.error)
+    meta[REFUSAL_META_KEY] |= {"detail": refusal.detail, "advice": advice, "values": values}
     return ToolResult(
         content=refusal_text(
-            message=refusal.detail,
+            message=message,
             code=refusal.error,
             retry_mode=refusal.retry.value,
             fix=fix,
             retry_after_s=refusal.retry_after_s,
         ),
         structured_content=envelope if view is None else view,
-        meta=refusal_meta(code=refusal.error),
+        meta=meta,
         is_error=True,
     )
+
+
+def _request_invalid_fix(refusal: Refusal, *, tool: str) -> dict[str, Any]:
+    """`request_invalid`'s fix: `tool`, its accepted arguments, and one problem.
+
+    The problem names the field `refusal.pointer` points at when the pointer
+    starts at one of `tool`'s arguments. A pointer elsewhere, such as into a
+    publish body the caller never wrote, leaves the detail alone.
+    """
+    accepted = _accepted_arguments.get(tool, ())
+    segments = (refusal.pointer or "").strip("/").split("/")
+    if segments[0] in accepted:
+        problem = f"{'.'.join(segments)}: {refusal.detail}"
+    else:
+        problem = refusal.detail
+    return {"tool": tool, "problems": [problem], "accepted": list(accepted)}
+
+
+def _refusal_message(refusal: Refusal) -> str:
+    """`refusal.detail`, followed by `refusal.fix` when that is display text."""
+    advice = refusal.fix if isinstance(refusal.fix, str) else None
+    return " ".join(_sentence(text) for text in (refusal.detail, advice) if text)
+
+
+def _sentence(text: str) -> str:
+    """`text` with a capital first letter and a closing stop."""
+    text = text.strip()
+    text = text[:1].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
 class ViewSupport(StrEnum):
@@ -328,11 +373,12 @@ def _write_result(
 async def _component_reply(
     reply: Mapping[str, Any] | WriteReply | Refusal,
     *,
+    tool: str,
     views: ViewSupport,
     include_projection: IncludeProjection,
     revise: bool = False,
 ) -> ToolResult:
-    """A write_component or describe_component reply as a `ToolResult`.
+    """A write_component or describe_component reply, from `tool`, as a `ToolResult`.
 
     A successful reply's `resolved_payload` leaves the payload and rides in
     `_meta` under `RESOLVED_PAYLOAD_META_KEY`. `content` is the projection
@@ -354,7 +400,11 @@ async def _component_reply(
     """
     app = views is not ViewSupport.UNDECLARED
     if isinstance(reply, Refusal):
-        return _refusal_result(reply, view=_notice(app, f"The request was refused: {reply.detail}"))
+        return _refusal_result(
+            reply,
+            tool=tool,
+            view=_notice(app, f"The request was refused: {_refusal_message(reply)}"),
+        )
     payload = _payload(reply)
     write_token = payload.pop(WRITE_TOKEN_KEY, None) if isinstance(reply, WriteReply) else None
     envelope = payload.pop("resolved_payload", None)
@@ -558,6 +608,7 @@ async def write_component(
         )
     return await _component_reply(
         reply,
+        tool="write_component",
         views=_view_support(ctx),
         include_projection=include_projection,
         revise=component_id is not None,
@@ -582,7 +633,7 @@ async def describe_frame(
     reply = await _safely(
         get_assembler().get_frame_view(frame_ref=frame_ref, dimension=dimension, query=query)
     )
-    return _reply(reply)
+    return _reply(reply, tool="describe_frame")
 
 
 async def describe_component(
@@ -609,6 +660,7 @@ async def describe_component(
     )
     return await _component_reply(
         reply,
+        tool="describe_component",
         views=_view_support(ctx),
         include_projection=include_projection,
     )
@@ -652,6 +704,7 @@ def _register_tools(
             write_schema, description=write_tool.description or ""
         )
         mcp.add_tool(write_tool)
+        _accepted_arguments[write_tool.name] = tuple(write_tool.parameters["properties"])
         registered.append(write_tool.name)
 
         frame_tool = Tool.from_function(
@@ -663,6 +716,7 @@ def _register_tools(
             frame_schema, description=frame_tool.description or ""
         )
         mcp.add_tool(frame_tool)
+        _accepted_arguments[frame_tool.name] = tuple(frame_tool.parameters["properties"])
         registered.append(frame_tool.name)
 
         describe_tool = Tool.from_function(
@@ -675,6 +729,7 @@ def _register_tools(
             describe_schema, description=describe_tool.description or ""
         )
         mcp.add_tool(describe_tool)
+        _accepted_arguments[describe_tool.name] = tuple(describe_tool.parameters["properties"])
         registered.append(describe_tool.name)
     except Exception:
         for name in registered:

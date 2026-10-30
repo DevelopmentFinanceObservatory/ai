@@ -154,6 +154,7 @@ async def get_skill(
     if offset > 0 or digest is not None:
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="get_skill",
                 pointer="/path",
                 detail=(
                     "offset and digest page a file; pass the path the closing line names, "

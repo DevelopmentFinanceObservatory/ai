@@ -46,11 +46,12 @@ the next call reconnects instead of repeating the same failure.
 
 Refusal grammar: every service refusal arrives as an MCP tool error whose
 structured content is `{code, retry_mode, message, fix, ...}`; a
-presentation refusal's `fix` can also hold display text and a JSON Pointer
-(`_presentation_refusal_outcome`). `_refusal_outcome` normalises both into
-the graph's `{"outcome": "refusal", "refusal": {code, retry_mode, fix,
-advice, message, origin}}` so the execute node branches on one grammar,
-plus the refusal's own `retry_after_s` when it names one.
+presentation refusal's `_meta` also carries its detail, display text and
+values as the assembler gave them (`_presentation_refusal_outcome`).
+`_refusal_outcome` normalises both into the graph's `{"outcome":
+"refusal", "refusal": {code, retry_mode, fix, advice, message, origin}}` so
+the execute node branches on one grammar, plus the refusal's own
+`retry_after_s` when it names one.
 `origin` says who declined: `"service"` for a refusal an MCP service
 returned, `"harness"` for the three this module builds itself
 (`unknown_tool`, and `resolved_revision_unavailable` or
@@ -107,7 +108,7 @@ from common.materialisation import (
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
 from common.recipe import RecipeAnchorError, RecipeError, build_recipe
-from common.refusal import refusal_code
+from common.refusal import REFUSAL_META_KEY, refusal_code
 from compiler.caller_clients import CallerClients, session_call_meta
 from compiler.surface import (
     ProgressCallback,
@@ -1008,7 +1009,9 @@ class McpExecutor:
         write_token = body.pop(WRITE_TOKEN_KEY, None)
         result.content = _without_write_token_text(result.content)
         if result.is_error:
-            return _presentation_refusal_outcome(body, fallback_text=_result_text(result))
+            return _presentation_refusal_outcome(
+                body, result.meta, fallback_text=_result_text(result)
+            )
         if tool == "describe_frame":
             return await self._described_frame(args, body)
         envelope = (result.meta or {}).get(RESOLVED_PAYLOAD_META_KEY)
@@ -1203,23 +1206,27 @@ def _refusal_outcome(
 
 
 def _presentation_refusal_outcome(
-    structured: dict[str, Any] | None, *, fallback_text: str
+    structured: dict[str, Any] | None, meta: dict[str, Any] | None, *, fallback_text: str
 ) -> dict[str, Any]:
     """A presentation-mcp refusal as `_refusal_outcome` states it.
 
-    presentation-mcp's `fix` can hold display text under `advice`, such as
-    the values the platform would accept as `label (ref)` and the violated
-    constraint id, and a JSON Pointer under `pointer`, beside the values a
-    retry can use. The text rides along as the refusal's `advice` and the
-    pointer is dropped, so `fix` holds only mergeable values, and is `None`
-    when none are left.
+    presentation-mcp's `_meta` carries the refusal as the assembler gave it,
+    beside its code: `detail`, display-text `advice` such as the values the
+    platform would accept as `label (ref)` and the violated constraint id,
+    and `values`, the mapping fix a retry can use. The refusal's `message` is
+    the detail, its `advice` the text and its `fix` the values, or `None`
+    when there are none. The envelope in `structured` writes the advice into
+    its message and a `request_invalid` fix as the arguments to correct.
     """
     body = structured or {}
-    fix = dict(body["fix"]) if isinstance(body.get("fix"), dict) else {}
-    advice = fix.pop("advice", None)
-    fix.pop("pointer", None)
+    parts = (meta or {}).get(REFUSAL_META_KEY) or {}
+    detail, advice, values = parts.get("detail"), parts.get("advice"), parts.get("values")
     return _refusal_outcome(
-        {**body, "fix": fix or None},
+        {
+            **body,
+            "message": detail if isinstance(detail, str) else body.get("message"),
+            "fix": values if isinstance(values, dict) else None,
+        },
         fallback_text=fallback_text,
         advice=advice if isinstance(advice, str) else None,
     )

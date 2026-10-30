@@ -751,7 +751,8 @@ async def test_request_invalid_problem_body_becomes_a_correct_and_retry_refusal_
     assert result.structured_content is not None
     assert result.structured_content["code"] == "request_invalid"
     assert result.structured_content["retry_mode"] == "correct_and_retry"
-    assert result.structured_content["fix"]["pointer"] == "/input/parts/0/variable_text"
+    assert result.structured_content["fix"]["tool"] == "search"
+    assert result.structured_content["fix"]["problems"][0].startswith("parts.0.variable_text: ")
 
 
 # Unusable search responses form the same class of gap `get_data_tool.py` guards its

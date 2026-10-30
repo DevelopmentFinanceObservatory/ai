@@ -1509,8 +1509,7 @@ async def test_upstream_invalid_role_ref_pointer_matches_the_local_entities_conv
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["code"] == "request_invalid"
-    assert result.structured_content["fix"]["pointer"] == "/scope/entities/recipient"
-    assert result.structured_content["fix"]["role"] == "recipient"
+    assert result.structured_content["fix"]["problems"][0].startswith("scope.entities.recipient: ")
     assert "/scope/entities/recipient" in text_of(result)
     assert "/input/scope/entities/" not in text_of(result)
 
@@ -1875,8 +1874,7 @@ async def test_invalid_name_refuses_request_invalid_with_the_role_in_the_pointer
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["code"] == "request_invalid"
-    assert result.structured_content["fix"]["pointer"] == "/scope/entities/recipient"
-    assert result.structured_content["fix"]["role"] == "recipient"
+    assert result.structured_content["fix"]["problems"][0].startswith("scope.entities.recipient: ")
 
 
 # Partial region membership
@@ -4164,14 +4162,22 @@ async def test_an_advertised_breakdown_posts_a_levels_groupby_and_describes_the_
             {"capability_version": "v1", "groupby_level_axes": ["crsPurpose"]},
             {"breakdown": {"code_system": "crsTypeOfFlow", "level": 0}},
             "request_invalid",
-            {"pointer": "/breakdown/code_system"},
+            {
+                "problems": [
+                    "breakdown.code_system: 'crsTypeOfFlow' cannot be rolled up to a level; this deployment rolls up crsPurpose"
+                ]
+            },
             id="code-system-not-rolled-up",
         ),
         pytest.param(
             {"capability_version": "v1", "groupby_level_axes": ["crsPurpose"]},
             {"breakdown": _SECTOR_BREAKDOWN, "stat_vars": "sum"},
             "request_invalid",
-            {"pointer": "/stat_vars"},
+            {
+                "problems": [
+                    'stat_vars: "sum" totals the whole family into one series, which leaves no code to break it down by; use "separate" with breakdown'
+                ]
+            },
             id="beside-sum",
         ),
     ],

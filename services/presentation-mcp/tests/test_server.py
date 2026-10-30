@@ -21,17 +21,20 @@ import asyncio
 import base64
 import copy
 import dataclasses
+import inspect
 import json
 import logging
 import os
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from html.parser import HTMLParser
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any, cast
 
 import httpx2
+import jsonschema
 import pytest
 import resvg_py
 from common import refusal as refusal_module
@@ -41,6 +44,7 @@ from common.declaration import declared_schema
 from common.materialisation import content_version as content_version_module
 from common.mcp_telemetry import LOOPBACK_SCOPE_KEY
 from common.refusal import REFUSAL_META_KEY, internal_error_message, refusal_text
+from common.row_budget import RowBudgetExhausted
 from fastmcp import Client
 from fastmcp.apps import UI_EXTENSION_ID, UI_MIME_TYPE, ResourceCSP
 from fastmcp.client.client import CallToolResult
@@ -56,10 +60,12 @@ from mcp.types import (
     ImageContent,
     TextContent,
 )
+from presentation_mcp import client as client_module
 from presentation_mcp import server
 from presentation_mcp.app_view import app_data, app_shell, notice_view, view_state
 from presentation_mcp.assembler_holder import get_assembler
 from presentation_mcp.client import PlatformAssembler
+from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.platform_contract import (
     RESOLVED_PAYLOAD_META_KEY,
     VIEW_STATE_META_KEY,
@@ -1020,10 +1026,12 @@ async def test_a_revise_without_a_write_token_is_refused_before_the_platform(
     assert revises == []
     refusal = _content_refusal(refused)
     assert refusal["code"] == "request_invalid"
-    assert refusal["fix"]["pointer"] == "/write_token"
+    assert refusal["fix"]["tool"] == "write_component"
+    (problem,) = refusal["fix"]["problems"]
+    assert problem.startswith("write_token: ")
     assert "cmp_1" in refusal["message"]
-    assert "create a new component" in refusal["fix"]["advice"]
-    assert "describe_component" in refusal["fix"]["advice"]
+    assert "create a new component" in refusal["message"]
+    assert "describe_component" in refusal["message"]
 
 
 async def test_a_revise_with_the_create_token_succeeds_and_a_wrong_one_is_write_refused(
@@ -1510,7 +1518,9 @@ async def _reply_for(
 ) -> ToolResult:
     """`server._component_reply` for a create that resolved to `envelope`."""
     reply = {"component_id": "cmp_1", "revision": 1, "resolved_payload": envelope}
-    return await server._component_reply(reply, views=views, include_projection=include_projection)
+    return await server._component_reply(
+        reply, tool="write_component", views=views, include_projection=include_projection
+    )
 
 
 async def test_an_undeclared_client_gets_one_png_of_the_chart_before_the_write_token(
@@ -1870,7 +1880,7 @@ async def test_a_write_refused_reply_names_tools_and_no_platform_route_or_header
     assert "write_token" in refusal["message"]
     assert "write_component" in refusal["message"]
     assert "describe_component" in refusal["message"]
-    assert "write_component" in refusal["fix"]["advice"]
+    assert "Create a new component" in refusal["message"]
     expected = (
         notice_view(f"The request was refused: {refusal['message']}", base_url=_BASE_URL)
         if apps_host
@@ -1904,7 +1914,7 @@ async def test_a_refusal_carries_its_code_in_meta_with_or_without_a_view(
 
     assert refused.is_error
     assert ("code" in (refused.structured_content or {})) is (extensions is None)
-    assert (refused.meta or {}).get(REFUSAL_META_KEY) == {"code": "not_found"}
+    assert (refused.meta or {})[REFUSAL_META_KEY]["code"] == "not_found"
     assert not frame.is_error
     assert REFUSAL_META_KEY not in (frame.meta or {})
 
@@ -1967,8 +1977,8 @@ _REFUSAL_SHAPES = {
         {
             "code": "binding_invalid",
             "retry_mode": "correct_and_retry",
-            "message": "No such recipient.",
-            "fix": {"advice": "recipient: Kenya (country/KEN)", "pointer": "/select/recipient"},
+            "message": "No such recipient. Recipient: Kenya (country/KEN).",
+            "fix": {},
         },
     ),
     "mapping-fix-and-wait": (
@@ -2008,7 +2018,7 @@ def _assert_refusal_envelope(result: CallToolResult) -> dict[str, Any]:
         fix=envelope["fix"],
         retry_after_s=envelope.get("retry_after_s"),
     )
-    assert (result.meta or {}).get(REFUSAL_META_KEY) == {"code": envelope["code"]}
+    assert (result.meta or {})[REFUSAL_META_KEY]["code"] == envelope["code"]
     return envelope
 
 
@@ -2074,7 +2084,8 @@ async def test_a_bare_ops_id_refuses_frame_ref_incomplete_in_the_envelope(
         "frame_ref_incomplete",
         "correct_and_retry",
     )
-    assert envelope["fix"]["pointer"] == "/frame_ref/content_version"
+    assert envelope["fix"] == {}
+    assert "content_version" in envelope["message"]
 
 
 async def test_an_apps_client_gets_a_notice_view_for_a_reply_without_an_envelope(
@@ -2436,3 +2447,130 @@ async def test_the_theme_url_a_payload_names_resolves_to_the_route() -> None:
     response = await _get_theme(path)
 
     assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+async def _platform_refusal(error: PlatformError) -> Refusal:
+    """The refusal `PlatformAssembler` relays for the platform error `error`."""
+    async with PlatformAssembler(
+        settings=server.settings, transport=_release_only_transport(RELEASE)
+    ) as assembler:
+        return assembler._refusal(error)
+
+
+async def _safety_net_refusal() -> Refusal:
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    return await server._safely(boom())
+
+
+def _relayed(code: str) -> Callable[[], Awaitable[Refusal]]:
+    """A platform refusal of `code` naming a field and its legal values."""
+    error = PlatformError(
+        status=400,
+        code=code,
+        retryable=False,
+        detail="the platform refused it",
+        pointer="/intent/select/recipient",
+        alternatives=[{"label": "Kenya", "ref": "country/KEN"}],
+    )
+    return lambda: _platform_refusal(error)
+
+
+# Every refusal presentation-mcp writes itself, by the tool that answers it, and
+# one relayed from the platform for each code the release's retry table names.
+_REFUSAL_SAMPLES: dict[str, tuple[str, Callable[[], Refusal | Awaitable[Refusal]]]] = {
+    "component-id": ("describe_component", lambda: client_module._component_id_refusal("x y")),
+    "write-token": ("write_component", lambda: client_module._write_token_refusal("x")),
+    "missing-write-token": ("write_component", lambda: server._missing_write_token("cmp_1")),
+    "spec-id": ("describe_frame", lambda: client_module._frame_ref_or_refusal({"spec_id": "x"})),
+    "content-version": (
+        "describe_frame",
+        lambda: client_module._frame_ref_or_refusal({"spec_id": "spec_1", "content_version": "x"}),
+    ),
+    "frame-ref-incomplete": (
+        "describe_frame",
+        lambda: client_module._frame_ref_incomplete("ops_1"),
+    ),
+    "publish-body": (
+        "write_component",
+        lambda: client_module._publish_body_refusal(
+            body_bytes=100, rows=10, ceiling=50, ceiling_kind="publish_body_bytes", what="gzip"
+        ),
+    ),
+    "publish-not-configured": ("write_component", lambda: client_module._PUBLISH_NOT_CONFIGURED),
+    "row-budget": (
+        "write_component",
+        lambda: client_module._row_budget_refusal(
+            RowBudgetExhausted(requested=10, free=1, max_rows=5)
+        ),
+    ),
+    "safety-net": ("describe_frame", _safety_net_refusal),
+    "transport": (
+        "describe_frame",
+        lambda: _platform_refusal(PlatformTransportError(detail="connection reset")),
+    ),
+    "unparsed-4xx": (
+        "describe_frame",
+        lambda: _platform_refusal(PlatformError(status=400, code=None, retryable=False)),
+    ),
+    "unparsed-5xx": (
+        "describe_frame",
+        lambda: _platform_refusal(PlatformError(status=502, code=None, retryable=True)),
+    ),
+    **{f"relayed-{code}": ("write_component", _relayed(code)) for code in RELEASE["retry_modes"]},
+}
+
+
+async def _sample(name: str) -> tuple[str, Refusal]:
+    tool, build = _REFUSAL_SAMPLES[name]
+    built = build()
+    refusal = await built if inspect.isawaitable(built) else built
+    assert isinstance(refusal, Refusal), name
+    return tool, refusal
+
+
+async def test_every_presentation_code_has_a_refusal_sample() -> None:
+    """The samples cover every code this service writes itself and every code the
+    release's retry table names."""
+    sources = (Path(server.__file__).parent / name for name in ("client.py", "server.py"))
+    written = {
+        code
+        for source in sources
+        for code in re.findall(r'error="([a-z_]+)"', source.read_text(encoding="utf-8"))
+    }
+    sampled = {(await _sample(name))[1].error for name in _REFUSAL_SAMPLES}
+    assert written | set(RELEASE["retry_modes"]) <= sampled
+
+
+@pytest.mark.parametrize("sample", list(_REFUSAL_SAMPLES))
+async def test_a_presentation_fix_names_only_arguments_and_values_its_tool_accepts(
+    sample: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fix key that is an argument of any presentation tool is one of this tool's,
+    with a value its schema accepts. Display text and pointers stay out of the fix,
+    and a `request_invalid` fix names the tool, its accepted arguments, and problems
+    on those arguments."""
+    monkeypatch.setattr(server, "PlatformAssembler", _mock_platform_assembler(RELEASE))
+    tool, refusal = await _sample(sample)
+
+    async with Client(mcp) as client:
+        schemas = {listed.name: listed.input_schema for listed in await client.list_tools()}
+        envelope = server._refusal_result(refusal, tool=tool).structured_content
+
+    assert envelope is not None
+    arguments = set().union(*(schema["properties"] for schema in schemas.values()))
+    properties = schemas[tool]["properties"]
+    fix = envelope["fix"]
+    assert not {"advice", "pointer", "detail"} & set(fix), (sample, fix)
+    for key, value in fix.items():
+        if key in arguments:
+            assert key in properties, (sample, tool, key)
+            jsonschema.validate(value, properties[key])
+    if envelope["code"] == "request_invalid":
+        assert fix["tool"] == tool
+        assert fix["accepted"] == list(properties)
+        for problem in fix["problems"]:
+            field, separator, _ = problem.partition(": ")
+            if separator and " " not in field:
+                assert field.split(".")[0] in properties, (sample, problem)
