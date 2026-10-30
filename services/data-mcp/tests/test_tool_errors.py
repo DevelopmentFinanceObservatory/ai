@@ -1869,6 +1869,7 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
     "allowance_exhausted": ("export_data", {"retry_after_s": 60.0, "detail": "d"}),
     "provenance_unavailable": ("export_data", {"spec_id": _SPEC}),
     "licence_not_redistributable": ("export_data", {"detail": "d"}),
+    "frame_unavailable": ("export_data", {"spec_id": _SPEC, "upstream_code": "artifact_expired"}),
     "skill_not_found": ("get_skill", {"skill_id": "oda-concepts"}),
     "skill_resource_not_found": (
         "get_skill",

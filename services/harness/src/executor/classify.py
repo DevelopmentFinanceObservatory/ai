@@ -206,6 +206,7 @@ STOP_CODES = frozenset(
         "allowance_exhausted",
         "provenance_unavailable",
         "licence_not_redistributable",
+        "frame_unavailable",
         # analysis-mcp
         "stat_var_unresolved",
         "frame_too_large",

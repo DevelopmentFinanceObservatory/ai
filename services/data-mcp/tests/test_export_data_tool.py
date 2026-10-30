@@ -33,6 +33,8 @@ ADDRESS = "ip:" + "0" * 32
 
 FETCHED = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "2" * 32}
 DERIVED = {"spec_id": "ops_" + "3" * 32, "content_version": "ocv_" + "4" * 32}
+# The version the exports door resolves a bare spec_id to: the newest it holds.
+NEWEST = "cv_" + "5" * 32
 
 _MEDIA_TYPES = {
     "csv": "text/csv",
@@ -56,7 +58,7 @@ def _facts(body: dict[str, Any]) -> dict[str, Any]:
         "rows": 1240,
         "columns": 14,
         "sha256": "f" * 64,
-        "frame": body["frame"],
+        "frame": {"content_version": NEWEST, **body["frame"]},
         "citation": "OECD (2026), Creditor Reporting System.",
         "licences": [
             {
@@ -89,7 +91,10 @@ def _refusing(status: int, code: str, **extra: object) -> Handler:
     headers = extra.pop("headers", {})
     assert isinstance(headers, dict)
 
-    def handler(_request: httpx2.Request) -> httpx2.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        # The probe a `not_found` sends to tell an unmounted surface from a missing id.
+        if request.url.path == "/api/datasets/capabilities":
+            return httpx2.Response(200, json={})
         return httpx2.Response(
             status,
             content=_problem_body(code=code, retryable=status >= 500, **extra),
@@ -161,6 +166,7 @@ async def test_the_digest_states_the_file_facts_in_order() -> None:
         "Citation",
         "Licences",
         "Kept",
+        "Frame",
         "Columns",
     ]
     licence_lines = [line for line in lines if line.startswith("- ")]
@@ -181,10 +187,23 @@ async def test_no_signed_url_reaches_the_result() -> None:
     assert "Signature" not in dumped
 
 
-async def test_a_bare_spec_id_refuses_frame_ref_incomplete_without_a_call() -> None:
+async def test_a_bare_spec_id_exports_the_version_the_platform_resolves() -> None:
     requests: list[httpx2.Request] = []
 
     result = await _call(_door(requests), {"frame_ref": {"spec_id": FETCHED["spec_id"]}})
+
+    assert not result.is_error
+    assert [json.loads(r.content)["frame"] for r in requests] == [{"spec_id": FETCHED["spec_id"]}]
+    resolved = {"spec_id": FETCHED["spec_id"], "content_version": NEWEST}
+    assert result.structured_content is not None
+    assert result.structured_content["frame_ref"] == resolved
+    assert f"Frame: {FETCHED['spec_id']} at content_version {NEWEST}" in text_of(result)
+
+
+async def test_a_bare_derived_id_refuses_frame_ref_incomplete_without_a_call() -> None:
+    requests: list[httpx2.Request] = []
+
+    result = await _call(_door(requests), {"frame_ref": {"spec_id": DERIVED["spec_id"]}})
 
     assert result.is_error
     assert result.structured_content is not None
@@ -289,15 +308,43 @@ async def test_a_refused_prepare_maps_to_the_envelope(
 
 
 @pytest.mark.parametrize(
-    ("status", "upstream_code"), [(404, "snapshot_not_found"), (410, "artifact_expired")]
+    ("status", "upstream_code"),
+    [
+        (404, "snapshot_not_found"),
+        (410, "artifact_expired"),
+        (404, "spec_not_found"),
+        (404, "not_found"),
+    ],
 )
-async def test_a_frame_refusal_maps_as_get_data_maps_it(status: int, upstream_code: str) -> None:
-    result = await _call(_refusing(status, upstream_code), {"frame_ref": FETCHED})
+@pytest.mark.parametrize(
+    ("frame", "fix"),
+    [(FETCHED, {"next_step": "get_data"}), (DERIVED, {})],
+    ids=["fetched", "derived"],
+)
+async def test_a_frame_the_platform_cannot_export_refuses_frame_unavailable(
+    status: int, upstream_code: str, frame: dict[str, str], fix: dict[str, str]
+) -> None:
+    requests: list[httpx2.Request] = []
+    refuse = _refusing(status, upstream_code)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return refuse(request)
+
+    result = await _call(handler, {"frame_ref": frame})
 
     envelope = result.structured_content
     assert envelope is not None
-    assert (envelope["code"], envelope["retry_mode"], envelope["upstream_code"]) == (
-        "upstream_error",
-        "do_not_retry",
+    assert (
+        envelope["code"],
+        envelope["retry_mode"],
+        envelope["upstream_code"],
+        envelope["fix"],
+    ) == (
+        "frame_unavailable",
+        "refresh_then_retry",
         upstream_code,
+        fix,
     )
+    # No fallback to another version: the one prepare is the only export call.
+    assert [r.method for r in requests if r.url.path == "/api/datasets/exports"] == ["POST"]

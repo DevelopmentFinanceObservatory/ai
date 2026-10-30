@@ -12,7 +12,14 @@ nothing for a repeat. The caller the website named rides on the call
 (`UpstreamClient.caller_headers`).
 
 A fetched frame (`spec_`) exports its long layout, with a `_label` column beside each
-code. A derived frame (`ops_`) exports its own columns, which carry no labels.
+code. A derived frame (`ops_`) exports its own columns, which carry no labels. A bare
+`spec_id` goes to dfo-apis alone, which exports the newest version it holds and names the
+pair it resolved; the result names that pair. Any other bare id refuses
+`frame_ref_incomplete`.
+
+dfo-apis answers `snapshot_not_found`, `artifact_expired`, `spec_not_found` or `not_found`
+for a frame it cannot export, and the tool refuses `frame_unavailable`. It never exports
+another version in place of the one named.
 """
 
 from __future__ import annotations
@@ -39,11 +46,18 @@ _PREPARE_DEADLINE_S = EXTERNAL_CALL_LIMIT_S - EXTERNAL_CALL_MARGIN_S
 _FORMAT_NAMES = {"csv": "CSV", "xlsx": "Excel (xlsx)", "parquet": "Parquet"}
 
 _DERIVED_PREFIX = "ops_"
+_FETCHED_PREFIX = "spec_"
+
+# The codes dfo-apis answers for a frame it cannot find or read back.
+_FRAME_UNAVAILABLE_CODES = frozenset(
+    {"snapshot_not_found", "artifact_expired", "spec_not_found", "not_found"}
+)
 
 
 @with_config(ConfigDict(extra="forbid"))
 class ExportFrameRef(TypedDict):
-    """The frame to export: `spec_id`, and its `content_version`."""
+    """The frame to export: `spec_id`, and its `content_version`, which a `spec_` id may
+    leave out."""
 
     spec_id: str
     content_version: NotRequired[str]
@@ -92,7 +106,7 @@ def _licence_line(licence: ExportLicence) -> str:
 
 def _render_digest(facts: ExportFacts, *, url: str) -> str:
     """The digest: file, format, shape, size, link, citation, licences, how long the file
-    is kept, and which columns the file holds."""
+    is kept, the frame version exported, and which columns the file holds."""
     file_format = _FORMAT_NAMES[facts.format]
     if facts.bundle:
         file_format += " in a zip with README.md, datapackage.json and CITATION.cff"
@@ -106,6 +120,7 @@ def _render_digest(facts: ExportFacts, *, url: str) -> str:
         "Licences:",
         *(_licence_line(licence) for licence in facts.licences),
         "Kept: permanently. The link needs no key and does not expire.",
+        f"Frame: {facts.frame['spec_id']} at content_version {facts.frame['content_version']}",
     ]
     if facts.frame["spec_id"].startswith(_DERIVED_PREFIX):
         lines.append("Columns: the derived frame's own. Code labels come with fetched frames only.")
@@ -121,34 +136,43 @@ def _refusal(exc: UpstreamError, *, frame: ExportFrameRef, export_format: str) -
         case "over_ceiling":
             count = exc.extensions.get("count")
             cap = exc.extensions.get("cap")
-            return ToolRefusal.export_over_ceiling(
+            refusal = ToolRefusal.export_over_ceiling(
                 export_format=export_format,
                 count=count if isinstance(count, int) else None,
                 cap=cap if isinstance(cap, int) else None,
             )
         case "allowance_exhausted":
-            return ToolRefusal.allowance_exhausted(
+            refusal = ToolRefusal.allowance_exhausted(
                 retry_after_s=exc.retry_after_s, detail=exc.detail
             )
         case "provenance_unavailable":
-            return ToolRefusal.provenance_unavailable(spec_id=frame["spec_id"])
+            refusal = ToolRefusal.provenance_unavailable(spec_id=frame["spec_id"])
         case "licence_not_redistributable":
-            return ToolRefusal.licence_not_redistributable(detail=exc.detail)
+            refusal = ToolRefusal.licence_not_redistributable(detail=exc.detail)
+        case code if code in _FRAME_UNAVAILABLE_CODES:
+            refusal = ToolRefusal.frame_unavailable(spec_id=frame["spec_id"], upstream_code=code)
         case "service_unavailable" if exc.retry_after_s is not None:
-            return ToolRefusal.service_unavailable(
+            refusal = ToolRefusal.service_unavailable(
                 service="dfo-apis exports",
                 retry_after_s=exc.retry_after_s,
                 detail=exc.detail,
                 trace_id=exc.trace_id,
                 capability_version=exc.capability_version,
             )
-    return from_upstream_error(exc, tool="export_data")
+        case _:
+            refusal = from_upstream_error(exc, tool="export_data")
+    return refusal
 
 
 async def export_data(
     frame_ref: Annotated[
         ExportFrameRef,
-        Field(description="The frame to export, as a get_data or verb result names it."),
+        Field(
+            description=(
+                "The frame to export, as a get_data or verb result names it. A bare "
+                "spec_id exports its newest version."
+            )
+        ),
     ],
     format: Annotated[
         Literal["csv", "xlsx", "parquet"], Field(description="The file format.")
@@ -165,17 +189,22 @@ async def export_data(
     The link needs no key and does not expire. CSV and xlsx hold up to 250,000 rows;
     Parquet has no limit.
     """
+    spec_id = frame_ref["spec_id"]
     content_version = frame_ref.get("content_version")
-    if not content_version:
+    if not content_version and not spec_id.startswith(_FETCHED_PREFIX):
         return to_tool_result(
-            ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=frame_ref["spec_id"])
+            ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=spec_id)
         )
+    frame = (
+        {"spec_id": spec_id}
+        if not content_version
+        else {
+            "spec_id": spec_id,
+            "content_version": content_version,
+        }
+    )
     client = get_client()
-    body = {
-        "frame": {"spec_id": frame_ref["spec_id"], "content_version": content_version},
-        "format": format,
-        "bundle": bundle,
-    }
+    body = {"frame": frame, "format": format, "bundle": bundle}
     try:
         response = await client.request(
             "POST",

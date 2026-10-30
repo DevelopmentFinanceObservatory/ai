@@ -2085,7 +2085,8 @@ async def test_a_bare_ops_id_refuses_frame_ref_incomplete_in_the_envelope(
         "correct_and_retry",
     )
     assert envelope["fix"] == {}
-    assert "content_version" in envelope["message"]
+    # The message opens with the argument's name as the schema writes it.
+    assert envelope["message"].startswith("frame_ref names ops_1 ")
 
 
 async def test_an_apps_client_gets_a_notice_view_for_a_reply_without_an_envelope(

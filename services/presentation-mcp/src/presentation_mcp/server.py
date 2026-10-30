@@ -65,6 +65,7 @@ from common.mcp_telemetry import (
 )
 from common.refusal import (
     REFUSAL_META_KEY,
+    detail_sentence,
     internal_error_message,
     log_unexpected_error,
     refusal_meta,
@@ -271,14 +272,7 @@ def _request_invalid_fix(refusal: Refusal, *, tool: str) -> dict[str, Any]:
 def _refusal_message(refusal: Refusal) -> str:
     """`refusal.detail`, followed by `refusal.fix` when that is display text."""
     advice = refusal.fix if isinstance(refusal.fix, str) else None
-    return " ".join(_sentence(text) for text in (refusal.detail, advice) if text)
-
-
-def _sentence(text: str) -> str:
-    """`text` with a capital first letter and a closing stop."""
-    text = text.strip()
-    text = text[:1].upper() + text[1:]
-    return text if text.endswith((".", "!", "?")) else f"{text}."
+    return " ".join(detail_sentence(text) for text in (refusal.detail, advice) if text)
 
 
 class ViewSupport(StrEnum):

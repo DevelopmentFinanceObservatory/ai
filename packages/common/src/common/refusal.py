@@ -5,7 +5,8 @@ each return refusals whose `content` ends in the refusal envelope as one
 line of compact JSON, so a client that shows its model only `content` still
 sees the code, the retry mode and the fix. `refusal_text` renders that text
 for all four. `refusal_code` reads the code from a refusal's
-`structuredContent`.
+`structuredContent`. `detail_sentence` turns an upstream service's `detail`
+fragment into a sentence of a refusal's message.
 
 Every refusal from those four also carries its code in `_meta` under
 `REFUSAL_META_KEY` (`refusal_meta`), where the combined server reads it.
@@ -51,6 +52,18 @@ def refusal_text(
         envelope["retry_after_s"] = retry_after_s
     text = f"{message}\n\n{json.dumps(envelope, separators=(',', ':'))}"
     return f"{preamble}\n\n{text}" if preamble else text
+
+
+def detail_sentence(detail: str) -> str:
+    """`detail`, an upstream fragment, as its own sentence: a capital first letter and a
+    closing stop. A fragment that opens with an identifier, a first word holding `_` or
+    `.` such as `frame_ref`, keeps it as written. An empty fragment stays empty."""
+    text = detail.strip()
+    if not text:
+        return text
+    if not {"_", "."} & set(text.split(maxsplit=1)[0]):
+        text = text[:1].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
 def refusal_meta(*, code: str, upstream_code: str | None = None) -> dict[str, Any]:

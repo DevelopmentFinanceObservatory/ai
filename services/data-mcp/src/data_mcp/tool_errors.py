@@ -2,7 +2,7 @@
 
 `ToolRefusal` is the stable code/retry-mode/fix/message contract a tool
 returns via `to_tool_result` instead of letting a raw `UpstreamError`
-propagate. Twenty-four codes span four retry modes (`RetryMode`), most with a
+propagate. Twenty-five codes span four retry modes (`RetryMode`), most with a
 typed factory whose `fix` payload is the machine-readable detail a calling
 model needs to correct and retry, wait, refresh, or give up.
 
@@ -64,7 +64,7 @@ class RetryMode(StrEnum):
 
 
 class ToolErrorCode(StrEnum):
-    """The twenty-four refusal codes, each mapped to exactly one `RetryMode`."""
+    """The twenty-five refusal codes, each mapped to exactly one `RetryMode`."""
 
     FACET_NOT_AVAILABLE = "facet_not_available"
     DEFAULT_FACET_UNDEFINED = "default_facet_undefined"
@@ -90,6 +90,7 @@ class ToolErrorCode(StrEnum):
     ALLOWANCE_EXHAUSTED = "allowance_exhausted"
     PROVENANCE_UNAVAILABLE = "provenance_unavailable"
     LICENCE_NOT_REDISTRIBUTABLE = "licence_not_redistributable"
+    FRAME_UNAVAILABLE = "frame_unavailable"
 
 
 # Locked table: two upstream `retryable: false` codes land on different modes
@@ -123,6 +124,9 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.ALLOWANCE_EXHAUSTED: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.PROVENANCE_UNAVAILABLE: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.LICENCE_NOT_REDISTRIBUTABLE: RetryMode.DO_NOT_RETRY,
+    # The mode every server gives this code: the receiver fetches the frame again,
+    # then retries with the frame_ref that fetch returns.
+    ToolErrorCode.FRAME_UNAVAILABLE: RetryMode.REFRESH_THEN_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
     # A plain `raise` rather than `assert` — `python -O` strips asserts, and
@@ -1107,6 +1111,23 @@ class ToolRefusal:
                 "sources and their licences cannot be named, and it cannot be exported."
             ),
             fix={},
+        )
+
+    @classmethod
+    def frame_unavailable(cls, *, spec_id: str, upstream_code: str) -> Self:
+        """dfo-apis cannot find or read back the frame `spec_id` names (`upstream_code`).
+        A fetched frame comes back from `get_data`; a derived one from the verb calls that
+        made it."""
+        fix: dict[str, Any] = {"next_step": "get_data"} if spec_id.startswith("spec_") else {}
+        return cls(
+            code=ToolErrorCode.FRAME_UNAVAILABLE,
+            message=(
+                f"The platform no longer holds the frame {spec_id!r}. Call get_data with the "
+                "spec_id (spec_...) to register it again and pass the frame_ref it returns; "
+                "for an ops_ result, repeat the verb calls that made it."
+            ),
+            fix=fix,
+            upstream_code=upstream_code,
         )
 
     @classmethod

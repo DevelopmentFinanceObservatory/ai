@@ -7,7 +7,12 @@ from typing import Any
 
 import pytest
 from common import refusal as refusal_module
-from common.refusal import internal_error_message, log_unexpected_error, refusal_code
+from common.refusal import (
+    detail_sentence,
+    internal_error_message,
+    log_unexpected_error,
+    refusal_code,
+)
 
 
 @pytest.mark.parametrize(
@@ -47,3 +52,22 @@ def test_an_unexpected_error_is_logged_with_the_trace_id_and_the_reply_text_has_
     reply = internal_error_message(subject="a tool")
     assert reply.startswith("a tool failed on the server")
     assert "trace" not in reply.lower()
+
+
+@pytest.mark.parametrize(
+    ("detail", "sentence"),
+    [
+        ("the frame was not found", "The frame was not found."),
+        (
+            "frame_ref names ops_1 without its content_version",
+            "frame_ref names ops_1 without its content_version.",
+        ),
+        ("frame_ref.spec_id must be a valid id.", "frame_ref.spec_id must be a valid id."),
+        ("  unknown role  ", "Unknown role."),
+        ("Already a sentence!", "Already a sentence!"),
+        ("", ""),
+    ],
+    ids=["fragment", "argument-name", "dotted-argument", "padded", "sentence", "empty"],
+)
+def test_detail_sentence_capitalises_all_but_an_identifier(detail: str, sentence: str) -> None:
+    assert detail_sentence(detail) == sentence
