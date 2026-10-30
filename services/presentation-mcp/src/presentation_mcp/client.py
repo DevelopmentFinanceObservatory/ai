@@ -32,10 +32,9 @@ from typing import Any, Self
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
 from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
-from common.materialisation import FrameRef, get_store
+from common.materialisation import dataset_pair
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
-from pydantic import ValidationError
 
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody, PublishBodyNotBuildable, publish_body_for
@@ -855,48 +854,15 @@ class PlatformAssembler:
         }
 
     async def _platform_pair(self, spec_id: str, content_version: str) -> tuple[str, str]:
-        """The pair apis holds for the frame `{spec_id, content_version}`.
+        """The pair apis holds for the frame `{spec_id, content_version}`
+        (`common.materialisation.dataset_pair`).
 
-        `get_data` reports the pair its frame is held under in the shared
-        store. A fetch with `place_types`, other `columns`, a `stat_vars` sum or
-        a `breakdown` is held under a pair of its own, which apis never
-        stored, so the platform refuses it as `frame_unavailable`. The mint
-        record the store keeps beside that frame names the pair apis does
-        hold (`MintRecord.dataset`): the rendering's own dataset version, or
-        the summed version apis mints for a collapse. That pair is
-        returned when it differs from the one given, and the platform draws
-        the dataset version's canonical frame.
-
-        Any other pair is returned as given: an `ops_` pair, a `spec_` pair
-        equal to its dataset pair, a `spec_` pair with no mint record, and a
-        value that is not a pair the store could hold. The record is written
-        best effort, and a lookup that fails for any reason is logged and the
-        pair returned as given. The platform refuses such a derived pair
-        `frame_unavailable`, and `get_frame_view` and `create_component` with
-        `rebuild_lost_frames` then read the Spec at its newest version.
+        A pair apis never stored, whose lookup failed or found no record, goes to the
+        platform as given, which refuses it `frame_unavailable`; `get_frame_view` and
+        `create_component` with `rebuild_lost_frames` then read the Spec at its newest
+        version.
         """
-        if not spec_id.startswith("spec_"):
-            return spec_id, content_version
-        try:
-            ref = FrameRef(spec_id=spec_id, content_version=content_version)
-        except ValidationError:
-            return spec_id, content_version
-        try:
-            record = await get_store().get_mint_record(ref)
-        except Exception:
-            # Broad on purpose: the store's failure modes belong to its backend
-            # (the storage client, its auth and its transport), which this module
-            # does not name, and the lookup only ever improves a call.
-            logger.warning(
-                "mint record of %s/%s unreadable; sending the pair as given",
-                spec_id,
-                content_version,
-                exc_info=True,
-            )
-            return spec_id, content_version
-        if record is None or record.frame == record.dataset:
-            return spec_id, content_version
-        return record.dataset.spec_id, record.dataset.content_version
+        return await dataset_pair(spec_id, content_version, logger=logger)
 
     async def _ensure_published_pair(self, spec_id: str, content_version: str) -> Refusal | None:
         """Ensure `{spec_id, content_version}` is published to apis'

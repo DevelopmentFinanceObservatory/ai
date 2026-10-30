@@ -58,6 +58,9 @@ second StatVar contributes the two differ, so a later mint of a root recorded
 with a count of 1 cannot tell which one its frame was. `harness.recipe_replay`
 refuses such a root unless its frame is held under the pair that names its
 groupby.
+
+`holder.dataset_pair` maps a frame's pair to the dataset pair its record names, the
+pair apis holds, for a caller that sends a frame to apis.
 """
 
 from __future__ import annotations

@@ -9,6 +9,7 @@ reference it's given, never inspects it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -22,8 +23,11 @@ from common.materialisation import (
     HeldFrame,
     InMemoryMaterialisationStore,
     MintRecord,
+    dataset_pair,
     decode_mint_record,
     encode_mint_record,
+    set_store,
+    store_is_set,
 )
 from common.materialisation.memory_store import FRAME_TTL
 from common.materialisation.store import MaterialisationStore
@@ -510,3 +514,70 @@ async def test_list_frames_is_oldest_first_by_first_write_whatever_was_read_sinc
 
     clock[0] = written[0] + FRAME_TTL + timedelta(seconds=1)
     assert [listing.ref for listing in await store.list_frames()] == refs[1:]
+
+
+_FRAME = FrameRef(spec_id="spec_" + "a" * 32, content_version="cv_" + "f" * 32)
+_DATASET = FrameRef(spec_id="spec_" + "b" * 32, content_version="cv_" + "d" * 32)
+
+
+@pytest.mark.parametrize(
+    ("record", "pair", "expected"),
+    [
+        (MintRecord(frame=_FRAME, dataset=_DATASET, options={}), _FRAME, _DATASET),
+        (MintRecord(frame=_FRAME, dataset=_FRAME, options={}), _FRAME, _FRAME),
+        (None, _FRAME, _FRAME),
+        (None, FrameRef(spec_id="ops_" + "a" * 32, content_version="ocv_" + "f" * 32), None),
+        (None, FrameRef.model_construct(spec_id="spec_1", content_version="cv_1"), None),
+    ],
+    ids=["record-names-another-pair", "record-names-its-own", "no-record", "ops", "not-a-pair"],
+)
+async def test_dataset_pair_maps_a_frame_to_the_dataset_its_record_names(
+    record: MintRecord | None, pair: FrameRef, expected: FrameRef | None
+) -> None:
+    store = InMemoryMaterialisationStore()
+    if record is not None:
+        await store.put_mint_record(record)
+    set_store(store)
+
+    try:
+        mapped = await dataset_pair(
+            pair.spec_id, pair.content_version, logger=logging.getLogger("caller")
+        )
+    finally:
+        set_store(None)
+
+    assert mapped == ((expected or pair).spec_id, (expected or pair).content_version)
+
+
+async def test_dataset_pair_builds_no_store_for_a_pair_that_is_not_a_spec_pair() -> None:
+    set_store(None)
+
+    await dataset_pair("ops_" + "a" * 32, "ocv_" + "f" * 32, logger=logging.getLogger("caller"))
+
+    assert not store_is_set()
+
+
+async def test_dataset_pair_logs_a_failed_lookup_on_the_callers_logger(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = InMemoryMaterialisationStore()
+    await store.put_mint_record(MintRecord(frame=_FRAME, dataset=_DATASET, options={}))
+
+    async def failing(ref: FrameRef) -> MintRecord | None:
+        raise OSError("storage unreachable")
+
+    monkeypatch.setattr(store, "get_mint_record", failing)
+    caplog.set_level(logging.WARNING, logger="caller")
+    set_store(store)
+
+    try:
+        mapped = await dataset_pair(
+            _FRAME.spec_id, _FRAME.content_version, logger=logging.getLogger("caller")
+        )
+    finally:
+        set_store(None)
+
+    assert mapped == (_FRAME.spec_id, _FRAME.content_version)
+    [logged] = [r for r in caplog.records if r.name == "caller"]
+    assert logged.levelno == logging.WARNING
+    assert isinstance(logged.exc_info and logged.exc_info[1], OSError)

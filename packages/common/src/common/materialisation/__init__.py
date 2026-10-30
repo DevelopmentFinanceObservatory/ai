@@ -24,7 +24,13 @@ from common.materialisation.frame_codec import (
 )
 from common.materialisation.frame_ref import FrameRef
 from common.materialisation.gcs_store import GcsMaterialisationStore
-from common.materialisation.holder import aclose_store, get_store, set_store, store_is_set
+from common.materialisation.holder import (
+    aclose_store,
+    dataset_pair,
+    get_store,
+    set_store,
+    store_is_set,
+)
 from common.materialisation.memory_store import InMemoryMaterialisationStore
 from common.materialisation.mint_record import (
     MintRecord,
@@ -72,6 +78,7 @@ __all__ = [
     "TraceCodecUnknown",
     "aclose_store",
     "build_store",
+    "dataset_pair",
     "decode_anchor_record",
     "decode_mint_record",
     "decode_trace",

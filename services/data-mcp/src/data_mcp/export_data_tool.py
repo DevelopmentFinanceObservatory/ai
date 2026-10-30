@@ -20,7 +20,7 @@ pair it resolved; the result names that pair. Any other bare id refuses
 A `spec_` pair `get_data` fetched with options, such as the type columns, is held under a
 pair of its own, which dfo-apis never stored. The mint record the frame store keeps beside
 that frame names the dataset version dfo-apis holds (`MintRecord.dataset`), and the tool
-exports that version (`_stored_pair`). The result names the pair the caller passed and the
+exports that version (`common.materialisation.dataset_pair`). The result names the pair the caller passed and the
 version exported.
 
 dfo-apis answers `snapshot_not_found`, `artifact_expired` or `spec_not_found` for a frame
@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Literal, NotRequired, TypedDict
 
-from common.materialisation import FrameRef, get_store
+from common.materialisation import dataset_pair
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
@@ -110,38 +110,6 @@ def _size(n: int) -> str:
 def _licence_line(licence: ExportLicence) -> str:
     terms = licence.licence or "licence not stated"
     return f"- {licence.label}: {terms}{f' ({licence.url})' if licence.url else ''}"
-
-
-async def _stored_pair(spec_id: str, content_version: str) -> tuple[str, str]:
-    """The pair dfo-apis holds for the frame `{spec_id, content_version}`.
-
-    A `spec_` pair whose mint record names another dataset pair (`MintRecord.dataset`) maps
-    to that pair. Any other pair is returned as given: an `ops_` pair, a pair with no mint
-    record or one equal to its dataset pair, and a value that is not a pair the store could
-    hold. A lookup that fails is logged and the pair returned as given, so dfo-apis then
-    refuses a pair it never stored as `frame_unavailable`.
-    """
-    if not spec_id.startswith(_FETCHED_PREFIX):
-        return spec_id, content_version
-    try:
-        ref = FrameRef(spec_id=spec_id, content_version=content_version)
-    except ValidationError:
-        return spec_id, content_version
-    try:
-        record = await get_store().get_mint_record(ref)
-    except Exception:
-        # Broad on purpose: the store's failure modes belong to its backend (the storage
-        # client, its auth and its transport), and the lookup only ever improves a call.
-        logger.warning(
-            "mint record of %s/%s unreadable; exporting the pair as given",
-            spec_id,
-            content_version,
-            exc_info=True,
-        )
-        return spec_id, content_version
-    if record is None or record.frame == record.dataset:
-        return spec_id, content_version
-    return record.dataset.spec_id, record.dataset.content_version
 
 
 def _render_digest(facts: ExportFacts, *, url: str, frame_ref: dict[str, str]) -> str:
@@ -249,7 +217,7 @@ async def export_data(
             ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=spec_id)
         )
     if content_version:
-        stored_spec_id, stored_version = await _stored_pair(spec_id, content_version)
+        stored_spec_id, stored_version = await dataset_pair(spec_id, content_version, logger=logger)
         frame = {"spec_id": stored_spec_id, "content_version": stored_version}
     else:
         frame = {"spec_id": spec_id}
