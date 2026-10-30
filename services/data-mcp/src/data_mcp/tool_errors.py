@@ -737,8 +737,8 @@ class ToolRefusal:
             code=ToolErrorCode.UPSTREAM_ERROR,
             message=(
                 f"{tool} cannot read {spec_id}: the platform refused its definition "
-                f"({upstream_code or 'unclassified'}): {detail}. Call search again and "
-                f"retry {tool} with the spec_id it returns."
+                f"({upstream_code or 'unclassified'}): {detail}. This spec_id cannot be read, "
+                "and repeating the call reaches the same refusal."
             ),
             fix={"tool": tool, "problems": [f"{spec_id}: {detail}"]},
             upstream_code=upstream_code,
