@@ -45,6 +45,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import rfc8785
 from common.materialisation import (
+    DEFAULT_MINT_OPTIONS,
     FrameExpired,
     FrameIntegrityError,
     FrameRef,
@@ -141,18 +142,6 @@ _MIN_FETCH_BUDGET_S = 5.0
 # Seconds of a caller's deadline the store write leaves unspent, for the caller's
 # rendering of its result.
 _AFTER_WRITE_RESERVE_S = 3.0
-
-# The `options` of a mint that sums nothing and selects no columns. Its frame is
-# read from the version's canonical frame (`CANONICAL_FRAME_RENDERING`), and the
-# requested rendering itself is never fetched. A mint cannot ask for the canonical
-# frame alone, since apis' `MintOptions.format` is `csv`, `xlsx` or `parquet`
-# and every mint renders one of them, so this asks for the cheapest: a bare parquet
-# file in the frame layout, written with no projection and no graph name read. A
-# mint with `columns` adds them to these options, and its frame is that rendering
-# (`_select_requested_artifact`).
-DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
-    {"format": "parquet", "bundle": False, "layout": "frame"}
-)
 
 # The `rendering` apis links every version's canonical frame under
 # (`datasets_api.render.CANONICAL_FRAME_RENDERING`). The snapshot route lists it,

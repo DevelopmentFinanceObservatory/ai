@@ -32,9 +32,9 @@ A record holds:
   `dataset.spec_id` leaves that identity as it is.
 - `stat_var_count`: how many distinct StatVars the frame's rows hold, read off
   the frame (`data_mcp.frame_materialisation.observed_shape`). `None` on a record
-  written before the count was kept, and on one rebuilt (`data_mcp.mint_recovery`)
+  written before the count was kept, on one rebuilt (`data_mcp.mint_recovery`)
   for a `groupby` sum with a version of its own whose frame the store no longer
-  holds.
+  holds, and on one a bare read wrote (`rendering.record_bare_read`).
 - `enrichment_stamp`: the `enrichment_stamp` of the artifact the frame was read from
   (`data_mcp.manifest.ArtifactEntry.enrichment_stamp`) when `options.columns` asks for
   a `{role}_party_kind` column, else `None`. It is also `None` on a record written
@@ -60,7 +60,8 @@ refuses such a root unless its frame is held under the pair that names its
 groupby.
 
 `holder.dataset_pair` maps a frame's pair to the dataset pair its record names, the
-pair apis holds, for a caller that sends a frame to apis.
+pair apis holds, for a caller that sends a frame to apis. `rendering.frame_rendering`
+answers what a record says about the frame's rows, for a caller that recovers it.
 """
 
 from __future__ import annotations

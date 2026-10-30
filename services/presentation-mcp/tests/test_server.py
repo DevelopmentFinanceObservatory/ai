@@ -41,7 +41,7 @@ from common import refusal as refusal_module
 from common.apis_auth import AuthProvider, IdTokenProvider
 from common.caller import CALLER_HEADER, supplied_caller
 from common.declaration import declared_schema
-from common.materialisation import InMemoryMaterialisationStore, set_store
+from common.materialisation import FrameRef, InMemoryMaterialisationStore, MintRecord, set_store
 from common.materialisation import content_version as content_version_module
 from common.mcp_telemetry import LOOPBACK_SCOPE_KEY
 from common.refusal import REFUSAL_META_KEY, internal_error_message, refusal_text
@@ -2094,7 +2094,12 @@ async def test_a_bare_ops_id_refuses_frame_ref_incomplete_in_the_envelope(
 _SPEC_ID = "spec_" + "0123456789abcdef" * 2
 _LOST_VERSION = "cv_" + "d" * 32
 _NEWEST_VIEW = {"spec_id": _SPEC_ID, "content_version": "cv_9", "dimensions": {}}
-_LOST = {"code": "frame_unavailable", "retryable": False, "detail": "gone"}
+_LOST = {
+    "code": "frame_unavailable",
+    "retryable": False,
+    "detail": "gone",
+    "cause": {"code": "unknown"},
+}
 
 
 def _frame_platform_assembler(
@@ -2120,16 +2125,16 @@ def _frame_platform_assembler(
 
 
 @pytest.fixture
-def frame_store() -> Iterator[None]:
+def frame_store() -> Iterator[InMemoryMaterialisationStore]:
     """An in-process frame store, so a `spec_` pair's mint record lookup finds none."""
-    set_store(InMemoryMaterialisationStore())
+    store = InMemoryMaterialisationStore()
+    set_store(store)
     try:
-        yield
+        yield store
     finally:
         set_store(None)
 
 
-@pytest.mark.usefixtures("frame_store")
 @pytest.mark.parametrize(
     ("arguments", "frame_replies", "named"),
     [
@@ -2151,11 +2156,14 @@ def frame_store() -> Iterator[None]:
     ],
 )
 async def test_describe_frame_names_the_version_it_read(
+    frame_store: InMemoryMaterialisationStore,
     arguments: dict[str, Any],
     frame_replies: tuple[httpx2.Response, ...],
     named: tuple[str, ...],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    frame = FrameRef(spec_id=_SPEC_ID, content_version=_LOST_VERSION)
+    await frame_store.put_mint_record(MintRecord(frame=frame, dataset=frame, options={}))
     monkeypatch.setattr(server, "PlatformAssembler", _frame_platform_assembler([], *frame_replies))
 
     async with _client() as client:
@@ -2608,6 +2616,10 @@ _REFUSAL_SAMPLES: dict[str, tuple[str, Callable[[], Refusal | Awaitable[Refusal]
     "frame-ref-incomplete": (
         "describe_frame",
         lambda: client_module._frame_ref_incomplete("ops_1"),
+    ),
+    "rendering-not-recorded": (
+        "describe_frame",
+        lambda: client_module._rendering_not_recorded("spec_1", "cv_1"),
     ),
     "publish-body": (
         "write_component",

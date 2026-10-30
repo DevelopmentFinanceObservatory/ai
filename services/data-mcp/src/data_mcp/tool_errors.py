@@ -64,7 +64,7 @@ class RetryMode(StrEnum):
 
 
 class ToolErrorCode(StrEnum):
-    """The twenty-five refusal codes, each mapped to exactly one `RetryMode`."""
+    """The twenty-six refusal codes, each mapped to exactly one `RetryMode`."""
 
     FACET_NOT_AVAILABLE = "facet_not_available"
     DEFAULT_FACET_UNDEFINED = "default_facet_undefined"
@@ -91,6 +91,7 @@ class ToolErrorCode(StrEnum):
     PROVENANCE_UNAVAILABLE = "provenance_unavailable"
     LICENCE_NOT_REDISTRIBUTABLE = "licence_not_redistributable"
     FRAME_UNAVAILABLE = "frame_unavailable"
+    RENDERING_NOT_RECORDED = "rendering_not_recorded"
 
 
 # Locked table: two upstream `retryable: false` codes land on different modes
@@ -127,6 +128,7 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     # Every server gives this code this mode. The receiver fetches the frame again,
     # then retries with the frame_ref that fetch returns.
     ToolErrorCode.FRAME_UNAVAILABLE: RetryMode.REFRESH_THEN_RETRY,
+    ToolErrorCode.RENDERING_NOT_RECORDED: RetryMode.CORRECT_AND_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
     # A plain `raise` rather than `assert` — `python -O` strips asserts, and
@@ -1142,6 +1144,27 @@ class ToolRefusal:
                 "verb that makes the same frame) and export the ops_ frame it returns."
             ),
             fix={"next_step": "get_data"},
+        )
+
+    @classmethod
+    def rendering_not_recorded(
+        cls, *, spec_id: str, content_version: str, options: Sequence[str]
+    ) -> Self:
+        """No mint record states the rendering of the frame, so no stored version is known
+        to hold its rows. `options` are those of a record no root is read with, empty when
+        no readable record is held."""
+        return cls(
+            code=ToolErrorCode.RENDERING_NOT_RECORDED,
+            message=(
+                f"The frame {spec_id}, {content_version} was fetched with {', '.join(options)}, "
+                "which cannot be exported. Call get_data for the same data without those "
+                "options and pass that frame_ref."
+                if options
+                else f"No record states how the frame {spec_id}, {content_version} was "
+                "fetched, so a file of it might hold other rows. Call get_data for the same "
+                "data and pass that frame_ref."
+            ),
+            fix={"next_step": "get_data", "options": list(options)},
         )
 
     @classmethod

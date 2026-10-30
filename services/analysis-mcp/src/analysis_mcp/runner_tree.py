@@ -31,8 +31,10 @@ the public `get_data` adds, so its root record, and the `ops_` id of a call over
 it, are those of the same call over the frame `get_data` returns. A bare
 `spec_id` argument is held in the op-spec as `newest_ref`, a pair naming no
 version, and `verb_tree` sends its Spec root in its place (`replaced`). A frame
-fetched again after the runner lost it is the Spec root of its mint record's
-rendering, or of no rendering when no record is held.
+fetched again after the runner lost it is the Spec root of the rendering its mint
+record states (`common.materialisation.frame_rendering`). A frame whose rendering
+no record states refuses `rendering_not_recorded`, since a Spec root of another
+rendering holds other rows, and a failed read of the record `service_unavailable`.
 
 The runner names the frame a Spec root read only in the stored recipe's root
 records, each the shape of a mint record: the frame pair, the dataset version and
@@ -72,8 +74,14 @@ from common.materialisation import (
     AnchorRecordIntegrityError,
     FrameIntegrityError,
     FrameRef,
+    FrameRendering,
     MintRecord,
+    RecordUnread,
+    RenderingUnknown,
+    frame_rendering,
     get_store,
+    root_rendering,
+    unread_options,
 )
 from common.place_type import PLACE_ROLE, TYPED_ROLES, PlaceLevel, type_column
 from pydantic import ValidationError
@@ -106,13 +114,6 @@ _SECOND_SLOT: Mapping[Verb, str] = {
     Verb.SHARE_OF: "denominator_frame_ref",
     Verb.QUOTIENT_OF: "denominator_frame_ref",
 }
-
-# The mint options a runner root is read with: data-mcp's frame-layout Parquet, its
-# enrichment columns, the party-total cut and the groupby of a breakdown or a sum
-# (dfo-apis `analysis_roots.dataset_root`).
-_READ_OPTIONS = frozenset(
-    {"format", "bundle", "layout", "columns", "without_party_totals", "groupby"}
-)
 
 # The op-spec frame slots, which the tree's `inputs` fill in place of `arguments`.
 _FRAME_SLOTS = frozenset({"verb", "frame_ref", *_SECOND_SLOT.values()})
@@ -176,39 +177,32 @@ async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
     if record is None:
         node = {**ref.model_dump(), "rendering": {"without_party_totals": False, "columns": []}}
         return node, (ref.spec_id, ref.content_version)
-    unread = sorted(set(record.options) - _READ_OPTIONS)
-    if unread:
+    if unread := unread_options(record):
         return ToolRefusal.rendering_not_recorded(
             spec_id=ref.spec_id, content_version=ref.content_version, options=unread
         )
     dataset = record.dataset
-    node = {**dataset.model_dump(), "rendering": _rendering(record)}
+    node = {**dataset.model_dump(), "rendering": root_rendering(record)}
     return node, (dataset.spec_id, dataset.content_version)
 
 
-def _rendering(record: MintRecord) -> dict[str, Any]:
-    """The rendering of a root read as `record`'s options state."""
-    rendering: dict[str, Any] = {
-        "without_party_totals": record.options.get("without_party_totals") is True,
-        # Sorted and listed once, as dfo-apis keeps a root's columns
-        # (`analysis_roots.mint_options`), so the recipe's normal form is the one
-        # dfo-apis computes.
-        "columns": sorted(set(record.options.get("columns") or ())),
-    }
-    if (groupby := record.options.get("groupby")) is not None:
-        rendering["groupby"] = groupby
-    return rendering
-
-
-async def spec_root(ref: FrameRef) -> dict[str, Any]:
+async def spec_root(ref: FrameRef) -> dict[str, Any] | ToolRefusal:
     """The Spec root that fetches the `spec_` frame `ref` again at its newest version,
-    with the rendering its mint record states. With no record, or one that cannot be
-    read or read again, the root takes the default rendering, as `get_data` with
-    default arguments fetches it."""
-    record = await _mint_record(ref)
-    if not isinstance(record, MintRecord) or set(record.options) - _READ_OPTIONS:
-        return {"spec_id": ref.spec_id}
-    return {"spec_id": ref.spec_id, "rendering": _rendering(record)}
+    with the rendering its mint record states, or the refusal for a frame whose
+    rendering cannot be established. See the module docstring."""
+    match await frame_rendering(ref, logger=logger):
+        case FrameRendering() as known:
+            return {"spec_id": ref.spec_id, "rendering": known.rendering}
+        case RenderingUnknown(options=options):
+            return ToolRefusal.rendering_not_recorded(
+                spec_id=ref.spec_id, content_version=ref.content_version, options=options
+            )
+        case RecordUnread():
+            return ToolRefusal.frame_store_unavailable(
+                spec_id=ref.spec_id,
+                content_version=ref.content_version,
+                retry_after_s=DEFAULT_RETRY_AFTER_S,
+            )
 
 
 async def record_spec_reads(
@@ -311,6 +305,9 @@ def _side_keys(op_spec: OpSpecVariant) -> tuple[tuple[str, ...], tuple[str, ...]
         return op_spec.group_by, op_spec.group_by
     numerator_by: tuple[str, ...] = getattr(op_spec, "numerator_by", ())
     denominator_by: Mapping[str, str] = getattr(op_spec, "denominator_by", {})
+    if not denominator_by:
+        # A pooled denominator, which no column keys.
+        return numerator_by, ()
     return numerator_by, tuple(denominator_by.get(key, key) for key in numerator_by)
 
 

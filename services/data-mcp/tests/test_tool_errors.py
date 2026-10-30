@@ -1870,6 +1870,10 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
     "provenance_unavailable": ("export_data", {"spec_id": _SPEC}),
     "licence_not_redistributable": ("export_data", {"detail": "d"}),
     "summed_frame_not_exportable": ("export_data", {"spec_id": _SPEC}),
+    "rendering_not_recorded": (
+        "export_data",
+        {"spec_id": _SPEC, "content_version": "cv_1", "options": []},
+    ),
     "frame_unavailable": ("export_data", {"spec_id": _SPEC, "upstream_code": "artifact_expired"}),
     "skill_not_found": ("get_skill", {"skill_id": "oda-concepts"}),
     "skill_resource_not_found": (

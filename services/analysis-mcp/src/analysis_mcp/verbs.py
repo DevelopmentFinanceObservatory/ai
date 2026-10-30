@@ -163,8 +163,9 @@ _REBUILD_LOST_FRAMES_TYPE = Annotated[
     Field(
         description=(
             "True fetches a frame the analysis service no longer holds again and repeats "
-            "the call: a spec_ frame at its newest version, an ops_ frame from its recipe "
-            "on current data."
+            "the call: a spec_ frame at its newest version in the rendering its mint record "
+            "states, an ops_ frame from its recipe on current data. A spec_ frame with no "
+            "readable record refuses rendering_not_recorded."
         )
     ),
 ]

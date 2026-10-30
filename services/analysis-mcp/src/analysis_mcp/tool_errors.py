@@ -201,7 +201,9 @@ do not change between calls, so it is `do_not_retry`.
 
 `rendering_not_recorded` fires when a `spec_` frame was fetched with an option
 the runner does not read a root with, so no runner call reproduces that frame.
-It is retryable over a frame fetched without the option.
+It is retryable over a frame fetched without the option. It also fires when a
+lost frame has no mint record to state its rendering, and `get_data` names a
+frame that has one.
 
 `upstream_error` is a runner refusal under a code this module does not
 define, or an answer the runner could not give. `upstream_code` names the
@@ -1710,16 +1712,26 @@ class ToolRefusal:
     def rendering_not_recorded(
         cls, *, spec_id: str, content_version: str, options: Sequence[str]
     ) -> Self:
-        """`options` are the mint options of the frame the runner cannot read a root with."""
+        """`options` are the mint options of the frame the runner cannot read a root with,
+        empty for a frame no mint record states the rendering of."""
+        frame = f"The frame spec_id={spec_id!r}, content_version={content_version!r}"
         return cls(
             code=ToolErrorCode.RENDERING_NOT_RECORDED,
             message=(
-                f"The frame spec_id={spec_id!r}, content_version={content_version!r} was "
-                f"fetched with {', '.join(options)}, which the analysis service cannot read "
-                "a frame with. Call get_data for the same data without those options and "
-                "retry with that frame_ref."
+                f"{frame} was fetched with {', '.join(options)}, which the analysis service "
+                "cannot read a frame with. Call get_data for the same data without those "
+                "options and retry with that frame_ref."
+                if options
+                else f"{frame} is no longer held, and no record states how it was fetched, "
+                "so it cannot be read again with the same rows. Call get_data for the same "
+                "data and retry with that frame_ref."
             ),
-            fix={"spec_id": spec_id, "content_version": content_version, "options": list(options)},
+            fix={
+                "spec_id": spec_id,
+                "content_version": content_version,
+                "options": list(options),
+                "tool": "get_data",
+            },
         )
 
     @classmethod

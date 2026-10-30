@@ -25,14 +25,17 @@ import pytest
 import rfc8785
 from common.apis_auth import ApisAuthError
 from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, supplied_caller
+from common.derived_replay import DEFAULT_RETRY_AFTER_S
 from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
+    FrameRendering,
     GcsMaterialisationStore,
     HeldFrame,
     InMemoryMaterialisationStore,
     MintRecord,
     StoredFrameTrace,
+    frame_rendering,
     gcs_store,
     get_store,
     register_trace_codec,
@@ -2388,6 +2391,61 @@ async def test_get_frame_view_reads_a_bare_spec_id_from_its_newest_version() -> 
     assert dict(request.url.params) == {"dimension": "recipient", "query": "ken"}
 
 
+class _UnwritableMintRecords(InMemoryMaterialisationStore):
+    async def put_mint_record(self, record: MintRecord) -> None:
+        raise OSError("store unreachable")
+
+
+_NEWEST_REF = FrameRef(spec_id=_ROOT_REF.spec_id, content_version="cv_" + "9" * 32)
+
+
+async def test_the_pair_a_bare_read_names_gets_a_mint_record_of_the_default_rendering(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    body = {**_NEWEST_REF.model_dump(), "dimensions": {}}
+    _requests, handler = _counting_handler(httpx2.Response(200, json=body))
+
+    async with _assembler(handler) as assembler:
+        await assembler.get_frame_view(frame_ref={"spec_id": _NEWEST_REF.spec_id})
+
+    answer = await frame_rendering(_NEWEST_REF, logger=logging.getLogger("caller"))
+    assert isinstance(answer, FrameRendering)
+    assert answer.default_rows
+
+
+async def test_the_pair_a_bare_create_draws_gets_a_mint_record_of_the_default_rendering(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    envelope = {**ENVELOPE, "provenance": {"inputs": [_NEWEST_REF.model_dump()]}}
+    _requests, handler = _counting_handler(
+        httpx2.Response(201, json={**WRITE_BODY, "resolved_payload": envelope})
+    )
+
+    async with _assembler(handler) as assembler:
+        await assembler.create_component(
+            intent={**INTENT, "frame_ref": {"spec_id": _NEWEST_REF.spec_id}},
+            caller=Caller.EXTERNAL,
+        )
+
+    answer = await frame_rendering(_NEWEST_REF, logger=logging.getLogger("caller"))
+    assert isinstance(answer, FrameRendering)
+    assert answer.default_rows
+
+
+async def test_a_bare_read_keeps_its_view_when_its_record_cannot_be_written() -> None:
+    set_store(_UnwritableMintRecords())
+    body = {**_NEWEST_REF.model_dump(), "dimensions": {}}
+    _requests, handler = _counting_handler(httpx2.Response(200, json=body))
+
+    try:
+        async with _assembler(handler) as assembler:
+            view = await assembler.get_frame_view(frame_ref={"spec_id": _NEWEST_REF.spec_id})
+    finally:
+        set_store(None)
+
+    assert view == body
+
+
 async def test_get_frame_view_relays_a_bare_spec_ids_frame_unavailable() -> None:
     problem = _problem_body(code="frame_unavailable", retryable=False, status=404)
     _requests, handler = _counting_handler(httpx2.Response(404, content=problem))
@@ -2416,10 +2474,17 @@ async def test_create_component_forwards_a_bare_spec_id_unchanged() -> None:
 
 # apis' refusals of a pair it no longer holds, lost or expired (apis marks an
 # expired frame retryable).
-_VERSION_LOST = _problem_body(code="frame_unavailable", retryable=False, status=404)
-_FRAME_EXPIRED = _problem_body(code="frame_unavailable", retryable=True, status=404)
+def _frame_unavailable(cause: str, *, retryable: bool = False) -> bytes:
+    return _problem_body(
+        code="frame_unavailable", retryable=retryable, status=404, cause={"code": cause}
+    )
+
+
+_VERSION_LOST = _frame_unavailable("unknown")
+_FRAME_EXPIRED = _frame_unavailable("expired", retryable=True)
 _LOST_BODIES = [
     pytest.param(_VERSION_LOST, id="lost"),
+    pytest.param(_frame_unavailable("ops_unsupported", retryable=True), id="ops_unsupported"),
     pytest.param(_FRAME_EXPIRED, id="expired"),
 ]
 
@@ -2443,7 +2508,11 @@ _DERIVED_PATH = f"/api/presentation/frames/{_DERIVED_REF.spec_id}/{_DERIVED_REF.
 @pytest.mark.parametrize(
     ("record", "pair_path"),
     [
-        pytest.param(None, _DERIVED_PATH, id="no mint record"),
+        pytest.param(
+            MintRecord(frame=_DERIVED_REF, dataset=_DERIVED_REF, options={}),
+            _DERIVED_PATH,
+            id="mint record of the default rendering",
+        ),
         pytest.param(
             MintRecord(frame=_DERIVED_REF, dataset=_ROOT_REF, options={"columns": ["x"]}),
             f"/api/presentation/frames/{_ROOT_REF.spec_id}/{_ROOT_REF.content_version}",
@@ -2453,15 +2522,14 @@ _DERIVED_PATH = f"/api/presentation/frames/{_DERIVED_REF.spec_id}/{_DERIVED_REF.
 )
 async def test_get_frame_view_reads_a_lost_spec_pair_at_its_newest_version(
     materialisation_store: InMemoryMaterialisationStore,
-    record: MintRecord | None,
+    record: MintRecord,
     pair_path: str,
     lost: bytes,
 ) -> None:
     """With `rebuild_lost_frames`, a spec_ pair apis no longer holds is read
     through the newest-version route, and the view names the version asked
     for and the one read."""
-    if record is not None:
-        await materialisation_store.put_mint_record(record)
+    await materialisation_store.put_mint_record(record)
     body = {"spec_id": _DERIVED_REF.spec_id, "content_version": "cv_9", "dimensions": {}}
     requests, handler = _sequence_handler(
         httpx2.Response(404, content=lost), httpx2.Response(200, json=body)
@@ -2475,7 +2543,7 @@ async def test_get_frame_view_reads_a_lost_spec_pair_at_its_newest_version(
     assert not isinstance(view, Refusal)
     assert {k: v for k, v in view.items() if k != FRAME_NOTE_KEY} == body
     assert _DERIVED_REF.content_version in view[FRAME_NOTE_KEY]
-    assert "cv_9" in view[FRAME_NOTE_KEY]
+    assert f"{_DERIVED_REF.spec_id}, cv_9" in view[FRAME_NOTE_KEY]
     assert [request.url.path for request in requests] == [
         pair_path,
         f"/api/presentation/frames/{_DERIVED_REF.spec_id}",
@@ -2483,12 +2551,16 @@ async def test_get_frame_view_reads_a_lost_spec_pair_at_its_newest_version(
     assert all(dict(r.url.params) == {"dimension": "recipient"} for r in requests)
 
 
-@pytest.mark.usefixtures("materialisation_store")
 @pytest.mark.parametrize("lost", _LOST_BODIES)
-async def test_create_component_draws_a_lost_spec_pair_at_its_newest_version(lost: bytes) -> None:
+async def test_create_component_draws_a_lost_spec_pair_at_its_newest_version(
+    materialisation_store: InMemoryMaterialisationStore, lost: bytes
+) -> None:
     """With `rebuild_lost_frames`, a create whose spec_ pair apis no longer
     holds is sent again with the spec_id alone under the same write token,
     and the reply names both versions."""
+    await materialisation_store.put_mint_record(
+        MintRecord(frame=_DERIVED_REF, dataset=_DERIVED_REF, options={})
+    )
     envelope = {
         **ENVELOPE,
         "provenance": {"inputs": [{"spec_id": _DERIVED_REF.spec_id, "content_version": "cv_9"}]},
@@ -2511,7 +2583,77 @@ async def test_create_component_draws_a_lost_spec_pair_at_its_newest_version(los
     assert second["write_token"] == first["write_token"]
     assert reply.frame_note is not None
     assert _DERIVED_REF.content_version in reply.frame_note
-    assert "cv_9" in reply.frame_note
+    assert f"{_DERIVED_REF.spec_id}, cv_9" in reply.frame_note
+
+
+async def _lost_spec_reply(call: str) -> tuple[Mapping[str, Any] | WriteReply | Refusal, int]:
+    """`call` with `rebuild_lost_frames` on `_DERIVED_REF`, which apis refuses as lost,
+    and how many requests reached apis."""
+    requests, handler = _counting_handler(httpx2.Response(404, content=_VERSION_LOST))
+    async with _assembler(handler) as assembler:
+        if call == "get_frame_view":
+            reply = await assembler.get_frame_view(
+                frame_ref=_DERIVED_REF.model_dump(), rebuild_lost_frames=True
+            )
+        else:
+            reply = await assembler.create_component(
+                intent={**INTENT, "frame_ref": _DERIVED_REF.model_dump()},
+                caller=Caller.EXTERNAL,
+                rebuild_lost_frames=True,
+            )
+    return reply, len(requests)
+
+
+@pytest.mark.parametrize("call", ["get_frame_view", "create_component"])
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param(None, id="no mint record"),
+        pytest.param({"groupby": {"by": ["stat_var"]}}, id="summed"),
+        pytest.param({"without_party_totals": True}, id="party totals cut"),
+        pytest.param({"currency": "EUR"}, id="option no root reads"),
+    ],
+)
+async def test_a_lost_spec_pair_a_bare_read_would_not_stand_for_refuses(
+    materialisation_store: InMemoryMaterialisationStore,
+    call: str,
+    options: dict[str, Any] | None,
+) -> None:
+    """A read of the spec_id alone holds the default rows, so a frame with other rows, or
+    with no record of its rows, refuses before that read."""
+    if options is not None:
+        await materialisation_store.put_mint_record(
+            MintRecord(frame=_DERIVED_REF, dataset=_DERIVED_REF, options=options)
+        )
+
+    reply, requests = await _lost_spec_reply(call)
+
+    assert isinstance(reply, Refusal)
+    assert (reply.error, reply.retry) == ("rendering_not_recorded", RetryMode.CORRECT_AND_RETRY)
+    assert "get_data" in str(reply.fix)
+    assert requests == 1
+
+
+class _UnreadableMintRecords(InMemoryMaterialisationStore):
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        raise OSError("store unreachable")
+
+
+@pytest.mark.parametrize("call", ["get_frame_view", "create_component"])
+async def test_a_lost_spec_pair_whose_record_read_fails_refuses_retryably(call: str) -> None:
+    set_store(_UnreadableMintRecords())
+    try:
+        reply, requests = await _lost_spec_reply(call)
+    finally:
+        set_store(None)
+
+    assert isinstance(reply, Refusal)
+    assert (reply.error, reply.retry, reply.retry_after_s) == (
+        "transient_unavailable",
+        RetryMode.RETRY_AFTER_DELAY,
+        DEFAULT_RETRY_AFTER_S,
+    )
+    assert requests == 1
 
 
 @pytest.mark.usefixtures("materialisation_store")
@@ -2529,7 +2671,7 @@ async def test_create_component_without_rebuild_lost_frames_relays_frame_unavail
 
 
 _LOST_OPS = FrameRef(spec_id="ops_" + "e" * 32, content_version="ocv_" + "e" * 32)
-_REPLAYED_OPS = FrameRef(spec_id=_LOST_OPS.spec_id, content_version="ocv_" + "f" * 32)
+_REPLAYED_OPS = FrameRef(spec_id="ops_" + "f" * 32, content_version="ocv_" + "f" * 32)
 _REPLAY_READY = httpx2.Response(
     200,
     json={
@@ -2543,6 +2685,43 @@ _REPLAY_READY = httpx2.Response(
         }
     },
 )
+
+
+@pytest.mark.usefixtures("materialisation_store")
+@pytest.mark.parametrize("call", ["get_frame_view", "create_component"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(_frame_unavailable("revoked"), id="revoked"),
+        pytest.param(_frame_unavailable("quarantined"), id="quarantined"),
+        pytest.param(_frame_unavailable("digest_mismatch"), id="digest_mismatch"),
+        pytest.param(_frame_unavailable("missing_rendering"), id="missing_rendering"),
+        pytest.param(
+            _problem_body(code="frame_unavailable", retryable=False, status=404), id="no cause"
+        ),
+    ],
+)
+@pytest.mark.parametrize("ref", [_DERIVED_REF, _LOST_OPS], ids=["spec_", "ops_"])
+async def test_a_frame_the_platform_refuses_to_serve_stays_its_refusal(
+    ref: FrameRef, body: bytes, call: str
+) -> None:
+    requests, handler = _counting_handler(httpx2.Response(404, content=body))
+
+    async with _assembler(handler) as assembler:
+        if call == "get_frame_view":
+            reply = await assembler.get_frame_view(
+                frame_ref=ref.model_dump(), rebuild_lost_frames=True
+            )
+        else:
+            reply = await assembler.create_component(
+                intent={**INTENT, "frame_ref": ref.model_dump()},
+                caller=Caller.EXTERNAL,
+                rebuild_lost_frames=True,
+            )
+
+    assert isinstance(reply, Refusal)
+    assert reply.error == "frame_unavailable"
+    assert len(requests) == 1
 
 
 @pytest.mark.usefixtures("materialisation_store")
@@ -2631,7 +2810,7 @@ async def test_a_lost_ops_pair_is_replayed_and_read_at_the_pair_the_replay_names
     note = reply.frame_note if isinstance(reply, WriteReply) else reply[FRAME_NOTE_KEY]
     assert note is not None
     assert _LOST_OPS.content_version in note
-    assert _REPLAYED_OPS.content_version in note
+    assert f"{_REPLAYED_OPS.spec_id}, {_REPLAYED_OPS.content_version}" in note
     replay, rebuilt = requests[-2:]
     assert json.loads(replay.content) == {"tree": _LOST_OPS.model_dump(), "latest": True}
     if call == "get_frame_view":

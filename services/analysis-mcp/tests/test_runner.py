@@ -1001,7 +1001,7 @@ async def test_a_frame_argument_without_its_content_version_refuses_before_any_c
 # Bare spec_ids, lost frames and place_level -----------------------------------------
 
 _NEWER_CV = "cv_" + "9" * 32
-_REPLAYED = {"spec_id": _OPS, "content_version": "ocv_" + "6" * 32}
+_REPLAYED = {"spec_id": "ops_" + "7" * 32, "content_version": "ocv_" + "6" * 32}
 
 
 def _text(result: Any) -> str:
@@ -1088,18 +1088,34 @@ async def test_a_bare_spec_id_whose_read_cannot_be_recorded_names_no_pair(
             },
             {"spec_id": _SPEC, "content_version": _DATASET_CV},
         ),
-        (None, {"spec_id": _SPEC}, _FRAME),
+        (
+            _record(
+                {
+                    "format": "parquet",
+                    "without_party_totals": True,
+                    "groupby": {"by": ["stat_var"]},
+                }
+            ),
+            {
+                "spec_id": _SPEC,
+                "rendering": {
+                    "without_party_totals": True,
+                    "columns": [],
+                    "groupby": {"by": ["stat_var"]},
+                },
+            },
+            {"spec_id": _SPEC, "content_version": _DATASET_CV},
+        ),
     ],
-    ids=["mint-record", "no-mint-record"],
+    ids=["columns", "groupby-and-cut"],
 )
 async def test_a_frame_the_runner_lost_is_fetched_again_at_its_newest_version(
     store: InMemoryMaterialisationStore,
-    record: MintRecord | None,
+    record: MintRecord,
     fetched: dict[str, Any],
     lost: dict[str, str],
 ) -> None:
-    if record is not None:
-        await store.put_mint_record(record)
+    await store.put_mint_record(record)
 
     def answer(body: dict[str, Any]) -> httpx2.Response:
         if "tree" in body and "content_version" in body["tree"]["inputs"]["data"]:
@@ -1115,6 +1131,85 @@ async def test_a_frame_the_runner_lost_is_fetched_again_at_its_newest_version(
     assert _CV in _text(result)
     assert _READ_FRAME["content_version"] in _text(result)
     assert await store.get_mint_record(FrameRef(**_READ_FRAME)) == _READ_RECORD
+
+
+async def test_a_lost_frame_no_record_states_refuses_with_no_rebuild(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    runner = _install(_problem(404, "snapshot_not_found", fix=_FRAME))
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum", rebuild_lost_frames=True)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "rendering_not_recorded",
+        "correct_and_retry",
+    )
+    assert structured["fix"]["tool"] == "get_data"
+    assert structured["fix"]["options"] == []
+    assert len(runner.requests) == 1
+
+
+class _RecordUnreadableAfterFirstRead(InMemoryMaterialisationStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        self.reads += 1
+        if self.reads > 1:
+            raise OSError("store unreachable")
+        return await super().get_mint_record(ref)
+
+
+async def test_a_lost_frame_whose_record_read_fails_refuses_retryably() -> None:
+    set_store(_RecordUnreadableAfterFirstRead())
+    try:
+        runner = _install(_problem(404, "snapshot_not_found", fix=_FRAME))
+        result = await verbs.aggregate(
+            frame_ref=_FRAME, aggregation="sum", rebuild_lost_frames=True
+        )
+    finally:
+        set_store(None)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_after_s"]) == (
+        "service_unavailable",
+        DEFAULT_RETRY_AFTER_S,
+    )
+    assert len(runner.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "resent",
+    [
+        httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
+        httpx2.Response(502, text="bad gateway"),
+    ],
+    ids=["timeout", "no-problem-document"],
+)
+async def test_a_transient_failure_of_the_call_sent_again_stays_retryable(
+    store: InMemoryMaterialisationStore, resent: httpx2.Response
+) -> None:
+    await store.put_mint_record(_record({"format": "parquet"}))
+    lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "content_version" in body["tree"]["inputs"]["data"]:
+            return _problem(404, "snapshot_not_found", fix=lost)
+        return resent
+
+    _install(answer)
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum", rebuild_lost_frames=True)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "upstream_error",
+        "retry_after_delay",
+    )
+    assert structured["retry_after_s"] is not None
 
 
 async def test_a_derived_input_that_lost_its_root_is_computed_again_on_current_data(
@@ -1138,13 +1233,19 @@ async def test_a_derived_input_that_lost_its_root_is_computed_again_on_current_d
     assert bodies[2]["tree"]["inputs"] == {"data": _REPLAYED}
     assert bodies[2]["latest"] is False
     assert _OCV in _text(result)
-    assert _REPLAYED["content_version"] in _text(result)
+    # A replay can mint a new `ops_` id: the digest names the pair a later call sends.
+    assert f"{_REPLAYED['spec_id']}, {_REPLAYED['content_version']}" in _text(result)
 
 
 @pytest.mark.parametrize(
     ("frame_ref", "lost", "code", "retry_mode"),
     [
-        (_FRAME, _FRAME, "frame_not_held", "correct_and_retry"),
+        (
+            _FRAME,
+            {"spec_id": _SPEC, "content_version": _DATASET_CV},
+            "frame_not_held",
+            "correct_and_retry",
+        ),
         (
             _DERIVED,
             {"spec_id": _SPEC, "content_version": _DATASET_CV},
@@ -1161,6 +1262,7 @@ async def test_a_frame_the_server_cannot_rebuild_refuses_as_the_first_call_did(
     code: str,
     retry_mode: str,
 ) -> None:
+    await store.put_mint_record(_record({"format": "parquet"}))
     runner = _install(_problem(404, "snapshot_not_found", fix=lost))
     unrebuilt = await verbs.aggregate(
         frame_ref=frame_ref, aggregation="sum", rebuild_lost_frames=True
@@ -1188,15 +1290,19 @@ def _losing_dataset_versions(body: dict[str, Any]) -> httpx2.Response:
 async def test_a_call_whose_two_sides_were_both_lost_rebuilds_each_side(
     store: InMemoryMaterialisationStore,
 ) -> None:
+    other = FrameRef(**_OTHER_FRAME)
+    await store.put_mint_record(_record({"format": "parquet"}))
+    await store.put_mint_record(MintRecord(frame=other, dataset=other, options={}))
     runner = _install(_losing_dataset_versions)
     result = await verbs.share_of(
         frame_ref=_FRAME, denominator_frame_ref=_OTHER_FRAME, rebuild_lost_frames=True
     )
 
     assert result.is_error is False, _text(result)
+    rendering = {"without_party_totals": False, "columns": []}
     assert _posts(runner)[-1]["tree"]["inputs"] == {
-        "data": {"spec_id": _SPEC},
-        "other": {"spec_id": _OTHER_SPEC},
+        "data": {"spec_id": _SPEC, "rendering": rendering},
+        "other": {"spec_id": _OTHER_SPEC, "rendering": rendering},
     }
 
 
@@ -1228,13 +1334,19 @@ async def test_a_lost_frame_on_a_call_that_does_not_rebuild_returns_the_runners_
             False,
         ),
         (
+            httpx2.Response(504, json={"code": "timeout", "detail": "slow", "retryable": True}),
+            "upstream_error",
+            DEFAULT_RETRY_AFTER_S,
+            True,
+        ),
+        (
             _problem(500, "internal_error"),
             "derived_input_unrecoverable",
             None,
             True,
         ),
     ],
-    ids=["pending", "busy", "failed"],
+    ids=["pending", "busy", "timeout", "failed"],
 )
 async def test_a_derived_input_whose_replay_cannot_run_yet_refuses_with_its_delay(
     store: InMemoryMaterialisationStore,
@@ -1292,8 +1404,17 @@ def _level_column(node: dict[str, Any]) -> str:
             ),
             {"data": "financingRecipient_type", "other": "observationAbout_type"},
         ),
+        (
+            lambda: verbs.share_of(
+                frame_ref=_FRAME,
+                denominator_frame_ref=_OTHER_FRAME,
+                numerator_by=["financingRecipient"],
+                place_level="Country",
+            ),
+            {"data": "financingRecipient_type", "other": "observationAbout_type"},
+        ),
     ],
-    ids=["rank", "aggregate-pooled-place", "share_of-each-side"],
+    ids=["rank", "aggregate-pooled-place", "share_of-each-side", "share_of-pooled-denominator"],
 )
 async def test_place_level_filters_each_input_on_the_type_of_the_role_it_keys_by(
     store: InMemoryMaterialisationStore, call: Callable[[], Any], columns: dict[str, str]

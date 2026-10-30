@@ -17,15 +17,21 @@ from typing import Any
 import pytest
 from common.materialisation import (
     FrameExpired,
+    FrameIntegrityError,
     FrameListing,
     FrameRef,
+    FrameRendering,
     FrameTooLarge,
     HeldFrame,
     InMemoryMaterialisationStore,
     MintRecord,
+    RecordUnread,
+    RenderingUnknown,
     dataset_pair,
     decode_mint_record,
     encode_mint_record,
+    frame_rendering,
+    record_bare_read,
     set_store,
     store_is_set,
 )
@@ -547,6 +553,143 @@ async def test_dataset_pair_maps_a_frame_to_the_dataset_its_record_names(
         set_store(None)
 
     assert mapped == ((expected or pair).spec_id, (expected or pair).content_version)
+
+
+_READ_AS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "frame"}
+
+
+@pytest.mark.parametrize(
+    ("options", "rendering", "summed", "default_rows"),
+    [
+        (_READ_AS, {"without_party_totals": False, "columns": []}, False, True),
+        (
+            {**_READ_AS, "columns": ["b", "a", "a"]},
+            {"without_party_totals": False, "columns": ["a", "b"]},
+            False,
+            True,
+        ),
+        (
+            {**_READ_AS, "without_party_totals": True},
+            {"without_party_totals": True, "columns": []},
+            False,
+            False,
+        ),
+        (
+            {**_READ_AS, "groupby": {"by": ["sector"]}},
+            {"without_party_totals": False, "columns": [], "groupby": {"by": ["sector"]}},
+            True,
+            False,
+        ),
+    ],
+    ids=["default", "columns", "party-total-cut", "groupby"],
+)
+async def test_frame_rendering_answers_what_the_record_states(
+    options: dict[str, Any], rendering: dict[str, Any], summed: bool, default_rows: bool
+) -> None:
+    store = InMemoryMaterialisationStore()
+    await store.put_mint_record(MintRecord(frame=_FRAME, dataset=_DATASET, options=options))
+    set_store(store)
+
+    try:
+        answer = await frame_rendering(_FRAME, logger=logging.getLogger("caller"))
+    finally:
+        set_store(None)
+
+    assert isinstance(answer, FrameRendering)
+    assert answer.record.dataset == _DATASET
+    assert (answer.rendering, answer.summed, answer.default_rows) == (
+        rendering,
+        summed,
+        default_rows,
+    )
+
+
+class _FailingMintRecords(InMemoryMaterialisationStore):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("store", "answer"),
+    [
+        (InMemoryMaterialisationStore(), RenderingUnknown()),
+        (
+            _FailingMintRecords(FrameIntegrityError(_FRAME, reason="does not decode")),
+            RenderingUnknown(),
+        ),
+        (_FailingMintRecords(OSError("store unreachable")), RecordUnread()),
+    ],
+    ids=["absent", "undecodable", "read-failed"],
+)
+async def test_frame_rendering_tells_a_failed_read_from_an_unknown_rendering(
+    store: InMemoryMaterialisationStore, answer: RenderingUnknown | RecordUnread
+) -> None:
+    set_store(store)
+
+    try:
+        assert await frame_rendering(_FRAME, logger=logging.getLogger("caller")) == answer
+    finally:
+        set_store(None)
+
+
+async def test_frame_rendering_names_the_options_no_root_reads() -> None:
+    store = InMemoryMaterialisationStore()
+    options = {**_READ_AS, "pivot": "x", "currency": "EUR"}
+    await store.put_mint_record(MintRecord(frame=_FRAME, dataset=_DATASET, options=options))
+    set_store(store)
+
+    try:
+        answer = await frame_rendering(_FRAME, logger=logging.getLogger("caller"))
+    finally:
+        set_store(None)
+
+    assert answer == RenderingUnknown(options=("currency", "pivot"))
+
+
+async def test_a_bare_read_records_the_default_rendering_and_keeps_a_record_already_held() -> None:
+    store = InMemoryMaterialisationStore()
+    summed = MintRecord(frame=_DATASET, dataset=_DATASET, options={"groupby": {"by": ["sector"]}})
+    await store.put_mint_record(summed)
+    set_store(store)
+    logger = logging.getLogger("caller")
+
+    try:
+        await record_bare_read(_FRAME.spec_id, _FRAME.content_version, logger=logger)
+        await record_bare_read(_DATASET.spec_id, _DATASET.content_version, logger=logger)
+        await record_bare_read(_FRAME.spec_id, "cv_1", logger=logger)
+        answer = await frame_rendering(_FRAME, logger=logger)
+    finally:
+        set_store(None)
+
+    assert isinstance(answer, FrameRendering)
+    assert answer.record.dataset == _FRAME
+    assert answer.default_rows
+    assert await store.get_mint_record(_DATASET) == summed
+
+
+class _UnwritableMintRecords(InMemoryMaterialisationStore):
+    async def put_mint_record(self, record: MintRecord) -> None:
+        raise OSError("store unreachable")
+
+
+async def test_a_failed_bare_read_record_is_logged_and_raises_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    set_store(_UnwritableMintRecords())
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="caller"):
+            await record_bare_read(
+                _FRAME.spec_id, _FRAME.content_version, logger=logging.getLogger("caller")
+            )
+    finally:
+        set_store(None)
+
+    assert any(_FRAME.content_version in record.getMessage() for record in caplog.records)
 
 
 async def test_dataset_pair_builds_no_store_for_a_pair_that_is_not_a_spec_pair() -> None:
