@@ -16,11 +16,11 @@ def escape_control_chars(value: str) -> str:
     character replaced by its `\\uXXXX` escape. `dfo_frame_grammar` places no
     character restriction on a role/entity value beyond rejecting lone UTF-16
     surrogates, so a raw newline, carriage return, or escape/bidi-override
-    character can reach here verbatim; escaping them is what makes a
-    digest's brackets (`[...]`, `role=value`) or a refusal message's own
-    line structure real delimiters a value can never break out of or use to
-    forge a line that reads as a directive. Every other codepoint, including
-    any non-ASCII letter, passes through unchanged."""
+    character can reach here verbatim. Escaping them keeps a digest's brackets
+    (`[...]`, `role=value`) and a refusal message's own line structure real
+    delimiters, which a value cannot break out of or use to forge a line that
+    reads as a directive. Every other codepoint, including any non-ASCII
+    letter, passes through unchanged."""
     return "".join(
         f"\\u{ord(char):04x}" if unicodedata.category(char) in ("Cc", "Cf") else char
         for char in value
@@ -29,9 +29,9 @@ def escape_control_chars(value: str) -> str:
 
 def truncate_value(value: str) -> str:
     """`value`, escaped (`escape_control_chars`) and then capped to
-    `MAX_LABEL_CHARS` -- a role, unit, facet, or entity-label value read
+    `MAX_LABEL_CHARS`. A role, unit, facet, or entity-label value read
     straight off an input row, or an id a caller typed, carries no length
-    ceiling before it reaches here. Escaping runs first: an escaped control
+    ceiling before it reaches here. Escaping runs first, since an escaped control
     character is six characters, so capping first and escaping the kept slice
     would let a value crafted to exploit that ordering render far past
     `MAX_LABEL_CHARS` once escaped."""

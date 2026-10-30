@@ -54,7 +54,7 @@ ROOT_READ_OPTIONS = frozenset(
 # (`data_mcp.frame_materialisation.CANONICAL_FRAME_RENDERING`), and the requested
 # rendering itself is never fetched. A mint cannot ask for the canonical frame alone,
 # since apis' `MintOptions.format` is `csv`, `xlsx` or `parquet` and every mint renders
-# one of them, so this asks for the cheapest: a bare parquet file in the frame layout,
+# one of them, so this asks for the cheapest, a bare parquet file in the frame layout,
 # written with no projection and no graph name read. A mint with `columns` adds them
 # to these options, and its frame is that rendering
 # (`data_mcp.frame_materialisation._select_requested_artifact`).
@@ -138,7 +138,7 @@ async def frame_rendering(
         )
         return RenderingUnknown()
     except Exception:
-        # Broad on purpose, as `holder.frame_mint_record` reads it: the store's failures
+        # Broad on purpose, as `holder.frame_mint_record` reads it. The store's failures
         # belong to its backend.
         logger.warning(
             "mint record of %s/%s unreadable", ref.spec_id, ref.content_version, exc_info=True
@@ -159,7 +159,7 @@ async def write_mint_record(record: MintRecord, *, logger: logging.Logger) -> bo
         async with asyncio.timeout(_RECORD_WRITE_TIMEOUT_S):
             await get_store().put_mint_record(record)
     except Exception:
-        # Broad on purpose, as `frame_rendering` reads it: the store's failures belong
+        # Broad on purpose, as `frame_rendering` reads it. The store's failures belong
         # to its backend.
         logger.warning(
             "mint record of %s/%s unstored",

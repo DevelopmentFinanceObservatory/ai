@@ -334,8 +334,8 @@ def _frame_lost(exc: PlatformError) -> bool:
     """Whether the platform refused a pair because it no longer holds it. That is a
     404 `frame_unavailable` whose `cause.code` is in `_LOST_CAUSES`, whatever its
     `retryable` flag, since apis marks an expired frame retryable. Any other 404
-    stays the platform's refusal: a revoked, quarantined or digest-mismatched frame
-    must not be read again under a newer version. A 503 `frame_unavailable` (a failed
+    stays the platform's refusal, since a revoked, quarantined or digest-mismatched
+    frame must not be read again under a newer version. A 503 `frame_unavailable` (a failed
     read, a recipe still pending or unreadable) passes back as the retryable refusal
     it is. With
     `rebuild_lost_frames`, the frame is then built again as the analysis verbs'

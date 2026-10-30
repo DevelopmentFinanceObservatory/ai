@@ -517,7 +517,7 @@ async def run_tree(
 
 def _derived_reads(refs_by_root: RefsByRoot) -> tuple[FrameRef, ...]:
     """The derived (`ops_`) frames the request reads, each by the pair it names, which
-    for a rebuilt frame is the replay's and no longer the caller's."""
+    for a rebuilt frame is the replay's."""
     return tuple(
         FrameRef(spec_id=spec_id, content_version=content_version)
         for spec_id, content_version in refs_by_root

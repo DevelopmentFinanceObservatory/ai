@@ -192,9 +192,9 @@ def _followable(
     arguments: Arguments, refusal: ToolRefusal, *, takes_place_level: bool
 ) -> ToolRefusal:
     """A runner `refusal` with advice the call's tool can follow. The runner writes
-    `rolling_anchor_unresolved` for a caller of `resolve_anchor`, and a call with no
-    `anchor_key` is not one: it is told of its derived inputs, whose stored recipes
-    the call computes again, or else of the years it stated. `place_levels_mixed` asks
+    `rolling_anchor_unresolved` for a caller of `resolve_anchor`. A call with no
+    `anchor_key` is told of its derived inputs, whose stored recipes the call computes
+    again, or else of the years it stated. `place_levels_mixed` asks
     for `place_level` only where the tool takes it. A party column's message asks for
     no `place_level`."""
     if (

@@ -7,8 +7,8 @@ beside it, and an id dfo-apis has not registered refuses `spec_not_found`. The c
 server therefore registers each such id first (`POST /api/datasets/register`), so a bare
 id fresh from `search` reads as `get_data` would mint it. The route is idempotent and
 materialises nothing, and each id this process registered is remembered, so it is sent
-once. dfo-apis may already hold an id, so a failure a retry may mend lets the call run;
-a 4xx refuses it in the calling tool's name.
+once. dfo-apis may already hold an id, so a failure a retry may mend lets the call run.
+A 4xx refuses it in the calling tool's name.
 """
 
 from __future__ import annotations

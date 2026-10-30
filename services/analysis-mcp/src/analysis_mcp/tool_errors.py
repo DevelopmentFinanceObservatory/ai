@@ -196,7 +196,7 @@ and `growth`, `rank` and `filter` raise it for a rolling call whose
 call. `fix["detail"]` names the check that failed. It is retryable, since a
 `resolve_anchor` call over the question's populations and root frames gives
 the key and the period to write the literals from. A call stating a relative
-year has no key: the runner raises the code from its own latest year, and
+year has no key. The runner raises the code from its own latest year, and
 `ToolRefusal.latest_year_unresolved` asks for fixed years. `rolling_grain_unsupported`
 fires when a population's periods are not calendar years, which the frames
 do not change between calls, so it is `do_not_retry`.
@@ -794,7 +794,7 @@ class ToolRefusal:
         """`frame_expired` (`expired`) or `frame_not_held` for a call whose frames
         `spec_ids`, passed without a `content_version`, the runner could not read at
         their newest version. Its refusal names no root, so each is named, and it names
-        no version, so `lost_frames` holds none of them: reading the newest version is
+        no version, so `lost_frames` holds none of them. Reading the newest version is
         all a rebuild would do."""
         named = ", ".join(spec_ids)
         return cls(
