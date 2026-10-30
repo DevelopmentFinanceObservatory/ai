@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1503,3 +1505,64 @@ def test_digest_length_does_not_track_frame_breadth() -> None:
     )
 
     assert abs(len(fat_digest) - len(lean_digest)) <= 10
+
+
+# Composite frames
+
+
+_COMPOSITE_MANIFEST = Path(__file__).parent / "fixtures" / "mint_composite_kenya_education.json"
+
+
+def _components_line(digest: str) -> str:
+    """The digest's line stating a composite frame's components."""
+    (line,) = [line for line in digest.split("\n\n") if line.startswith("Components:")]
+    return line
+
+
+def test_a_stacked_composite_states_each_component_s_rows_years_and_zero_rows() -> None:
+    # Minted by dfo-apis' `tests/datasets_api/test_mint_composite.py` client: CRS bilateral
+    # education aid from France to Kenya plus the imputed multilateral share, 2020-2021.
+    manifest = strip_manifest(json.loads(_COMPOSITE_MANIFEST.read_text()))
+
+    line = _components_line(
+        render_get_data_digest(
+            manifest=manifest, frame_ref=_frame_ref(manifest), entity_labels={}, dropped_roles=[]
+        )
+    )
+
+    assert "bilateral 4 rows, 2020-2021" in line
+    assert "1 year left out (2019)" in line
+    assert "imputed multilateral 32 rows, 2020-2021, 30 of them zeros" in line
+    assert "between" not in line
+
+
+def test_a_spliced_composite_states_the_break_between_its_components() -> None:
+    # Built to the dfo-apis manifest contract (`trace.components`): no recorded mint
+    # splices the OECD headline yet.
+    def component(role: str, first: int, last: int) -> dict[str, Any]:
+        return {
+            "role": role,
+            "provenance": "provenance/OECDDAC1",
+            "content_version": f"cv_{role}",
+            "periods": [[first, last]],
+            "dropped_years": [],
+            "stat_vars": [f"dcid:{role}"],
+            "rows": last - first + 1,
+            "zero_rows": 0,
+            "warnings": [],
+        }
+
+    digest = _digest(
+        trace={
+            "components": [
+                component("headline_net", 2015, 2017),
+                component("headline_ge", 2018, 2020),
+            ]
+        },
+        window={"start_year": 2015, "end_year": 2020},
+    )
+
+    line = _components_line(digest)
+    assert "net flows 3 rows, 2015-2017" in line
+    assert "grant equivalents 3 rows, 2018-2020" in line
+    assert "between 2017 and 2018" in line

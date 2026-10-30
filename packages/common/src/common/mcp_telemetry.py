@@ -70,7 +70,7 @@ def is_loopback_url(url: str) -> bool:
     return urlsplit(url).hostname in LOOPBACK_HOSTS
 
 
-def _is_loopback_request() -> bool:
+def is_loopback_request() -> bool:
     """Whether the current HTTP request carries the `LOOPBACK_SCOPE_KEY` mark the
     harness sets. Raises `RuntimeError` when no HTTP request is in flight."""
     return get_http_request().scope.get(LOOPBACK_SCOPE_KEY) is True
@@ -81,7 +81,7 @@ def _session_from_loopback_request() -> str | None:
     request has no HTTP request behind it, did not arrive over loopback, or
     carries no string under `SESSION_META_KEY`. Never raises."""
     try:
-        if not _is_loopback_request():
+        if not is_loopback_request():
             return None
         request_context = fastmcp_request_ctx.get()
         meta = request_context.meta if request_context is not None else None
@@ -176,7 +176,7 @@ def _recording_loopback_span() -> trace.Span | None:
     if not span.is_recording():
         return None
     try:
-        return span if _is_loopback_request() else None
+        return span if is_loopback_request() else None
     except RuntimeError:  # no HTTP request in flight
         return None
     except Exception:

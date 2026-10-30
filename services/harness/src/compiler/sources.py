@@ -19,14 +19,18 @@ with the producer.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+import logging
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from enum import StrEnum
 from typing import cast
 
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
 from planner.records import (
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
+    EntityCandidate,
+    EntityKey,
     Period,
     ResolvedSourceMention,
     StatVarReading,
@@ -44,6 +48,8 @@ from planner.workflow import (
     SelectedSource,
 )
 from pydantic import JsonValue, TypeAdapter
+
+logger = logging.getLogger(__name__)
 
 # The `coverage.kind` under which `search` reports a real series window.
 EXACT_COVERAGE = "exact"
@@ -104,6 +110,8 @@ class DiscoveryOutcome(StrictModel):
     `diagnostics.warnings` followed by the part's own -- the one upstream
     signal that a role or time phrase was dropped from the search. Discovery
     sends one part per call, so a request-level warning bears on it.
+    `ambiguous_sources` and `ambiguous_entities` are a `no_data` answer's
+    choices between source references and between graph nodes.
     """
 
     status: DiscoveryStatus
@@ -112,6 +120,7 @@ class DiscoveryOutcome(StrictModel):
     reason: str | None = None
     warnings: tuple[PartWarning, ...] = ()
     ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
+    ambiguous_entities: tuple[AmbiguousEntityReading, ...] = ()
 
 
 def resolved_source_mentions(part: Mapping[str, object]) -> tuple[ResolvedSourceMention, ...]:
@@ -144,36 +153,55 @@ def source_constraint_matches(
     )
 
 
-def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
-    """The refs Search bound for each entity text of `part`, by the text case-folded.
+def bound_refs(part: Mapping[str, object]) -> tuple[BoundEntity, ...]:
+    """The refs Search bound for each entity row of `part`, one `BoundEntity` per row, in row order.
 
-    Search states, beside the part's `restatement`, `entity_refs` rows: an
-    entity text and the refs it finally bound. "G7" binds `GroupOfSeven`,
-    whatever label Search gives the set. A text bound to nothing, being
-    ambiguous, not held or not found, states no refs and is left out, and so
-    is every text of a part without `entity_refs`, from a Search that
-    predates the field. Such a name is matched by label or through the
-    graph's resolve door. A text stated twice binds every ref either row
-    states.
+    Search states one `entity_refs` entry per `restatement.entities` row,
+    at the row's position: the row's text and the refs it finally bound.
+    "G7" binds `GroupOfSeven`, whatever label Search gives the set. Each
+    entry is kept with its row's identity (`dcid`, else `name`, else
+    `text`) and `role_text`, so two rows written "Congo" pinned to
+    `country/COD` and to `country/COG` stay two entities. A row bound to
+    nothing, being ambiguous, not held or not found, states no refs and is
+    left out, and so is every row of a part whose `entity_refs` does not
+    hold one entry per row, as a Search that predates the field or states
+    one entry per text answers. Such a name is matched by label or through
+    the graph's resolve door.
     """
-    return _fold_bound_refs(
-        (text, _strings(row.get("refs")))
-        for row in _sequence(part.get("entity_refs"))
-        if (text := _text(row.get("text"))) is not None
-    )
+    rows = _sequence(_mapping(part.get("restatement")).get("entities"))
+    entries = _sequence(part.get("entity_refs"))
+    if len(entries) != len(rows):
+        return ()
+    bound: list[BoundEntity] = []
+    for row, entry in zip(rows, entries, strict=True):
+        text, refs = _text(row.get("text")), _strings(entry.get("refs"))
+        if text is None or not refs:
+            continue
+        identity = _text(row.get("dcid")) or _text(row.get("name")) or text
+        bound.append(
+            BoundEntity(
+                identity=identity,
+                text=text,
+                role=_text(row.get("role_text")),
+                refs=tuple(dict.fromkeys(refs)),
+            )
+        )
+    return tuple(bound)
 
 
 def bound_rows(refs: Mapping[str, object]) -> tuple[BoundEntity, ...]:
-    """`refs`, a mapping from each entity text to the refs it bound (`bound_refs`), as
-    the `BoundEntity` rows a spec block stores under `_bound_refs`.
+    """`refs`, a mapping from each entity text to the refs it bound, as the
+    `BoundEntity` rows a spec block stores under `_bound_refs`.
 
     Each entry `text: refs` becomes `BoundEntity(identity=text, text=text,
     role=None, refs=refs)`: the mapping keeps no row's pinned `dcid`, stated
     `name` or `role_text`, so `identity` takes the text and `role` is
     unstated. A reader finds the row by its text, case-folded, with any role
     fitting, as it read the mapping. Only the string refs of an entry count,
-    each once, and an entry with no text or no such ref is left out. A block
-    holds one row per text, read from the mapping by this rule.
+    each once, and an entry with no text or no such ref is left out. Blocks
+    stored as the mapping are rewritten by this rule too
+    (`harness.bound_refs_migration`), so a stored block holds the same rows
+    whichever way it was written.
     """
     rows: list[BoundEntity] = []
     for text, value in refs.items():
@@ -189,45 +217,21 @@ def bound_rows(refs: Mapping[str, object]) -> tuple[BoundEntity, ...]:
     return tuple(rows)
 
 
-def stored_bound_refs(raw: object) -> dict[str, tuple[str, ...]]:
-    """A spec block's stored `_bound_refs` as `SelectedSource.bound_refs`: each
-    entity text, case-folded, to the refs it bound, as `bound_refs` reads
-    the part the block came from.
-
-    A block holds either a list of `BoundEntity` rows (`bound_rows`), or a
-    mapping from each text, case-folded, to its refs, as blocks stored before
-    the rows were kept hold it. An absent `_bound_refs` binds none.
-
-    Raises:
-        ValueError: If a list holds a row that is no `BoundEntity`.
-    """
-    if isinstance(raw, list | tuple):
-        return _fold_bound_refs(
-            (row.text, row.refs) for row in _BOUND_ENTITIES.validate_python(raw)
-        )
-    return _fold_bound_refs((text, _strings(value)) for text, value in _mapping(raw).items())
-
-
-def _fold_bound_refs(
-    pairs: Iterable[tuple[str, Sequence[str]]],
-) -> dict[str, tuple[str, ...]]:
-    """Each text of `pairs`, case-folded, to every ref the pairs stating it bind, in
-    order; a text binding no ref is left out."""
-    refs: dict[str, tuple[str, ...]] = {}
-    for text, bound in pairs:
-        if bound:
-            key = text.casefold()
-            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
-    return refs
-
-
-def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
+def outcome_from_envelope(
+    envelope: Mapping[str, object], *, entities: Sequence[EntityKey] = ()
+) -> DiscoveryOutcome:
     """Read a single-part `search` envelope into a `DiscoveryOutcome`.
+
+    `entities` keys the entity rows the part was sent with, in row order. A
+    `no_data` answer's `ambiguous_entities` names each reading's entity by
+    them.
 
     Raises:
         ValueError: If the envelope does not carry exactly one part, the part's
             status is not one `search` documents, a `definite` part names no
-            spec, or a spec block it carries is not usable as a source.
+            spec, a spec block it carries is not usable as a source, or an
+            ambiguous group of a `no_data` part is malformed or pins no row of
+            `entities`.
     """
     parts = _sequence(envelope.get("parts"))
     if len(parts) != 1:
@@ -274,6 +278,7 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
                 AmbiguousSourceReading.model_validate(group)
                 for group in _sequence(no_data.get("ambiguous_sources"))
             ),
+            ambiguous_entities=ambiguous_entities(no_data, entities=entities),
         )
     unsupported = _mapping(part.get("unsupported"))
     detail = " ".join(
@@ -284,12 +289,120 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     return DiscoveryOutcome(status=status, detail=detail or None, warnings=warnings)
 
 
+def ambiguous_entities(
+    no_data: Mapping[str, object], *, entities: Sequence[EntityKey]
+) -> tuple[AmbiguousEntityReading, ...]:
+    """Read a `no_data` block's `ambiguous_entities` groups, one reading per entity a group pins.
+
+    `entities` keys the rows the part was sent with, in row order. Each
+    option settling group `g` (`entity_choice == g`) is the sent part with
+    the group's rows pinned to one candidate, and every option pins the same
+    rows that resolved to one node. The group's rows are therefore the
+    positions where its options' rows differ, read with no matching of text
+    or role. A group pinning two rows gives two readings with its
+    candidates, one per entity, since each entity is its own choice.
+
+    A group's candidates are those whose option the planner can restate. An
+    option posting the candidate's ref as the `dcid` of every row the group
+    covers is stated by that ref as each covered entity's `dcid`. A row asked
+    for its members takes a group's own node by the group's registered name,
+    posted as the row's `text` with `members` and no dcid, since a pin cannot
+    ask for a group's members; that candidate is kept with the name as its
+    `restate_as`. Such an option carries no ref, so it is the candidate's by
+    the `label` Search gives the option, the candidate's name. A candidate
+    Search gives no option, a group node with no registered name, is no
+    choice Search can replay and is left out.
+
+    Raises:
+        ValueError: If a group or candidate is malformed, or a group has fewer
+            than two options holding one row per sent entity, its options
+            differ in no row, an option pins no one candidate by dcid or by a
+            group's name, or fewer than two of its candidates have an option.
+    """
+    options = _sequence(no_data.get("options"))
+    readings: list[AmbiguousEntityReading] = []
+    for index, group in enumerate(_sequence(no_data.get("ambiguous_entities"))):
+        settling = [option for option in options if option.get("entity_choice") == index]
+        rows = [_option_rows(option) for option in settling]
+        if len(rows) < 2 or any(len(option_rows) != len(entities) for option_rows in rows):
+            raise ValueError(
+                f"search's ambiguous entity group {index} has {len(rows)} option(s), not two or "
+                f"more each holding the {len(entities)} entity row(s) discovery sent"
+            )
+        positions = [
+            position
+            for position in range(len(entities))
+            if any(option_rows[position] != rows[0][position] for option_rows in rows)
+        ]
+        if not positions:
+            raise ValueError(f"search's ambiguous entity group {index} pins no entity row")
+        stated = [
+            EntityCandidate.model_validate(
+                {"ref": candidate.get("ref"), "label": candidate.get("label")}
+            )
+            for candidate in _sequence(group.get("candidates"))
+        ]
+        posted: set[str] = set()
+        named: list[tuple[object, str | None]] = []
+        for option, option_rows in zip(settling, rows, strict=True):
+            covered = [option_rows[position] for position in positions]
+            dcids = {row.get("dcid") for row in covered}
+            if len(dcids) == 1 and isinstance(dcid := dcids.pop(), str):
+                posted.add(dcid)
+            else:
+                named.append((option.get("label"), _members_name(covered)))
+        restated: dict[str, str] = {}
+        for label, name in named:
+            owners = [candidate for candidate in stated if candidate.label == label]
+            if name is None or len(owners) != 1 or owners[0].ref in posted or label in restated:
+                raise ValueError(
+                    f"search's ambiguous entity group {index} has an option, {label!r}, that "
+                    "pins no one candidate by dcid or by a group's name"
+                )
+            restated[owners[0].label] = name
+        candidates = [
+            candidate.model_copy(update={"restate_as": restated[candidate.label]})
+            if candidate.ref not in posted
+            else candidate
+            for candidate in stated
+            if candidate.ref in posted or candidate.label in restated
+        ]
+        if len(candidates) < 2:
+            raise ValueError(
+                f"search's ambiguous entity group {index} offers {len(candidates)} candidate(s) "
+                "whose option pins every row it covers by dcid or by a group's name, not two "
+                "or more"
+            )
+        readings.extend(
+            AmbiguousEntityReading.model_validate(
+                {"text": group.get("text"), "candidates": candidates, "entity": entities[position]}
+            )
+            for position in positions
+        )
+    return tuple(readings)
+
+
+def _members_name(rows: Sequence[Mapping[str, object]]) -> str | None:
+    """The group name `rows` all post asking for its members with no dcid, else `None`."""
+    if any(row.get("dcid") is not None or row.get("members") is not True for row in rows):
+        return None
+    names = {_text(row.get("text")) for row in rows}
+    return names.pop() if len(names) == 1 else None
+
+
+def _option_rows(option: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """The entity rows of an option's one-part `data_query`."""
+    parts = _sequence(_mapping(option.get("data_query")).get("parts"))
+    return _sequence(parts[0].get("entities")) if len(parts) == 1 else []
+
+
 def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     """Read one spec block of a `search` envelope into a `SelectedSource`.
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, the counts of its members and how many it serves, the label,
-    size and digest of the binding its `shape` states, entities and the named
+    size and digest of the binding its `shape` states, the concept it counts
+    and the tables it is published in, entities and the named
     sets it binds, the measure it elected and the others it offers, the entity
     axes it leaves open, unit (or that it varies per series), provenance and
     its account, the publisher codes it is exactly (`exact_codes`), the
@@ -300,11 +413,14 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     `None`.
     `coverage.window` is a series window only when `coverage.kind` is
     `exact`; a `breadth` or `bare` coverage carries none.
+    The block's `_bound_refs`, the rows of the part that carried it
+    (`bound_refs`, written by `harness.tool_contracts.resolver_digest`),
+    are the source's `bound_refs`; a block without them binds none.
 
     Raises:
         ValueError: If the block lacks a usable `spec_id`, an entity it
             resolves lacks its role, value or label, or its `_bound_refs`
-            list holds a row that is no `BoundEntity`.
+            are not a list of `BoundEntity` rows.
     """
     resolved = _mapping(block.get("resolved"))
     coverage = _mapping(resolved.get("coverage"))
@@ -321,6 +437,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             confidence=_text(resolved.get("confidence")),
             has_data=_flag(coverage.get("has_data")),
             measure_label=_text(shape.get("label")),
+            concept_label=block_concept_label(block),
+            published_tables=_text(resolved.get("published_tables")),
             elected_measure=_elected_measure(resolved),
             stat_var_member_count=_count(stat_vars.get("member_count")),
             stat_var_member_count_exact=_flag(stat_vars.get("member_count_exact")),
@@ -329,7 +447,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
             groups=_groups(_mapping(resolved.get("entity_groups"))),
-            bound_refs=stored_bound_refs(block.get("_bound_refs")),
+            bound_refs=_BOUND_ENTITIES.validate_python(block.get("_bound_refs", ())),
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
@@ -350,12 +468,23 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             ),
             identity=_identity(_mapping(block.get("definition")).get("identity")),
             open_axes=_open_axes(resolved),
-            slot_codes=_slot_codes(resolved),
+            slot_codes=slot_codes(resolved),
         )
     except ValueError as exc:
         # pydantic's ValidationError is a ValueError too, so one clause covers
         # a malformed field and a missing one alike.
         raise ValueError(f"the spec block is not usable as a source: {exc}") from exc
+
+
+def readable_source(block: Mapping[str, object]) -> SelectedSource | None:
+    """The source `block` states (`source_from_spec_block`), `None` with a warning
+    logged where it is not usable as one, for a caller that names or labels by the
+    source and falls back to other words without it."""
+    try:
+        return source_from_spec_block(block)
+    except ValueError as exc:
+        logger.warning("spec block %s is not readable as a source: %s", block.get("spec_id"), exc)
+        return None
 
 
 def _exact_codes(stat_vars: Mapping[str, object]) -> tuple[str, ...]:
@@ -414,7 +543,7 @@ def _open_axes(resolved: Mapping[str, object]) -> tuple[OpenAxis, ...]:
     return tuple(axes)
 
 
-def _slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | None] | None:
+def slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | None] | None:
     """The codes each slot of `resolved.slots` admits, by constraint property.
 
     A `value` binding admits its ref and every code its `expansion` added;
@@ -473,14 +602,43 @@ def entity_scopes_disjoint(left: SelectedSource, right: SelectedSource) -> bool:
     for role in {entity.role for entity in left.entities} & {
         entity.role for entity in right.entities
     }:
-        refs = [
-            {entity.ref for entity in source.entities if entity.role == role}
-            for source in (left, right)
-        ]
-        countries = all(ref.startswith(_COUNTRY_PREFIX) for ref in refs[0] | refs[1])
-        if countries and refs[0].isdisjoint(refs[1]):
+        if countries_apart(
+            *(
+                {entity.ref for entity in source.entities if entity.role == role}
+                for source in (left, right)
+            )
+        ):
             return True
     return False
+
+
+def is_country(ref: str) -> bool:
+    """Whether the resolved party `ref` is a country: its dcid is under `country/`,
+    as Search's own catalogue counts countries. Search's `entity_type` is the
+    graph's type of the node and is absent where the graph states none, so it is
+    not read."""
+    return ref.startswith(_COUNTRY_PREFIX)
+
+
+def party_class(ref: str) -> PartyClass | None:
+    """The class of party (`PartyClass`) the resolved party `ref` is of, where its ref
+    shows it: `official` for a country (`is_country`), since Search's code index
+    classes a private provider by its OECD private donor code, none of which names a
+    country, and every other party it does not total or count as a residual as
+    official. `None` for any other party, whose class only Search's index states."""
+    return "official" if is_country(ref) else None
+
+
+def countries_apart(left: Collection[str], right: Collection[str]) -> bool:
+    """Whether two sets of entity refs bound on one role name rows that never meet:
+    both name countries alone (`is_country`), at least one each, and none in
+    common. A region holds countries, so a ref that is no country proves nothing."""
+    return (
+        bool(left)
+        and bool(right)
+        and all(is_country(ref) for ref in (*left, *right))
+        and set(left).isdisjoint(right)
+    )
 
 
 class FamilyOverlap(StrEnum):
@@ -719,19 +877,31 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     return StatVarReading.SEPARATE
 
 
-def stat_var_reading(source: SelectedSource, requested: StatVarReading | None) -> SelectedSource:
-    """`source` stating how its retrieval reads it, and who said so.
+def stat_var_reading_of(
+    source: SelectedSource, requested: StatVarReading | None
+) -> StatVarReading | None:
+    """How a retrieval of `source` reads its StatVars, `requested` the requirement's reading.
 
-    A source binding one StatVar has no reading. A family takes the
-    requirement's `requested` reading when it states one, and
-    `default_reading` otherwise.
+    A source binding one StatVar has no reading. A family takes `requested`
+    when it states one, and `default_reading` otherwise.
     """
     if not is_family(source):
-        reading, set_by = None, None
-    elif requested is not None:
-        reading, set_by = requested, ReadingSetBy.PLAN
-    else:
-        reading, set_by = default_reading(source), ReadingSetBy.RULE
+        return None
+    return requested if requested is not None else default_reading(source)
+
+
+def stat_var_reading(source: SelectedSource, requested: StatVarReading | None) -> SelectedSource:
+    """`source` stating how its retrieval reads it (`stat_var_reading_of`), and who
+    said so: the plan where it stated the reading, the rule where `default_reading`
+    settled it."""
+    reading = stat_var_reading_of(source, requested)
+    set_by = (
+        None
+        if reading is None
+        else ReadingSetBy.PLAN
+        if requested is not None
+        else ReadingSetBy.RULE
+    )
     return source.model_copy(
         update={"stat_var_reading": reading, "stat_var_reading_set_by": set_by}
     )
@@ -745,8 +915,11 @@ def open_entity_axes_of(resolved: Mapping[str, object]) -> tuple[OpenEntityAxis,
     for a worldwide total), and each `role_axis_facts` entry counts the members of
     a flow side the part left open. A count either field cannot state, such
     as a `members` that is not a list, is `None`, never 0. When both state
-    one column, the scope's count wins, since it lists the members it
-    counts. A column a `resolved.entities` entry binds is not open. Never
+    one column, the fact's count wins on a flow side (`FLOW_ROLE_COLUMNS`),
+    since `search` counts its parties there and leaves out the group totals
+    the scope lists, which a flow retrieval does not return; on the place
+    axis the scope's count wins, since it lists the members it counts. A
+    column a `resolved.entities` entry binds is not open. Never
     raises: `harness.tool_contracts` reads the search envelope with it
     too, where a malformed field must not fail the digest.
     """
@@ -756,7 +929,9 @@ def open_entity_axes_of(resolved: Mapping[str, object]) -> tuple[OpenEntityAxis,
         if (role := _text(fact.get("role"))) is not None:
             counts[role] = _count(fact.get("member_count"))
     scope = _mapping(resolved.get("scope"))
-    if (axis := _text(scope.get("axis"))) is not None:
+    if (axis := _text(scope.get("axis"))) is not None and (
+        axis not in FLOW_ROLE_COLUMNS or counts.get(axis) is None
+    ):
         members = scope.get("members")
         counts[axis] = len(members) if isinstance(members, list) else None
     return tuple(
@@ -777,12 +952,21 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     """The named sets `resolved.entity_groups` states, each keyed by the role column it fills.
 
     A group stating no name names nothing a requirement can ask for, so it is
-    left out rather than failing the block. `total` is the published total
+    left out rather than failing the block. `group_id` is the membership
+    registry's id for a set the graph holds no node for. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
     `whole_of` is the classes of party a whole-population total holds, or a
     union of such totals, absent for any other set. `side_classes` is the
     classes of party, totals aside, the dataset publishes on such a set's side,
-    absent for any other set and from a Search that predates it. A class outside
+    absent for any other set and from a Search that predates it. `members` are
+    the parties a bound total holds where Search lists them. `left_out` and
+    `sum_differs` are, for a set read as its members, the residuals its
+    published total counts that the members leave out, which Search sends only
+    where there are some, and whether the source publishes its own figure for
+    it, which Search sends only where it does.
+    `holds_multilaterals` is whether a donor set read as a total or a whole
+    population holds a multilateral organisation, absent where Search states
+    nothing. A class outside
     `common.place_type.PartyClass` fails the block.
     """
     found = []
@@ -794,9 +978,14 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     role=role,
                     label=label,
                     ref=_text(group.get("ref")),
+                    group_id=_text(group.get("group_id")),
                     total=_text(group.get("total")),
                     whole_of=_party_classes(group.get("whole_of")),
                     side_classes=_party_classes(group.get("side_classes")),
+                    members=tuple(_strings(group.get("members"))),
+                    left_out=tuple(_strings(group.get("left_out"))),
+                    sum_differs=_flag(group.get("sum_differs")) is True,
+                    holds_multilaterals=_flag(group.get("holds_multilaterals")),
                 )
             )
     return tuple(found)
@@ -881,9 +1070,119 @@ def _axis_values(values: object) -> dict[str, str | None]:
     }
 
 
+def block_concept_label(block: Mapping[str, object] | None) -> str | None:
+    """What Search says a spec block's series count (`resolved.concept_label`), `None`
+    when it states none (`SelectedSource.concept_label`)."""
+    return _text(_mapping(_mapping(block).get("resolved")).get("concept_label"))
+
+
 def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
-    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`)."""
+    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`).
+
+    Raises:
+        ValueError: When a set it reads is not readable, as one naming a class
+            of party outside `PartyClass`.
+    """
     return _groups(_mapping(_mapping(block.get("resolved")).get("entity_groups")))
+
+
+def block_group(block: Mapping[str, object], role: str) -> ResolvedGroup | None:
+    """The named set a spec block's `resolved.entity_groups` states on the role column
+    `role` (`block_groups`), `None` where it states none there or the set names nothing.
+    A set on another role is not read, so one there that is not readable does not
+    hide this one.
+
+    Raises:
+        ValueError: When the set on `role` is not readable, as one naming a class
+            of party outside `PartyClass`.
+    """
+    groups = _mapping(_mapping(block.get("resolved")).get("entity_groups"))
+    if role not in groups:
+        return None
+    return next(iter(_groups({role: groups[role]})), None)
+
+
+def block_wire_groups(
+    block: Mapping[str, object], *, leaving_out: str | None = None
+) -> tuple[ResolvedGroup, ...]:
+    """The named sets a spec block's `resolved.entity_groups` states, each holding only
+    what a resubmit posts of it (`wire_groups`): its role, `label`, `ref` and
+    `group_id`, skipping the set on the role column `leaving_out`. Every other field
+    keeps its default and is not read, so a set naming a class of party outside
+    `PartyClass` still reads here. A set stating no label is skipped, as
+    `block_groups` skips it: it names nothing a resubmit can post. What this
+    returns is for `wire_groups` alone.
+
+    Raises:
+        ValueError: When a labelled set's posted identity is not readable:
+            `entity_groups` is not an object, or a set is not one, or states a `ref`
+            or `group_id` that is not text. A resubmit posted without that set can
+            bind another population.
+    """
+    raw = _mapping(block.get("resolved")).get("entity_groups")
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"entity_groups is not an object: {raw!r}")
+    found = []
+    for role, held in cast(Mapping[str, object], raw).items():
+        if role == leaving_out:
+            continue
+        if not isinstance(held, Mapping):
+            raise ValueError(f"the set on {role!r} is not an object: {held!r}")
+        group = cast(Mapping[str, object], held)
+        if (label := _text(group.get("label"))) is None:
+            continue
+        found.append(
+            ResolvedGroup(
+                role=role,
+                label=label,
+                ref=_optional_text(group, "ref", role=role),
+                group_id=_optional_text(group, "group_id", role=role),
+            )
+        )
+    return tuple(found)
+
+
+def readable_wire_groups(
+    block: Mapping[str, object], *, leaving_out: str | None = None
+) -> tuple[ResolvedGroup, ...] | None:
+    """What a resubmit posts of each named set `block` states (`block_wire_groups`),
+    skipping the set on the role column `leaving_out`, `None` with a warning logged
+    where that is not readable. A caller refuses the resubmit on `None`, since a
+    definition posted without its sets can bind another population."""
+    try:
+        return block_wire_groups(block, leaving_out=leaving_out)
+    except ValueError as exc:
+        logger.warning("posted named sets of %s are not readable: %s", block.get("spec_id"), exc)
+        return None
+
+
+def _optional_text(group: Mapping[str, object], key: str, *, role: str) -> str | None:
+    """`group[key]`, `None` where it is absent, null or empty, as `_groups` reads it,
+    `group` the set on `role`.
+
+    Raises:
+        ValueError: When it is anything but text.
+    """
+    value = group.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"the set on {role!r} states a {key} that is not text: {value!r}")
+    return _text(value)
+
+
+def readable_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...] | None:
+    """The named sets `block` states (`block_groups`), `None` with a warning logged
+    where they are not readable, as a set naming a class of party outside
+    `PartyClass`, for a caller that reads them and goes on without. A resubmit
+    posts only each set's identity (`readable_wire_groups`) and refuses where that is
+    not readable, since a definition posted without its sets can bind another
+    population."""
+    try:
+        return block_groups(block)
+    except ValueError as exc:
+        logger.warning("named sets of %s are not readable: %s", block.get("spec_id"), exc)
+        return None
 
 
 def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, JsonValue]]:
@@ -986,27 +1285,50 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     """The sentence saying an answer reads `group` as its members, or `None` when it binds the total.
 
     `answer` is how the answer reads the members, `None` when the column
-    the group sits on is not known. An answer combining a flow side's
-    members leaves out what the source allocates to the group and to no
-    single member ("Africa, regional"), which only the group's total counts.
+    the group sits on is not known. An answer combining the members leaves
+    out the residuals Search says the group's total counts beside them
+    (`ResolvedGroup.left_out`, "Africa, unallocated by country (DAC)"), named
+    as Search names them (`_left_out`). Where Search names none, as for a
+    set with no published total, the sentence names none.
+    Where Search says the source publishes its own figure for the group
+    (`ResolvedGroup.sum_differs`), a second sentence says that figure can
+    differ, after every answer's sentence but `EACH`'s, so the residuals' list
+    ends with the first.
     """
     if group.reads_total:
         return None
-    if answer is None:
-        return (
-            f"The figures for {group.label} are its members' figures, not a total the source "
-            "publishes for the group."
-        )
-    if answer is MembersAnswer.EACH:
-        return f"The figures for {group.label} are its members' figures, each on its own."
-    left_out = (
-        " and leaves out amounts the data allocates to no single country"
-        if group.role in FLOW_ROLE_COLUMNS
+    published = (
+        f" The source publishes its own figure for {group.label}, "
+        "which can differ from one built from its members."
+        if group.sum_differs
         else ""
     )
-    if answer is MembersAnswer.SUMMED:
-        return f"The figure for {group.label} adds up its members' figures{left_out}."
-    return f"The figure for {group.label} is computed from its members' figures{left_out}."
+    if answer is None:
+        return f"The figures for {group.label} come from its members' figures.{published}"
+    if answer is MembersAnswer.EACH:
+        return f"The figures for {group.label} are its members' figures, each on its own."
+    built = "adds up" if answer is MembersAnswer.SUMMED else "is computed from"
+    return (
+        f"The figure for {group.label} {built} its members' figures{_left_out(group)}.{published}"
+    )
+
+
+def _left_out(group: ResolvedGroup) -> str:
+    """The clause naming what `group`'s members leave out of its published total,
+    empty where Search names nothing left out (`ResolvedGroup.left_out`).
+
+    On the recipient side the residuals are the money the data allocates to no
+    single country ("Africa, unallocated by country (DAC)"); on any other side
+    they are named as what the group's total counts beside its members.
+    """
+    if not group.left_out:
+        return ""
+    what = (
+        "what the data allocates to no single country"
+        if group.role == "destination"
+        else f"what the source's total for {group.label} counts beside them"
+    )
+    return f" and leaves out {what}: " + "; ".join(group.left_out)
 
 
 def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
@@ -1014,10 +1336,16 @@ def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
     for a resubmit to post beside the identity they stand for (`_groups`).
 
     `total` is not posted. Search recomputes it from what the role binds,
-    and a server that predates the field refuses it.
+    and a server that predates the field refuses it. `group_id` is posted
+    where set: a set the graph holds no node for, read as its members, is
+    kept only through it, with the total its dataset publishes for it.
     """
     return {
-        group.role: {"label": group.label, **({"ref": group.ref} if group.ref else {})}
+        group.role: {
+            "label": group.label,
+            **({"ref": group.ref} if group.ref else {}),
+            **({"group_id": group.group_id} if group.group_id else {}),
+        }
         for group in groups
     }
 

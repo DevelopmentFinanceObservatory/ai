@@ -53,7 +53,7 @@ from typing import assert_never, cast
 from common.telemetry import record_event
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult, compile_plan
 from compiler.rolling import anchor_groups
-from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
+from compiler.surface import ToolSchema, ToolSurface, ToolSurfaceUnavailableError
 from executor.outcomes import (
     AnchorResult,
     MethodChoiceNeeded,
@@ -63,7 +63,7 @@ from executor.outcomes import (
     failed_step,
     stop_cause,
 )
-from executor.run import AnchorRead, read_anchors
+from executor.run import AnchorRead, HeldAnchor, read_anchors
 from google.adk.tools.tool_context import ToolContext
 from planner.operations import Translation
 from planner.plan import (
@@ -71,6 +71,7 @@ from planner.plan import (
     HistorySplit,
     Plan,
     Restatement,
+    SessionState,
     UnsupportedOperation,
     authored_text,
     discovery_time_left,
@@ -85,7 +86,12 @@ from planner.plan import (
     save_plan,
     split_of,
 )
-from planner.records import EvidenceIssueCode, RollingPlanError
+from planner.records import (
+    AmbiguousEntityReading,
+    EvidenceIssueCode,
+    RollingPlanError,
+    warn_left_out,
+)
 from planner.shapes import pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
 from planner.workflow import SelectedSource, Workflow
@@ -115,6 +121,7 @@ from translator.discovery import (
 from translator.mechanical import TranslatorCore, run_translate
 from translator.referral import (
     MAY_CARRY_CANDIDATES,
+    REPAIR_OF,
     Referral,
     ReferralKind,
     StalePin,
@@ -135,6 +142,45 @@ type AnchorReader = Callable[
     ...,
     Awaitable[tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None],
 ]
+
+# The groups the latest newest-year read of this session resolved
+# (`executor.run.HeldAnchor`), by key, which the next translation's read
+# stands on in place of running their retrievals again.
+ANCHOR_READS_STATE_KEY = "translator:anchor_reads"
+
+
+def held_anchor_reads(state: SessionState) -> tuple[HeldAnchor, ...]:
+    """The groups `save_anchor_reads` kept, less any stored in a shape this release rejects.
+
+    A value that is no mapping of groups holds none, and the omission is logged.
+    """
+    stored = state.get(ANCHOR_READS_STATE_KEY) or {}
+    if not isinstance(stored, Mapping):
+        logger.warning(
+            "%s: left out a stored value that is no mapping, a %s",
+            ANCHOR_READS_STATE_KEY,
+            type(stored).__name__,
+        )
+        return ()
+    held: list[HeldAnchor] = []
+    errors: list[ValidationError] = []
+    for value in stored.values():
+        try:
+            held.append(HeldAnchor.model_validate(value))
+        except ValidationError as exc:
+            errors.append(exc)
+    if errors:
+        warn_left_out(logger, ANCHOR_READS_STATE_KEY, errors, entries=len(errors))
+    return tuple(held)
+
+
+def save_anchor_reads(state: SessionState, read: Sequence[AnchorRead]) -> None:
+    """Keep the groups `read` resolved, in place of those an earlier read kept."""
+    state[ANCHOR_READS_STATE_KEY] = {
+        group.held.key: group.held.model_dump(mode="json")
+        for group in read
+        if group.held is not None
+    }
 
 
 def _other_stale_pins(plan: Plan, log: DiscoveryLog, requirement_id: str) -> tuple[StalePin, ...]:
@@ -179,8 +225,9 @@ def _referral_payload(referral: Referral) -> dict[str, object]:
     and `not_issued` appear only when set, the cases the planner seam ends
     the entry on, and `source_mismatch` and `stop_code` likewise. `withheld`
     appears only when a source is withheld, each rendered without its
-    `spec_id` beside the scope it drops, since no pin may name it, and
-    `repair` only when one is stated.
+    `spec_id` beside the scope it drops, since no pin may name it,
+    `repair` only when one is stated, and `ambiguous_entities` only on an
+    `entity_name_ambiguous` referral.
     """
     selectable = referral.kind is not ReferralKind.NO_DATA
     excluded = {"candidates", "stale_pins", "withheld"}
@@ -789,10 +836,15 @@ def _logged_reference(reason: str) -> str:
 
 
 async def read_within_entry(
-    workflow: Workflow, plan: Plan, *, surface: ToolSurface
+    workflow: Workflow,
+    plan: Plan,
+    *,
+    surface: ToolSurface,
+    held: Sequence[HeldAnchor] = (),
 ) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None:
     """`executor.run.read_anchors` over `workflow`, or `None` when the planner entry has no time for it.
 
+    `held` are the groups an earlier read resolved, as `read_anchors` takes them.
     Inside a planner entry the read may take the time the entry has left
     (`planner.plan.discovery_time_left`). A read that time cuts short, or
     one there is no time to start, is logged and recorded on the trace as
@@ -811,6 +863,7 @@ async def read_within_entry(
                         r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
                     ],
                     surface=surface,
+                    held=held,
                 )
         except TimeoutError:
             if not deadline.expired():
@@ -900,12 +953,28 @@ def build_translator_core(
         again. A read that stops otherwise answers `_run_would_stop`, and a
         restatement a plan rule refuses, or one that does not compile,
         answers `_not_compiled` with `ROLLING_ANCHOR_BEHIND` issues.
+
+        The read lists the surface itself and refuses tools changed since
+        `result` was compiled (`executor.run._Run._surface_as_compiled`). A
+        group whose retrievals and
+        requirements are those of a group the session's previous read
+        resolved stands on that read (`held_anchor_reads`), so a revision
+        that leaves a rolling root as it was reads it once. The run reads it
+        again (`executor.run._Run.execute`).
         """
         workflow = result.workflow
         assert workflow is not None
         if not anchor_groups(workflow):
             return plan, translation, result
-        read = _groups_read(await anchor_read(workflow, plan, surface=surface))
+        answered = await anchor_read(
+            workflow,
+            plan,
+            surface=surface,
+            held=held_anchor_reads(tool_context.state),
+        )
+        if isinstance(answered, tuple):
+            save_anchor_reads(tool_context.state, answered)
+        read = _groups_read(answered)
         if isinstance(read, Refused):
             return _run_would_stop(read, workflow=workflow, translation=translation)
         if not any(group.behind for group in read):
@@ -924,7 +993,9 @@ def build_translator_core(
         return moved_plan, moved_translation, recompiled
 
     async def propose_operations(
-        translation: Translation, tool_context: ToolContext
+        translation: Translation,
+        tool_context: ToolContext,
+        schemas: Sequence[ToolSchema] | None = None,
     ) -> dict[str, object]:
         """Compile `translation` against the recorded draft, the sources discovery
         recorded and the live tool surface, and record it on the plan if it
@@ -936,14 +1007,17 @@ def build_translator_core(
         known, the action that moves past it; the plan is then left
         untouched, and a decline the closing issue earns
         (`_earned_decline`) is recorded as optional, for the rest of the
-        planner entry."""
+        planner entry. `schemas` are the surface's tools as the caller
+        listed them (`translator.mechanical._propose_until_settled`), or,
+        when `None`, as this call lists them."""
         plan = _translatable_draft(tool_context)
         if isinstance(plan, dict):
             return plan
-        try:
-            schemas = await surface.list_tools()
-        except ToolSurfaceUnavailableError as exc:
-            return problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED)
+        if schemas is None:
+            try:
+                schemas = await surface.list_tools()
+            except ToolSurfaceUnavailableError as exc:
+                return problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED)
 
         requirement_keys, pinned, across = dataset_keys(plan)
 
@@ -1020,7 +1094,11 @@ def build_translator_core(
         if result.workflow is None:
             return _not_compiled(result, translation, tool_context)
         stated = await stated_from_the_data(
-            plan, translation, result, compiled=compiled, tool_context=tool_context
+            plan,
+            translation,
+            result,
+            compiled=compiled,
+            tool_context=tool_context,
         )
         if isinstance(stated, dict):
             return stated
@@ -1136,7 +1214,11 @@ def build_translator_core(
             # from, or the nearest-series relaxation found nothing, and a
             # referral naming no candidates there reports exactly that.
         ambiguous_sources = ()
-        if kind is ReferralKind.SOURCE_NAME_AMBIGUOUS and requirement is not None:
+        ambiguous_entities = ()
+        if (
+            kind in {ReferralKind.SOURCE_NAME_AMBIGUOUS, ReferralKind.ENTITY_NAME_AMBIGUOUS}
+            and requirement is not None
+        ):
             key = requirement_revision(requirement)
             log = load_log(tool_context.state)
             matching = [
@@ -1144,7 +1226,10 @@ def build_translator_core(
                 for record in log.records
                 if record.requirement_id == requirement.id and record.requirement_key == key
             ]
-            ambiguous_sources = matching[-1].ambiguous_sources if matching else ()
+            if matching and kind is ReferralKind.SOURCE_NAME_AMBIGUOUS:
+                ambiguous_sources = matching[-1].ambiguous_sources
+            elif matching:
+                ambiguous_entities = matching[-1].ambiguous_entities
         try:
             referral = Referral(
                 kind=kind,
@@ -1152,9 +1237,10 @@ def build_translator_core(
                 requirement_id=requirement_id,
                 candidates=candidates,
                 ambiguous_sources=ambiguous_sources,
+                ambiguous_entities=ambiguous_entities,
                 no_data_reason=no_data_reason,
                 constraint=constraint,
-                repair=repair or scope_repair,
+                repair=REPAIR_OF.get(kind) or repair or scope_repair,
                 reference=(
                     reference or _logged_reference(reason)
                     if kind is ReferralKind.INTERNAL_FAILURE
@@ -1182,6 +1268,7 @@ def build_translator_core(
         discover_source=discover_source_tool.func,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
+        list_tools=surface.list_tools,
     )
 
 
@@ -1212,7 +1299,7 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
     in session state name a copy by its own id, which the model did not write
     and cannot patch or pin, so the answer it reads names the copy's origin
     (`planner.plan.origin_of`) in `requirement_id`, each stale pin's and each
-    named group's, and in the
+    named group's, each entity candidate's `pick`, and in the
     prose of `reason` and each `repair`. Discovery and the compiler build
     that prose with ids interpolated at dozens of sites, so it is rewritten
     here (`planner.plan.authored_text`).
@@ -1266,7 +1353,15 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
 
     mapped = prose(answer)
     if isinstance(requirement_id := answer.get("requirement_id"), str):
-        mapped["requirement_id"] = origin_of(split, requirement_id)
+        authored_id = origin_of(split, requirement_id)
+        mapped["requirement_id"] = authored_id
+        if "ambiguous_entities" in answer:
+            mapped["ambiguous_entities"] = [
+                AmbiguousEntityReading.model_validate(reading)
+                .picked_under(authored_id)
+                .model_dump(mode="json")
+                for reading in cast("list[dict[str, object]]", answer["ambiguous_entities"])
+            ]
     if "stale_pins" in answer:
         by_origin: dict[str, list[tuple[str, dict[str, object]]]] = {}
         for pin in cast("list[dict[str, object]]", answer["stale_pins"]):
@@ -1317,8 +1412,13 @@ def build_translate(
         First names, on the recorded draft, each group a pin holds a
         requirement's `across` side to, in place of that `across`
         (`translator.discovery.name_pinned_groups`). Each identity is
-        resolved at most once in the whole translation
-        (`translator.discovery.resolving_once`).
+        resolved at most once in the turn
+        (`translator.discovery.resolving_once`), so a switch or an amendment
+        that leaves a pin as it was asks Search nothing for it. A retryable
+        refusal Search answers one identity with is kept for the rest of the
+        translation, so the group rewrite and discovery ask for it once. A
+        raised failure (a timeout, a transport error,
+        `ToolSurfaceUnavailableError`) is kept for nothing and is asked again.
 
         Returns:
             `{"outcome": "ok"}` once the plan compiled, with `restated` when
@@ -1328,8 +1428,11 @@ def build_translate(
             was named, each entry the requirement, the entity named and the
             `across` dropped. Each names a requirement by the id the model
             wrote (`authored_answer`).
+
+        A translation that reaches a compile lists the surface once, however
+        many rounds it proposes (`translator.mechanical._propose_until_settled`).
         """
-        with resolving_once():
+        with resolving_once(tool_context.state, keep_retryable=True):
             named = await name_pinned_groups(tool_context, surface=surface)
             answer = _planner_answer(await run_translate(tool_context, core=core))
         if answer.get("outcome") == Outcome.UNSUPPORTED.value:

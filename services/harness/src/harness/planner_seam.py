@@ -92,8 +92,9 @@ import contextvars
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from common.telemetry import current_trace_id
@@ -108,10 +109,11 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
-from planner.agent import PROPOSE_PLAN
+from planner.agent import PROPOSE_PLAN, ToolContextSession, declare_ready, with_source_reads
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
+    DECISION_PICK_STATE_KEY,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
@@ -125,10 +127,12 @@ from planner.plan import (
     PlanStatus,
     SessionState,
     UnsupportedOperation,
+    clear_plan,
     clear_unsupported,
     current_discovery_time_left,
     cut_user_text,
     discovery_time_left,
+    held_sources,
     load_ask_breakdowns,
     load_asks,
     load_asks_across_years,
@@ -138,31 +142,48 @@ from planner.plan import (
     record_optional_decline,
     record_unsupported,
     save_amendment_entry,
+    save_decision_pick,
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    windowed_pins,
 )
+from planner.records import Severity
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
-from planner.workflow import ElectedMeasure
-from translator.discovery import CutCalls, current_cut_calls
+from planner.workflow import ElectedMeasure, SelectedSource
+from submission.service import (
+    ALIGNED_PINS_STATE_KEY,
+    SEARCHED_PINS_STATE_KEY,
+    Proposal,
+    SourceReadings,
+    pinned_sources,
+    searched_pins,
+    submit,
+)
+from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
+from translator.discovery import CutCalls, current_cut_calls, resolving_once
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
-from translator.referral import USER_DECIDES
-from translator.tool import Translate, permitted_repair
+from translator.referral import USER_DECIDES, ReferralKind
+from translator.tool import Translate, build_translate, permitted_repair
 
 from harness import plan_display
-from harness.agents import create_planner_with_translator
+from harness.agents import build_tool_surface, create_planner_with_translator
+from harness.decision_pick import DecisionPick
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    store_search,
 )
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
     TERMINAL_PROPOSE_CODES,
+    PlanWords,
     SeamCode,
     referral_sentence,
+    refusal_reason,
     refusal_sentence,
 )
 from harness.settings import Settings
@@ -180,6 +201,11 @@ from harness.turn_records import (
 from harness.usage import log_usage
 
 logger = logging.getLogger(__name__)
+
+# What `PlannerSeam._stalled_referral` counts a referral by: its kind,
+# requirement, constraint, and the (name, role) of each entity it leaves
+# unsettled.
+type StallKey = tuple[str, str | None, str | None, tuple[tuple[str, str | None], ...]]
 
 # Insurance against a runaway tool loop inside one agent run. A healthy plan
 # takes well under this many tool calls (skill reads and proposals).
@@ -334,7 +360,7 @@ class _RunTracker:
     """
 
     def __init__(self) -> None:
-        self.referral_counts: dict[tuple[str, str | None, str | None], int] = {}
+        self.referral_counts: dict[StallKey, int] = {}
         self.refused: dict[str, Any] | None = None
         self.ready_to_break = False
         # The `adk_request_input` call args the next generation is replaced
@@ -397,6 +423,29 @@ ModelRequestCallback = Callable[[CallbackContext, LlmRequest], LlmResponse | Non
 ModelResponseCallback = Callable[[CallbackContext, LlmResponse], LlmResponse | None]
 
 
+@dataclass(frozen=True)
+class _RevisionSession(ToolContextSession):
+    """The session a revision's proposal is checked against (`PlannerSeam.revise`).
+
+    The user has spoken since the plan it amends was recorded: their switch
+    is the revision. A dataset that replaces one the user picked answering
+    an ask (`inherits`, the new spec_id to the one it replaces) counts as
+    picked too, so the measure decision a pin of it states stays theirs.
+    """
+
+    inherits: Mapping[str, str] = field(default_factory=dict)
+
+    def user_spoke_since(self, version: int) -> bool:
+        """Always: the revision answers the user's own switch."""
+        del version
+        return True
+
+    def elected_spec_ids(self) -> frozenset[str]:
+        """The spec_ids the user picked, and each that replaces one of them."""
+        elected = super().elected_spec_ids()
+        return elected | {new for new, old in self.inherits.items() if old in elected}
+
+
 class PlannerSeam:
     """`harness.graph.seams.PlannerModel`, implemented by `src/planner` and the translation it runs."""
 
@@ -419,10 +468,16 @@ class PlannerSeam:
         # `after_model_callbacks` run before the seam's own, so they see each
         # response as the model answered it, before `drop_thought_parts`
         # replaces one. `evals/planner_entry` runs the served planner this way.
+        # The surface and translation `propose_plan` runs, kept for `revise`,
+        # which records a proposal of its own with no model call.
+        self._surface = surface if surface is not None else build_tool_surface(settings=settings)
+        self._translate = (
+            translate if translate is not None else build_translate(surface=self._surface)
+        )
         self._agent = create_planner_with_translator(
             settings=settings,
             agent_settings=agent_settings,
-            surface=surface,
+            surface=self._surface,
             # The orchestrator states the plan's question in its brief
             # (`harness.graph.state.ORCHESTRATOR_BRIEF_KEY`) before the planner ever
             # runs (see `planner.agent.create_planner_agent`'s own
@@ -439,7 +494,7 @@ class PlannerSeam:
             # name a step.
             reads_user_words=False,
             prefix_cache=prefix_cache,
-            translate=translate,
+            translate=self._translate,
         )
         if model is not None:
             self._agent.model = model
@@ -476,6 +531,7 @@ class PlannerSeam:
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        pick: DecisionPick | None = None,
     ) -> dict[str, Any]:
         # `readings` is the search readings of the conversation's earlier
         # turns and then this turn's, as `harness.orchestrator_tools` stores
@@ -525,6 +581,12 @@ class PlannerSeam:
             # names (`submission.service.admit`). `_message` renders the
             # amendment on the same test.
             save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
+            # The option the user picked on the plan card, which this entry
+            # replans to hold, with the scope the card gave the replan:
+            # admission refuses a plan that does not state it or that changes
+            # anything but the picked decision and the requirements citing it
+            # (`submission.service._picked_decision`). Any other entry clears it.
+            save_decision_pick(cast(SessionState, ctx.session.state), pick)
             clear_unsupported(cast(SessionState, ctx.session.state))
             for operation in _earned_by_refusal(refusal):
                 record_unsupported(cast(SessionState, ctx.session.state), operation)
@@ -556,12 +618,14 @@ class PlannerSeam:
                 # would find the earlier entry's plan still on record and,
                 # with this seam's pair built with `question_fixed=True`,
                 # could only amend it, since `starts_new_plan` is refused.
-                # Clearing `_BRIEFED_STATE_KEY` alongside makes the very
+                # The plan's alignments go with it (`clear_plan`), so no
+                # amendment of the new draft reads an input the old plan
+                # moved. Clearing `_BRIEFED_STATE_KEY` alongside makes the very
                 # next read of it, two lines below, compute a fresh `True`
                 # for this call, so the entry gets the full brief rather
                 # than the continuing-call message a session that has
                 # already been briefed gets.
-                ctx.session.state[PLAN_STATE_KEY] = None
+                clear_plan(cast(SessionState, ctx.session.state))
                 ctx.session.state[_BRIEFED_STATE_KEY] = False
                 # A first draft may decline an ask no requirement kind states,
                 # which no tool's answer could ever earn, except one a
@@ -578,88 +642,100 @@ class PlannerSeam:
         # cancelled on the way out (`translator.discovery.CutCalls`).
         cut_calls = CutCalls()
         cut_calls_token = current_cut_calls.set(cut_calls)
-        try:
-            # `fresh` answers "has this session ever been briefed".
-            fresh = not ctx.session.state.get(_BRIEFED_STATE_KEY, False)
-            ctx.session.state[_BRIEFED_STATE_KEY] = True
-            # Every spec_id the planner's message shows it, written on every
-            # entry so `propose_plan` reads it (`PIN_SOURCES_STATE_KEY`). A
-            # pin of a shown one reuses its block, and one of a shown,
-            # settled measure gets the measure decision `propose_plan`
-            # writes. Readings render on a fresh message only, so a later
-            # entry keeps the ones it rendered, less any the executor has
-            # since refused.
-            ledger = _NO_READINGS
-            if fresh:
-                ledger = _readings_ledger(readings)
-                # An earlier turn's spec_id pins from the block its own turn
-                # stored; this turn's search of one replaces it.
-                prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
-                blocks = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
-                searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
-                sources = _reading_pin_sources(
-                    readings,
-                    ledger.spec_ids,
-                    blocks=blocks,
-                    earlier=_named(prior.get("readings", ())) - searched,
-                    warnings={
-                        **prior.get("warnings", {}),
-                        **(ctx.state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}),
-                    },
-                )
-            else:
-                sources = pin_sources(cast(SessionState, ctx.session.state))
-            refused = {spec_id for spec_id, _ in _refused_specs(refusal)}
-            sources = {k: v for k, v in sources.items() if k not in refused}
-            save_pin_sources(cast(SessionState, ctx.session.state), sources)
-            message = self._message(
-                fresh=fresh,
-                question=question,
-                prior_plan=_as_authored(seeded),
-                refusal=refusal,
-                amendment=amendment,
-                canvas_digest=canvas_digest,
-                conversation_digest=conversation_digest,
-                ledger=ledger,
-                asks=load_asks(cast(SessionState, ctx.session.state)),
-                ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
-                asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
-            )
-            submitted, plan, refused = await self._propose(
-                ctx=ctx, message=message, on_progress=on_progress
-            )
-            if refused is not None:
-                return self._refused(refused)
-            assert submitted is not None and plan is not None, (
-                "_propose answers a refusal unless a proposal declared the plan on record "
-                "ready (see planner.agent.declare_ready)"
-            )
-            if plan.status is not PlanStatus.PENDING_APPROVAL:
-                # `declare_ready` enforces this (`planner.agent.
-                # _execution_blocked`); repeated here so a future gap in that
-                # allowlist reaches this seam as a loud `PlannerSeamError`
-                # instead of a plan the graph shows the user as approvable.
-                raise PlannerSeamError(
-                    f"a plan that is {plan.status.value} was declared ready, not "
-                    "pending_approval; refusing to report it ready"
-                )
-            return {"plan": plan.model_dump(mode="json"), "summary": submitted["summary"]}
-        finally:
-            # Every exit of this method runs through here -- a normal
-            # return, a raised `PlannerSeamError`, and a `NodeInterruptedError`
-            # propagating straight out of `_propose`'s own `await
-            # ctx.run_node(...)` (a planner-side `adk_request_input` ask)
-            # alike. `finally` is what makes the last of those work: that
-            # exception is never caught anywhere in this method, so only code
-            # that always runs on the way out, regardless of how the method
-            # is leaving, ever gets a chance to run before the flush this
-            # node's own `NodeRunner` performs on the way to reporting the
-            # pause (see `_persist_durable`'s own docstring).
+        # A `resolve_definition` call this turn already made is served its answer
+        # (`translator.discovery.resolving_once`).
+        with resolving_once(cast(SessionState, ctx.state)):
             try:
-                self._persist_durable(ctx)
+                # `fresh` answers "has this session ever been briefed".
+                fresh = not ctx.session.state.get(_BRIEFED_STATE_KEY, False)
+                ctx.session.state[_BRIEFED_STATE_KEY] = True
+                # Every spec_id the planner's message shows it, written on every
+                # entry so `propose_plan` reads it (`PIN_SOURCES_STATE_KEY`). A
+                # pin of a shown one reuses its block, and one of a shown,
+                # settled measure gets the measure decision `propose_plan`
+                # writes. Readings render on a fresh message only, so a later
+                # entry keeps the ones it rendered, less any the executor has
+                # since refused.
+                ledger = _NO_READINGS
+                if fresh:
+                    ledger = _readings_ledger(readings)
+                    # An earlier turn's spec_id pins from the block its own turn
+                    # stored; this turn's search of one replaces it.
+                    prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
+                    blocks = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+                    searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
+                    sources = _reading_pin_sources(
+                        readings,
+                        ledger.spec_ids,
+                        blocks=blocks,
+                        earlier=_named(prior.get("readings", ())) - searched,
+                        warnings={
+                            **prior.get("warnings", {}),
+                            **(ctx.state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}),
+                        },
+                    )
+                else:
+                    sources = pin_sources(cast(SessionState, ctx.session.state))
+                refused = {spec_id for spec_id, _ in _refused_specs(refusal)}
+                sources = {k: v for k, v in sources.items() if k not in refused}
+                save_pin_sources(cast(SessionState, ctx.session.state), sources)
+                message = self._message(
+                    fresh=fresh,
+                    question=question,
+                    prior_plan=_as_authored(seeded),
+                    refusal=refusal,
+                    amendment=amendment,
+                    pick=pick,
+                    canvas_digest=canvas_digest,
+                    conversation_digest=conversation_digest,
+                    ledger=ledger,
+                    asks=load_asks(cast(SessionState, ctx.session.state)),
+                    ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
+                    asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
+                )
+                submitted, plan, refused = await self._propose(
+                    ctx=ctx, message=message, on_progress=on_progress
+                )
+                if refused is not None:
+                    if pick is not None:
+                        # The card shows why under the decision the user
+                        # switched, as for a switch revised in code.
+                        state = cast(SessionState, ctx.session.state)
+                        return self._revision_refused(
+                            refused,
+                            words=_revision_words(load_plan(state), seeded, state=state)
+                            if seeded is not None
+                            else PlanWords(),
+                        )
+                    return self._refused(refused)
+                assert submitted is not None and plan is not None, (
+                    "_propose answers a refusal unless a proposal declared the plan on record "
+                    "ready (see planner.agent.declare_ready)"
+                )
+                if plan.status is not PlanStatus.PENDING_APPROVAL:
+                    # `declare_ready` enforces this (`planner.agent.
+                    # _execution_blocked`); repeated here so a future gap in that
+                    # allowlist reaches this seam as a loud `PlannerSeamError`
+                    # instead of a plan the graph shows the user as approvable.
+                    raise PlannerSeamError(
+                        f"a plan that is {plan.status.value} was declared ready, not "
+                        "pending_approval; refusing to report it ready"
+                    )
+                return {"plan": plan.model_dump(mode="json"), "summary": submitted["summary"]}
             finally:
-                current_cut_calls.reset(cut_calls_token)
-                await cut_calls.close()
+                # Every exit of this method runs through here: a normal return, a
+                # raised `PlannerSeamError`, and a `NodeInterruptedError` from
+                # `_propose`'s own `await ctx.run_node(...)` (a planner-side
+                # `adk_request_input` ask). Nothing in this method catches that
+                # exception, so only a `finally` runs before the flush this
+                # node's own `NodeRunner` performs on the way to reporting the
+                # pause (see `_persist_durable`'s own docstring).
+                try:
+                    store_searched_pin_readings(ctx, cast(SessionState, ctx.session.state))
+                    self._persist_durable(ctx)
+                finally:
+                    current_cut_calls.reset(cut_calls_token)
+                    await cut_calls.close()
 
     @staticmethod
     def _persist_durable(ctx: Context) -> None:
@@ -704,7 +780,7 @@ class PlannerSeam:
         if plan is not None:
             save_plan(cast(SessionState, ctx.state), plan)
         elif PLAN_STATE_KEY in ctx.session.state:
-            ctx.state[PLAN_STATE_KEY] = None
+            clear_plan(cast(SessionState, ctx.state))
         save_plan_rounds(cast(SessionState, ctx.state), load_plan_rounds(session_state))
         if ctx.session.state.get(_BRIEFED_STATE_KEY, False):
             ctx.state[_BRIEFED_STATE_KEY] = True
@@ -717,10 +793,12 @@ class PlannerSeam:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
-        # `COMPILE_FAILURES_STATE_KEY` and `AMENDMENT_ENTRY_STATE_KEY` too.
-        # The declines an ask-the-user resume still owes or may make, the
-        # failures it may repeat, and the amendment that opened it are this
-        # entry's own.
+        # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
+        # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY` and
+        # `SEARCHED_PINS_STATE_KEY` too. The declines an ask-the-user resume
+        # still owes or may make, the failures it may repeat, the amendment
+        # or card pick that opened it and the pins compiled for its proposals
+        # are this entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
@@ -728,9 +806,105 @@ class PlannerSeam:
             REDUCTION_REFUSED_ASKS_STATE_KEY,
             COMPILE_FAILURES_STATE_KEY,
             AMENDMENT_ENTRY_STATE_KEY,
+            DECISION_PICK_STATE_KEY,
+            ALIGNED_PINS_STATE_KEY,
+            SEARCHED_PINS_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
+
+    async def revise(
+        self,
+        *,
+        ctx: Context,
+        prior_plan: dict[str, Any],
+        evidence_requirements: Sequence[Mapping[str, Any]],
+        inherits: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Amend `prior_plan` with `evidence_requirements` and translate it, calling no model.
+
+        `harness.graph.PlannerModel.revise`'s contract. The proposal runs
+        the chain `propose_plan` runs (`submission.service.submit`), reading
+        each first year it needs and compiling each input a calculation needs
+        on another basis or provider scope (`planner.agent.with_source_reads`), then
+        the translation, and the plan is ready when `declare_ready` says so.
+        A dataset requirement re-pinned to another spec_id cites the
+        decisions that pin states and drops those of the one it left, which
+        go with it. The proposal opens its own round count, as a planner
+        entry does. `inherits` maps each new spec_id to the one it
+        replaces (`_RevisionSession`).
+
+        Returns `{"plan", "summary"}` once the revised plan awaits approval,
+        or `{"refused": ...}` as `__call__` refuses, with `reason` beside
+        (`_revision_refused`), the revision recording
+        a version or not; the caller restores what it keeps. A translation
+        that refers the plan back refuses as an entry ending on that
+        referral does: on its closing refusal (`_closing_refusal`), on the
+        service that did not answer for a transient one, which no later round
+        proposes again (`_unanswered`), or as `SeamCode.PLAN_NOT_READY` with
+        the referral's reason (`_not_ready`), since no model is there to
+        settle it.
+
+        A `resolve_definition` call this turn already made is served its
+        answer (`translator.discovery.resolving_once`).
+        """
+        with resolving_once(cast(SessionState, ctx.state)):
+            return await self._revised(
+                ctx=ctx,
+                prior_plan=prior_plan,
+                evidence_requirements=evidence_requirements,
+                inherits=inherits,
+            )
+
+    async def _revised(
+        self,
+        *,
+        ctx: Context,
+        prior_plan: dict[str, Any],
+        evidence_requirements: Sequence[Mapping[str, Any]],
+        inherits: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """`revise`'s answer, inside the turn's answers."""
+        state = cast(SessionState, ctx.state)
+        prior = Plan.model_validate(prior_plan)
+        save_plan(state, prior)
+        save_plan_rounds(state, 0)
+        view = _RevisionSession(tool_context=ctx, inherits=dict(inherits))
+        proposal = Proposal(
+            evidence_requirements=list(evidence_requirements), amends_version=prior.version
+        )
+        recorded = await with_source_reads(
+            lambda: submit(
+                view,
+                proposal,
+                question_fixed=True,
+                reads_user_words=False,
+                proposer=PROPOSE_PLAN_PROPOSER,
+            ),
+            state=state,
+            surface=self._surface,
+        )
+        store_searched_pin_readings(ctx, state)
+        if recorded.get("outcome") != Outcome.OK.value:
+            return self._revision_refused(recorded, words=plan_display.plan_words(prior))
+        translation = await self._translate(ctx)
+        referral = PlannerSeam._referral_dict(translation)
+        if referral is not None:
+            return self._revision_refused(
+                PlannerSeam._closing_refusal(referral)
+                or _unanswered(referral)
+                or _not_ready(referral),
+                words=_revision_words(load_plan(state), prior, state=state),
+            )
+        answer = declare_ready({**recorded, "translation": translation}, ctx)
+        plan = load_plan(state)
+        if "summary" not in answer or plan is None:
+            blocked = answer.get("submission") or answer.get("translation")
+            return self._revision_refused(
+                cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer),
+                words=_revision_words(plan, prior, state=state),
+            )
+        return {"plan": plan.model_dump(mode="json"), "summary": answer["summary"]}
 
     # -- one agent run ------------------------------------------------------
 
@@ -998,8 +1172,10 @@ class PlannerSeam:
             # `PlannerSeam.__init__`). The cap bounds the proposals within
             # one entry into the planner, since `PlannerSeam.__call__`
             # resets the count on each entry (see `__call__`); a restart is
-            # refused however fresh that budget is. Stop the planner's turn
-            # here either way.
+            # refused however fresh that budget is. `NOTHING_TO_PLAN` declines
+            # every ask, and `PRICES_UNSERVED` needs a search the planner
+            # cannot make (`submission.prices_choice`). Stop the planner's
+            # turn here in every case.
             tracker.ready_to_break = True
             tracker.refused = tool_response
         elif isinstance(tool_response, dict):
@@ -1068,8 +1244,9 @@ class PlannerSeam:
     @staticmethod
     def _refused(refused: dict[str, Any]) -> dict[str, Any]:
         """What `__call__` answers for a refusal that ends the entry: its plain
-        sentence (`harness.sentences.refusal_sentence`), whether another plan
-        for the same ask could succeed, and its code."""
+        sentence (`harness.sentences.refusal_sentence`), which the planner and
+        the orchestrator read, whether another plan for the same ask could
+        succeed, and its code."""
         return {
             "refused": {
                 "text": refusal_sentence(refused),
@@ -1077,6 +1254,16 @@ class PlannerSeam:
                 "code": refused.get("code"),
             }
         }
+
+    @staticmethod
+    def _revision_refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
+        """What `revise` answers for a refusal: `_refused`'s, with why alone
+        as one sentence for the user (`harness.sentences.refusal_reason`),
+        naming requirements by `words` (`harness.plan_display.plan_words`), under `reason`, which
+        a switch that did not apply shows under its choice."""
+        answer = PlannerSeam._refused(refused)
+        answer["refused"]["reason"] = refusal_reason(refused, words=words)
+        return answer
 
     @staticmethod
     def _is_terminal_refusal(tool_response: dict[str, Any] | None) -> bool:
@@ -1152,14 +1339,16 @@ class PlannerSeam:
         return None
 
     @staticmethod
-    def _stalled_referral(
-        response: dict[str, Any] | None, counts: dict[tuple[str, str | None, str | None], int]
-    ) -> bool:
-        """Count one referral by its kind, its requirement and the compile
-        issue it names as its `constraint`, and answer whether that exact
+    def _stalled_referral(response: dict[str, Any] | None, counts: dict[StallKey, int]) -> bool:
+        """Count one referral by its kind, its requirement, the compile
+        issue it names as its `constraint` and the entities its
+        `ambiguous_entities` leave unsettled, and answer whether that exact
         referral has now come back a second time, which stops the run. Two
         different repairs on one requirement count apart, so a planner that
-        fixes one compile issue per round keeps going. A third repetition
+        fixes one compile issue per round keeps going, and an
+        `entity_name_ambiguous` referral covering fewer entities counts
+        apart, so a planner that settles one end of "aid from Congo to Congo"
+        per round keeps going too. A third repetition
         would carry nothing a model could act on that the second one did not
         already say. A referral marked `repeated` ends the entry instead
         (`_closing_refusal`). A transient referral is never counted: the same
@@ -1171,7 +1360,11 @@ class PlannerSeam:
         kind = referral.get("kind")
         if kind is None:
             return False
-        key = (kind, referral.get("requirement_id"), referral.get("constraint"))
+        unsettled = tuple(
+            (reading["entity"]["name"], reading["entity"].get("role"))
+            for reading in referral.get("ambiguous_entities") or ()
+        )
+        key = (kind, referral.get("requirement_id"), referral.get("constraint"), unsettled)
         counts[key] = counts.get(key, 0) + 1
         return counts[key] >= 2
 
@@ -1188,6 +1381,7 @@ class PlannerSeam:
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
         ledger: RenderedReadings = _NO_READINGS,
+        pick: DecisionPick | None = None,
         asks: Sequence[str] = (),
         ask_breakdowns: Sequence[AskBreakdown] = (),
         asks_across_years: Sequence[int] = (),
@@ -1199,7 +1393,9 @@ class PlannerSeam:
         conversation digests, the plan being changed, and the question.
         `fresh=False` -- a later `__call__` re-entering over the
         `amend`/`replan` edge -- renders only the new thing: the
-        `amendment`/`refusal` ask. `prior_plan` is never rendered when
+        `amendment`/`refusal` ask, and the option `pick` the user picked on
+        the plan card, on a line of its own, apart from any amendment.
+        `prior_plan` is never rendered when
         `fresh` is `False`, even though it is still accepted here and still
         seeded into `propose_plan`'s own drafting state unconditionally
         (`__call__`'s own `save_plan` call, which does not read `fresh`).
@@ -1221,7 +1417,8 @@ class PlannerSeam:
         The question and the amendment are the user's own words, and a refusal
         carries text from the run that failed. Nothing bounds their length on
         the wire, so each renders cut to `MAX_QUESTION_CHARS`
-        (`planner.plan.cut_user_text`), the size `Plan.question` holds.
+        (`planner.plan.cut_user_text`), the size `Plan.question` holds,
+        except a refusal's errors, which render whole (`_refusal_text`).
 
         `prior_plan` is the plan being changed as the model wrote it
         (`_as_authored`), and renders as a digest, through `_plan_context`. The
@@ -1248,8 +1445,22 @@ class PlannerSeam:
             stop = {key: value for key, value in refusal.items() if key != "computed_asks"}
             ask = (
                 f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
-                f"Refusal: {cut_user_text(json.dumps(stop), MAX_QUESTION_CHARS)}\n"
+                f"Refusal: {_refusal_text(stop)}\n"
                 f"Call {PROPOSE_PLAN} again with a plan that avoids it.{avoid}\n"
+            )
+        if pick is not None:
+            ask += (
+                f"\nOn the plan card the user picked {pick.chosen!r} for decision "
+                f"{pick.slot!r}. Call {PROPOSE_PLAN} again with that decision's `chosen` "
+                f"set to {pick.chosen!r} and the evidence requirements citing it changed to "
+                "state what that option asks for, which has it translated and compiled again. "
+                "Change only that decision and the requirements that cite it. Carry every other "
+                "requirement, with its id, its content and its citations, and every other "
+                "decision exactly as the plan card has them. Keep the id of any replaced "
+                "requirement that another requirement reads. Cite that decision, and every "
+                "decision of the user's that all the replaced requirements cited, from each "
+                "requirement you add, and cite any other decision of the user's a replaced "
+                "requirement cited from at least one of them.\n"
             )
         if not fresh:
             return ask
@@ -1266,6 +1477,46 @@ class PlannerSeam:
         )
 
 
+def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) -> PlanWords:
+    """How a sentence about `revision`, which did not compile, names its
+    requirements (`harness.plan_display.plan_words`): each `prior`, the plan the
+    card shows, holds by its name there, and each new one by its own, read off
+    the source Search answered for its pin (`_sources_by_spec_id`)."""
+    if revision is None:
+        return plan_display.plan_words(prior)
+    return plan_display.plan_words(
+        revision, shown_as=prior, pinned=_sources_by_spec_id(state, revision)
+    )
+
+
+def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
+    """Every spec block `state` holds a pin's source in, by spec_id: those on
+    record (`held_sources`), then this turn's searches (`ORCHESTRATOR_SPECS_KEY`)
+    in place of those for their spec_ids. A pin compiled for a calculation's
+    input gives its block only to a spec_id no dataset the planner was shown
+    holds, so a pin of a shown dataset reads the block it was shown with,
+    whatever compile shares its spec_id."""
+    blocks: dict[str, Mapping[str, Any]] = {
+        spec_id: block
+        for spec_id, held in held_sources(state).items()
+        if (block := held.spec_block(spec_id)) is not None
+    }
+    blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    return blocks
+
+
+def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
+    """The source each spec_id a retrieval of `plan` pins reads, by spec_id,
+    from the block `state` holds for it (`_spec_blocks`). A pin copied over
+    its requirement's window (`planner.plan.windowed_pins`) reads its
+    origin's block. A block not readable as a source is left out, so the
+    retrieval is named by its composed label."""
+    to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
+    blocks = _spec_blocks(state)
+    sources = SourceReadings(lambda spec_id: blocks.get(to_origin.get(spec_id, spec_id)))
+    return pinned_sources(plan.evidence_requirements, sources)
+
+
 def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
     """What a refusal ending on `referral` carries for its sentence and its reader."""
     return {key: referral.get(key) for key in ("kind", "requirement_id", "reason", "constraint")}
@@ -1279,6 +1530,25 @@ def _not_ready(referral: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _unanswered(referral: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The refusal a revision ends on for a transient referral, or `None` for
+    any other: Search not answering as `SeamCode.DISCOVERY_UNAVAILABLE`, and
+    any other service, such as the calculation service, as
+    `ProblemCode.SURFACE_UNAVAILABLE`. Each carries the requirement the
+    referral is about and its reason."""
+    if referral.get("outcome") != Outcome.TRANSIENT.value:
+        return None
+    return {
+        "code": SeamCode.DISCOVERY_UNAVAILABLE
+        if referral.get("kind") == ReferralKind.DISCOVERY_UNAVAILABLE
+        else ProblemCode.SURFACE_UNAVAILABLE,
+        "detail": {
+            "requirement_id": referral.get("requirement_id"),
+            "reason": referral.get("reason"),
+        },
+    }
+
+
 def _stop_response(refused: Mapping[str, Any]) -> LlmResponse:
     """The terminal text `_before_planner_model` substitutes for a generation,
     stating the refusal the run ends on in its user sentence."""
@@ -1288,6 +1558,137 @@ def _stop_response(refused: Mapping[str, Any]) -> LlmResponse:
             parts=[types.Part(text=f"Stopping this turn: {refusal_sentence(refused)}")],
         )
     )
+
+
+def _refusal_text(refusal: Mapping[str, Any]) -> str:
+    """`refusal`, a failed run's replan payload, as JSON the planner reads, with every kind of error in it.
+
+    Each `issues` list, the refusal's own and each `also_stopped` entry's,
+    lists its errors first. Past `MAX_QUESTION_CHARS`, the issues that are
+    not errors give way to a count of each code under `warnings_left_out`.
+    Still past it, the rest of the refusal is cut to `MAX_QUESTION_CHARS`
+    (`planner.plan.cut_user_text`) and the errors follow it under `Errors:`
+    (`_errors_listed`), so four `window_short` warnings never push the
+    `entity_missing` errors behind them out of the planner's sight.
+    """
+    split = _split(refusal)
+    ordered = _issues_shown(split, warnings=True)
+    if len(text := json.dumps(ordered)) <= MAX_QUESTION_CHARS:
+        return text
+    summarised = _issues_shown(split, warnings=False)
+    if len(text := json.dumps(summarised)) <= MAX_QUESTION_CHARS:
+        return text
+    stopped = [split, *(one for one in split.also_stopped or () if isinstance(one, _Split))]
+    failing = [
+        {key: issue[key] for key in _ERROR_FIELDS if key in issue}
+        for one in stopped
+        for issue in one.failing
+    ]
+    rest = cut_user_text(
+        json.dumps(_issues_shown(split, warnings=False, errors=False)), MAX_QUESTION_CHARS
+    )
+    return f"{rest}\n{_errors_listed(failing)}" if failing else rest
+
+
+# The fields of an evidence error `_refusal_text` keeps when it lists the errors
+# on their own: what failed, where, and what the plan asked for.
+_ERROR_FIELDS = ("code", "requirement_id", "detail", "required")
+
+# The characters past the first error of each requirement and code that
+# `_errors_listed` fills with further errors before it counts the rest. A
+# grain or coverage error comes once per series, so a retrieval over hundreds
+# of series would otherwise put hundreds of errors in one prompt.
+_ERRORS_BUDGET = 2 * MAX_QUESTION_CHARS
+
+
+def _errors_listed(failing: Sequence[Mapping[str, Any]]) -> str:
+    """The `Errors:` lines of `_refusal_text`: each error whole that the bound allows, and the rest counted.
+
+    The first error of each `(requirement_id, code)` is always listed, so
+    every requirement and every kind of error reaches the planner. Further
+    errors follow in order while the list stays within `_ERRORS_BUDGET`
+    characters past those firsts, and the rest are counted by code under
+    `Errors left out:`.
+    """
+    seen: set[tuple[object, object]] = set()
+    firsts: list[int] = []
+    for index, error in enumerate(failing):
+        key = (error.get("requirement_id"), error.get("code"))
+        if key not in seen:
+            seen.add(key)
+            firsts.append(index)
+    kept = set(firsts)
+    room = _ERRORS_BUDGET
+    for index, error in enumerate(failing):
+        if index in kept:
+            continue
+        size = len(json.dumps(error)) + 2
+        if size > room:
+            break
+        kept.add(index)
+        room -= size
+    listed = [error for index, error in enumerate(failing) if index in kept]
+    left_out = Counter(
+        str(error.get("code")) for index, error in enumerate(failing) if index not in kept
+    )
+    text = f"Errors: {json.dumps(listed)}"
+    return f"{text}\nErrors left out: {json.dumps(dict(left_out))}" if left_out else text
+
+
+@dataclass(frozen=True, slots=True)
+class _Split:
+    """A replan refusal with its evidence issues split once by severity, for `_issues_shown`.
+
+    `failing` holds the issues whose severity is `error` and `others` the
+    rest, each in the refusal's order; both are empty when `issues` is not a
+    list. `also_stopped` holds each `also_stopped` entry split the same way,
+    an entry that is not a dict as it is, and is `None` when the refusal's
+    `also_stopped` is not a list.
+    """
+
+    refusal: Mapping[str, Any]
+    failing: list[Mapping[str, Any]]
+    others: list[Mapping[str, Any]]
+    also_stopped: list[_Split | Any] | None
+
+
+def _split(refusal: Mapping[str, Any]) -> _Split:
+    """`refusal` and each of its `also_stopped`, their issues split by severity in one pass."""
+    failing: list[Mapping[str, Any]] = []
+    others: list[Mapping[str, Any]] = []
+    issues = refusal.get("issues")
+    for issue in issues if isinstance(issues, list) else ():
+        if isinstance(issue, dict):
+            (failing if issue.get("severity") == Severity.ERROR.value else others).append(issue)
+    siblings = refusal.get("also_stopped")
+    return _Split(
+        refusal=refusal,
+        failing=failing,
+        others=others,
+        also_stopped=[_split(one) if isinstance(one, dict) else one for one in siblings]
+        if isinstance(siblings, list)
+        else None,
+    )
+
+
+def _issues_shown(split: _Split, *, warnings: bool, errors: bool = True) -> dict[str, Any]:
+    """`split`'s refusal and each of its `also_stopped` with its issues' errors first, then,
+    when `warnings`, the rest; otherwise the rest counted by code under `warnings_left_out`.
+    Without `errors`, the errors are counted by code under `errors_listed` too."""
+    shown = dict(split.refusal)
+    if "issues" in shown:
+        failing, others = split.failing, split.others
+        shown["issues"] = [*(failing if errors else ()), *(others if warnings else ())]
+        if others and not warnings:
+            shown["warnings_left_out"] = dict(Counter(str(issue.get("code")) for issue in others))
+        if failing and not errors:
+            shown["errors_listed"] = dict(Counter(str(issue.get("code")) for issue in failing))
+    if split.also_stopped is not None:
+        shown["also_stopped"] = [
+            _issues_shown(one, warnings=warnings, errors=errors) if isinstance(one, _Split) else one
+            for one in split.also_stopped
+        ]
+    return shown
 
 
 def _failed_run_sentence(computed: Sequence[int] | None) -> str:
@@ -1517,6 +1918,46 @@ def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
         newest_per_spec_id([SearchReading.model_validate(reading) for reading in readings]),
         budget=_READINGS_BUDGET,
     )
+
+
+def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> None:
+    """Store each dataset Search settled on for a calculation's input the planner
+    pinned none for as a reading of the conversation.
+
+    `planner_state` holds those searches (`submission.service.searched_pins`),
+    each with Search's answer as a digest. One no reading of the conversation
+    names yet joins this turn's readings through `store_search`, as the
+    `switch` node stores a switched one: under the words it was searched as,
+    with the parties the search named and held open, its block marking every
+    axis those words settled as the planner's.
+
+    A pin compiled for a calculation's input (`submission.service.AlignedPin`)
+    is no reading: admission derives it again on every proposal, a switch of
+    the axis it moved, or of a row of a requirement pinning it directly,
+    resubmits from the compile itself (`harness.graph.switch`), and a later
+    turn reads its spec_id as any source the translator found
+    (`harness.turn_records.PlanRecord.source_readings`).
+    """
+    searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]
+    if not searched:
+        return
+    stored = {
+        SearchReading.model_validate(reading).spec_id
+        for reading in (
+            *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+            *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+        )
+    }
+    for found in searched:
+        if found.spec_id in stored or found.digest is None:
+            continue
+        store_search(
+            cast(SessionState, ctx.state),
+            found.digest,
+            asked=[found.asked_roles],
+            held_open=[found.open_roles],
+        )
+        stored.add(found.spec_id)
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:

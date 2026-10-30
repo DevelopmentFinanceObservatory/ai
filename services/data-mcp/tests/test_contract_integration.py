@@ -27,7 +27,7 @@ from data_mcp.graph_wire import (
     SourceNode,
     StatVarNode,
 )
-from data_mcp.search_tool import SearchPart, SearchSource, to_wire_request
+from data_mcp.search_tool import SearchContext, SearchPart, SearchSource, to_wire_request
 
 _GRAPH_SCHEMA_SNAPSHOT = Path(__file__).resolve().parent / "fixtures" / "graph_api_schema.json"
 
@@ -58,7 +58,10 @@ async def test_wire_request_validates_against_the_published_request_schema() -> 
 
     Validates the wire shape itself, a tagged union on `kind`, via a full
     `jsonschema` validation rather than a version check, so it catches a
-    contract drift a field-name walk would miss.
+    contract drift a field-name walk would miss. The request carries the
+    conversation context, `user_message` and a carried entry, so it fails
+    against a deployment that does not declare them, where
+    `Settings.search_sends_conversation_context` must stay off.
     """
     base_url = os.environ["DFO_APIS_URL"]
     async with httpx2.AsyncClient(base_url=base_url, timeout=10.0) as client:
@@ -74,8 +77,21 @@ async def test_wire_request_validates_against_the_published_request_schema() -> 
             )
         ],
     )
-    wire = to_wire_request([part], raw_query=None)
+    context = SearchContext(
+        user_message="debt service to Ghana, not from IDS",
+        carried_entries=[
+            {
+                "axis": "sector",
+                "option_id": "sector:120",
+                "provenance": "carried",
+                "concept": "health",
+                "origin": {"kind": "choice", "choice_id": "spec_0123:sector"},
+            }
+        ],
+    )
+    wire = to_wire_request([part], raw_query=None, context=context)
 
+    assert {"user_message", "carried_entries"} <= set(wire["input"])
     jsonschema.validate(instance=wire, schema=request_schema)
 
 

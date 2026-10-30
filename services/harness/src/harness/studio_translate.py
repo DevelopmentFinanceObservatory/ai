@@ -40,13 +40,14 @@ import functools
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
 from common.refusal import refusal_code
+from common.telemetry import record_event
 from compiler.surface import (
     ProgressCallback,
     ToolCallResult,
@@ -66,7 +67,7 @@ from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.agent import PROPOSE_PLAN
 from planner.phrasing import entities_phrase
-from planner.plan import PLAN_STATE_KEY, DatasetRequirement
+from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
@@ -84,6 +85,7 @@ from harness.graph.state import (
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
 )
+from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import (
@@ -91,12 +93,15 @@ from harness.provenance import (
     manifest_with_stat_vars,
     retrieval_frame_ref,
 )
+from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
     StudioStore,
+    _PendingChoice,
     _PendingInterrupt,
+    _PendingOption,
     _PendingQuestion,
     _wire_id,
 )
@@ -104,9 +109,10 @@ from harness.studio_state import (
     land_component as state_land_component,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
-from harness.turn_records import loose_match_notes
+from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
 from harness.wire import (
     ActivityStep,
+    ApplyChoiceSuggestion,
     ComponentCreated,
     CompositionUpdated,
     Done,
@@ -119,12 +125,18 @@ from harness.wire import (
     MessageComplete,
     MessageDelta,
     PlanAction,
+    PlanApproved,
+    PlanApprovedChoice,
+    PlanApprovedStep,
     PlanAsk,
     PlanDecision,
+    PlanDecisionOption,
+    PlanMoved,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
     PlanStep,
+    PlanSwitchFailed,
     PlanVersioned,
     RetryMode,
     StepProduced,
@@ -194,6 +206,7 @@ _TOOL_LABELS = {
     "describe_component": "Reading a card",
     "write_component": "Adding a chart",
     SEED_STEP_TOOL: "Receive the datasets from Search",
+    APPLY_CHOICE_STEP_TOOL: "Count your choice",
 }
 # A tool with no label above is never shown by its machine name.
 _UNNAMED_TOOL_LABEL = "Working on your request"
@@ -937,6 +950,9 @@ def _refused_detail(record: _ExecutorRecord) -> str:
     if record.tool == SEED_STEP_TOOL:
         return _SEEDS_UNUSED if record.step_id == SEEDS_STEP_ID else _SEED_UNUSED
     refusal = record.result.get("refusal")
+    if record.tool == APPLY_CHOICE_STEP_TOOL and isinstance(refusal, Mapping):
+        # The note a plan card's switch shows (`harness.graph.switch`).
+        return str(refusal.get("message"))
     return failure_detail(refusal if isinstance(refusal, Mapping) else {})
 
 
@@ -1021,6 +1037,178 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
     return f"{phrase} and {len(datasets) - 1} more" if len(datasets) > 1 else phrase
 
 
+def _choice_members(
+    decision: Decision | None, plan: PlannerPlan, named: Callable[[str], str]
+) -> dict[str, Any]:
+    """The `PlanDecision` members a switchable decision of `plan` adds: the id
+    of its row, its active option and each option with its label and status.
+
+    A scope decision's row takes `plan_display.choice_id`, and each option
+    the status Search gave it, its years and why it is limited
+    (`REASON_COPY`). A planner decision the card can switch
+    (`plan_display.switchable_decision`) takes `plan_display.
+    decision_choice_id`, and each option `plan_display.decision_option_id`,
+    its label in the card's words (`named`) and status "available", the
+    chosen one active. Empty for any other decision.
+    """
+    if decision is None:
+        return {}
+    if decision.scope is not None:
+        return {
+            "choice_id": plan_display.choice_id(plan, decision),
+            "active_option_id": decision.active_option_id,
+            "options": [
+                PlanDecisionOption(
+                    option_id=state.option_id,
+                    label=label,
+                    status=state.status,
+                    reason=REASON_COPY.get(state.code) if state.code is not None else None,
+                    years=list(state.years) if state.years is not None else None,
+                )
+                for label, state in zip(decision.options, decision.scope.options, strict=True)
+            ],
+        }
+    if not plan_display.switchable_decision(decision):
+        return {}
+    return {
+        "choice_id": plan_display.decision_choice_id(decision),
+        "active_option_id": plan_display.decision_option_id(decision.chosen),
+        "options": [
+            PlanDecisionOption(
+                option_id=plan_display.decision_option_id(option),
+                label=named(option),
+                status="available",
+            )
+            for option in decision.options
+        ],
+    }
+
+
+def _search_default(decision: Decision | None) -> bool:
+    """Whether `decision` states a scope choice Search's default settled."""
+    return (
+        decision is not None
+        and decision.scope is not None
+        and decision.scope.provenance == "default"
+    )
+
+
+def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
+    """The choices of the card's `decisions` a switch may name, by choice id:
+    scope choices and switchable planner decisions (`_choice_members`).
+
+    A choice is switchable when an option other than its active one is
+    available or partial. The plan card lists `PlanAction.SWITCH` only
+    when one is, and `/interrupt` checks a switch against what is kept.
+    """
+    choices: dict[str, _PendingChoice] = {}
+    for decision in decisions:
+        if decision.choice_id is None or decision.options is None:
+            continue
+        assert decision.active_option_id is not None
+        if not any(
+            option.status != "unavailable" and option.option_id != decision.active_option_id
+            for option in decision.options
+        ):
+            continue
+        choices[decision.choice_id] = _PendingChoice(
+            active=decision.active_option_id,
+            options={
+                option.option_id: _PendingOption(label=option.label, status=option.status)
+                for option in decision.options
+            },
+        )
+    return choices
+
+
+def held_labels(card: PlanProposed) -> dict[str, str]:
+    """The label of the option each switchable choice of `card` holds, by choice id; the
+    option's id where the choice lists no option by that id."""
+    return {
+        decision.choice_id: next(
+            (
+                option.label
+                for option in decision.options or ()
+                if option.option_id == decision.active_option_id
+            ),
+            decision.active_option_id or "",
+        )
+        for decision in card.decisions or ()
+        if decision.choice_id is not None
+    }
+
+
+def plan_approved(
+    card: PlanProposed,
+    *,
+    seq: int,
+    baseline: Mapping[str, str],
+) -> PlanApproved:
+    """The `plan.approved` frame for the plan card the user approved.
+
+    Built from the card, so it states what the user saw: its title, summary,
+    step labels and caveats, and for each decision with a `choice_id`, scope
+    choices and planner decisions (`decision/<slot>`) alike, that id, the
+    short name (`PlanDecision.question`) and the label of the option it
+    held. A choice holding another label than the one `baseline` keeps for
+    its choice id, the label on the card the turn's first switch of it was
+    made from (`ConversationState.turn_choice_baseline`), carries that label
+    as `changed_from`, whether the user switched it or a switch moved it.
+    """
+    labels = held_labels(card)
+    choices = [
+        PlanApprovedChoice(
+            choice_id=decision.choice_id,
+            question=decision.question,
+            chosen=labels[decision.choice_id],
+            changed_from=held
+            if (held := baseline.get(decision.choice_id)) != labels[decision.choice_id]
+            else None,
+        )
+        for decision in card.decisions or ()
+        if decision.choice_id is not None
+    ]
+    return PlanApproved(
+        event="plan.approved",
+        seq=seq,
+        plan_version_id=card.plan_version_id,
+        version=card.version,
+        revision=card.revision,
+        title=card.title,
+        summary=card.summary,
+        steps=[
+            PlanApprovedStep(label=step.label, gives_answer=step.gives_answer)
+            for step in card.steps
+        ],
+        choices=choices,
+        caveats=card.caveats,
+    )
+
+
+def _caveats(plan: PlannerPlan) -> list[str]:
+    """The reason of each decision of `plan` that qualifies the answer
+    (`Decision.caveat`), such as a share whose sides count different
+    providers, in plan order and as the card words it
+    (`plan_display.card_decision_text`), each sentence once."""
+    return list(
+        dict.fromkeys(
+            plan_display.card_decision_text(decision.rationale, plan, decision=decision)
+            for decision in plan.decisions
+            if decision.caveat is not None
+        )
+    )
+
+
+def _switch_failed(payload: Mapping[str, Any]) -> PlanSwitchFailed | None:
+    """The switch that did not apply, on a plan the `switch` node offers
+    again unchanged (`harness.graph.switch`): the choice and option the user
+    picked, the refusal's code, the sentence saying why it failed and
+    whether the same switch can succeed if asked again. `None` on any other
+    plan."""
+    failed = payload.get("switch_failed")
+    return PlanSwitchFailed.model_validate(failed) if failed else None
+
+
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     """The planner node's payload as a `planner.plan.Plan`. The planner
     node itself validates a model-drafted plan (`harness.graph.planning`'s `planner` node
@@ -1034,12 +1222,15 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     a plan again, and `Plan`'s schema has no field for that. `restarted`
     marks an `"ok"` draft made over a plan the node could not read, whose version
     counts from 1 again; `_interrupt_frames` reads it to start a new line of
-    plan version ids.
+    plan version ids. `moved` rides on a plan the `switch` node offers
+    (`harness.graph.switch`): the other scope choices the switch moved;
+    `switch_failed` on one it offers again after a switch that did not
+    apply (`_switch_failed`).
     """
     fields = {
         key: value
         for key, value in payload.items()
-        if key not in ("summary", "revision", "refusal_note", "restarted")
+        if key not in ("summary", "revision", "refusal_note", "restarted", "moved", "switch_failed")
     }
     return PlannerPlan.model_validate(fields)
 
@@ -1134,15 +1325,24 @@ class _Translator:
         conversation: ConversationState,
         recorder: _RecordingExecutor,
         surface_recorder: _RecordingSurface | None = None,
+        approving: PlanProposed | None = None,
     ) -> None:
         self._conversation = conversation
         self._recorder = recorder
         self._surface_recorder = surface_recorder
+        # The plan card the user approved on this segment's first answer to
+        # its interrupt; `plan.approved` states it once the `approve` node
+        # takes the approval, and only then.
+        self._approving = approving
         # The wire `step_id` each step (`_ExecutorRecord.step_id`) was given
         # at its first frame, so its later frames update the same line.
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
         self.paused = False
+        # Whether the planner's latest entry replans for a pick on the plan
+        # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
+        # resumes a stoppable replan.
+        self._pick_replan = False
         # The running status line, as (wire id, label, monotonic start).
         self._status: tuple[str, str, float] | None = None
         self._streamed_text = False
@@ -1213,15 +1413,48 @@ class _Translator:
         # late `progress` reports, carry no output and add no frame.
         started = event.custom_metadata.get(PLANNER_STARTED_KEY) if event.custom_metadata else None
         if node == "planner" and isinstance(started, dict):
+            # The planner drafts the plan again, an amendment's or an execute
+            # replan's, and may reuse the requirement ids the choice ids are
+            # built from, so no earlier card's labels describe its choices.
+            # A pick's replan that raises, is stopped or is refused leaves the
+            # plan unchanged, so it drops them only once it lands, and then
+            # only the scope choices' (below).
+            self._pick_replan = bool(started.get("pick"))
+            if not self._pick_replan:
+                self._conversation.turn_choice_baseline = {}
             label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
         output = event.output if isinstance(event.output, dict) else None
         if output is None:
             return frames
         if node == "approve" and event.actions.route == "approved":
+            if self._approving is not None:
+                frames.append(
+                    plan_approved(
+                        self._approving,
+                        seq=self._conversation.next_seq(),
+                        baseline=self._conversation.turn_choice_baseline,
+                    )
+                )
+                self._approving = None
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
+            if event.actions.route == "ok":
+                # A drafted plan, whose requirement ids, and so its scope
+                # choice ids, may be reused. A planner decision's row is
+                # named by its slot and its options by their labels, so a
+                # pick's replan keeps those rows' labels, and the row the
+                # user switched names the label it was switched from.
+                self._conversation.turn_choice_baseline = (
+                    {
+                        choice_id: label
+                        for choice_id, label in self._conversation.turn_choice_baseline.items()
+                        if choice_id.startswith(plan_display.DECISION_CHOICE_PREFIX)
+                    }
+                    if self._pick_replan
+                    else {}
+                )
             frames.extend(self._close_status())
         return frames
 
@@ -1589,8 +1822,10 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
-            shown_slots = {decision.slot for decision in plan_display.shown_decisions(plan)}
-            named = functools.partial(plan_display.with_source_names, plan=plan)
+            questions = plan_display.card_questions(plan)
+            by_slot = {decision.slot: decision for decision in plan.decisions}
+            named = functools.partial(plan_display.card_decision_text, plan=plan)
+            option_named = functools.partial(plan_display.card_choice_text, plan=plan)
             revision = payload.get("revision")
             steps = [
                 PlanStep(
@@ -1598,12 +1833,13 @@ class _Translator:
                     label=str(row["label"]),
                     description=str(row["description"]),
                     args=cast("dict[str, Any] | None", row["args"]),
+                    gives_answer=bool(row["gives_answer"]),
                 )
-                for row in plan_display.step_rows(plan)
+                for row in plan_display.card_rows(plan)
             ]
             # `plan.workflow.steps`' own ids are what `executor.run.
             # current_step_id` sets and `_ExecutorRecord.step_id` carries
-            # (`plan_display.step_rows` reads the same ids off the same
+            # (`plan_display.card_rows` reads the same ids off the same
             # steps to build `steps` above); the fallback covers a plan
             # whose workflow this payload's `_plan_from_payload` parse
             # somehow left unset. Recorded on the pending interrupt below so
@@ -1619,8 +1855,18 @@ class _Translator:
                 self._surface_recorder.set_step_order(
                     current_conversation_id.get(), step_order, step_labels
                 )
+            # A requirement cites only the card's rows: a caveat it cites
+            # reaches the card as a caveat alone.
             requirements = [
-                PlanRequirement(**cast("dict[str, Any]", row))
+                PlanRequirement.model_validate(row).model_copy(
+                    update={
+                        "decision_ids": [
+                            slot
+                            for slot in cast("list[str]", row["decision_ids"])
+                            if slot in questions
+                        ]
+                    }
+                )
                 for row in plan_display.requirement_rows(plan)
             ]
             operations = [
@@ -1638,40 +1884,65 @@ class _Translator:
                 )
                 for row in plan_display.ask_rows(plan)
             ]
-            frames.append(
-                PlanProposed(
-                    event="plan.proposed",
-                    seq=conversation.next_seq(),
-                    interrupt_id=wire_id,
-                    plan_version_id=plan_version_id,
-                    version=version,
-                    title="Research plan",
-                    steps=steps,
-                    decisions=[
-                        PlanDecision(
-                            id=decision.get("slot", f"d{index + 1}"),
-                            question=named(decision.get("description", "")),
-                            chosen=named(decision.get("chosen", "")),
-                            alternatives=(
-                                [named(option) for option in decision["options"]]
-                                if decision.get("options") is not None
-                                else None
-                            ),
-                            reason=named(decision.get("rationale", "")),
-                            resolved_by=_RESOLVED_BY_TO_WIRE.get(
-                                decision.get("resolved_by", ""), "default"
-                            ),
-                        )
-                        for index, decision in enumerate(payload.get("decisions", []))
-                        if decision.get("slot") in shown_slots
-                    ],
-                    actions=[PlanAction.APPROVE, PlanAction.AMEND, PlanAction.REJECT],
-                    revision=revision,
-                    requirements=requirements,
-                    operations=operations,
-                    asks=asks or None,
+            decisions = [
+                PlanDecision(
+                    id=decision.get("slot", f"d{index + 1}"),
+                    question=questions[decision.get("slot", "")],
+                    chosen=option_named(decision.get("chosen", ""), decision=held, options=offered),
+                    alternatives=(
+                        [
+                            option_named(option, decision=held, options=offered)
+                            for option in decision["options"]
+                        ]
+                        if decision.get("options") is not None
+                        else None
+                    ),
+                    # A reason saying only that Search's default holds says nothing.
+                    reason=""
+                    if _search_default(held)
+                    else named(decision.get("rationale", ""), decision=held),
+                    resolved_by=_RESOLVED_BY_TO_WIRE.get(
+                        decision.get("resolved_by", ""), "default"
+                    ),
+                    **_choice_members(
+                        held,
+                        plan,
+                        functools.partial(option_named, decision=held, options=offered),
+                    ),
                 )
+                for index, decision in enumerate(payload.get("decisions", []))
+                if decision.get("slot") in questions
+                for held in [by_slot.get(decision["slot"])]
+                for offered in [decision.get("options") or ()]
+            ]
+            choices = _switchable(decisions)
+            card = PlanProposed(
+                event="plan.proposed",
+                seq=conversation.next_seq(),
+                interrupt_id=wire_id,
+                plan_version_id=plan_version_id,
+                version=version,
+                title=plan_display.card_title(plan),
+                summary=plan_display.card_summary(plan),
+                steps=steps,
+                decisions=decisions,
+                actions=[
+                    PlanAction.APPROVE,
+                    PlanAction.AMEND,
+                    PlanAction.REJECT,
+                    *([PlanAction.SWITCH] if choices else []),
+                ],
+                revision=revision,
+                requirements=requirements,
+                operations=operations,
+                asks=asks or None,
+                moved=[PlanMoved.model_validate(moved) for moved in payload["moved"]]
+                if payload.get("moved")
+                else None,
+                switch_failed=_switch_failed(payload),
+                caveats=_caveats(plan),
             )
+            frames.append(card)
             conversation.pending[wire_id] = _PendingInterrupt(
                 adk_id=adk_id,
                 kind="plan",
@@ -1679,6 +1950,8 @@ class _Translator:
                 plan_revision=revision,
                 step_order=tuple(step_order),
                 step_labels=step_labels,
+                choices=choices,
+                card=card,
             )
             return frames
         # The workflow's own `ask` node raises a `RequestInput` whose `payload`
@@ -1706,9 +1979,11 @@ class _Translator:
                 for question in asked
             ]
             skippable = not several
+            pick_replan = False
         else:
             questions = [_planner_question(args)]
             skippable = True
+            pick_replan = self._pick_replan
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
@@ -1729,6 +2004,7 @@ class _Translator:
                 for question in questions
             ),
             skippable=skippable,
+            pick_replan=pick_replan,
         )
         return [frame]
 
@@ -2086,13 +2362,69 @@ class _Translator:
                     return str(reading["text"])
         return None
 
+    def _record_chips(self, chips: list[ApplyChoiceSuggestion]) -> None:
+        """Record the turn's chip events in telemetry, each a `scope_choice.*` event.
+
+        `applied` or `not_applied` for a turn asked to apply a chip
+        (`ConversationState.turn_applied_choice`), by whether the `seed` node
+        applied it; `kept` or `reversed` when the turn before applied one, by
+        whether this turn moved its choice back
+        (`harness.turn_records.chip_kept`); and `chips_shown` when the answer
+        offers `chips`.
+        """
+        asked = self._conversation.turn_applied_choice
+        if asked:
+            outcome = "applied" if asked.get("spec_id") else "not_applied"
+            logger.info("scope choice %s: choice_id=%s", outcome, asked.get("choice_id"))
+            record_event(
+                f"scope_choice.{outcome}",
+                level="DEFAULT",
+                metadata={key: str(value) for key, value in asked.items()},
+            )
+        self._record_chip_kept()
+        if chips:
+            logger.info("scope chips shown: %d", len(chips))
+            record_event(
+                "scope_choice.chips_shown",
+                level="DEFAULT",
+                metadata={
+                    "count": len(chips),
+                    "choice_ids": ",".join(dict.fromkeys(chip.choice_id for chip in chips)),
+                    "option_ids": ",".join(chip.option_id for chip in chips),
+                },
+            )
+
+    def _record_chip_kept(self) -> None:
+        """Record whether this turn kept the chip the turn before it applied
+        (`harness.turn_records.chip_kept`), as `scope_choice.kept` or
+        `scope_choice.reversed`. Nothing when that turn applied none."""
+        turns = self._conversation.turns
+        applied = turns[-1].get("applied_choice") if turns else None
+        if not applied or not applied.get("spec_id"):
+            return
+        kept = chip_kept(applied, self._conversation.turn_readings)
+        outcome = "kept" if kept else "reversed"
+        logger.info("scope choice %s: choice_id=%s", outcome, applied.get("choice_id"))
+        record_event(
+            f"scope_choice.{outcome}",
+            level="DEFAULT",
+            metadata={
+                "choice_id": str(applied.get("choice_id")),
+                "option_id": str(applied.get("option_id")),
+            },
+        )
+
     def finish(self) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
-        (`harness.turn_records.loose_match_notes`), sent as a last
-        `message.delta` so the deltas still add up to the `message.complete`
-        text."""
+        (`harness.turn_records.loose_match_notes`) and the line on how its
+        figures were counted (`harness.turn_records.basis_line`), sent as a
+        last `message.delta` so the deltas still add up to the
+        `message.complete` text and the stored turn keeps them. The turn
+        record keeps the notes and the line apart from the answer
+        (`ConversationState.close_turn`), so a later turn's model reads the
+        answer alone, with no text of the code's own to restate."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
@@ -2105,18 +2437,29 @@ class _Translator:
         self._held.clear()
         if self.paused:
             return frames
+        answer, notes, basis = self._final_text, None, None
         if self._final_text:
-            notes = loose_match_notes(
+            notes = (
+                " ".join(
+                    loose_match_notes(
+                        self._conversation.turn_readings,
+                        specs=self._conversation.turn_specs,
+                        plans=self._conversation.turn_plans,
+                    )
+                )
+                or None
+            )
+            basis = basis_line(
                 self._conversation.turn_readings,
                 specs=self._conversation.turn_specs,
                 plans=self._conversation.turn_plans,
             )
-            if notes:
-                coverage = "\n\n" + " ".join(notes)
-                self._final_text += coverage
+            closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
+            if closing:
+                self._final_text += closing
                 frames.append(
                     MessageDelta(
-                        event="message.delta", seq=self._conversation.next_seq(), text=coverage
+                        event="message.delta", seq=self._conversation.next_seq(), text=closing
                     )
                 )
             self._conversation.turn_final_text = self._final_text
@@ -2127,8 +2470,24 @@ class _Translator:
                     text=self._final_text,
                 )
             )
-        self._conversation.close_turn(final_text=self._final_text)
-        frames.append(Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=[]))
+        # `close_turn` below appends this turn's record, so its number is the
+        # count of records before it, plus one.
+        turn = len(self._conversation.turns) + 1
+        chips = (
+            [
+                ApplyChoiceSuggestion(kind="apply_choice", turn=turn, **chip._asdict())
+                for chip in scope_chips(
+                    self._conversation.turn_readings, specs=self._conversation.turn_specs
+                )
+            ]
+            if self._final_text
+            else []
+        )
+        self._record_chips(chips)
+        self._conversation.close_turn(final_text=answer, match_notes=notes, basis_line=basis)
+        frames.append(
+            Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
+        )
         frames.append(
             Done(
                 event="done",

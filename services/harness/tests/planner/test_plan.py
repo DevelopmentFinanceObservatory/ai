@@ -26,6 +26,7 @@ from planner.operations import (
 )
 from planner.parties import PartyRole
 from planner.plan import (
+    _NESTED_FIXES,
     CUT_MARKER,
     MAX_ACROSS_WORDS,
     MAX_DECISION_DESCRIPTION_CHARS,
@@ -54,7 +55,9 @@ from planner.plan import (
     Decision,
     DecisionDraft,
     DecisionFixes,
+    DecisionScope,
     Decline,
+    DifferenceCaveat,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -70,17 +73,20 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
     UnsupportedOperation,
     UnsupportedPlanError,
     WholeIsItsMemberError,
+    WholeOf,
     _build_shapes,
     authored_text,
     cut_user_text,
     frame_shapes,
     full_history,
+    is_scope_choice,
     load_plan,
     period_window,
     plan_revision,
@@ -88,8 +94,10 @@ from planner.plan import (
     restated_translation,
     retrieves_period,
     rolls_from_its_start,
+    scope_choice_slot,
     settle_decisions,
     split_of,
+    whole_of_fault,
     windowed_pin,
 )
 from planner.proof import mismatches
@@ -813,14 +821,39 @@ def test_a_requirement_names_an_entity_beside_the_party_across_covers(
 # --- Derived requirement validation --------------------------------------------
 
 
-def test_dataset_entities_must_be_unique_by_name_and_role(requirement: RequirementFactory) -> None:
-    with pytest.raises(ValidationError, match="unique by name and role"):
+def test_dataset_entities_must_be_unique_by_name_role_and_node(
+    requirement: RequirementFactory,
+) -> None:
+    with pytest.raises(ValidationError, match="unique by name, role and node"):
         requirement(
             entities=[
                 Entity(name="Kenya", role="debtor"),
                 Entity(name="Kenya", role="debtor"),
             ]
         )
+    with pytest.raises(ValidationError, match="unique by name, role and node"):
+        requirement(
+            entities=[
+                Entity(name="Congo", role="donor", dcid="country/COD"),
+                Entity(name="Congo", role="donor", dcid="country/COD"),
+            ]
+        )
+    with pytest.raises(ValidationError, match="dcid must be its own node"):
+        requirement(
+            entities=[
+                Entity(name="Congo", role="donor", dcid="country/COD"),
+                Entity(name="Congo", role="recipient", dcid="country/COD"),
+            ]
+        )
+
+    pinned_apart = requirement(
+        entities=[
+            Entity(name="Congo", role="donor", dcid="country/COD"),
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+        ]
+    )
+
+    assert [entity.dcid for entity in pinned_apart.entities] == ["country/COD", "country/COG"]
 
 
 def test_a_rank_window_may_be_one_year_and_refuses_an_end_before_its_start() -> None:
@@ -1041,7 +1074,12 @@ def test_a_calculation_the_question_states_outright_cites_no_decision(
 
 
 def test_a_draft_names_every_field_a_decision_fixes_but_the_pin() -> None:
-    assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {"source_spec_id"}
+    # Code alone writes the pin and the user's prices for a part
+    # (`submission.prices_choice`).
+    assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {
+        "source_spec_id",
+        "prices",
+    }
 
 
 @pytest.mark.parametrize(
@@ -4423,6 +4461,59 @@ def test_plan_revision_changes_when_a_source_spec_id_changes(
     assert plan_revision(repinned) != plan_revision(plan)
 
 
+def _scope(**overrides: Any) -> DecisionScope:
+    """A sector choice of two options, the second covering some years only."""
+    fields: dict[str, Any] = {
+        "choice_id": "spec_base:sector",
+        "axis": "sector",
+        "options": (
+            ScopeOptionState(option_id="sector:120+130", status="available"),
+            ScopeOptionState(
+                option_id="sector:120",
+                status="partial",
+                years=((2011, 2024),),
+                code="imputed_coverage",
+            ),
+        ),
+    }
+    return DecisionScope(**(fields | overrides))
+
+
+def test_a_scope_reference_enters_the_revision_only_once_set(
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+) -> None:
+    """A decision with no scope reference dumps and hashes as it did before
+    the field existed; one with a reference is another plan."""
+    slot = scope_choice_slot(_PIN, "sector")
+    plain = pinning_decision(_PIN, slot=slot)
+    scoped = pinning_decision(_PIN, slot=slot, scope=_scope())
+
+    def plan(decision: Decision) -> Plan:
+        return _plan(
+            decision,
+            evidence_requirements=[
+                requirement(source_spec_id=_PIN, decision_ids=[slot]),
+                derived_requirement(decision_ids=[slot]),
+            ],
+        )
+
+    assert "scope" not in plain.model_dump(mode="json")
+    assert "scope" not in revision_content(plan(plain))["decisions"][0]
+    assert plan_revision(plan(scoped)) != plan_revision(plan(plain))
+    assert Plan.model_validate_json(plan(scoped).model_dump_json()).decisions[0] == scoped
+    assert (is_scope_choice(plain), is_scope_choice(scoped)) == (False, True)
+    assert (plain.active_option_id, scoped.active_option_id) == (None, "sector:120+130")
+
+
+def test_a_scope_reference_states_one_option_state_per_option(
+    pinning_decision: DecisionFactory,
+) -> None:
+    with pytest.raises(ValidationError, match="option states for 2 options"):
+        pinning_decision(_PIN, scope=_scope(options=_scope().options[:1]))
+
+
 def test_plan_revision_is_stable_across_serialisation(
     decision: DecisionFactory, requirements: tuple[EvidenceRequirement, ...]
 ) -> None:
@@ -4597,7 +4688,9 @@ def test_every_decision_fixes_field_is_declared_by_a_requirement_class() -> None
         for name in cls.model_fields
     }
 
-    undeclared = sorted(set(DecisionFixes.model_fields) - requirement_field_names)
+    # A nested field is held inside the requirement field it names first.
+    held = {_NESTED_FIXES.get(name, (name,))[0] for name in DecisionFixes.model_fields}
+    undeclared = sorted(held - requirement_field_names)
 
     assert undeclared == []
 
@@ -4898,6 +4991,72 @@ def test_a_plan_at_the_size_limit_validates_and_one_character_over_is_refused() 
     with pytest.raises(ValidationError) as refused:
         Plan.model_validate(plan_record(MAX_PLAN_RECORD_CHARS + 1))
     assert f"the plan is {MAX_PLAN_RECORD_CHARS + 1:,} characters" in str(refused.value)
+
+
+@pytest.mark.parametrize(("caveat", "valid"), [("providers_differ", True), (None, False)])
+def test_the_decision_cap_leaves_out_the_decisions_qualifying_the_answer(
+    caveat: str | None, valid: bool
+) -> None:
+    """A plan at `MAX_PLAN_DECISIONS` with one decision more, cited by a requirement:
+    one qualifying the answer (`Decision.caveat`) is carried past the cap, any other
+    is refused."""
+    record = plan_record()
+    extra = {**record["decisions"][0], "slot": "extra", "caveat": caveat}
+    record["decisions"].append(extra)
+    record["evidence_requirements"][0]["decision_ids"].append("extra")
+
+    if valid:
+        assert len(Plan.model_validate(record).decisions) == MAX_PLAN_DECISIONS + 1
+        return
+    with pytest.raises(ValidationError, match=f"over the {MAX_PLAN_DECISIONS} a plan may take"):
+        Plan.model_validate(record)
+
+
+def test_every_requirement_carries_a_caveat_for_each_axis_its_inputs_differ_on() -> None:
+    """A plan at `MAX_PLAN_DECISIONS` whose every requirement cites one decision
+    qualifying the answer per difference axis (`DifferenceCaveat`), as
+    `submission.service._difference_decisions` writes for a calculation whose inputs
+    differ on both, validates."""
+    record = plan_record()
+    for requirement in record["evidence_requirements"]:
+        for caveat in get_args(DifferenceCaveat):
+            slot = f"{caveat}_{requirement['id']}"
+            record["decisions"].append({**record["decisions"][0], "slot": slot, "caveat": caveat})
+            requirement["decision_ids"].append(slot)
+
+    plan = Plan.model_validate(record)
+
+    assert sum(decision.caveat is not None for decision in plan.decisions) == len(
+        get_args(DifferenceCaveat)
+    ) * len(plan.evidence_requirements)
+
+
+def test_the_size_limit_leaves_out_the_scope_decisions_code_writes() -> None:
+    """A plan at the size limit whose first decision becomes a scope
+    decision serialises past the limit and is recorded; the same decision
+    with no scope reference is refused."""
+    record = plan_record(MAX_PLAN_RECORD_CHARS)
+    slot = scope_choice_slot(_PIN, "sector")
+    first = record["decisions"][0]
+    record["decisions"][0] = {
+        **first,
+        "slot": slot,
+        "options": ["sector:120+130", "sector:120"],
+        "chosen": "sector:120+130",
+        "fixes": {"source_spec_id": _PIN},
+        "scope": _scope().model_dump(mode="json"),
+    }
+    cited = record["evidence_requirements"][0]
+    cited["decision_ids"] = [slot if s == first["slot"] else s for s in cited["decision_ids"]]
+    unscoped = copy.deepcopy(record)
+    del unscoped["decisions"][0]["scope"]
+
+    plan = Plan.model_validate(record)
+
+    assert record_chars(unscoped) > MAX_PLAN_RECORD_CHARS
+    assert is_scope_choice(plan.decisions[0])
+    with pytest.raises(ValidationError, match="characters"):
+        Plan.model_validate(unscoped)
 
 
 def test_the_size_refusal_names_the_parts_that_take_the_most() -> None:
@@ -5348,6 +5507,16 @@ _ON_THE_NEWEST = RollingWindow(window_start=_OFFSET[0], window_end=_OFFSET[0])
             ],
             "excess",
             id="a-following-first-year-against-a-fixed-cap-on-the-other-side",
+        ),
+        # Two steps refused alike: the refusal names the first step the plan
+        # states, whatever the ids sort to.
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5), _lte(2024)),
+                _years("earlier", _DATASET, _gte(2019, -5), _lte(2024)),
+            ],
+            "recent",
+            id="the-first-of-two-refused-steps-the-plan-states",
         ),
     ],
 )
@@ -6998,3 +7167,35 @@ def test_an_ask_across_years_names_a_listed_ask_once(
 ) -> None:
     with pytest.raises(ValidationError, match="across years"):
         _creditor_plan(decision, ("creditor",), across_years=numbers)
+
+
+@pytest.mark.parametrize(
+    ("part_entities", "asks_for_roles"),
+    [
+        pytest.param([Entity(name="United States", role=None)], True, id="part-entity-has-no-role"),
+        pytest.param(
+            [Entity(name="Kenya", role="recipient")], False, id="part-names-only-the-other-side"
+        ),
+    ],
+)
+def test_a_whole_over_donors_of_a_part_with_a_roleless_entity_asks_for_its_role(
+    part_entities: list[Entity], asks_for_roles: bool
+) -> None:
+    period = Period(start=2023, end=2023)
+    part = DatasetRequirement(
+        id="part", decision_ids=["measure"], measure="aid", entities=part_entities, period=period
+    )
+    whole = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure="total aid",
+        entities=part_entities,
+        across=("donor",),
+        period=period,
+        whole_of=WholeOf(part="part", axis="donor"),
+    )
+
+    reason = whole_of_fault(whole, {"part": part, "whole": whole})
+
+    assert reason is not None
+    assert ("state each entity's role" in reason) is asks_for_roles

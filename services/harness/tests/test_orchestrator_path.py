@@ -18,6 +18,7 @@ from analysis_mcp.execution_identity import current_execution_identity
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
+from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
 from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
@@ -69,7 +70,7 @@ from harness.sentences import DECLINE_REASONS
 from harness.settings import Settings
 from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
-from harness.turn_records import PlanAsk, PlanRecord
+from harness.turn_records import PlanAsk, PlanRecord, SearchReading, WindowReading
 from harness.wiring import handing_back_planner_failures
 from planner.agent import ToolContextSession
 from planner.plan import (
@@ -371,6 +372,158 @@ def _france_kenya_with_constant_prices(*, net_qualifier: str) -> dict[str, Any]:
         {**constant, "label": "constant prices", "axis": "unit"},
     ]
     return block
+
+
+def _open_reading(spec_id: str) -> dict[str, Any]:
+    """A `definite` reading of `spec_id` over 2018 to 2022, as `store_search` keeps it."""
+    return SearchReading(
+        text=None,
+        status="definite",
+        spec_id=spec_id,
+        window=WindowReading(start=2018, end=2022, source="requested"),
+    ).model_dump(mode="json")
+
+
+_USD_BLOCK_UNIT = {
+    "basis": "fallback",
+    "ref": "CurrencyUSD",
+    "label": "US Dollar",
+    "currency": "USD",
+}
+
+
+def _usd_block(spec_id: str) -> dict[str, Any]:
+    """A spec block in current US dollars, so its prices are open over several years."""
+    return {"spec_id": spec_id, "resolved": {"facets": {"unit": _USD_BLOCK_UNIT}}}
+
+
+_OTHER = "spec_" + "b" * 32
+
+
+async def test_a_prices_question_takes_its_options_from_its_part_s_open_prices():
+    """Two parts whose prices are open, worded alike. Each prices question
+    names its part, and code gives it that part's `open_prices` entries,
+    marked with the part and their prices. A pick of constant prices no
+    search listed asks for a search of that part."""
+    runner, model = orchestrator_runner(
+        call(
+            "ask_user",
+            questions=[
+                {"question": "Aid in which prices?", "prices_of": _GROSS},
+                {"question": "GDP in which prices?", "prices_of": _OTHER},
+            ],
+        ),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(
+        runner,
+        **{
+            ORCHESTRATOR_SPECS_KEY: {spec: _usd_block(spec) for spec in (_GROSS, _OTHER)},
+            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(spec) for spec in (_GROSS, _OTHER)],
+        },
+    )
+
+    pause = single_pause(await run_turn(runner, types.UserContent("Aid and GDP, 2018-2022?")))
+    assert [q["candidates"] for q in pause.args["payload"]["questions"]] == [
+        [
+            {"spec_id": "o1", "label": "current prices", "part": part, "prices": "current"},
+            {"spec_id": "o2", "label": "constant prices", "part": part, "prices": "constant"},
+        ]
+        for part in (_GROSS, _OTHER)
+    ]
+    reply = create_request_input_response(
+        pause.id,
+        {
+            "result": _answers(
+                q1={"kind": "option", "spec_id": "o1"}, q2={"kind": "option", "spec_id": "o2"}
+            )
+        },
+    )
+    await run_turn(runner, types.Content(role="user", parts=[reply]))
+
+    asked = request_text(model.requests[-1])
+    assert (
+        f"The user chose: constant prices, which no search listed. Search once for that part "
+        f"({_OTHER}) in constant prices." in asked
+    )
+    assert f"({_GROSS}) in constant prices" not in asked
+
+
+async def test_two_prices_questions_on_one_part_are_refused():
+    """Two questions pricing one part would let the later answer override the
+    earlier one in silence, so `ask_user` refuses the call and nothing pauses."""
+    runner, _ = orchestrator_runner(
+        call(
+            "ask_user",
+            questions=[
+                {"question": "Aid in which prices?", "prices_of": _GROSS},
+                {"question": "And in which prices again?", "prices_of": _GROSS},
+            ],
+        ),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(
+        runner,
+        **{
+            ORCHESTRATOR_SPECS_KEY: {_GROSS: _usd_block(_GROSS)},
+            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_GROSS)],
+        },
+    )
+
+    events = await run_turn(runner, types.UserContent("Aid, 2018-2022?"))
+
+    assert not [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
+    (refused,) = [
+        r.response for e in events for r in e.get_function_responses() if r.name == "ask_user"
+    ]
+    assert refused is not None
+    assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
+    assert f"{_GROSS} is priced by more than one question" in refused["refusal"]
+
+
+@pytest.mark.parametrize("same_measure", [True, False], ids=["two-windows", "two-counts"])
+async def test_two_windows_of_one_measure_take_one_prices_question(same_measure: bool):
+    """Two readings of one measure over different years are one part, so two
+    prices questions on them are refused, and nothing pauses. Two readings of
+    different counts each take their own question."""
+    other = copy.deepcopy(_FRANCE_KENYA)
+    other["spec_id"] = other["definition"]["spec_id"] = _OTHER
+    identity = other["definition"]["identity"]
+    if same_measure:
+        identity["requested_window"] = {"kind": "range", "start": 2010, "end": 2014}
+    else:
+        for slot in identity["slots"]:
+            if slot["property"] == "nettingBasis":
+                slot["binding"]["ref"] = "Net"
+    runner, _ = orchestrator_runner(
+        call(
+            "ask_user",
+            questions=[
+                {"question": "Aid to 2014 in which prices?", "prices_of": _OTHER},
+                {"question": "Aid since 2018 in which prices?", "prices_of": _FK_GROSS},
+            ],
+        ),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(
+        runner,
+        **{
+            ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: other},
+            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_FK_GROSS), _open_reading(_OTHER)],
+        },
+    )
+
+    events = await run_turn(runner, types.UserContent("Aid to 2014 against since 2018?"))
+
+    paused = [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
+    assert (not paused) is same_measure
+    if same_measure:
+        (refused,) = [
+            r.response for e in events for r in e.get_function_responses() if r.name == "ask_user"
+        ]
+        assert refused is not None
+        assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
+        assert "measure one thing over other years" in refused["refusal"]
 
 
 _COUNT_AND_PRICES = [
@@ -1179,7 +1332,7 @@ _COUNT_ONLY_SHAPES = {
     "aggregate": (
         "aggregate: sum grouped by reporter",
         "6 group(s):",
-        "  reporter=dcid:USA [n=1]: 1.0",
+        "  reporter=dcid:USA [1 row]: 1.0",
     ),
     "growth": (
         "growth: 2020..2023, entity_by reporter",

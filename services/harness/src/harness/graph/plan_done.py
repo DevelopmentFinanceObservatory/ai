@@ -23,9 +23,12 @@ from google.adk import Context
 from planner.plan import (
     Plan,
     SessionState,
+    aligned_pins,
+    aligned_stated_pins,
     authored_text,
     copy_origins,
     load_asks,
+    windowed_pins,
 )
 
 from harness import plan_display
@@ -35,6 +38,7 @@ from harness.graph.seams import (
     Executor,
 )
 from harness.graph.state import (
+    ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
@@ -44,12 +48,13 @@ from harness.graph.state import (
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
+    conversation_readings,
     frame_id_for,
     readable_plan,
     register_frames,
 )
 from harness.sentences import DECLINE_REASONS
-from harness.turn_records import PlanAsk, PlanRecord
+from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
 
 # Characters of planner text one hand-back to the orchestrator may carry per
 # field, and characters the plan record may take. The two recorded plans in
@@ -60,7 +65,7 @@ _HAND_BACK_CAP = 800
 # Characters of a step summary that hands back a limited ranking whole
 # (`_lists_kept_rows`): the digest's header, up to `_LIST_CAP` rank lines of
 # at most about 120 characters each (a key of two role columns, a value and
-# the `[n=, coverage=]` tail), and its unit and coverage lines. A summary
+# the `[N rows, coverage=]` tail), and its unit and coverage lines. A summary
 # that still passes it is trimmed to the first and last row instead of cut
 # mid-list.
 _WHOLE_RANKING_CHARS = 3_000
@@ -504,8 +509,9 @@ class HandBack:
 
     `describe` describes one frame through `executor`. `listing` registers
     the described frames under ids the orchestrator charts by, each with the
-    pair the materialisation store holds it under, and returns
-    them with the step summaries, the notes on how the figures were computed
+    pair the materialisation store holds it under and, for a frame of
+    shares, the whole they divide by (`wholes`), and returns them with the
+    step summaries, the notes on how the figures were computed
     (`totals`, `harness.graph.answer.answer_notes`), the frames no view was
     prepared for (`frames_not_chartable`), and the asks. `read` says whether
     every frame described so far was read for delivery
@@ -520,6 +526,7 @@ class HandBack:
     )
     not_chartable: list[dict[str, Any]] = field(default_factory=list)
     reads: list[bool] = field(default_factory=list)
+    wholes: dict[str, str] = field(default_factory=dict)
 
     @property
     def read(self) -> bool:
@@ -533,18 +540,26 @@ class HandBack:
         return bool(self.not_chartable) and not self.described
 
     async def describe(
-        self, ref: dict[str, Any], *, tool: str, store_ref: dict[str, Any] | None
+        self,
+        ref: dict[str, Any],
+        *,
+        tool: str,
+        store_ref: dict[str, Any] | None,
+        whole: str | None = None,
     ) -> dict[str, Any]:
         """Describe one final frame for listing, and return its status as
         `_ask_status` reports it: `data`, `empty` for a frame with no series,
         or `not_chartable` with a closed-vocabulary reason. `ref` is the pair
         the frame is described and drawn by, and `store_ref` the pair the
         materialisation store holds it under, or None when the step states no
-        store pair."""
+        store pair. `whole` is what the frame's shares divide by
+        (`plan_display.share_wholes`), None for a frame of anything else."""
         view = await self.executor(tool="describe_frame", args={"frame_ref": ref})
         self.reads.append(frame_read(view))
         if view.get("outcome") == "ok":
             self.described.append((ref, view.get("view") or {}, store_ref))
+            if whole is not None:
+                self.wholes[frame_id_for(ref)] = whole
             empty = (view.get("view") or {}).get("series_count") == 0
             return {"status": "empty" if empty else "data", "frame": frame_id_for(ref)}
         # The reason comes from a closed vocabulary
@@ -557,7 +572,7 @@ class HandBack:
         """The frames, summaries, computation notes and asks the agent
         reads, the described frames registered in `state` under their ids."""
         result: dict[str, Any] = {
-            "frames": register_frames(state, self.described),
+            "frames": register_frames(state, self.described, wholes=self.wholes),
             "step_summaries": [_hand_back_text(summary) for summary in self.summaries],
             "totals": self.totals,
         }
@@ -626,12 +641,40 @@ def record_plan(
         },
         failed_steps=frozenset(stopped.values()),
         run_id=run_id,
+        windowed_from={copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()},
+        aligned_from=aligned_stated_pins(state),
+        aligned_bases=_aligned_bases(state),
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
         *(state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),
         plan_record.model_dump(mode="json"),
     ]
     return plan_record
+
+
+def _aligned_bases(state: SessionState) -> dict[str, AlignedBasis]:
+    """How each compile `state` holds counts the inputs alignment moved onto
+    it, by the compile's spec_id (`harness.turn_records.aligned_basis`): read
+    off the compile's block (`AlignedPin.block`) under the words of the
+    newest reading of the pin it was compiled from, with how the plan's
+    retrieval of it was served (`ORCHESTRATOR_ALIGNED_SERVED_KEY`). A declared
+    whole (`AlignedPin.whole_axis`) is no reading of its part's words and is
+    read under none. A compile whose block is missing or has no scope choices
+    has no basis."""
+    words = {
+        reading.get("spec_id"): reading.get("text") for reading in conversation_readings(state)
+    }
+    served = state.get(ORCHESTRATOR_ALIGNED_SERVED_KEY) or {}
+    bases: dict[str, AlignedBasis] = {}
+    for pin in aligned_pins(state):
+        block = pin.block
+        if block is None or pin.spec_id in bases:
+            continue
+        stated = None if pin.whole_axis is not None else words.get(pin.origin)
+        basis = aligned_basis(block, words=stated, served=served.get(pin.spec_id))
+        if basis is not None:
+            bases[pin.spec_id] = basis
+    return bases
 
 
 def plan_done_node(
@@ -736,13 +779,19 @@ def plan_done_node(
                 + listed,
             }
             return
+        plan = readable_plan(ctx, ctx.state.get("plan"))
+        wholes = plan_display.share_wholes(plan) if plan is not None else {}
         # Final step id -> its output's status, as `_ask_status` reports it.
         ran: dict[str, dict[str, Any]] = {}
         steps = node_input.get("frame_ref_steps", [])
         for ref, step in zip(node_input.get("frame_refs", []), steps, strict=True):
             if step.get("is_final_step"):
-                ran[step.get("step_id", "")] = await hand_back.describe(
-                    ref, tool=step.get("tool", ""), store_ref=step.get("store_ref")
+                step_id = step.get("step_id", "")
+                ran[step_id] = await hand_back.describe(
+                    ref,
+                    tool=step.get("tool", ""),
+                    store_ref=step.get("store_ref"),
+                    whole=wholes.get(step_id),
                 )
         # The run's own frames decide its delivery; an earlier run's kept
         # frames, described below, do not.
@@ -757,7 +806,6 @@ def plan_done_node(
             delivery = await deliver(run_ledger, run["run_id"], read=read)
         unrecorded = unfinished and run.get("status") in ("unfinished", "not_started")
         record = ""
-        plan = readable_plan(ctx, ctx.state.get("plan"))
         if plan is not None:
             stopped = _stop_causes(plan, failed.get("step_id") if failed else None)
             plan_record = record_plan(
@@ -816,6 +864,10 @@ def plan_done_node(
                 )
                 if _give_plan_back(ctx):
                     lead += " A brief that avoids the failure may be planned once more."
+            if "remedy" in result["failed_step"]:
+                lead += (
+                    " Tell the user what they can do about it, as the failed step's remedy says it."
+                )
         elif hand_back.nothing_chartable:
             lead = (
                 "The approved plan ran, but its result cannot be drawn: tell the user what "

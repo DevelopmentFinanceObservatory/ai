@@ -19,15 +19,17 @@ from typing import Any
 from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
-    block_groups,
     bound_refs,
-    bound_rows,
     open_entity_axes_of,
+    readable_groups,
+    readable_wire_groups,
     resolved_source_mentions,
     total_reading,
 )
 from data_mcp.digest import source_codes
+from pydantic import ValidationError
 
+from harness.scope_choices import PartScope, planner_axes
 from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
@@ -485,11 +487,11 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     candidate its digest offers keyed by its spec_id (`_offered_specs`).
     `harness.graph.state.store_search` stores them, so `fetch` and the
     planner's pins read a part's or a picked candidate's block with no
-    second `search` call. Each block a part carries holds the refs the
-    part's entity texts bound (`compiler.sources.bound_refs`), one
-    `BoundEntity` per text (`compiler.sources.bound_rows`), under
-    `_bound_refs`, which `compiler.sources.source_from_spec_block` reads
-    back, so a pin names an entity by the refs its text bound. The
+    second `search` call. Each block a part carries holds the refs each
+    of the part's entity rows bound (`compiler.sources.bound_refs`), one
+    `BoundEntity` per row in row order, under `_bound_refs`, which
+    `compiler.sources.source_from_spec_block` reads back, so a pin names
+    an entity by the refs its own row bound. The
     top-level `spec_block` holds the first part's block the same way. `kind` is what the envelope says
     of itself: a resolution, a catalogue, or a declined question, `resolution`
     when it states none. The skills it names for `get_skill` are
@@ -499,19 +501,18 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     raw_parts = envelope.get("parts") or []
     raw_part = raw_parts[0] if raw_parts else {}
     digest["spec_block"] = (
-        _with_bound_refs(raw_part.get("spec"), _stored_rows(raw_part))
+        _with_bound_refs(raw_part, raw_part.get("spec"))
         if digest.get("status") == "definite"
         else None
     )
     for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
-        rows = _stored_rows(part)
         summary["spec_block"] = (
-            _with_bound_refs(part.get("spec"), rows)
+            _with_bound_refs(part, part.get("spec"))
             if summary.get("status") == "definite"
             else None
         )
         summary["candidate_blocks"] = {
-            spec["spec_id"]: _with_bound_refs(spec, rows)
+            spec["spec_id"]: _with_bound_refs(part, spec)
             for spec in _offered_specs(part)
             if spec.get("spec_id")
         }
@@ -519,16 +520,12 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     return digest
 
 
-def _stored_rows(part: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """`part`'s `bound_refs` as the JSON rows (`bound_rows`) each block it carries stores."""
-    return [row.model_dump(mode="json") for row in bound_rows(bound_refs(part))]
-
-
-def _with_bound_refs(spec: Any, rows: list[dict[str, Any]]) -> Any:
-    """`spec`, a block a part carries, with the part's stored `rows` under `_bound_refs` when it has any."""
+def _with_bound_refs(part: Mapping[str, Any], spec: Any) -> Any:
+    """`spec`, a block `part` carries, with the part's `bound_refs` rows under `_bound_refs` when it has any."""
+    rows = bound_refs(part)
     if not rows or not isinstance(spec, Mapping):
         return spec
-    return {**spec, "_bound_refs": rows}
+    return {**spec, "_bound_refs": [row.model_dump(mode="json") for row in rows]}
 
 
 def _offered_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -553,7 +550,14 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `coverage_kind` is `resolved.coverage.kind` (`exact`, `breadth`,
     `bare`); `requested_window_kind` the identity's `requested_window.kind`
     (`range`, `all`, `latest`); `entity_roles` and `open_entity_axes` as
-    `_wide_facts` reads them. These are keys
+    `_wide_facts` reads them; `scope` is `resolved.scope_choices` as
+    `_scope` reads it, and `planner_axes` the axes the planner's own words
+    settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `entity_groups`
+    are the named sets the part's places were asked for as, each holding only
+    what a resubmit posts of it (`compiler.sources.readable_wire_groups`), which a
+    later resubmit of the reading, such as a chip's, posts again. Where what one
+    posts is not readable they are none, with a warning logged, and
+    `entity_groups_unreadable` is true, and that resubmit refuses. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -564,12 +568,33 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     resolved = spec.get("resolved") or {}
     requested = _identity(spec).get("requested_window")
     facts = _wide_facts(spec)
+    groups = readable_wire_groups(spec)
     return {
         "coverage_kind": (resolved.get("coverage") or {}).get("kind"),
         "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
         "entity_roles": facts["entity_roles"],
         "open_entity_axes": facts["open_entity_axes"],
+        "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
+        "planner_axes": sorted(planner_axes(spec)),
+        "entity_groups": [group.model_dump(mode="json") for group in groups or ()],
+        "entity_groups_unreadable": groups is None,
     }
+
+
+def _scope(spec_id: object, scope: object) -> dict[str, Any] | None:
+    """`scope`, a block's `resolved.scope_choices`, as `PartScope` JSON.
+
+    `None` when the block carries none, or carries one this release cannot
+    read, which is logged: the reading then stores no scope choices, and
+    the search still answers.
+    """
+    if scope is None:
+        return None
+    try:
+        return PartScope.from_search(scope).model_dump(mode="json")
+    except ValidationError as exc:
+        logger.warning("scope choices of %s left unread: %s", spec_id, exc)
+        return None
 
 
 def chosen_part(spec: Mapping[str, Any], *, variable: str | None) -> dict[str, Any]:
@@ -679,11 +704,7 @@ def _total_readings(spec: Mapping[str, Any]) -> list[str]:
     `group_read_as_members` departure. A block whose sets are not readable
     has none.
     """
-    try:
-        groups = block_groups(spec)
-    except ValueError:
-        logger.warning("search: named sets of %s are not readable", spec.get("spec_id"))
-        return []
+    groups = readable_groups(spec) or ()
     entities = (spec.get("resolved") or {}).get("entities") or ()
     labels = {
         str(entity["ref"]): str(entity["label"])

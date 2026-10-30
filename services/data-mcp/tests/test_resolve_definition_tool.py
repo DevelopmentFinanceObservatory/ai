@@ -154,3 +154,60 @@ async def test_a_named_group_is_posted_beside_its_identity() -> None:
     (body,) = posted
     (entry,) = body["input"]["entries"]
     assert entry["entity_groups"] == groups
+
+
+# A switch resubmit as the dfo-apis Search app answers it: the scope's base
+# identity posted with its scope entries, the definite part, and the 422 for
+# an option the part does not offer.
+_SWITCH = json.loads(
+    (Path(__file__).parent / "fixtures" / "resubmit_scope_switch.json").read_text()
+)
+
+
+async def test_scope_entries_are_posted_with_the_base_identity_and_the_compiled_spec_is_stored() -> (
+    None
+):
+    posted: list[dict[str, Any]] = []
+    (entry,) = _SWITCH["request"]["input"]["entries"]
+    spec = _SWITCH["response"]["parts"][0]["spec"]
+    store = InMemoryDefinitionStore()
+
+    result = await _call(
+        _recorded_answer(posted, _SWITCH["response"]),
+        {
+            "spec_id": entry["variable_text"],
+            "identity": entry["identity"],
+            "scope_entries": entry["scope_entries"],
+        },
+        store,
+    )
+
+    assert result.is_error is False
+    assert posted == [_SWITCH["request"]]
+    held = await store.get(spec["spec_id"], schema_version=1)
+    assert held is not None
+    assert json.loads(held.canonical_bytes) == spec["definition"]["identity"]
+
+
+async def test_a_scope_entry_search_refuses_names_search_s_code() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            422,
+            content=json.dumps(_SWITCH["refusal"]).encode(),
+            headers={"content-type": "application/problem+json"},
+        )
+
+    (entry,) = _SWITCH["request"]["input"]["entries"]
+    result = await _call(
+        handler,
+        {
+            "spec_id": entry["variable_text"],
+            "identity": entry["identity"],
+            "scope_entries": entry["scope_entries"],
+        },
+        InMemoryDefinitionStore(),
+    )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["upstream_code"] == "requested_option_unavailable"

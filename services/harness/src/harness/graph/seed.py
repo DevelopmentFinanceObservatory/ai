@@ -1,5 +1,6 @@
 """The `seed` node: opens the turn with the runs an earlier turn left
-unfinished, carried on, and the datasets the user brought from Search."""
+unfinished, carried on, and the datasets the user brought from Search or
+the chip the user clicked."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import asyncio
 import logging
 from collections.abc import (
     AsyncIterator,
+    Awaitable,
     Callable,
 )
 from typing import Any
@@ -26,10 +28,12 @@ from harness.graph.seams import (
     Executor,
 )
 from harness.graph.state import (
+    APPLY_CHOICE_STATE_KEY,
     state_json,
     store_search,
     turn_budgets,
 )
+from harness.graph.switch import apply_stored_choice
 from harness.seeds import (
     SEED_DROPPED,
     DroppedSeed,
@@ -71,23 +75,34 @@ def _turn_ran_before(ctx: Context) -> bool:
 
 
 def seed_node(
-    *, executor: Executor, definition_surface: ToolSurface, resume: ResumeRuns | None = None
+    *,
+    executor: Executor,
+    definition_surface: ToolSurface,
+    resume: ResumeRuns | None = None,
+    fetch: Callable[..., Awaitable[dict[str, Any]]] | None = None,
 ) -> Callable[[Context, Any], AsyncIterator[dict[str, str]]]:
     """The `seed` node, carrying on unfinished runs through `resume`,
-    resolving seeds through `definition_surface` and recording its steps
-    through `executor`."""
+    resolving seeds and applying a chip through `definition_surface`,
+    fetching a chip's data with `fetch`, the orchestrator's `fetch` tool,
+    and recording its steps through `executor`."""
 
     async def receive_seeds(ctx: Context, node_input: Any) -> AsyncIterator[dict[str, str]]:
         """Carry on the runs an earlier turn left unfinished (`resume`,
         `harness.graph.resume`), then hand the agent the datasets the user
-        brought from Search. The hand-back names the runs first, then the
-        seeds, each as its own paragraph. Once the session holds it, which
-        it does when the yield returns, the runs it delivers are
-        acknowledged (`harness.graph.resume.Resumed.acknowledge`).
+        brought from Search, or the data of the chip the user clicked
+        (`APPLY_CHOICE_STATE_KEY`, `harness.graph.switch.apply_stored_choice`).
+        The hand-back names the runs first, then the seeds or the chip, each
+        as its own paragraph. Once the session holds it, which it does when
+        the yield returns, the runs it delivers are acknowledged
+        (`harness.graph.resume.Resumed.acknowledge`).
 
-        No output when there is neither. A run that resumes a turn already
-        under way (`_turn_ran_before`) clears the seeds slot and does
-        neither.
+        No output when there is none of these. A run that resumes a turn
+        already under way (`_turn_ran_before`) clears the seeds slot and
+        does none of them. The chip's slot stays for the turn, since
+        `harness.graph.state.turn_budgets` reads it.
+
+        Raises:
+            RuntimeError: If the turn applies a chip and the node has no `fetch`.
         """
         del node_input
         raw = state_json(ctx, SEEDS_STATE_KEY, default=[])
@@ -96,6 +111,19 @@ def seed_node(
             return
         resumed = await resume(ctx) if resume is not None else None
         seeded = await take(ctx, raw)
+        pick = state_json(ctx, APPLY_CHOICE_STATE_KEY)
+        if seeded is None and pick is not None:
+            if fetch is None:
+                raise RuntimeError("the seed node applies a chip only with a fetch tool")
+            seeded = await apply_stored_choice(
+                ctx,
+                choice_id=str(pick["choice_id"]),
+                option_id=str(pick["option_id"]),
+                spec_id=str(pick["spec_id"]),
+                surface=definition_surface,
+                fetch=fetch,
+                record_step=getattr(executor, "record_step", None),
+            )
         if resumed is None:
             if seeded is not None:
                 yield seeded

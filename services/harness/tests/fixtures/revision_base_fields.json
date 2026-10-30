@@ -157,6 +157,11 @@
     "change",
     "per_period"
   ],
+  "planner.plan.DecisionScope": [
+    "choice_id",
+    "axis",
+    "options"
+  ],
   "planner.plan.Decline": [
     "ask",
     "code"
@@ -239,6 +244,12 @@
     "copy_id",
     "origin_id"
   ],
+  "planner.plan.ScopeOptionState": [
+    "option_id",
+    "status",
+    "years",
+    "code"
+  ],
   "planner.plan.ShareOfRequirement": [
     "kind",
     "id",
@@ -259,6 +270,10 @@
     "currency",
     "prices",
     "base_year"
+  ],
+  "planner.plan.WholeOf": [
+    "axis",
+    "part"
   ],
   "planner.records.Breakdown": [
     "dimension",
@@ -316,6 +331,12 @@
   "planner.workflow.Binding": [
     "from_step",
     "output"
+  ],
+  "planner.workflow.BoundEntity": [
+    "identity",
+    "text",
+    "role",
+    "refs"
   ],
   "planner.workflow.ElectedMeasure": [
     "label",

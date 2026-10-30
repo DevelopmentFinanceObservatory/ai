@@ -450,6 +450,15 @@ def test_a_plan_the_planner_refused_shows_its_code_s_sentence_and_none_of_its_de
     assert is_user_sentence(failed.detail)
 
 
+def test_a_hand_back_for_constant_prices_reads_as_a_search_for_them():
+    """`prices_unserved` hands the turn back for a search, which may still
+    answer, so its step does not read as data that does not cover the question."""
+    failed = _plan_failed_step({"code": "prices_unserved"})
+
+    assert failed.detail == failure_sentence("prices_unserved")
+    assert failed.detail != failure_sentence("coverage_gaps")
+
+
 @pytest.mark.parametrize(
     ("failure", "code"),
     [
@@ -492,6 +501,30 @@ def test_a_plan_that_ran_is_read_from_the_execute_nodes_result_through_the_hand_
         ("Reading the plan's results", StepStatus.COMPLETE),
         ("Making 1 chart", StepStatus.RUNNING),
     ]
+
+
+def test_thinking_leaves_the_reading_line_running_until_the_answer_text():
+    """Studio hides thought text, so a thought chunk, streamed or in a
+    finished call, leaves the line the model reads under running. The
+    answer's first text completes it."""
+    translator = _translator()
+    call = types.FunctionCall(id="call_1", name="make_charts", args={"charts": [{}]})
+    response = types.FunctionResponse(
+        id="call_1", name="make_charts", response={"charts": [{"title": "A"}]}
+    )
+    thought = types.Part(text="**Weighing the charts**", thought=True)
+
+    thinking = _frames(
+        translator,
+        _event(types.Part(function_call=call)),
+        _event(types.Part(function_response=response)),
+        _event(thought, partial=True),
+        _event(thought),
+    )
+    answering = _frames(translator, _event(types.Part(text="Here it is."), partial=True))
+
+    assert _steps(thinking)[-1] == ("Going over the charts", StepStatus.RUNNING)
+    assert _steps(answering) == [("Going over the charts", StepStatus.COMPLETE)]
 
 
 def test_a_plan_sent_back_for_a_replan_opens_no_reading_line():

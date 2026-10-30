@@ -7,18 +7,47 @@ dependency on either, and neither do these tests.
 
 from __future__ import annotations
 
+import enum
+import json
+import os
+import subprocess
+import sys
 import typing
+from collections import Counter
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
+from compiler.sources import source_from_spec_block
+from harness import plan_display
+from harness.decision_pick import DecisionPick, decision_pick
 from harness.plan_display import (
+    _card_label,
+    _concepts,
     _label,
+    card_choice_text,
+    card_decision_text,
+    card_questions,
+    card_rows,
+    card_summary,
+    card_title,
+    choice_id,
+    chosen_scope_decision,
+    decision_choice_id,
+    decision_option_id,
+    listed_together,
     operation_rows,
+    pinned_choice_id,
+    plan_words,
     requirement_rows,
+    share_wholes,
+    shown_decisions,
     shown_plan,
     step_rows,
+    switchable_decision,
 )
+from harness.scripted_plan import scripted_plan
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -40,6 +69,7 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     DecisionFixes,
+    DecisionScope,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -51,8 +81,15 @@ from planner.plan import (
     QuotientRequirement,
     RankRequirement,
     RequirementSide,
+    ResolvedBy,
+    ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
+    WholeOf,
+    frame_shapes,
+    scope_choice_slot,
+    search_pin_slot,
+    split_of,
 )
 from planner.records import (
     Breakdown,
@@ -88,8 +125,21 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
+from pydantic import BaseModel
+from submission.service import SourceReadings, _card_names
+from translator.mechanical import build_translation
 
-from .split_plan import SPEC_DEBT, stored_split_plan
+from .share_plan import (
+    ALL_DONORS,
+    DAC_DONORS,
+    NAMED_DONORS,
+    UGANDA,
+    US_DONOR,
+    USA_RECEIVING,
+    us_share_of_kenya_oda,
+    us_share_per_recipient,
+)
+from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 
 # The `decision` fixture, from `services/harness/tests/conftest.py`. Annotated
 # structurally rather than imported, the same discipline `tests/planner/test_plan.py`
@@ -430,6 +480,142 @@ def test_requirement_rows_carries_id_kind_decision_ids_and_sentence(
     )
 
 
+def _scope_decision(
+    pin: str,
+    axis: typing.Literal["sector", "measure_basis"],
+    *,
+    resolved_by: ResolvedBy = ResolvedBy.PLANNER_DEFAULT,
+    other: typing.Literal["available", "unavailable"] = "available",
+) -> Decision:
+    """The scope decision `propose_plan` writes for `axis` of a pin of `pin`:
+    two options, the first chosen, the other `other`."""
+    ids = {
+        "sector": ("sector:120+130", "sector:120"),
+        "measure_basis": ("measure_basis:gross", "measure_basis:net"),
+    }[axis]
+    return Decision(
+        slot=scope_choice_slot(pin, axis),
+        description=f"How {axis} is counted.",
+        options=(f"{ids[0]} label", f"{ids[1]} label"),
+        chosen=f"{ids[0]} label",
+        resolved_by=resolved_by,
+        rationale="Search's default for this question.",
+        fixes=DecisionFixes(source_spec_id=pin),
+        scope=DecisionScope(
+            choice_id=f"{pin}:{axis}",
+            axis=axis,
+            options=(
+                ScopeOptionState(option_id=ids[0], status="available"),
+                ScopeOptionState(
+                    option_id=ids[1],
+                    status=other,
+                    code="conflicts_with" if other == "unavailable" else None,
+                ),
+            ),
+        ),
+    )
+
+
+def test_sources_counted_alike_share_one_scope_row_and_others_keep_their_own(
+    decision: DecisionFactory,
+) -> None:
+    """Two pins whose sector choices are the same share one row, the user's;
+    basis choices whose options are not equally available keep a row each.
+    Each requirement cites the row standing for its own decision. A row's id
+    is the first requirement pinning one of its sources and the axis,
+    whichever decision of the row is listed, and names that decision."""
+    sector_a = _scope_decision(_SPEC_A, "sector")
+    sector_b = _scope_decision(_SPEC_B, "sector", resolved_by=ResolvedBy.USER)
+    basis_a = _scope_decision(_SPEC_A, "measure_basis")
+    basis_b = _scope_decision(_SPEC_B, "measure_basis", other="unavailable")
+
+    def dataset(id: str, pin: str, *cited: Decision) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure", *(d.slot for d in cited)],
+            measure="health aid",
+            entities=[Entity(name="Africa", role="recipient")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    plan = Plan(
+        question="Health aid to Africa from two donors",
+        decisions=[decision(), sector_a, basis_a, sector_b, basis_b],
+        evidence_requirements=[
+            dataset("aid_a", _SPEC_A, sector_a, basis_a),
+            dataset("aid_b", _SPEC_B, sector_b, basis_b),
+        ],
+    )
+
+    assert [d.slot for d in shown_decisions(plan)] == [
+        "measure",
+        basis_a.slot,
+        sector_b.slot,
+        basis_b.slot,
+    ]
+    rows = {row["id"]: row["decision_ids"] for row in requirement_rows(plan)}
+    assert rows == {
+        "aid_a": ["measure", sector_b.slot, basis_a.slot],
+        "aid_b": ["measure", sector_b.slot, basis_b.slot],
+    }
+    assert [choice_id(plan, d) for d in (sector_a, sector_b, basis_a, basis_b)] == [
+        "aid_a:sector",
+        "aid_a:sector",
+        "aid_a:measure_basis",
+        "aid_b:measure_basis",
+    ]
+    assert chosen_scope_decision(plan, "aid_a:sector") == sector_b
+    # A card sent before these ids names the listed row by Search's own id.
+    assert chosen_scope_decision(plan, f"{_SPEC_B}:sector") == sector_b
+    assert chosen_scope_decision(plan, f"{_SPEC_A}:sector") is None
+
+
+@pytest.mark.parametrize("merged", [False, True], ids=["apart", "merged"])
+def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
+    decision: DecisionFactory, merged: bool
+) -> None:
+    """The numerator's and the denominator's basis decisions on different
+    options are two rows, each with its own requirement's id. Switched to the
+    same option they become one row, which takes the first requirement's id
+    in plan order and stands for both, so a switch of it moves both; apart
+    again, each row has its own id back."""
+    numerator = _scope_decision(_SPEC_A, "measure_basis")
+    denominator = _scope_decision(_SPEC_B, "measure_basis")
+    if not merged:
+        denominator = denominator.model_copy(update={"chosen": "measure_basis:net label"})
+
+    def dataset(id: str, pin: str, cited: Decision) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure", cited.slot],
+            measure="aid",
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    plan = Plan(
+        question="US health aid as a share of US aid",
+        decisions=[decision(), numerator, denominator],
+        evidence_requirements=[
+            dataset("health_aid", _SPEC_A, numerator),
+            dataset("total_aid", _SPEC_B, denominator),
+        ],
+    )
+
+    rows = [d for d in shown_decisions(plan) if d.scope is not None]
+    ids = [choice_id(plan, row) for row in rows]
+    if merged:
+        assert ids == ["health_aid:measure_basis"]
+        (row,) = rows
+        assert chosen_scope_decision(plan, "health_aid:measure_basis") == row
+        assert listed_together(plan, row.slot) == (numerator, denominator)
+    else:
+        assert ids == ["health_aid:measure_basis", "total_aid:measure_basis"]
+        assert [chosen_scope_decision(plan, id) for id in ids] == [numerator, denominator]
+
+
 def _one_requirement_compiled_plan(
     decision: DecisionFactory,
     *,
@@ -620,11 +806,11 @@ def _retrieve_then_aggregate_plan(
     return draft.with_translation(translation=translation, workflow=workflow)
 
 
-def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
+def test_steps_that_read_alike_are_numbered_in_the_order_the_plan_states_them(
     decision: DecisionFactory,
 ) -> None:
-    # The workflow runs `second_totals` before `first_totals`, so the card
-    # lists it first and it takes "(1)".
+    # The plan states `first_totals` first, so it takes "(1)", though the workflow
+    # runs `second_totals` first and the card lists it first.
     plan = _retrieve_then_aggregate_plan(decision)
     assert plan.translation is not None and plan.workflow is not None
     dataset, totals = plan.evidence_requirements
@@ -670,8 +856,8 @@ def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
 
     assert [(row["id"], row["label"]) for row in rows] == [
         ("annual_debt_service", "Fetch external debt service paid for Kenya"),
-        ("second_totals", "Total external debt service paid by year (1)"),
-        ("first_totals", "Total external debt service paid by year (2)"),
+        ("second_totals", "Total external debt service paid by year (2)"),
+        ("first_totals", "Total external debt service paid by year (1)"),
     ]
 
 
@@ -1883,6 +2069,534 @@ def test_a_rank_over_one_of_two_open_parties_states_that_partys_count(
     assert "ranks all 55 donors the source holds" in sentences["ranked"]
 
 
+def _among_decision(decision: DecisionFactory) -> DecisionFactory:
+    """`decision` with the options a planner writes as `among`'s own values."""
+
+    def _decision(**overrides: Any) -> Decision:
+        written = {
+            "description": "Whether to rank across all reporting donors or a restricted set.",
+            "options": ["population", "named"],
+            "chosen": "population",
+        }
+        return decision(**(written | overrides))
+
+    return _decision
+
+
+def _donor_rank_plan(decision: DecisionFactory) -> Plan:
+    """The top donors to Kenya, ranked among every donor DAC2a holds, by a
+    decision whose options the planner wrote as `among`'s values."""
+    dataset = DatasetRequirement(
+        id="health_spending",
+        decision_ids=["measure"],
+        measure="education aid",
+        entities=[Entity(name="Kenya", role="recipient")],
+        across=("donor",),
+        period=Period(start=2022, end=2022),
+    )
+    kenya = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+    donors = OpenEntityAxis(column="origin", member_count=32)
+    return _open_axis_rank_plan(
+        _among_decision(decision),
+        dataset,
+        axis="donor",
+        reduction=Reduction.SUM,
+        source={"entities": (kenya,), "open_entity_axes": (donors,), "published_tables": "DAC2a"},
+    )
+
+
+def test_a_rank_option_written_as_its_value_reads_as_who_the_rank_compares(
+    decision: DecisionFactory,
+) -> None:
+    # The reported card: the planner wrote `among`'s values as the options and
+    # names no donor. The card names the donors DAC2a holds, and a named rank,
+    # which compiles only behind a filter naming its entities, as donors picked
+    # by name. A chosen text naming a value the decision does not fix keeps
+    # the planner's words.
+    plan = _donor_rank_plan(decision)
+    (among,) = plan.decisions
+    contradicted = among.model_copy(update={"chosen": "named"})
+
+    shown = [
+        card_choice_text(o, plan, options=among.options, decision=among) for o in among.options
+    ]
+
+    assert shown == ["all 32 donors in DAC2a", "only donors picked by name"]
+    assert card_choice_text("named", plan, options=(), decision=contradicted) == "named"
+
+
+def _two_donor_ranks(decision: DecisionFactory, among: RankAmong, *kept: list[str]) -> Plan:
+    """The top donors to Kenya in ODA and in private flows, both ranks citing
+    one `among` decision: over every donor, or, given `kept`, over the donors
+    each retrieval names, kept by a filter."""
+    requirements: list[EvidenceRequirement] = []
+    for index, flow in enumerate(("oda", "private")):
+        requirements.append(
+            DatasetRequirement(
+                id=flow,
+                decision_ids=["measure"],
+                measure=flow,
+                entities=[
+                    Entity(name="Kenya", role="recipient"),
+                    *(Entity(name=name, role="donor") for name in (kept[index] if kept else ())),
+                ],
+                across=() if kept else ("donor",),
+                period=Period(start=2022, end=2022),
+            )
+        )
+        ranked = flow
+        if kept:
+            ranked = f"{flow}_kept"
+            requirements.append(_filter(ranked, flow, EntityIn(names=kept[index], role="donor")))
+        requirements.append(
+            RankRequirement(
+                id=f"top_{flow}",
+                decision_ids=["measure"],
+                input_id=ranked,
+                direction=RankDirection.HIGHEST_FIRST,
+                among=among,
+                axis="donor",
+                reduction=Reduction.SUM,
+            )
+        )
+    options = ["population", "named"] if among is RankAmong.POPULATION else ["named", "population"]
+    return Plan(
+        question="q",
+        decisions=[decision(options=options, chosen=options[0], fixes=DecisionFixes(among=among))],
+        evidence_requirements=requirements,
+    )
+
+
+def _compiled_donor_ranks(decision: DecisionFactory, sources: dict[str, tuple[str, int]]) -> Plan:
+    """`_two_donor_ranks` over every donor, compiled: each flow retrieved from
+    the source `sources` gives it, by its published tables and donor count."""
+    draft = _two_donor_ranks(decision, RankAmong.POPULATION)
+    specs = {"oda": _SPEC_A, "private": _SPEC_B}
+    operations: list[Operation] = []
+    steps: list[WorkflowStep] = []
+    for flow, spec in specs.items():
+        rank = typing.cast(RankRequirement, draft.requirement(f"top_{flow}"))
+        operations += [
+            RetrieveOperation(id=flow, requirement_id=flow, spec_id=spec),
+            RankOperation(
+                id=rank.id,
+                requirement_id=rank.id,
+                input=flow,
+                direction=rank.direction,
+                among=rank.among,
+                axis=rank.axis,
+                reduction=rank.reduction,
+            ),
+        ]
+        steps += [
+            WorkflowStep(
+                id=flow,
+                operation_id=flow,
+                tool=ToolId(server="data-mcp", name="get_data"),
+                args={"spec_id": spec},
+                input_schema_hash="hash",
+            ),
+            WorkflowStep(
+                id=rank.id,
+                operation_id=rank.id,
+                tool=ToolId(server="analysis-mcp", name="rank"),
+                bindings={"frame_ref": Binding(from_step=flow, output=ArtifactKind.FRAME_REF)},
+                input_schema_hash="hash",
+            ),
+        ]
+    terminal = ["top_oda", "top_private"]
+    workflow = Workflow(
+        steps=steps,
+        sources=[
+            SelectedSource(
+                spec_id=spec,
+                sentence="s",
+                has_data=True,
+                published_tables=sources[flow][0],
+                open_entity_axes=(OpenEntityAxis(column="origin", member_count=sources[flow][1]),),
+            )
+            for flow, spec in specs.items()
+        ],
+        evidence_bindings=[
+            EvidenceBinding(requirement_id=flow, step_id=flow, spec_id=spec)
+            for flow, spec in specs.items()
+        ],
+        terminal_steps=terminal,
+    )
+    return draft.with_translation(
+        translation=Translation(operations=operations, terminal=terminal), workflow=workflow
+    )
+
+
+@pytest.mark.parametrize(
+    ("sources", "population"),
+    [
+        pytest.param(
+            {"oda": ("DAC2a", 32), "private": ("DAC2a", 32)},
+            "all 32 donors in DAC2a",
+            id="one-source",
+        ),
+        pytest.param(
+            {"oda": ("DAC2a", 32), "private": ("CRS", 45)},
+            "all donors each source holds",
+            id="two-sources",
+        ),
+    ],
+)
+def test_ranks_citing_one_decision_are_named_by_what_they_all_share(
+    decision: DecisionFactory, sources: dict[str, tuple[str, int]], population: str
+) -> None:
+    # Ranks reading different sources are not named by the first one's.
+    plan = _compiled_donor_ranks(decision, sources)
+    (among,) = plan.decisions
+
+    shown = [
+        card_choice_text(o, plan, options=among.options, decision=among) for o in among.options
+    ]
+
+    assert shown == [population, "only donors picked by name"]
+
+
+@pytest.mark.parametrize(
+    ("kept", "named"),
+    [
+        pytest.param(
+            (["France", "Japan"], ["France", "Japan"]), "only France and Japan", id="alike"
+        ),
+        pytest.param(
+            (["France", "Japan", "Italy", "Spain"],) * 2,
+            "only the 4 donors the filter keeps",
+            id="many",
+        ),
+        pytest.param(
+            (["France", "Japan"], ["Italy"]), "only donors picked by name", id="different"
+        ),
+    ],
+)
+def test_a_named_rank_option_names_the_donors_its_filter_keeps(
+    decision: DecisionFactory, kept: tuple[list[str], list[str]], named: str
+) -> None:
+    plan = _two_donor_ranks(decision, RankAmong.NAMED, *kept)
+    (among,) = plan.decisions
+
+    assert card_choice_text("named", plan, options=among.options, decision=among) == named
+
+
+def _gni_share(decision: DecisionFactory, *denominators: str, narrowed: bool = False) -> Plan:
+    """Each donor's ODA to Kenya over Kenya's GNI (and over Kenya's revenue
+    for a second denominator), by a decision written as
+    `denominator_scope`'s values. A `narrowed` denominator is read for Kenya
+    and Uganda and kept to Kenya by a filter."""
+    requirements: list[EvidenceRequirement] = [
+        DatasetRequirement(
+            id="oda",
+            decision_ids=["measure"],
+            measure="ODA",
+            entities=[Entity(name="Kenya", role="recipient")],
+            across=("donor",),
+            period=Period(start=2022, end=2022),
+        )
+    ]
+    for index, measure in enumerate(denominators):
+        requirements += [
+            DatasetRequirement(
+                id=f"denominator_{index}",
+                decision_ids=["measure"],
+                measure=measure,
+                entities=[
+                    Entity(name="Kenya", role="country"),
+                    *([Entity(name="Uganda", role="country")] if narrowed else []),
+                ],
+                period=Period(start=2022, end=2022),
+            ),
+            *(
+                [
+                    _filter(
+                        f"kenya_{index}",
+                        f"denominator_{index}",
+                        EntityIn(names=["Kenya"], role="country"),
+                    )
+                ]
+                if narrowed
+                else []
+            ),
+            ShareOfRequirement(
+                id=f"share_{index}",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="oda"),
+                denominator=RequirementSide(
+                    input_id=f"kenya_{index}" if narrowed else f"denominator_{index}"
+                ),
+                axis="donor",
+                denominator_scope=DenominatorScope.POOLED,
+            ),
+        ]
+    return Plan(
+        question="q",
+        decisions=[
+            decision(
+                options=["pooled", "per_axis"],
+                chosen="pooled",
+                fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED),
+            )
+        ],
+        evidence_requirements=requirements,
+    )
+
+
+@pytest.mark.parametrize(
+    ("denominators", "narrowed", "shown"),
+    [
+        pytest.param(
+            ("GNI",),
+            False,
+            ["each divided by one total of GNI", "each divided by its own total of GNI"],
+            id="one-share",
+        ),
+        pytest.param(
+            ("GNI", "government revenue"),
+            False,
+            ["one shared total", "each its own total"],
+            id="two-denominators",
+        ),
+        pytest.param(
+            ("GNI",),
+            True,
+            ["one shared total", "each divided by its own total of GNI"],
+            id="narrowed",
+        ),
+    ],
+)
+def test_a_share_option_written_as_its_scope_names_the_denominator(
+    decision: DecisionFactory, denominators: tuple[str, ...], narrowed: bool, shown: list[str]
+) -> None:
+    # A pooled share over Kenya's GNI divides by GNI, not by a total over the
+    # donors, and each option names that measure. Shares over different
+    # denominators, and a pooled total over the rows a filter keeps, which
+    # only a quoted step label names, read the value's fallback.
+    plan = _gni_share(decision, *denominators, narrowed=narrowed)
+    (scope,) = plan.decisions
+
+    assert [
+        card_choice_text(o, plan, options=scope.options, decision=scope) for o in scope.options
+    ] == shown
+
+
+def _oda_to_kenya(
+    *kenya: Entity, across: tuple[str, ...] = ("donor",), by_sector: bool = False
+) -> DatasetRequirement:
+    """ODA from every donor (`across`) to `kenya`, broken down by sector when
+    `by_sector`, the input of a total grouped by entity."""
+    return DatasetRequirement(
+        id="debt",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=list(kenya),
+        across=across,
+        period=Period(start=2015, end=2024),
+        stat_vars=StatVarReading.SEPARATE if by_sector else None,
+        breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0) if by_sector else None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("dataset", "shown"),
+    [
+        pytest.param(_debt(), ["by debtor", "by year"], id="one-party"),
+        pytest.param(
+            _oda_to_kenya(Entity(name="Kenya", role="recipient")),
+            ["by recipient", "by year"],
+            id="open-donors",
+        ),
+        pytest.param(
+            _oda_to_kenya(Entity(name="Kenya")),
+            ["by each place named", "by year"],
+            id="roleless-place",
+        ),
+        pytest.param(
+            _oda_to_kenya(
+                Entity(name="Kenya", role="recipient"),
+                Entity(name="France", role="donor"),
+                across=(),
+            ),
+            ["by donor and recipient", "by year"],
+            id="two-parties",
+        ),
+        pytest.param(
+            _oda_to_kenya(Entity(name="Kenya", role="recipient"), by_sector=True),
+            ["by recipient and sector", "by sector"],
+            id="party-and-sector",
+        ),
+    ],
+)
+def test_a_group_by_option_written_as_entity_names_the_party(
+    decision: DecisionFactory, dataset: DatasetRequirement, shown: list[str]
+) -> None:
+    # "entity" reads as what a total grouped by entity keeps: each party
+    # named, a breakdown by its dimension, and the places named with no role.
+    # An open `across` party is summed away, so it names nothing. Over a
+    # breakdown the other option is "breakdown", by the same dimension.
+    plan = Plan(
+        question="q",
+        decisions=[
+            decision(
+                options=["entity", "breakdown" if dataset.breakdown else "period"],
+                chosen="entity",
+                fixes=DecisionFixes(group_by=(GroupBy.ENTITY,)),
+            )
+        ],
+        evidence_requirements=[dataset, _total("debt", GroupBy.ENTITY)],
+    )
+    (grouping,) = plan.decisions
+
+    assert [
+        card_choice_text(o, plan, options=grouping.options, decision=grouping)
+        for o in grouping.options
+    ] == shown
+
+
+def _values_in(annotation: object, name: str) -> dict[str, set[str]]:
+    """The values of every enum and `Literal` `annotation` names, through
+    unions, tuples and `Annotated`, by the field holding it: `name`, or
+    "<name>.<field>" for a field of a model `annotation` names. A model's
+    `kind` tag names the model, and a `Literal` of one value offers no
+    choice, so neither counts."""
+    if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+        return {name: {member.value for member in annotation}}
+    if typing.get_origin(annotation) is typing.Literal:
+        values = typing.get_args(annotation)
+        return {name: set(values)} if len(values) > 1 else {}
+    found: dict[str, set[str]] = {}
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        nested = [
+            (info.annotation, f"{name}.{field}")
+            for field, info in annotation.model_fields.items()
+            if field != "kind"
+        ]
+    else:
+        nested = [(arg, name) for arg in typing.get_args(annotation)]
+    for inner, held in nested:
+        for field, values in _values_in(inner, held).items():
+            found.setdefault(field, set()).update(values)
+    return found
+
+
+def test_every_value_a_decision_can_fix_has_card_words() -> None:
+    # A new enum or `Literal` field on `DecisionFixes`, a new one nested in
+    # one of its fields (`PlaceLevel.level` or a threshold's `op` in
+    # `predicates`), or a new value of one, fails here until the card has
+    # words for it, with a fallback true in every plan that never reads as
+    # the raw value.
+    fixed = {
+        held: values
+        for name, field in DecisionFixes.model_fields.items()
+        for held, values in _values_in(field.annotation, name).items()
+    }
+    words = plan_display.FIXED_VALUE_WORDS
+
+    assert {name: set(values) for name, values in plan_display.FIXED_ENUMS.items()} == fixed
+    assert {name: set(values) for name, values in words.items()} == fixed
+    for name, values in words.items():
+        fallbacks = [held.fallback for held in values.values()]
+        assert [
+            value
+            for value, held in values.items()
+            if not held.fallback
+            or held.fallback.lower() in {value.lower(), value.replace("_", " ")}
+        ] == [], name
+        assert len(set(fallbacks)) == len(fallbacks), name
+
+
+def _bilateral_donors_plan(decision: DecisionFactory) -> Plan:
+    """Kenya's donors in 2022, "now only bilateral aid": the planner narrows
+    the donors to countries by a filter whose decision's options name the
+    level's raw value."""
+    countries = (PlaceLevel(level=PlaceType.COUNTRY, role="donor", strict=True),)
+    return Plan(
+        question="Rank Kenya's top 10 donors by ODA received in 2022, only bilateral aid",
+        decisions=[
+            decision(),
+            decision(
+                slot="donor_type",
+                description="Narrow the donors to bilateral donor countries",
+                options=["Country", "all reporting providers"],
+                chosen="Country",
+                fixes=DecisionFixes(predicates=countries),
+            ),
+        ],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="oda_to_kenya",
+                decision_ids=["measure"],
+                measure="official development assistance",
+                entities=[Entity(name="Kenya", role="recipient")],
+                across=("donor",),
+                period=Period(start=2022, end=2022),
+            ),
+            FilterRequirement(
+                id="bilateral_donors",
+                decision_ids=["donor_type"],
+                input_id="oda_to_kenya",
+                predicates=countries,
+            ),
+        ],
+    )
+
+
+def test_a_place_level_option_reads_as_the_level_kept_on_its_role(
+    decision: DecisionFactory,
+) -> None:
+    # The planner copied `PlaceLevel.level`'s value into the option. The card
+    # reads it as the level the filter keeps on the donors; the option naming
+    # no level keeps the planner's words.
+    plan = _bilateral_donors_plan(decision)
+    _, narrowing = plan.decisions
+    roleless = narrowing.model_copy(
+        update={"fixes": DecisionFixes(predicates=(PlaceLevel(level=PlaceType.COUNTRY),))}
+    )
+
+    shown = [
+        card_choice_text(o, plan, options=narrowing.options, decision=narrowing)
+        for o in narrowing.options
+    ]
+
+    assert shown == ["only donor countries", "all reporting providers"]
+    assert card_choice_text("Country", plan, options=(), decision=roleless) == "only countries"
+
+
+@pytest.mark.parametrize(
+    ("fixes", "options", "shown"),
+    [
+        (
+            DecisionFixes(predicates=(ValueThreshold(op="gte", value=1_000_000),)),
+            ["gte", "gt"],
+            ["at least", "more than"],
+        ),
+        (
+            DecisionFixes(stat_vars=StatVarReading.SUM),
+            ["sum", "separate"],
+            ["summed into one series", "one series per indicator"],
+        ),
+        (
+            DecisionFixes(prices="constant"),
+            ["constant", "current"],
+            ["constant prices, inflation removed", "current prices"],
+        ),
+    ],
+    ids=["threshold-op", "stat-vars-sum", "prices"],
+)
+def test_an_option_written_as_a_literal_or_shared_value_reads_as_its_fields_words(
+    decision: DecisionFactory, fixes: DecisionFixes, options: list[str], shown: list[str]
+) -> None:
+    # A threshold's `op` and a price basis are `Literal` values, and "sum" is
+    # a value of both `stat_vars` and `reduction`: each reads as the words of
+    # the field the decision fixes.
+    plan = _bilateral_donors_plan(decision)
+    fixing = decision(options=options, chosen=options[0], fixes=fixes)
+
+    assert [card_choice_text(o, plan, options=options, decision=fixing) for o in options] == shown
+
+
 def test_a_rank_whose_source_does_not_answer_its_party_states_no_count(
     decision: DecisionFactory,
 ) -> None:
@@ -2036,13 +2750,36 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
             },
             "summed over its 1,554 indicators by default",
         ),
+        # The US health share of Kenya in 2022: the family serves 288, and the
+        # answer sums the 13 that hold data.
+        (
+            {
+                "served_count": 288,
+                "stat_var_member_count": 13,
+                "stat_var_reading": StatVarReading.SUM,
+                "stat_var_reading_set_by": ReadingSetBy.PLAN,
+            },
+            "summed over its 13 indicators",
+        ),
+        # With the donors left open, Search's count also covers group totals,
+        # which the retrieval leaves out.
+        (
+            {
+                "served_count": 288,
+                "stat_var_member_count": 13,
+                "open_entity_axes": (_DONORS,),
+                "stat_var_reading": StatVarReading.SUM,
+                "stat_var_reading_set_by": ReadingSetBy.PLAN,
+            },
+            "summed over whichever of its 288 indicators hold data",
+        ),
         (
             {
                 "served_count": 3,
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "summed over its 3 indicators",
+            "summed over whichever of its 3 indicators hold data",
         ),
         (
             {
@@ -2050,7 +2787,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as 2 separate indicators",
+            "kept separate over whichever of its 2 indicators hold data",
         ),
         (
             {
@@ -2082,6 +2819,8 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
     ],
     ids=[
         "summed-by-the-rule",
+        "confirmed-within-a-served-family",
+        "confirmed-over-an-open-donor-axis",
         "summed-by-the-plan",
         "separate-by-the-plan",
         "one-confirmed-summed",
@@ -2366,3 +3105,2051 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
             copy_gap.replace("'debt_history'", "'debt'"),
         ),
     ]
+
+
+def test_a_choice_row_names_its_input_as_the_card_labels_name_it(
+    decision: DecisionFactory,
+) -> None:
+    """`debt` and a health aid retrieval each pin a source whose basis choice offers
+    its options differently, so the card lists a Basis row for each, naming its
+    input. `debt`'s copy for the rolling growth is no row of the card, so `debt`
+    is named as its step label names it, with no party or number added."""
+    stored = split_draft(decision)
+    spec_health = "spec_" + "c" * 32
+    debt_basis = _scope_decision(SPEC_DEBT, "measure_basis")
+    health_basis = _scope_decision(spec_health, "measure_basis", other="unavailable")
+    pins = {"debt": SPEC_DEBT, "debt_history": SPEC_DEBT_HISTORY}
+    plan = Plan.model_validate(
+        {
+            **stored.model_dump(),
+            "decisions": [*stored.decisions, debt_basis, health_basis],
+            "evidence_requirements": [
+                *(
+                    requirement.model_copy(
+                        update={
+                            "decision_ids": (*requirement.decision_ids, debt_basis.slot),
+                            "source_spec_id": pins[requirement.id],
+                        }
+                    )
+                    if requirement.id in pins
+                    else requirement
+                    for requirement in stored.evidence_requirements
+                ),
+                DatasetRequirement(
+                    id="health",
+                    decision_ids=["measure", health_basis.slot],
+                    measure="health aid",
+                    entities=[Entity(name="Kenya", role="recipient")],
+                    period=Period(start=2015, end=2024),
+                    source_spec_id=spec_health,
+                ),
+            ],
+        }
+    )
+
+    questions = card_questions(plan)
+
+    assert (questions[debt_basis.slot], questions[health_basis.slot]) == (
+        "Basis: external debt service paid",
+        "Basis: health aid",
+    )
+
+
+@pytest.mark.parametrize(
+    ("axes", "measure"),
+    [
+        (
+            ("sector", "measure_basis"),
+            "net disbursements (official development assistance) for sector:120+130 label",
+        ),
+        (("measure_basis",), "net disbursements (official development assistance)"),
+        ((), "gross ODA disbursements to health"),
+    ],
+    ids=["sector-and-basis", "basis", "no-scope-choice"],
+)
+def test_a_step_reading_a_scoped_dataset_names_its_measure_as_search_counts_it(
+    decision: DecisionFactory,
+    axes: tuple[typing.Literal["sector", "measure_basis"], ...],
+    measure: str,
+) -> None:
+    """The planner wrote "gross ODA disbursements to health" for the pin it
+    chose; a switch on the plan card re-pinned the dataset on net
+    disbursements. A step reading a dataset whose basis or sector a scope
+    decision settles names the source's measure and the sector chosen, so its
+    label and sentence follow the pin; with no such decision they keep the
+    planner's words."""
+    compiled = _retrieve_then_aggregate_plan(decision)
+    assert compiled.workflow is not None
+    scoped = [_scope_decision(_SPEC_A, axis) for axis in axes]
+    dataset, totals = compiled.evidence_requirements
+    assert isinstance(dataset, DatasetRequirement)
+    plan = compiled.model_copy(
+        update={
+            "decisions": [*compiled.decisions, *scoped],
+            "evidence_requirements": [
+                dataset.model_copy(
+                    update={
+                        "measure": "gross ODA disbursements to health",
+                        "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
+                    }
+                ),
+                totals,
+            ],
+            "workflow": compiled.workflow.model_copy(
+                update={
+                    "sources": [
+                        source.model_copy(
+                            update={
+                                "measure_label": "net disbursements (official development assistance)"
+                            }
+                        )
+                        for source in compiled.workflow.sources
+                    ]
+                }
+            ),
+        }
+    )
+
+    labels = {row["id"]: row["label"] for row in step_rows(plan)}
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+
+    assert labels["annual_totals"] == f"Total {measure} by year"
+    assert sentences["annual_totals"] == f"The total of {measure}, grouped by year."
+
+
+# --- The whole a share divides by ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("numerator", "whole", "wholes"),
+    [
+        (US_DONOR, DAC_DONORS, {"share": "from official donors (DAC)"}),
+        (US_DONOR, ALL_DONORS, {"share": "from every donor"}),
+        # Official donors' share of every provider's ODA divides by every provider.
+        (DAC_DONORS, ALL_DONORS, {"share": "from every donor"}),
+        # A share of official donors' ODA divides by the same donors, which it names.
+        (DAC_DONORS, DAC_DONORS, {}),
+    ],
+    ids=["dac_donors", "all_donors", "dac_of_all", "same_donors"],
+)
+def test_a_share_names_the_population_its_denominator_holds_and_its_numerator_does_not(
+    decision: DecisionFactory,
+    numerator: dict[str, Any],
+    whole: dict[str, Any],
+    wholes: dict[str, str],
+) -> None:
+    """The United States' share of ODA to Kenya divides by official donors
+    (DAC) over one source and by every provider over another, and the
+    source the denominator reads says which."""
+    donor = "United States" if numerator is US_DONOR else "official donors (DAC)"
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=numerator, donor=donor)
+
+    assert share_wholes(plan) == wholes
+
+
+@pytest.mark.parametrize(
+    ("whole", "parties"),
+    [(DAC_DONORS, "Kenya and official donors (DAC)"), (ALL_DONORS, "Kenya and all 140 donors")],
+    ids=["dac_donors", "all_donors"],
+)
+def test_the_approved_plan_names_the_parties_a_shares_denominator_source_holds(
+    decision: DecisionFactory, whole: dict[str, Any], parties: str
+) -> None:
+    """The denominator asks for every donor; the plan says what its source
+    holds, the official donors (DAC) its group stands for or the count of
+    donors it leaves open, in the fetch step's label and the share's sentence."""
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
+
+    rows = {row["id"]: row for row in step_rows(plan)}
+
+    assert rows["all_oda"]["label"] == f"Fetch ODA gross disbursements for {parties}"
+    assert rows["share"]["description"].startswith(
+        "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
+        f"disbursements ({parties})."
+    )
+
+
+@pytest.mark.parametrize(
+    ("whole_across", "label"),
+    [
+        (("donor",), "Fetch ODA gross disbursements for Kenya and official donors (DAC)"),
+        # A fetch naming no donor leaves the set its source binds unsaid, as it did.
+        ((), "Fetch ODA gross disbursements for Kenya"),
+    ],
+    ids=["across_donors", "kenya_only"],
+)
+def test_a_bound_set_stands_only_for_an_across_word_on_its_side(
+    decision: DecisionFactory, whole_across: tuple[str, ...], label: str
+) -> None:
+    plan = us_share_of_kenya_oda(
+        decision, whole=DAC_DONORS, numerator=US_DONOR, whole_across=whole_across
+    )
+
+    rows = {row["id"]: row for row in step_rows(plan)}
+
+    assert rows["all_oda"]["label"] == label
+
+
+@pytest.mark.parametrize(
+    ("scope", "numerator_recipients", "whole"),
+    [
+        # Each recipient divides by its own total, so the recipients are no part of the whole.
+        (DenominatorScope.PER_AXIS, 120, "from official donors (DAC)"),
+        # Every recipient divides by one total across them, though the numerator holds as many.
+        (DenominatorScope.POOLED, 150, "from every donor and to every recipient"),
+    ],
+    ids=["per_axis", "pooled"],
+)
+def test_a_keyed_shares_whole_follows_its_denominator_scope(
+    decision: DecisionFactory, scope: DenominatorScope, numerator_recipients: int, whole: str
+) -> None:
+    plan = us_share_per_recipient(
+        decision, scope=scope, numerator_recipients=numerator_recipients, whole_recipients=150
+    )
+
+    assert share_wholes(plan) == {"share": whole}
+
+
+_LATER = (PeriodThreshold(op="gte", year=2020),)
+
+
+@pytest.mark.parametrize(
+    ("then", "wholes"),
+    [
+        (
+            (
+                FilterRequirement(id="later", input_id="share", predicates=_LATER),
+                FilterOperation(
+                    id="later", requirement_id="later", input="share", predicates=_LATER
+                ),
+            ),
+            {"share": "from official donors (DAC)", "later": "from official donors (DAC)"},
+        ),
+        (
+            (
+                AggregateRequirement(
+                    id="mean", input_id="share", reduction=Reduction.MEAN, group_by=()
+                ),
+                AggregateOperation(
+                    id="mean",
+                    requirement_id="mean",
+                    input="share",
+                    reduction=Reduction.MEAN,
+                    group_by=(),
+                ),
+            ),
+            {"share": "from official donors (DAC)", "mean": "from official donors (DAC)"},
+        ),
+        # A total of shares, or their change, is no share of the whole.
+        (
+            (
+                AggregateRequirement(
+                    id="total", input_id="share", reduction=Reduction.SUM, group_by=()
+                ),
+                AggregateOperation(
+                    id="total",
+                    requirement_id="total",
+                    input="share",
+                    reduction=Reduction.SUM,
+                    group_by=(),
+                ),
+            ),
+            {"share": "from official donors (DAC)"},
+        ),
+        (
+            (
+                GrowthRequirement(
+                    id="change",
+                    input_id="share",
+                    window_start=2015,
+                    window_end=2024,
+                    change=GrowthChange.ABSOLUTE,
+                ),
+                GrowthOperation(
+                    id="change",
+                    requirement_id="change",
+                    input="share",
+                    window_start=2015,
+                    window_end=2024,
+                    change=GrowthChange.ABSOLUTE,
+                ),
+            ),
+            {"share": "from official donors (DAC)"},
+        ),
+    ],
+    ids=["filter", "mean", "total", "growth"],
+)
+def test_a_step_keeping_its_inputs_shares_keeps_their_whole(
+    decision: DecisionFactory, then: tuple[EvidenceRequirement, Operation], wholes: dict[str, str]
+) -> None:
+    plan = us_share_of_kenya_oda(decision, whole=DAC_DONORS, numerator=US_DONOR, then=[then])
+
+    assert share_wholes(plan) == wholes
+
+
+_AT_LEAST_1BN = (ValueThreshold(op="gte", value=1e9),)
+_POOLED_WHOLE = "from every donor and to every recipient"
+
+
+def _narrowed(requirement: FilterRequirement | RankRequirement) -> tuple[Any, Any]:
+    """`requirement` reading `all_oda`, beside the operation carrying it out."""
+    if isinstance(requirement, FilterRequirement):
+        operation: Operation = FilterOperation(
+            id=requirement.id,
+            requirement_id=requirement.id,
+            input="all_oda",
+            predicates=requirement.predicates,
+        )
+    else:
+        operation = RankOperation(
+            id=requirement.id,
+            requirement_id=requirement.id,
+            input="all_oda",
+            direction=requirement.direction,
+            among=requirement.among,
+            axis=requirement.axis,
+            reduction=requirement.reduction,
+            per_period=requirement.per_period,
+            limit=requirement.limit,
+        )
+    return requirement, operation
+
+
+_TOP_TEN = RankRequirement(
+    id="top",
+    input_id="all_oda",
+    direction=RankDirection.HIGHEST_FIRST,
+    among=RankAmong.POPULATION,
+    decision_ids=["population"],
+    axis="donor",
+    reduction=Reduction.SUM,
+    per_period=True,
+    limit=10,
+)
+# The share's sentence over a denominator narrowed by the step `label` names.
+_OVER_ROWS = (
+    "Share of ODA gross disbursements as one figure overall, divided by one total of ODA "
+    'gross disbursements over the rows "{label}" keeps.'
+)
+
+
+@pytest.mark.parametrize(
+    ("narrowing", "wholes", "sentence"),
+    [
+        # Donors giving at least $1bn are not every donor, and nothing typed names them.
+        (
+            FilterRequirement(id="big", input_id="all_oda", predicates=_AT_LEAST_1BN),
+            {},
+            _OVER_ROWS.format(label="Filter ODA gross disbursements"),
+        ),
+        (
+            _TOP_TEN,
+            {},
+            _OVER_ROWS.format(
+                label="Rank the top 10 donors by the total of ODA gross disbursements"
+            ),
+        ),
+        # Keeping some years keeps every donor.
+        (
+            FilterRequirement(id="later", input_id="all_oda", predicates=_LATER),
+            {"share": "from every donor"},
+            "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
+            "disbursements (Kenya and all 140 donors).",
+        ),
+    ],
+    ids=["value_filter", "top_ten", "period_filter"],
+)
+def test_a_denominator_narrowed_below_its_sources_population_names_no_whole(
+    decision: DecisionFactory,
+    narrowing: FilterRequirement | RankRequirement,
+    wholes: dict[str, str],
+    sentence: str,
+) -> None:
+    """Neither the card nor the plan's sentence names every donor for a
+    total over the donors a filter or a limited rank keeps; the sentence
+    names that step, whose own line states what it keeps."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=ALL_DONORS, numerator=US_DONOR, narrowing=[_narrowed(narrowing)]
+    )
+
+    assert share_wholes(plan) == wholes
+    assert {row["id"]: row["sentence"] for row in requirement_rows(plan)}["share"] == sentence
+
+
+_UK_AND_US = ("United Kingdom", "United States")
+_TWO_RECIPIENTS = {"whole_recipients": ("Kenya", "Uganda")}
+_US_TO_TWO = {"entities": (*US_DONOR["entities"], UGANDA)}
+
+
+@pytest.mark.parametrize(
+    ("whole", "whole_donors", "options", "wholes"),
+    [
+        (NAMED_DONORS, _UK_AND_US, {}, {"share": "from United Kingdom and United States"}),
+        # The United States narrowed out of the same frame.
+        (
+            NAMED_DONORS,
+            _UK_AND_US,
+            {"narrowed_from": "all_oda"},
+            {"share": "from United Kingdom and United States"},
+        ),
+        # Narrowed out of the two donors' ODA to Kenya, it holds Kenya alone.
+        (
+            {"entities": (*NAMED_DONORS["entities"], UGANDA)},
+            _UK_AND_US,
+            {
+                **_TWO_RECIPIENTS,
+                "numerator": NAMED_DONORS,
+                "us_donors": _UK_AND_US,
+                "narrowed_from": "us",
+            },
+            {"share": "from United Kingdom and United States and to Kenya and Uganda"},
+        ),
+        # A frame holding the United States on both sides narrows to the donor
+        # its requirement names.
+        (
+            {"entities": (*NAMED_DONORS["entities"], USA_RECEIVING)},
+            _UK_AND_US,
+            {"narrowed_from": "all_oda"},
+            {"share": "from United Kingdom and United States"},
+        ),
+        # The denominator names the numerator's donor, by its words or by another
+        # name the graph resolves to the same ref, beside recipients it does not.
+        (_US_TO_TWO, ("United States",), _TWO_RECIPIENTS, {"share": "to Kenya and Uganda"}),
+        (
+            {**_US_TO_TWO, "entity_refs": {"usa": "country/USA"}},
+            ("USA",),
+            _TWO_RECIPIENTS,
+            {"share": "to Kenya and Uganda"},
+        ),
+        # Donors giving at least $1bn of the two are not both of them.
+        (
+            NAMED_DONORS,
+            _UK_AND_US,
+            {
+                "narrowing": [
+                    _narrowed(
+                        FilterRequirement(id="big", input_id="all_oda", predicates=_AT_LEAST_1BN)
+                    )
+                ]
+            },
+            {},
+        ),
+    ],
+    ids=[
+        "named_donors",
+        "narrowed_out_of_the_frame",
+        "narrowed_out_of_another_frame",
+        "named_on_both_sides",
+        "same_donor",
+        "same_ref",
+        "value_filter",
+    ],
+)
+def test_a_share_of_named_donors_names_them_where_the_numerator_holds_others(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    whole_donors: tuple[str, ...],
+    options: dict[str, Any],
+    wholes: dict[str, str],
+) -> None:
+    """The United States' share of the United Kingdom's and the United
+    States' ODA to Kenya divides by the two donors; Kenya, which both sides
+    name, is no part of the whole."""
+    plan = us_share_of_kenya_oda(
+        decision,
+        whole=whole,
+        whole_across=(),
+        whole_donors=whole_donors,
+        **{"numerator": US_DONOR, **options},
+    )
+
+    assert share_wholes(plan) == wholes
+
+
+@pytest.mark.parametrize(
+    ("reduction", "wholes"),
+    [
+        (Reduction.SUM, {"share": "from every donor"}),
+        # The mean or the largest donor's flow each year is no total of every donor's.
+        (Reduction.MEAN, {}),
+        (Reduction.MAX, {}),
+    ],
+    ids=["sum", "mean", "max"],
+)
+def test_a_denominator_reducing_by_no_total_names_no_whole(
+    decision: DecisionFactory, reduction: Reduction, wholes: dict[str, str]
+) -> None:
+    plan = us_share_of_kenya_oda(
+        decision, whole=ALL_DONORS, numerator=US_DONOR, whole_reduction=reduction
+    )
+
+    assert share_wholes(plan) == wholes
+
+
+def test_a_denominator_narrowed_to_one_entity_names_that_entity(decision: DecisionFactory) -> None:
+    """The United States' ODA to Kenya as a share of the United Kingdom's ODA
+    to every recipient divides by the United Kingdom's row of a frame of two
+    donors to all 150 recipients, and names the United Kingdom alone."""
+    donors = (
+        ResolvedEntity(role="origin", ref="country/GBR", label="United Kingdom"),
+        ResolvedEntity(role="origin", ref="country/USA", label="United States"),
+    )
+    plan = us_share_of_kenya_oda(
+        decision,
+        whole={
+            "entities": donors,
+            "open_entity_axes": (OpenEntityAxis(column="destination", member_count=150),),
+        },
+        numerator=US_DONOR,
+        whole_across=(),
+        whole_donors=("United Kingdom", "United States"),
+    )
+    payload = plan.model_dump(mode="json")
+    payload["asks"] = ["US ODA to Kenya as a percentage of UK ODA to every recipient each year"]
+    payload["answered"] = [{"ask": 0, "outputs": ["share"]}]
+    for requirement in payload["evidence_requirements"]:
+        if requirement["id"] == "all_oda":
+            requirement["entities"] = requirement["entities"][:2]
+            requirement["across"] = ["recipient"]
+        if requirement["id"] == "share":
+            requirement["denominator"] = {"input_id": "all_oda", "entity": "United Kingdom"}
+    payload["evidence_requirements"] = [
+        item for item in payload["evidence_requirements"] if item["id"] != "all_by_year"
+    ]
+    payload["translation"]["operations"] = [
+        {**item, "denominator": {"input": "all_oda", "entity": "United Kingdom"}}
+        if item["id"] == "share"
+        else item
+        for item in payload["translation"]["operations"]
+        if item["id"] != "all_by_year"
+    ]
+    payload["workflow"]["steps"] = [
+        item for item in payload["workflow"]["steps"] if item["id"] != "all_by_year"
+    ]
+    share = next(item for item in payload["workflow"]["steps"] if item["id"] == "share")
+    share["bindings"]["denominator"]["from_step"] = "all_oda"
+
+    assert share_wholes(Plan.model_validate(payload)) == {
+        "share": "to every recipient and from United Kingdom"
+    }
+
+
+@pytest.mark.parametrize(
+    ("limit", "wholes"),
+    [
+        # Ranked each year with no limit, the values are each recipient's place.
+        (None, {"share": _POOLED_WHOLE}),
+        (5, {"share": _POOLED_WHOLE, "ranked": _POOLED_WHOLE}),
+    ],
+    ids=["positions", "top_five"],
+)
+def test_a_rank_writing_positions_carries_no_share_whole(
+    decision: DecisionFactory, limit: int | None, wholes: dict[str, str]
+) -> None:
+    rank = RankRequirement(
+        id="ranked",
+        input_id="share",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        decision_ids=["population"],
+        axis="recipient",
+        per_period=True,
+        limit=limit,
+    )
+    operation = RankOperation(
+        id="ranked",
+        requirement_id="ranked",
+        input="share",
+        direction=rank.direction,
+        among=rank.among,
+        axis="recipient",
+        per_period=True,
+        limit=limit,
+    )
+    plan = us_share_per_recipient(
+        decision,
+        scope=DenominatorScope.POOLED,
+        numerator_recipients=150,
+        whole_recipients=150,
+        then=[(rank, operation)],
+    )
+
+    assert share_wholes(plan) == wholes
+
+
+def _every_donor(
+    count: int, *, dataset: str | None = "DAC2A", window: int = 2015
+) -> dict[str, Any]:
+    """A source of ODA to Kenya leaving its donors open, holding `count` of
+    them, read from `dataset` over the years from `window`; `None` for a
+    source stating no identity."""
+    return {
+        "entities": ALL_DONORS["entities"],
+        "open_entity_axes": (OpenEntityAxis(column="origin", member_count=count),),
+        "identity": (
+            None
+            if dataset is None
+            else {"dataset": dataset, "requested_window": {"start": window, "end": 2024}}
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("numerator", "whole", "whole_words"),
+    [
+        (_every_donor(140, window=2020), _every_donor(140), None),
+        (_every_donor(120), _every_donor(140), "from every donor"),
+        # As many donors in another dataset may be other donors.
+        (_every_donor(140, dataset="CRS"), _every_donor(140), "from every donor"),
+        (_every_donor(140, dataset=None), _every_donor(140, dataset=None), "from every donor"),
+    ],
+    ids=["same_donors", "fewer_donors", "other_dataset", "unidentified"],
+)
+def test_a_numerator_population_is_the_denominators_by_its_identity_not_its_words(
+    decision: DecisionFactory,
+    numerator: dict[str, Any],
+    whole: dict[str, Any],
+    whole_words: str | None,
+) -> None:
+    """120 donors are not the 140 the denominator holds, though both read
+    "every donor", and 140 donors are the same 140 only in the same dataset,
+    over whatever years."""
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=numerator, every_donor=True)
+
+    wholes = share_wholes(plan)
+
+    assert wholes == ({} if whole_words is None else {"share": whole_words})
+
+
+# Three plans a live harness proposed for US health aid, as the planner node's
+# payloads carried them: one retrieval and its total; a health share of all
+# US aid; and that share after the user switched its basis to net.
+_RECORDED_PLANS = Path(__file__).parent / "fixtures" / "plan_card_recorded.json"
+
+
+def _recorded_payload(name: str, *, search_labels: bool = True) -> dict[str, Any]:
+    """The planner node's recorded payload `name`. The recording predates Search's
+    `concept_label` and `published_tables`, so with `search_labels` each source
+    carries them as Search sends them for these CRS sources: the health
+    part's sector concept ("health" for ONE's grouping of CRS 120 and 130), the
+    total's measure noun and the CRS table. Without, each source is as stored
+    before them."""
+    payload = json.loads(_RECORDED_PLANS.read_text())[name]
+    if search_labels:
+        sectors = {
+            decision["slot"]
+            for decision in payload["decisions"]
+            if (decision.get("scope") or {}).get("axis") == "sector"
+        }
+        sectored = {
+            requirement["source_spec_id"]
+            for requirement in payload["evidence_requirements"]
+            if sectors & set(requirement.get("decision_ids", ()))
+        }
+        for source in payload["workflow"]["sources"]:
+            concept = (
+                "health" if source["spec_id"] in sectored else "official development assistance"
+            )
+            source.update(concept_label=concept, published_tables=_CRS_TABLES)
+    return payload
+
+
+def _recorded_plan(name: str, *, search_labels: bool = True) -> Plan:
+    """The recorded plan `name` (`_recorded_payload`)."""
+    payload = _recorded_payload(name, search_labels=search_labels)
+    return Plan.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in ("summary", "revision", "moved")
+        }
+    )
+
+
+# The tables Search names for a CRS source (`resolved.published_tables`).
+_CRS_TABLES = "OECD Creditor Reporting System (CRS)"
+_HEALTH = "health"
+# The sector option the recorded plans hold, as Search labelled it without its codes.
+_RECORDED_SECTOR = "health incl. population and reproductive health"
+# The option label Search gave the recorded plan's sector choice "sector:120+130".
+_RECORDED_SECTOR_LABEL = f"{_RECORDED_SECTOR} (CRS 120 + 130)"
+_LONG_LABELS = [
+    f"Fetch {_HEALTH} for United States",
+    f"Total {_HEALTH}",
+    "Fetch official development assistance for United States",
+    "Total official development assistance",
+    "Health as a share of official development assistance",
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "title", "summary", "labels"),
+    [
+        (
+            "short",
+            "Total health aid from the United States to Africa in 2024",
+            f"Gross disbursements, current USD, for {_HEALTH}, from United States to Africa "
+            "incl. regional and unspecified amounts, in 2024, from the OECD Creditor Reporting "
+            "System (CRS).",
+            [f"Fetch {_HEALTH} for United States and each member of Africa", f"Total {_HEALTH}"],
+        ),
+        (
+            "long",
+            "Health share of US ODA in 2023",
+            f"Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+            f"System (CRS): {_HEALTH} from United States to 129 recipients, as a share of the "
+            "total from United States to 152 recipients.",
+            _LONG_LABELS,
+        ),
+        (
+            "long_switched_to_net",
+            "Health share of US ODA in 2023",
+            f"Net disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+            f"System (CRS): {_HEALTH} from United States to 129 recipients, as a share of the "
+            "total from United States to 152 recipients.",
+            _LONG_LABELS,
+        ),
+    ],
+)
+def test_the_card_states_a_recorded_plan_once_in_short_labels(
+    name: str, title: str, summary: str, labels: list[str]
+) -> None:
+    """The card is titled by the ask and sums the plan up in one sentence;
+    each step label names what it fetches or computes in the reader's words,
+    leaving the basis and the sector codes to the summary and the choices,
+    so a one-year total says no "by year" and a switch to net leaves every
+    label as it was."""
+    plan = _recorded_plan(name)
+
+    rows = card_rows(plan)
+
+    assert card_title(plan) == title
+    assert card_summary(plan) == summary
+    assert [row["label"] for row in rows] == labels
+
+
+_POPULATION = "population policy, programme, and reproductive health"
+
+
+@pytest.mark.parametrize(
+    ("option", "concept", "named"),
+    [
+        pytest.param(0, "health", "health", id="grouped-sector"),
+        pytest.param(2, _POPULATION, _POPULATION, id="single-code"),
+        pytest.param(
+            0, None, f"{_RECORDED_SECTOR} (CRS 120 + 130)", id="grouped-sector-before-labels"
+        ),
+        pytest.param(2, None, f"{_POPULATION}, CRS 130 alone", id="single-code-before-labels"),
+    ],
+)
+def test_a_retrieval_is_named_by_the_concept_search_states_for_its_sector(
+    option: int, concept: str | None, named: str
+) -> None:
+    """The recorded US health aid to Africa with its sector choice on ONE's health
+    grouping (CRS 120 and 130) or on CRS 130 alone: the card names the retrieval
+    by the concept Search states for the source, with no codes, and a source
+    stored before Search stated one by the sector option as Search labelled it."""
+    payload = _recorded_payload("short", search_labels=False)
+    (sector,) = [d for d in payload["decisions"] if d["slot"].startswith("scope_sector_")]
+    sector["chosen"] = sector["options"][option]
+    (source,) = payload["workflow"]["sources"]
+    if concept is not None:
+        source.update(concept_label=concept, published_tables=_CRS_TABLES)
+    plan = Plan.model_validate(
+        {k: v for k, v in payload.items() if k not in ("summary", "revision", "moved")}
+    )
+
+    assert [row["label"] for row in card_rows(plan)] == [
+        f"Fetch {named} for United States and each member of Africa",
+        f"Total {named}",
+    ]
+    assert f"for {named}, from United States" in card_summary(plan)
+
+
+def test_a_recorded_plan_from_before_searchs_labels_reads_the_labels_search_composed() -> None:
+    """The recorded US health share as stored before Search sent `concept_label` and
+    `published_tables`: the health part is named by its sector option as Search
+    labelled it, codes and all, and the total by Search's measure label, each as
+    written; the summary names the dataset by its provenance label."""
+    plan = _recorded_plan("long", search_labels=False)
+
+    rows = card_rows(plan)
+
+    sector = f"{_RECORDED_SECTOR} (CRS 120 + 130)"
+    total = "gross disbursements (official development assistance)"
+    assert [row["label"] for row in rows] == [
+        f"Fetch {sector} for United States",
+        f"Total {sector}",
+        f"Fetch {total} for United States",
+        f"Total {total}",
+        f"{sector[0].upper()}{sector[1:]} as a share of {total}",
+    ]
+    assert card_summary(plan) == (
+        "Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+        f"System (CRS): {sector} from United States to 129 recipients, as a share of the "
+        "total from United States to 152 recipients."
+    )
+
+
+def test_a_declared_whole_is_named_by_the_axis_it_opens_and_never_the_planners_measure() -> None:
+    """The recorded US health share with its total declared the health part over
+    every sector, under the planner's measure "Total aid to health": the whole's
+    labels name all sectors, the part's sector opened, and never that measure."""
+    plan = _recorded_plan("long")
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(
+                    update={
+                        "measure": "Total aid to health",
+                        "whole_of": WholeOf(part="us_health_aid_raw", axis="sector"),
+                    }
+                )
+                if r.id == "us_total_aid_raw"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+
+    labels = [row["label"] for row in card_rows(plan)]
+
+    assert labels == [
+        f"Fetch {_HEALTH} for United States",
+        f"Total {_HEALTH}",
+        "Fetch all sectors for United States",
+        "Total all sectors",
+        f"{_HEALTH[0].upper()}{_HEALTH[1:]} as a share of all sectors",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("whole", "population"),
+    [(DAC_DONORS, "official donors (DAC)"), (ALL_DONORS, "140 donors")],
+    ids=["dac_donors", "all_donors"],
+)
+def test_a_declared_donor_whole_is_named_by_its_parts_concept_and_the_donors_its_source_holds(
+    decision: DecisionFactory, whole: dict[str, Any], population: str
+) -> None:
+    """The United States' share of ODA to Kenya with the total declared the US part
+    over every donor, under the planner's measure "Total aid to Kenya": the whole
+    counts the part's concept, so the card names it so, with the donors its source
+    holds, the total of official donors (DAC) or the 140 left open."""
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(
+                    update={
+                        "measure": "Total aid to Kenya",
+                        "whole_of": WholeOf(part="us", axis="donor"),
+                    }
+                )
+                if r.id == "all_oda"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+
+    labels = [row["label"] for row in card_rows(plan)]
+
+    whole_name = f"ODA gross disbursements from {population} to Kenya"
+    assert labels == [
+        "Fetch ODA gross disbursements from United States to Kenya",
+        f"Fetch {whole_name}",
+        f"Total {whole_name} by year",
+        f"ODA gross disbursements from United States to Kenya as a share of {whole_name}",
+    ]
+
+
+_ODA = "official development assistance"
+
+
+def test_a_donor_whole_counted_on_another_series_is_named_by_its_own_concept(
+    decision: DecisionFactory,
+) -> None:
+    """The United States' bilateral ODA to Kenya as a share of its whole over every
+    donor, which Search counted on total ODA, the bilateral series not being
+    published for official donors (DAC): the card names the whole by the
+    concept Search states for its own source, total ODA, and the part by its."""
+    plan = us_share_of_kenya_oda(
+        decision,
+        whole={**DAC_DONORS, "concept_label": _ODA},
+        numerator={**US_DONOR, "concept_label": "bilateral ODA"},
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(update={"whole_of": WholeOf(part="us", axis="donor")})
+                if r.id == "all_oda"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+
+    assert [row["label"] for row in card_rows(plan)] == [
+        "Fetch bilateral ODA for United States and Kenya",
+        f"Fetch {_ODA} for Kenya and official donors (DAC)",
+        f"Total {_ODA} by year",
+        f"Bilateral ODA as a share of {_ODA}",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("whole", "numerator", "concept"),
+    [
+        ({"measure_label": "total ODA"}, {"measure_label": "bilateral ODA"}, "total ODA"),
+        ({}, {"measure_label": "bilateral ODA"}, "bilateral ODA"),
+        ({"measure_label": "total ODA"}, {"concept_label": _ODA}, _ODA),
+        ({"concept_label": _ODA}, {"concept_label": "bilateral ODA"}, _ODA),
+    ],
+    ids=["own_measure_label", "parts_measure_label", "parts_concept", "own_concept"],
+)
+def test_a_donor_whole_is_named_by_one_concept_on_the_card(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    numerator: dict[str, Any],
+    concept: str,
+) -> None:
+    """A donor whole of the United States' ODA to Kenya, its source and its
+    part's stating a concept or only a measure label: the card's fetch names it
+    by one concept, with or without `concept_label`."""
+    plan = us_share_of_kenya_oda(
+        decision, whole={**DAC_DONORS, **whole}, numerator={**US_DONOR, **numerator}
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": [
+                r.model_copy(update={"whole_of": WholeOf(part="us", axis="donor")})
+                if r.id == "all_oda"
+                else r
+                for r in plan.evidence_requirements
+            ],
+        }
+    )
+
+    # The card adds the parties each reads only to retrievals named alike.
+    assert str(card_rows(plan)[1]["label"]).startswith(f"Fetch {concept} f")
+
+
+def test_a_comparison_of_two_entities_of_one_retrieval_names_each_sides_entity(
+    decision: DecisionFactory,
+) -> None:
+    """US grant equivalents minus the UK's, both read from one DAC1 fetch of the
+    two donors: each side names the entity it narrows the fetch to, so the
+    card label, the step label, the sentence and the plan's words tell the two
+    sides apart."""
+    plan = Plan(
+        question="How much more grant-equivalent ODA did the US give than the UK in 2023?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="dac1",
+                decision_ids=["measure"],
+                measure="grant equivalents",
+                entities=[
+                    Entity(name="United States", role="donor"),
+                    Entity(name="United Kingdom", role="donor"),
+                ],
+                period=Period(start=2023, end=2023),
+            ),
+            ComparisonRequirement(
+                id="gap",
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="dac1", entity="United States"),
+                subtrahend=RequirementSide(input_id="dac1", entity="United Kingdom"),
+            ),
+        ],
+    )
+    gap = plan.requirement("gap")
+    us, uk = "grant equivalents for United States", "grant equivalents for United Kingdom"
+
+    card = _card_label(gap, plan, concepts=_concepts(plan).names, shapes=frame_shapes(plan))
+
+    assert card == f"Compare {us} to {uk}"
+    assert _label(gap, plan) == f"Compare {us} to {uk}"
+    (row,) = [row for row in requirement_rows(plan) if row["id"] == "gap"]
+    assert row["sentence"] == (
+        f"Grant equivalents for United States minus {uk}, at every period the two share."
+    )
+    assert plan_words(plan).names["gap"] == f"{us} against {uk}"
+
+
+@pytest.mark.parametrize(
+    ("donors", "labels"),
+    [
+        pytest.param(
+            ("United States", "United Kingdom"),
+            [
+                "Fetch grant equivalents from United States",
+                "Fetch grant equivalents from United Kingdom",
+            ],
+            id="parties-differ",
+        ),
+        pytest.param(
+            ("United States", "United States"),
+            [
+                "Fetch grant equivalents from United States (1)",
+                "Fetch grant equivalents from United States (2)",
+            ],
+            id="parties-equal",
+        ),
+    ],
+)
+def test_retrievals_named_alike_name_their_parties_once(
+    decision: DecisionFactory, donors: tuple[str, str], labels: list[str]
+) -> None:
+    """Two retrievals of one concept, as "compare US and UK health aid" plans
+    them: the concept names each one's parties, so the retrieval's label
+    adds them no second time."""
+    plan = Plan(
+        question="Compare US and UK grant equivalents in 2023.",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=f"dac1_{number}",
+                decision_ids=["measure"],
+                measure="grant equivalents",
+                entities=[Entity(name=donor, role="donor")],
+                period=Period(start=2023, end=2023),
+            )
+            for number, donor in enumerate(donors)
+        ],
+    )
+    concepts, shapes = _concepts(plan).names, frame_shapes(plan)
+
+    shown = [
+        _card_label(requirement, plan, concepts=concepts, shapes=shapes)
+        for requirement in plan.evidence_requirements
+    ]
+
+    assert shown == labels
+
+
+def test_a_card_answering_an_ask_of_only_whitespace_takes_the_plans_title() -> None:
+    plan = _recorded_plan("short")
+    plan = Plan.model_validate({**plan.model_dump(), "asks": [" \n "]})
+
+    assert card_title(plan) == "Research plan"
+
+
+@pytest.mark.parametrize("name", ["short", "long", "long_switched_to_net"])
+def test_the_one_step_answering_the_ask_gives_the_answer(name: str) -> None:
+    """Exactly one step gives the answer: the last step the ask's answer
+    names, whose description ends with the result's scope."""
+    plan = _recorded_plan(name)
+
+    rows = card_rows(plan)
+
+    answering = [row for row in rows if row["gives_answer"]]
+    assert [row["id"] for row in answering] == [plan.answered[-1].outputs[-1]]
+    assert str(answering[0]["description"]).endswith(
+        "Result: one figure, 2024." if name == "short" else "Result: one figure, 2023."
+    )
+
+
+def test_a_retrievals_description_is_searchs_account_of_its_source() -> None:
+    plan = _recorded_plan("long_switched_to_net")
+
+    fetch = card_rows(plan)[2]
+
+    assert fetch["description"] == (
+        "United States of America's net ODA disbursements to 152 recipients in 2023. "
+        "Current US dollars · OECD Creditor Reporting System (CRS)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("crs_total", "crs total"),
+        ("sector:120+130 health incl. population", f"{_RECORDED_SECTOR} (CRS 120 + 130)"),
+        ("sector:130", "population policy, programme, and reproductive health, CRS 130 alone"),
+        ("CRS total aid", "CRS total aid"),
+        ("gross disbursements, current USD", "gross disbursements, current USD"),
+    ],
+)
+def test_a_choice_shows_no_planner_slug_or_option_id(text: str, shown: str) -> None:
+    assert card_choice_text(text, _recorded_plan("long"), options=(text,)) == shown
+
+
+def test_options_one_label_would_read_alike_keep_the_planners_words() -> None:
+    """Two options of one decision opening with the same scope option id would
+    both read as that option's label alone, so each keeps the planner's words
+    after the id, the chosen one included; an option no other reads alike
+    with still reads as the label alone."""
+    plan = _recorded_plan("long")
+    numerator, total = (
+        "sector:120+130 health for the numerator",
+        "sector:120+130 health for the total",
+    )
+    offered = (numerator, total, "sector:130")
+
+    shown = [card_choice_text(text, plan, options=offered) for text in (*offered, numerator)]
+
+    assert shown == [
+        f"{_RECORDED_SECTOR_LABEL} health for the numerator",
+        f"{_RECORDED_SECTOR_LABEL} health for the total",
+        "population policy, programme, and reproductive health, CRS 130 alone",
+        f"{_RECORDED_SECTOR_LABEL} health for the numerator",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        (
+            "measure_basis:net because the user asked for net flows",
+            "net disbursements, current USD because the user asked for net flows",
+        ),
+        (
+            "sector:130",
+            "population policy, programme, and reproductive health, CRS 130 alone",
+        ),
+        ("crs_total", "crs total"),
+        (
+            "sector:120+130 Health incl. population is the sector the user asked for",
+            f"{_RECORDED_SECTOR_LABEL} Health incl. population is the sector the user asked for",
+        ),
+    ],
+)
+def test_a_decisions_reason_keeps_its_words_after_the_option_id(text: str, shown: str) -> None:
+    """A reason, question or caveat opening with an option's id reads that id
+    as the option's label and keeps the planner's words after it as written,
+    including words that repeat the label."""
+    payload = _recorded_payload("long")
+    for decision in payload["decisions"]:
+        if (decision.get("scope") or {}).get("axis") == "sector":
+            decision["options"][0] = decision["chosen"] = _RECORDED_SECTOR_LABEL
+    plan = Plan.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in ("summary", "revision", "moved")
+        }
+    )
+    assert card_decision_text(text, plan) == shown
+
+
+_RELABELLED_NET = "net flows, current USD"
+
+
+@pytest.mark.parametrize(
+    ("rendered", "label"),
+    [
+        (None, "net disbursements, current USD"),
+        ("scope_sector_spec_61d37f5bd032b8bba3d077187e627ded", "net disbursements, current USD"),
+        ("scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca", _RELABELLED_NET),
+    ],
+    ids=["no_decision", "another_decisions_option", "own_label"],
+)
+def test_an_option_id_two_decisions_label_apart_never_shows_raw(
+    rendered: str | None, label: str
+) -> None:
+    """The recorded plan's two basis decisions, the second relabelling
+    "measure_basis:net": a reason opening with that id reads the label of the
+    decision it is of where that decision offers it, else of the first
+    decision offering it in plan order, so the id never shows, including in
+    the reason of the sector decision, which offers no basis option."""
+    payload = _recorded_payload("long")
+    for held in payload["decisions"]:
+        if held["slot"] == "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca":
+            held["options"][1] = _RELABELLED_NET
+    plan = Plan.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in ("summary", "revision", "moved")
+        }
+    )
+    decision = next((held for held in plan.decisions if held.slot == rendered), None)
+
+    text = "measure_basis:net because the user asked for net flows"
+    assert card_decision_text(text, plan, decision=decision) == (
+        f"{label} because the user asked for net flows"
+    )
+    assert (
+        card_choice_text(
+            "measure_basis:net", plan, decision=decision, options=("measure_basis:net",)
+        )
+        == label
+    )
+
+
+@pytest.mark.parametrize(
+    ("ghana", "kenya", "names"),
+    [
+        (
+            ("Ghana", 2023, 2023),
+            ("Kenya", 2023, 2023),
+            ("health aid to Ghana", "health aid to Kenya"),
+        ),
+        (
+            ("Kenya", 2015, 2023),
+            ("Kenya", 2023, 2023),
+            ("health aid to Kenya in 2015-2023", "health aid to Kenya in 2023"),
+        ),
+        (
+            ("Kenya", 2023, 2023),
+            ("Kenya", 2023, 2023),
+            ("health aid to Kenya (1)", "health aid to Kenya (2)"),
+        ),
+    ],
+    ids=["entity", "period", "alike"],
+)
+def test_requirements_a_sentence_names_alike_are_told_apart_by_the_facet_that_differs(
+    decision: Callable[..., Decision],
+    ghana: tuple[str, int, int],
+    kenya: tuple[str, int, int],
+    names: tuple[str, str],
+) -> None:
+    """Two retrievals named alike read as the card names them: with the
+    parties each reads, then the period where that differs, then a number
+    where nothing does. A calculation reads by the names it reads."""
+
+    def dataset(requirement_id: str, place: str, start: int, end: int) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="health aid",
+            entities=[Entity(name=place, role="recipient")],
+            period=Period(start=start, end=end),
+        )
+
+    plan = Plan(
+        question="Health aid to Ghana against Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("left", *ghana),
+            dataset("right", *kenya),
+            ComparisonRequirement(
+                id="both",
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="left"),
+                subtrahend=RequirementSide(input_id="right"),
+            ),
+        ],
+    )
+
+    words = plan_words(plan)
+
+    assert (words.names["left"], words.names["right"]) == names
+    assert words.names["both"] == f"{names[0]} against {names[1]}"
+    assert words.inputs["both"] == ("left", "right")
+
+
+@pytest.mark.parametrize(
+    ("measure", "axis", "held", "names"),
+    [
+        (
+            "health",
+            "provider",
+            ("bilateral flows only", "bilateral plus imputed multilateral"),
+            (
+                "health from United States to Kenya, bilateral flows only",
+                "health from United States to Kenya, bilateral plus imputed multilateral",
+            ),
+        ),
+        (
+            "official development assistance",
+            "measure_basis",
+            ("net", "grant equivalent"),
+            (
+                "official development assistance from United States to Kenya, net",
+                "official development assistance from United States to Kenya, grant equivalent",
+            ),
+        ),
+    ],
+    ids=["crs_bilateral_vs_inclusive", "dac1_net_vs_grant_equivalent"],
+)
+def test_namesakes_holding_different_scope_options_are_told_apart_by_the_option(
+    decision: DecisionFactory,
+    measure: str,
+    axis: typing.Literal["provider", "measure_basis"],
+    held: tuple[str, str],
+    names: tuple[str, str],
+) -> None:
+    """Two retrievals whose concept, parties and period match, pinned to
+    sources holding different options on the provider or measure-basis axis,
+    read by the option each holds, as the source labels it, before any
+    number. The card's plan and the caveats `propose_plan` writes
+    (`_card_names`) name them alike, and both report that each name states
+    the option on that axis (`PlanWords.options`)."""
+    pins = (_SPEC_A, _SPEC_B)
+    scopes = {
+        pin: Decision(
+            slot=scope_choice_slot(pin, axis),
+            description=f"How {axis} is counted.",
+            options=held,
+            chosen=chosen,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT,
+            rationale="Search's default for this question.",
+            fixes=DecisionFixes(source_spec_id=pin),
+            scope=DecisionScope(
+                choice_id=f"{pin}:{axis}",
+                axis=axis,
+                options=(
+                    ScopeOptionState(option_id=f"{axis}:first", status="available"),
+                    ScopeOptionState(option_id=f"{axis}:second", status="available"),
+                ),
+            ),
+        )
+        for pin, chosen in zip(pins, held, strict=True)
+    }
+    datasets = [
+        DatasetRequirement(
+            id=f"r{index}",
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[
+                Entity(name="United States", role="donor"),
+                Entity(name="Kenya", role="recipient"),
+            ],
+            period=Period(start=2023, end=2023),
+            source_spec_id=pin,
+        )
+        for index, pin in enumerate(pins)
+    ]
+    plan = Plan(
+        question=f"{measure} from the United States to Kenya, both ways",
+        decisions=[decision(), *scopes.values()],
+        evidence_requirements=[
+            dataset.model_copy(update={"decision_ids": (*dataset.decision_ids, scopes[pin].slot)})
+            for dataset, pin in zip(datasets, pins, strict=True)
+        ],
+    )
+
+    caveat = _card_names(
+        datasets,
+        decisions=[decision()],
+        scope_decisions={pin: [scope] for pin, scope in scopes.items()},
+        sources=SourceReadings(lambda _: None),
+    )
+    words = plan_words(plan)
+
+    assert (words.names["r0"], words.names["r1"]) == names
+    assert (caveat.names["r0"], caveat.names["r1"]) == names
+    assert words.options == caveat.options == {"r0": {axis}, "r1": {axis}}
+
+
+@pytest.mark.parametrize(
+    ("measure", "name"),
+    [("health aid", "health aid to Kenya (1)"), ("aid for health", "aid for health")],
+    ids=["unchanged", "measure_changed"],
+)
+def test_a_revision_names_what_the_card_holds_by_the_cards_names(
+    decision: Callable[..., Decision], measure: str, name: str
+) -> None:
+    """A revision that did not compile names a retrieval the card shows by its
+    name there while its concept, parties and period are the card's, and
+    otherwise by its own, as it names a retrieval new to the revision."""
+
+    def dataset(requirement_id: str, measure: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2023, end=2023),
+        )
+
+    prior = Plan(
+        question="Health aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[dataset("health", "health aid"), dataset("again", "health aid")],
+    )
+    revision = Plan(
+        question="Health aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("health", measure),
+            dataset("education", "education aid"),
+        ],
+    )
+
+    words = plan_words(revision, shown_as=prior)
+
+    assert (words.names["health"], words.names["education"]) == (name, "education aid")
+
+
+def test_a_revisions_changed_retrieval_is_told_apart_from_a_name_the_card_holds(
+    decision: Callable[..., Decision],
+) -> None:
+    """A retrieval whose measure the revision changed to one the card already
+    names, and one new to the revision named alike, read apart from the name
+    the card holds, which its retrieval keeps, by numbers it does not hold."""
+
+    def dataset(requirement_id: str, measure: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2023, end=2023),
+        )
+
+    prior = Plan(
+        question="Health and education aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("health", "health aid"),
+            dataset("again", "health aid"),
+            dataset("other", "education aid"),
+        ],
+    )
+    revision = Plan(
+        question="Health aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("health", "health aid"),
+            dataset("other", "health aid"),
+            dataset("new", "health aid"),
+        ],
+    )
+
+    words = plan_words(revision, shown_as=prior)
+
+    assert [words.names[rid] for rid in ("health", "other", "new")] == [
+        "health aid to Kenya (1)",
+        "health aid to Kenya (2)",
+        "health aid to Kenya (3)",
+    ]
+
+
+def test_a_revisions_retrieval_sharing_a_carried_retrievals_concept_keeps_its_parties(
+    decision: Callable[..., Decision],
+) -> None:
+    """A retrieval the revision changed shares its concept with one the card
+    holds by a name with parties added; it reads with its own parties too,
+    since the concept alone reads as either."""
+
+    def dataset(requirement_id: str, donor: str, start: int) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="health aid",
+            entities=[Entity(name=donor, role="donor"), Entity(name="Kenya", role="recipient")],
+            period=Period(start=start, end=2023),
+        )
+
+    prior = Plan(
+        question="Health aid to Kenya from the United States and France",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("us", "United States", 2023),
+            dataset("france", "France", 2023),
+        ],
+    )
+    revision = Plan(
+        question="Health aid to Kenya from the United States and France",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("us", "United States", 2023),
+            dataset("france", "France", 2020),
+        ],
+    )
+
+    words = plan_words(revision, shown_as=prior)
+
+    assert (words.names["us"], words.names["france"]) == (
+        "health aid from United States to Kenya",
+        "health aid from France to Kenya",
+    )
+
+
+def test_a_revisions_retrieval_changing_its_option_is_told_apart_from_a_numbered_carried_one(
+    decision: DecisionFactory,
+) -> None:
+    """The card numbers two retrievals alike in every naming facet, "(1)" and
+    "(2)"; a revision changes only the second's provider option. The first
+    keeps its card name, and the second, a namesake of it by concept,
+    parties and period whatever number the card's name holds, reads by the
+    option it now holds."""
+    pins = (_SPEC_A, _SPEC_B)
+    held = ("bilateral flows only", "bilateral plus imputed multilateral")
+
+    def scope(pin: str, chosen: str) -> Decision:
+        return Decision(
+            slot=scope_choice_slot(pin, "provider"),
+            description="How provider is counted.",
+            options=held,
+            chosen=chosen,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT,
+            rationale="Search's default for this question.",
+            fixes=DecisionFixes(source_spec_id=pin),
+            scope=DecisionScope(
+                choice_id=f"{pin}:provider",
+                axis="provider",
+                options=(
+                    ScopeOptionState(option_id="provider:first", status="available"),
+                    ScopeOptionState(option_id="provider:second", status="available"),
+                ),
+            ),
+        )
+
+    def plan(second: str) -> Plan:
+        scopes = [scope(pins[0], held[0]), scope(pins[1], second)]
+        return Plan(
+            question="Health aid from the United States to Kenya, twice",
+            decisions=[decision(), *scopes],
+            evidence_requirements=[
+                DatasetRequirement(
+                    id=f"r{index}",
+                    decision_ids=["measure", held_scope.slot],
+                    measure="health",
+                    entities=[
+                        Entity(name="United States", role="donor"),
+                        Entity(name="Kenya", role="recipient"),
+                    ],
+                    period=Period(start=2023, end=2023),
+                    source_spec_id=pin,
+                )
+                for index, (pin, held_scope) in enumerate(zip(pins, scopes, strict=True))
+            ],
+        )
+
+    prior = plan(held[0])
+    assert _concepts(prior).names == {
+        "r0": "health from United States to Kenya (1)",
+        "r1": "health from United States to Kenya (2)",
+    }
+
+    words = plan_words(plan(held[1]), shown_as=prior)
+
+    assert (words.names["r0"], words.names["r1"]) == (
+        "health from United States to Kenya (1)",
+        "health from United States to Kenya, bilateral plus imputed multilateral",
+    )
+    assert words.options == {"r0": frozenset(), "r1": {"provider"}}
+
+
+def test_a_revisions_new_retrieval_is_told_apart_from_the_name_a_carried_one_keeps(
+    decision: DecisionFactory,
+) -> None:
+    """The card names health to Kenya, holding a provider option, apart from
+    health to Uganda by its parties. A revision drops Uganda and adds health
+    to Kenya with no provider decision. The carried retrieval keeps its card
+    name; the new one, whose own facets read as that name, takes a number."""
+    held = ("bilateral flows only", "bilateral plus imputed multilateral")
+    provider = Decision(
+        slot=scope_choice_slot(_SPEC_A, "provider"),
+        description="How provider is counted.",
+        options=held,
+        chosen=held[0],
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="Search's default for this question.",
+        fixes=DecisionFixes(source_spec_id=_SPEC_A),
+        scope=DecisionScope(
+            choice_id=f"{_SPEC_A}:provider",
+            axis="provider",
+            options=(
+                ScopeOptionState(option_id="provider:first", status="available"),
+                ScopeOptionState(option_id="provider:second", status="available"),
+            ),
+        ),
+    )
+
+    def dataset(requirement_id: str, recipient: str, *scopes: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure", *scopes],
+            measure="health",
+            entities=[Entity(name=recipient, role="recipient")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=_SPEC_A if scopes else None,
+        )
+
+    kenya = dataset("kenya", "Kenya", provider.slot)
+    prior = Plan(
+        question="Health aid to Kenya and Uganda",
+        decisions=[decision(), provider],
+        evidence_requirements=[kenya, dataset("uganda", "Uganda")],
+    )
+    revision = Plan(
+        question="Health aid to Kenya, twice",
+        decisions=[decision(), provider],
+        evidence_requirements=[kenya, dataset("again", "Kenya")],
+    )
+    assert _concepts(prior).names["kenya"] == "health to Kenya"
+
+    words = plan_words(revision, shown_as=prior)
+
+    assert (words.names["kenya"], words.names["again"]) == (
+        "health to Kenya",
+        "health to Kenya (1)",
+    )
+
+
+@pytest.mark.parametrize("helper", ["_concept", "_who"])
+def test_a_revision_reads_each_retrievals_naming_once_per_plan(
+    decision: Callable[..., Decision], monkeypatch: pytest.MonkeyPatch, helper: str
+) -> None:
+    """Naming a revision around the card's names reads each retrieval's concept
+    and parties once for the card's plan and once for the revision, however
+    many of them share a name."""
+
+    def dataset(requirement_id: str, measure: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2023, end=2023),
+        )
+
+    prior = Plan(
+        question="Health aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[dataset("health", "health aid"), dataset("again", "health aid")],
+    )
+    revision = Plan(
+        question="Health aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[dataset("health", "health aid"), dataset("new", "health aid")],
+    )
+    real = getattr(plan_display, helper)
+    reads: Counter[tuple[str, str]] = Counter()
+
+    def counted(requirement: DatasetRequirement, plan: Plan, **kwargs: Any) -> str:
+        reads[plan.question, requirement.id] += 1
+        return real(requirement, plan, **kwargs)
+
+    monkeypatch.setattr(plan_display, helper, counted)
+    revision = revision.amend(question="Health aid to Kenya, revised")
+
+    plan_words(revision, shown_as=prior)
+
+    assert reads, helper
+    assert max(reads.values()) == 1, reads
+
+
+def test_a_revision_not_compiled_names_what_the_card_holds_by_the_cards_names() -> None:
+    """The recorded plan, compiled, and an amendment of it that did not compile
+    and so holds no workflow, here one rewording the question: each retrieval
+    it holds unchanged reads the source the card's was compiled from, so it
+    keeps the card's name."""
+    prior = _recorded_plan("long")
+    revision = prior.amend(question=f"{prior.question} Show it as a share.")
+    assert revision.workflow is None
+
+    words = plan_words(revision, shown_as=prior)
+
+    card = _concepts(shown_plan(prior)).names
+    assert card == {
+        "us_health_aid_raw": "health",
+        "us_total_aid_raw": "official development assistance",
+    }
+    assert {rid: words.names[rid] for rid in card} == card
+
+
+@pytest.mark.parametrize(
+    ("concept", "name"),
+    [("health care", "health care"), (None, _RECORDED_SECTOR_LABEL)],
+    ids=["concept_label", "no_concept_label"],
+)
+def test_a_retrieval_a_revision_repins_is_named_by_searchs_answer_for_its_pin(
+    concept: str | None, name: str
+) -> None:
+    """A revision, not compiled, that pins the recorded plan's health retrieval
+    to another dataset is named by the concept Search's answer for that pin
+    states, and with none stated by the sector option's label."""
+    prior = _recorded_plan("long")
+    moved = f"spec_{'e' * 32}"
+    revision = prior.model_copy(
+        update={
+            "translation": None,
+            "workflow": None,
+            "evidence_requirements": [
+                r.model_copy(update={"source_spec_id": moved}) if r.id == "us_health_aid_raw" else r
+                for r in prior.evidence_requirements
+            ],
+        }
+    )
+    block = {
+        "spec_id": moved,
+        "resolved": {"concept_label": concept} if concept is not None else {},
+    }
+
+    words = plan_words(revision, shown_as=prior, pinned={moved: source_from_spec_block(block)})
+
+    assert words.names["us_health_aid_raw"] == name
+    assert words.names["us_total_aid_raw"] == "official development assistance"
+
+
+def test_namesakes_are_numbered_as_the_plan_states_them_before_and_after_compile(
+    decision: DecisionFactory,
+) -> None:
+    """Two retrievals named alike, stated `z_aid` then `m_aid`, against the order of
+    their ids. A rolling growth reads `z_aid` from its first year, so the split runs
+    a copy, `z_aid_history`, beside it, and the compiler, taking operations by
+    requirement id, runs `m_aid` before `z_aid`. The sentence a proposal writes over
+    the plan as stated (`submission.service._card_names`), a revision's sentence over
+    the plan not compiled, and the compiled card each number them as the plan states
+    them."""
+    retrieval = DatasetRequirement(
+        id="z_aid",
+        decision_ids=["measure"],
+        measure="aid",
+        entities=[Entity(name="Kenya", role="recipient")],
+        period=Period(start=2015, end=2024),
+        period_end_open=True,
+    )
+    draft = Plan(
+        question="Aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            retrieval,
+            retrieval.model_copy(update={"id": "m_aid", "period_end_open": False}),
+            GrowthRequirement(
+                id="a_growth",
+                input_id="z_aid",
+                window_start=2019,
+                window_end=2024,
+                rolling=RollingWindow(
+                    window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+                ),
+            ),
+            SumOfRequirement(
+                id="s_sum",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="m_aid"),
+                right=RequirementSide(input_id="z_aid"),
+            ),
+        ],
+        first_years=[FirstYear(requirement_id="z_aid", year=2000)],
+    )
+    split = split_of(draft)
+    assert [copy.copy_id for copy in split.copies] == ["z_aid_history"]
+    uncompiled = Plan.model_validate(
+        {
+            **draft.model_dump(),
+            "evidence_requirements": split.requirements,
+            "rolling_copies": split.copies,
+        }
+    )
+    pins = {"z_aid": SPEC_DEBT, "z_aid_history": SPEC_DEBT_HISTORY, "m_aid": "spec_" + "c" * 32}
+    translation = build_translation(uncompiled, pins)
+
+    def retrieve(step_id: str) -> WorkflowStep:
+        return WorkflowStep(
+            id=step_id,
+            operation_id=step_id,
+            tool=ToolId(server="data-mcp", name="get_data"),
+            args={"spec_id": pins[step_id]},
+            input_schema_hash="hash",
+        )
+
+    def frame(step_id: str) -> Binding:
+        return Binding(from_step=step_id, output=ArtifactKind.FRAME_REF)
+
+    workflow = Workflow(
+        # The compiler's order: requirements by id, each after the inputs it reads.
+        steps=[
+            retrieve("z_aid_history"),
+            WorkflowStep(
+                id="a_growth",
+                operation_id="a_growth",
+                tool=ToolId(server="analysis-mcp", name="growth"),
+                bindings={"frame_ref": frame("z_aid_history")},
+                input_schema_hash="hash",
+            ),
+            retrieve("m_aid"),
+            retrieve("z_aid"),
+            WorkflowStep(
+                id="s_sum",
+                operation_id="s_sum",
+                tool=ToolId(server="analysis-mcp", name="sum_of"),
+                bindings={"left_ref": frame("m_aid"), "right_ref": frame("z_aid")},
+                input_schema_hash="hash",
+            ),
+        ],
+        sources=[
+            SelectedSource(spec_id=spec_id, sentence="aid", has_data=True)
+            for spec_id in pins.values()
+        ],
+        evidence_bindings=[
+            EvidenceBinding(requirement_id=rid, step_id=rid, spec_id=spec_id)
+            for rid, spec_id in pins.items()
+        ],
+        terminal_steps=["a_growth", "s_sum"],
+    )
+    compiled = uncompiled.with_translation(translation=translation, workflow=workflow)
+
+    caveat = _card_names(
+        draft.evidence_requirements,
+        decisions=draft.decisions,
+        scope_decisions={},
+        sources=SourceReadings(lambda _: None),
+    ).names
+    revision = plan_words(uncompiled).names
+    card = plan_words(compiled).names
+
+    retrievals = ("z_aid", "m_aid")
+    assert [caveat[rid] for rid in retrievals] == ["aid to Kenya (1)", "aid to Kenya (2)"]
+    assert [revision[rid] for rid in retrievals] == [caveat[rid] for rid in retrievals]
+    assert [card[rid] for rid in retrievals] == [caveat[rid] for rid in retrievals]
+
+
+# `_concepts` numbers the namesakes "aid" and "aid (1)" in card order, the "aid"
+# pair first, so the numbers it gives depend on no hash order.
+_NAMESAKES_BY_CARD_ORDER = ["aid (2)", "aid (3)", "aid (1) (1)", "aid (1) (2)"]
+
+
+@pytest.mark.parametrize("seed", ["0", "1"])
+def test_namesakes_are_numbered_in_card_order_whatever_the_hash_order(
+    decision: DecisionFactory, seed: str
+) -> None:
+    """Two retrievals named "aid" and two named "aid (1)": numbering one pair
+    can take a name the other holds, so the names depend on which pair is
+    numbered first. Each pair is numbered in card order. Run in a fresh
+    interpreter per hash seed, since the two seeds order a set of the two
+    names each way. Each run takes about a second."""
+    plan = Plan(
+        question="Aid",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id=f"r{index}",
+                decision_ids=["measure"],
+                measure=measure,
+                across=["recipient"],
+                period=Period(start=2023, end=2023),
+            )
+            for index, measure in enumerate(["aid", "aid", "aid (1)", "aid (1)"])
+        ],
+    )
+    script = (
+        "import json, sys\n"
+        "from harness.plan_display import _concepts\n"
+        "from planner.plan import Plan\n"
+        "plan = Plan.model_validate_json(sys.stdin.read())\n"
+        "print(json.dumps(list(_concepts(plan).names.values())))\n"
+    )
+
+    ran = subprocess.run(
+        [sys.executable, "-c", script],
+        input=plan.model_dump_json(),
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONHASHSEED": seed},
+    )
+
+    assert json.loads(ran.stdout) == _NAMESAKES_BY_CARD_ORDER
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        AggregateRequirement(
+            id="over_share", input_id="health_share", reduction=Reduction.MEAN, group_by=[]
+        ),
+        GrowthRequirement(
+            id="over_share", input_id="health_share", window_start=2016, window_end=2020
+        ),
+        RankRequirement(
+            id="over_share",
+            input_id="health_share",
+            direction=RankDirection.HIGHEST_FIRST,
+            among=RankAmong.POPULATION,
+            reduction=Reduction.MEAN,
+        ),
+        FilterRequirement(
+            id="over_share", input_id="health_share", predicates=(ValueThreshold(op="gt", value=0),)
+        ),
+    ],
+    ids=["aggregate", "growth", "rank", "filter"],
+)
+def test_a_step_over_a_share_keeps_the_shares_summary(over: EvidenceRequirement) -> None:
+    """The answer is a total, growth, rank or filter over the recorded share: the
+    summary still says what the share divides, "as a share of" its denominator and
+    from which source."""
+    plan = _recorded_plan("long")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                *plan.evidence_requirements,
+                over.model_copy(update={"decision_ids": ("measure",)}),
+            ],
+            "answered": [plan.answered[0].model_copy(update={"outputs": ("over_share",)})],
+        }
+    )
+
+    assert card_summary(plan) == card_summary(_recorded_plan("long"))
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        ComparisonRequirement(
+            id="over_shares",
+            minuend=RequirementSide(input_id="health_share"),
+            subtrahend=RequirementSide(input_id="other_share"),
+        ),
+        SumOfRequirement(
+            id="over_shares",
+            left=RequirementSide(input_id="health_share"),
+            right=RequirementSide(input_id="other_share"),
+        ),
+    ],
+    ids=["comparison", "sum"],
+)
+def test_a_calculation_over_two_shares_has_no_summary(over: EvidenceRequirement) -> None:
+    """The answer is a comparison or sum of two shares: naming either share's
+    numerator alone would read as a plain amount, so the card shows its title only."""
+    plan = _recorded_plan("long")
+    share = plan.requirement("health_share")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                *plan.evidence_requirements,
+                share.model_copy(update={"id": "other_share"}),
+                over.model_copy(update={"decision_ids": ("measure",)}),
+            ],
+            "answered": [plan.answered[0].model_copy(update={"outputs": ("over_shares",)})],
+        }
+    )
+
+    assert card_summary(plan) is None
+
+
+def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> None:
+    """Both sides of the share total the same retrieval: the summary keeps
+    each side, joined by "as a share of", and does not read as one figure."""
+    plan = _recorded_plan("long")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                requirement.model_copy(update={"input_id": "us_health_aid_raw"})
+                if requirement.id == "us_total_aid_sum"
+                else requirement
+                for requirement in plan.evidence_requirements
+            ]
+        }
+    )
+
+    side = f"{_HEALTH} from United States to 129 recipients"
+    assert card_summary(plan) == (
+        "Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+        f"System (CRS): {side}, as a share of {side}."
+    )
+
+
+def _planner_decision(**update: Any) -> Decision:
+    """A decision the planner wrote fixing the window's first year, with `update` set."""
+    return Decision.model_validate(
+        {
+            "slot": "window",
+            "description": "Which years the answer covers.",
+            "options": ["since 2015", "since 2020"],
+            "chosen": "since 2015",
+            "resolved_by": "planner_default",
+            "rationale": "The question asks for the last decade.",
+            "fixes": {"window_start": 2015},
+            **update,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("decision", "switchable"),
+    [
+        (_planner_decision(), True),
+        (_planner_decision(fixes=None), False),
+        (
+            _planner_decision(slot=search_pin_slot(_SPEC_A), fixes={"source_spec_id": _SPEC_A}),
+            False,
+        ),
+        (_scope_decision(_SPEC_A, "sector"), False),
+        (_planner_decision(caveat="providers_differ"), False),
+    ],
+    ids=["fixes_fields", "rationale_only", "search_pin", "scope_choice", "caveat"],
+)
+def test_only_a_planner_decision_settling_fields_switches_on_the_card(
+    decision: Decision, switchable: bool
+) -> None:
+    """The decisions `propose_plan` writes switch through Search or qualify
+    the answer, and a rationale settles nothing a switch could change."""
+    assert switchable_decision(decision) is switchable
+
+
+def test_a_planner_decisions_row_id_never_names_a_scope_choice() -> None:
+    """A requirement may be called `decision`, and a planner decision's slot
+    may be a scope axis: the scope choice of that requirement on that axis
+    and the planner decision's row still take different ids."""
+    dumped = scripted_plan("kenya life expectancy", spec_id=None).model_dump()
+    for requirement in dumped["evidence_requirements"]:
+        if requirement["id"] == "life_expectancy":
+            requirement.update(id="decision", source_spec_id=_SPEC_A)
+        if requirement.get("input_id") == "life_expectancy":
+            requirement["input_id"] = "decision"
+    plan = Plan.model_validate(dumped | {"translation": None, "workflow": None})
+
+    assert decision_choice_id(_planner_decision(slot="sector")) != pinned_choice_id(
+        plan, {_SPEC_A}, "sector"
+    )
+
+
+def _fixing_measure(plan: Plan) -> Plan:
+    """`plan` (the scripted Kenya life expectancy plan) with its measure
+    decision fixing the measure its dataset reads."""
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    return Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [
+                d.model_copy(update={"fixes": DecisionFixes(measure=dataset.measure)})
+                for d in plan.decisions
+            ],
+        }
+    )
+
+
+def test_a_switch_of_a_planner_decision_picks_the_option_as_the_plan_states_it() -> None:
+    """The row `decision/measure`'s option for a label picks that label, with
+    the decision as the plan states it. A row or option the card does not
+    offer picks nothing, and nor does the option the decision has chosen."""
+    unfixed = scripted_plan("kenya life expectancy", spec_id=None)
+    plan = _fixing_measure(unfixed)
+    (measure,) = plan.decisions
+    birth, healthy = measure.options
+    assert (birth, healthy) == ("life expectancy at birth", "healthy life expectancy")
+    assert measure.fixes is not None
+    assert measure.chosen == birth
+
+    picks = [
+        decision_pick(plan, choice_id=choice, option_id=option, to_origin={}, alignments={})
+        for choice, option in [
+            ("decision/measure", decision_option_id(healthy)),
+            ("decision/measure", decision_option_id(birth)),
+            ("decision/measure", decision_option_id("life expectancy at 60")),
+            ("decision/measure", "option_2"),
+            ("decision/other", decision_option_id(healthy)),
+            ("measure", decision_option_id(healthy)),
+        ]
+    ]
+
+    assert picks == [
+        DecisionPick.on_card(plan, slot="measure", chosen=healthy),
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert (
+        decision_pick(
+            unfixed,
+            choice_id="decision/measure",
+            option_id=decision_option_id(healthy),
+            to_origin={},
+            alignments={},
+        )
+        is None
+    )

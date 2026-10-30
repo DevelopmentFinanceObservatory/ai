@@ -113,8 +113,14 @@ from compiler.surface import (
     deliver_progress,
     mcp_progress_handler,
 )
+from data_mcp.mint_admission import (
+    BACKGROUND_ADMISSION,
+    MINT_ADMISSION_META_KEY,
+    background_outcome,
+)
 from data_mcp.mint_recovery import DatasetVersions, recover_mint_record
-from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.search_result import SEARCH_CONTEXT_META_KEY, SEARCH_ENVELOPE_META_KEY
+from data_mcp.search_tool import SearchContext
 from dfo_frame_grammar.grammar import parse_time_period
 from executor.classify import MAX_ATTEMPTS_PER_STEP, Jitter, delay_before_retry
 from executor.completion import FramePublished, PublishFault
@@ -157,6 +163,7 @@ from harness.rolling_cards import (
     resolved_basis,
     written_title_refusal,
 )
+from harness.scope_choices import served_facts
 from harness.settings import Settings
 from harness.tool_contracts import (
     _PRESENTATION_TOOLS,
@@ -224,6 +231,7 @@ async def _call_tool(
     arguments: dict[str, Any],
     *,
     on_progress: ProgressCallback | None = None,
+    meta: Mapping[str, Any] | None = None,
 ) -> Any:
     """`client.call_tool`, raising `_McpTimeoutError` in place of a bare
     `MCPError` when it is one. `raise_on_error=False` only suppresses a
@@ -231,12 +239,13 @@ async def _call_tool(
     (`compiler.capabilities.call_timeouts()`, else `Settings.
     mcp_call_timeout_s`) elapsing still raises `MCPError`, with mcp's
     `REQUEST_TIMEOUT` code and no refusal body. `on_progress` hears the
-    call's progress notifications (`compiler.surface.mcp_progress_handler`)."""
+    call's progress notifications (`compiler.surface.mcp_progress_handler`).
+    `meta` joins the request's `_meta` beside the turn's session."""
     try:
         return await client.call_tool(
             tool,
             arguments,
-            meta=session_call_meta(client),
+            meta={**session_call_meta(client), **(meta or {})},
             progress_handler=mcp_progress_handler(on_progress),
             raise_on_error=False,
         )
@@ -253,6 +262,7 @@ async def _call_held(
     arguments: dict[str, Any],
     *,
     on_progress: ProgressCallback | None = None,
+    meta: Mapping[str, Any] | None = None,
 ) -> Any:
     """`_call_tool` against `client` -- `clients`' held client for the
     current conversation -- evicting it from `clients` when the call fails
@@ -275,7 +285,7 @@ async def _call_held(
     in the first place.
     """
     try:
-        return await _call_tool(client, tool, arguments, on_progress=on_progress)
+        return await _call_tool(client, tool, arguments, on_progress=on_progress, meta=meta)
     except _McpTimeoutError:
         raise
     except Exception:
@@ -324,8 +334,19 @@ class McpResolver:
         await self._clients.aclose()
 
     async def __call__(
-        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
+        self,
+        *,
+        question: str,
+        parts: list[dict[str, Any]],
+        raw_text: bool = False,
+        context: SearchContext | None = None,
     ) -> dict[str, Any]:
+        """Call data-mcp `search` and digest the envelope it returns.
+
+        `context` rides in the request's `_meta` under
+        `SEARCH_CONTEXT_META_KEY`, where data-mcp reads it and the tool's
+        input schema, which outside clients see, does not name it.
+        """
         if raw_text:
             # The orchestrator's second search: Search reads `question` itself
             # through its raw-text door, so no decomposition is sent.
@@ -346,7 +367,17 @@ class McpResolver:
             arguments = {"parts": parts, "raw_query": question}
         client = await self._clients.get()
         try:
-            result = await _call_held(self._clients, client, "search", arguments)
+            result = await _call_held(
+                self._clients,
+                client,
+                "search",
+                arguments,
+                meta=(
+                    {SEARCH_CONTEXT_META_KEY: context.model_dump(mode="json", exclude_none=True)}
+                    if context is not None
+                    else None
+                ),
+            )
         finally:
             await self._clients.release(client)
         if result.is_error:
@@ -727,6 +758,37 @@ class McpExecutor:
                 return outcome
         return outcome
 
+    async def get_data_in_background(self, args: dict[str, Any]) -> str:
+        """One `get_data` call with `args`, its mint marked background, and the
+        outcome as a word (`data_mcp.mint_admission.background_outcome`):
+        data-mcp's `"minted"`, `"queued"`, `"posted"` or `"joined"` (a POST of
+        the same request was already open), `"declined"` when apis had no room
+        for it, or another refusal's code. data-mcp answers `"posted"` as soon as the mint POST is
+        written out, so apis' own answer, a decline included, mostly arrives
+        after this returns; data-mcp logs it (`background mint answered`).
+
+        The mark rides the request `_meta` (`data_mcp.mint_admission`), so apis
+        admits the mint only while it has room and declines it at once
+        otherwise, and data-mcp answers once the mint POST has been written
+        out, keeping the POST itself open until apis answers. Sent
+        once, without `_retried`, and nothing is
+        written to the provenance store: the call only warms the frame
+        execution will ask for (`harness.early_mint`). A failed call raises, as
+        `_call_held` does.
+        """
+        client = await self._get_data_clients.get()
+        try:
+            result = await _call_held(
+                self._get_data_clients,
+                client,
+                "get_data",
+                args,
+                meta={MINT_ADMISSION_META_KEY: BACKGROUND_ADMISSION},
+            )
+        finally:
+            await self._get_data_clients.release(client)
+        return background_outcome(result.structured_content)
+
     async def _admitted_write(self, args: dict[str, Any]) -> AdmittedWrite:
         """The arguments to send for a `write_component` call, under the rules
         for a card whose period follows the latest data
@@ -838,6 +900,8 @@ class McpExecutor:
                 "opened in the materialisation store by the pair dfo-apis serves it under",
                 (manifest.get("definition") or {}).get("spec_id"),
             )
+        # `served` is how the frame was counted (`served_facts`), which the
+        # `fetch` tool keeps on the readings of the spec_id; no model reads it.
         return {
             "outcome": "ok",
             "frame_refs": [ref],
@@ -846,6 +910,7 @@ class McpExecutor:
             "rows": coverage.get("rows"),
             "warnings": manifest.get("warnings") or [],
             **({"period_note": note} if (note := period_note(coverage)) else {}),
+            **({"served": served} if (served := served_facts(manifest)) is not None else {}),
         }
 
     async def _presentation(

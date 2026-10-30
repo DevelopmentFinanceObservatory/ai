@@ -215,6 +215,32 @@ async def test_a_sibling_measure_definition_is_written_beside_its_spec() -> None
     assert store.written == [_stored(spec["definition"]), _stored(sibling)]
 
 
+async def test_a_specs_scope_choices_register_no_identity_of_their_own() -> None:
+    """The base identity a switch posts back and the options of every choice,
+    an unavailable one among them, stay out of the store: only the spec and its
+    sibling measure are written."""
+    envelope = json.loads((_FIXTURES / "resolve_aid_france_kenya.json").read_text())
+    spec = envelope["parts"][0]["spec"]
+    scope = json.loads((_FIXTURES / "scope_choices_us_health_africa.json").read_text())
+    spec["resolved"]["scope_choices"] = scope
+    sibling = spec["resolved"]["alternative_measures"][0]["definition"]
+    statuses = {
+        option["availability"]["status"]
+        for choice in scope["choices"]
+        for option in choice["options"]
+    }
+    assert statuses == {"available", "unavailable"}
+    assert scope["base"]["spec_id"] != spec["spec_id"]
+    store = _SpyStore()
+
+    result = await _call_search_with_store(
+        _json_handler(200, envelope), [{"variable": "aid"}], store
+    )
+
+    assert result.is_error is False
+    assert store.written == [_stored(spec["definition"]), _stored(sibling)]
+
+
 async def test_an_unhashable_sibling_is_skipped_and_named_nowhere_in_the_answer(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

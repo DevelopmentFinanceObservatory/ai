@@ -1347,12 +1347,23 @@ _NEWEST = RelativePeriod(offset=0)
 
 _EVERY_YEAR_HELD = {"stat_var": "NetODA", "requested_window": {"kind": "all"}}
 _OPEN_SPEC = spec_id_for(canonicalize(_EVERY_YEAR_HELD))
+# Imputed multilateral aid, another series of the dataset `SPEC` and `_OPEN_SPEC`
+# read, under fixed and open years.
+_IMPUTED_SPEC = "spec_" + "b" * 32
+_IMPUTED_EVERY_YEAR_HELD = {
+    "stat_var": "ImputedMultilateralODA",
+    "requested_window": {"kind": "all"},
+}
+_IMPUTED_OPEN_SPEC = spec_id_for(canonicalize(_IMPUTED_EVERY_YEAR_HELD))
 
 
 @pytest.fixture
 def aid_on_record() -> Iterator[None]:
     """The source `_open` pins on record, as `harness.studio` sets the lookup for a turn."""
-    recorded = {_OPEN_SPEC: RecordedIdentity(identity=_EVERY_YEAR_HELD)}
+    recorded = {
+        _OPEN_SPEC: RecordedIdentity(identity=_EVERY_YEAR_HELD),
+        _IMPUTED_OPEN_SPEC: RecordedIdentity(identity=_IMPUTED_EVERY_YEAR_HELD),
+    }
     token = current_recorded_identity.set(recorded.get)
     yield
     current_recorded_identity.reset(token)
@@ -1369,6 +1380,20 @@ _SHOWN_OPEN = {
             },
         }
     )
+}
+
+# The imputed series `_totals_paired` pins, shown beside the others.
+_SHOWN_IMPUTED = {
+    _IMPUTED_SPEC: PinSource(provenance_ref="oecd/dac2a"),
+    _IMPUTED_OPEN_SPEC: PinSource(
+        block={
+            "spec_id": _IMPUTED_OPEN_SPEC,
+            "definition": {"identity": _IMPUTED_EVERY_YEAR_HELD},
+            "resolved": {
+                "download": {"rows": 35, "window": {"start_year": 1990, "end_year": 2024}}
+            },
+        }
+    ),
 }
 
 
@@ -2672,7 +2697,7 @@ def test_the_one_year_each_refusal_offers_is_admitted(
             AskAnswer(ask=1, outputs=(sibling,)),
         ]
     # Both sides of a sum pin one dataset, so adding them needs no pick from the user.
-    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    pins = {**_SHOWN_OPEN, **_SHOWN_IMPUTED, SPEC: PinSource(provenance_ref="oecd/dac2a")}
 
     refused = _propose(_context(asks=asks, pins=pins), requirements, cited, answered=answered)
     (gap,) = refused["detail"]["gaps"]
@@ -2839,9 +2864,12 @@ def _totals_paired(
         input_id="bilateral",
         predicates=(ValueThreshold(op="gt", value=84.357),),
     )
+    imputed = series("imputed", measure="imputed multilateral aid")
     return [
         series("bilateral"),
-        series("imputed", measure="imputed multilateral aid"),
+        imputed.model_copy(
+            update={"source_spec_id": _IMPUTED_OPEN_SPEC if open_ else _IMPUTED_SPEC}
+        ),
         *([kept] if by_value else []),
         _total(id="bilateral_total", input_id="kept" if by_value else "bilateral"),
         _total(id="imputed_total", input_id="imputed"),
@@ -3019,7 +3047,7 @@ def test_a_span_newer_data_moves_matches_no_fixed_window_or_span_that_stays(
     such as 2016-2020 where France's 2015 value falls below the threshold,
     so it matches no span another step wrote."""
     # Both sides pin one dataset, so adding them needs no pick from the user.
-    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    pins = {**_SHOWN_OPEN, **_SHOWN_IMPUTED, SPEC: PinSource(provenance_ref="oecd/dac2a")}
     ctx = _context(across_years=[0], pins=pins)
 
     result = _propose(ctx, requirements, [decision(), *decisions])
@@ -3063,7 +3091,7 @@ def test_a_mean_over_a_pair_with_a_trailing_side_reduces_years_in_either_side_or
     ]
     order = (_side("right"), _side("left")) if trailing_first else (_side("left"), _side("right"))
     pair = QuotientRequirement(id="pair", numerator=order[0], denominator=order[1])
-    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    pins = {**_SHOWN_OPEN, **_SHOWN_IMPUTED, SPEC: PinSource(provenance_ref="oecd/dac2a")}
 
     result = _propose(
         _context(pins=pins),
@@ -3115,7 +3143,7 @@ def test_a_total_of_the_rows_a_value_filter_kept_pairs_with_no_other_steps_resul
         ),
         _paired(kind, *(sides[::-1] if swap else sides)),
     ]
-    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    pins = {**_SHOWN_OPEN, **_SHOWN_IMPUTED, SPEC: PinSource(provenance_ref="oecd/dac2a")}
 
     refused = _propose(
         _context(across_years=[0], pins=pins), requirements, [decision(), POPULATION, POOLED]
@@ -3148,7 +3176,7 @@ def test_a_max_by_entity_pairs_with_no_series_a_value_filter_kept(
         *([_total(id="kept_total", input_id="kept")] if counterpart == "kept_total" else []),
         _paired("quotient_of", *(sides[::-1] if swap else sides)),
     ]
-    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    pins = {**_SHOWN_OPEN, **_SHOWN_IMPUTED, SPEC: PinSource(provenance_ref="oecd/dac2a")}
 
     refused = _propose(_context(pins=pins), requirements, [decision(), POPULATION, POOLED])
 
@@ -3201,7 +3229,7 @@ def test_the_sides_of_a_pairing_are_offered_one_year_together(
     the refusal offers each its year together with the other, on the newest
     year where the sides' years follow it. The plan following both is
     admitted, and one following either alone is not."""
-    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    pins = {**_SHOWN_OPEN, **_SHOWN_IMPUTED, SPEC: PinSource(provenance_ref="oecd/dac2a")}
     cited = [decision(), *decisions]
 
     refused = _propose(_context(pins=pins), requirements, cited)

@@ -269,6 +269,7 @@ def orchestrator_runner(
     definition_surface: Any = None,
     publisher: Any = scripted_publish_result,
     run_ledger: Any = None,
+    early_mints: Any = None,
 ) -> tuple[Runner, ScriptLlm]:
     """The root workflow on the orchestrator topology under a bare ADK
     `Runner` (app `t`), its model answering from `script`. The planner
@@ -276,8 +277,9 @@ def orchestrator_runner(
     test unless a resolver or executor is given. `definition_surface`
     resolves seeds, data-mcp over a Search API that serves nothing unless
     one is given. `publisher` publishes a run's derived results, all of
-    them at once by default, and `run_ledger` keeps its runs, the
-    workflow's in-memory ledger by default."""
+    them at once by default, `run_ledger` keeps its runs, the
+    workflow's in-memory ledger by default, and `early_mints` starts each
+    offered card's retrievals, none by default."""
     model = ScriptLlm(script=list(script))
     agent = create_orchestrator_agent(
         model_name="unused",
@@ -294,6 +296,7 @@ def orchestrator_runner(
         publisher=publisher,
         run_ledger=run_ledger,
         fetch_series_stats=scripted_fetch_series_stats,
+        early_mints=early_mints,
     )
     runner = Runner(
         app=App(name="t", root_agent=workflow), session_service=InMemorySessionService()
@@ -340,6 +343,8 @@ def orchestrator_app(
     served: Sequence[Mapping[str, Any]] = (),
     publisher: Any = scripted_publish_result,
     run_ledger: Any = None,
+    definition_surface: Any = None,
+    early_mints: Any = None,
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the orchestrator topology, and the agent's model.
 
@@ -353,9 +358,11 @@ def orchestrator_app(
     (`harness.scripted.ScriptedExecutor` by default). `planner` drafts
     plans (`ScriptedPlannerModel` by default). `tool_surface` runs an
     approved plan's steps, and with `None` `execute` refuses. `served` are
-    the seeds or Spec blocks data-mcp's definition lookup answers with.
+    the seeds or Spec blocks data-mcp's definition lookup answers with, and
+    `definition_surface` replaces that lookup whole.
     `publisher` publishes a run's derived results, all at once by default,
     and `run_ledger` keeps its runs, the workflow's in-memory ledger by
+    default. `early_mints` starts each offered card's retrievals, none by
     default.
     """
     session_service = session_service or InMemorySessionService()
@@ -380,11 +387,12 @@ def orchestrator_app(
             orchestrator=agent,
             executor=recorder,
             tool_surface=surface_recorder,
-            definition_surface=DataMcpDefinitions(served=served),
+            definition_surface=definition_surface or DataMcpDefinitions(served=served),
             publisher=publisher,
             run_ledger=run_ledger,
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
+            early_mints=early_mints,
         )
 
     studio = StudioRunner(
@@ -394,6 +402,7 @@ def orchestrator_app(
         tool_surface=tool_surface,
         store=store,
         edit_model=edit_model,
+        early_mints=early_mints,
     )
     app = FastAPI()
     app.state.studio = studio

@@ -96,6 +96,35 @@ class ProblemCode(StrEnum):
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"
+    # The user kept constant prices for a part when the planner asked, and no
+    # series shown serves them, so the entry ends for a search to find one
+    # (`submission.prices_choice`).
+    PRICES_UNSERVED = "prices_unserved"
+    # The plan does not state the option the user picked for a decision on
+    # the plan card, which the entry replanning for that pick holds
+    # (`submission.service._picked_decision`).
+    USER_PICK_NOT_HELD = "user_pick_not_held"
+    # A calculation's inputs are counted on different measure bases or
+    # provider scopes, and an input still needs compiling on the options they
+    # share (`submission.service._aligned_bases`).
+    BASES_UNALIGNED = "bases_unaligned"
+    # An input of a calculation pins no dataset while another input carries
+    # a basis choice, so the input is searched for before the plan records
+    # (`submission.service._aligned_bases`).
+    BASIS_UNKNOWN = "basis_unknown"
+    # A whole the planner declared (`planner.plan.DatasetRequirement.whole_of`)
+    # cannot be compiled from its part's own dataset with the axis left open
+    # (`submission.service.share_whole_underivable`).
+    SHARE_WHOLE_UNDERIVABLE = "share_whole_underivable"
+    # A comparison, share, quotient or sum reads an input its dataset does not serve on the
+    # provider scope of its other inputs, which the planner repairs
+    # (`submission.service._providers_unaligned`).
+    PROVIDERS_UNALIGNED = "providers_unaligned"
+    # A share or quotient whose two sides read one series over the same years and
+    # entities, which divides a figure by itself
+    # (`submission.service._share_of_itself`).
+    SHARE_OF_ITSELF = "share_of_itself"
+    MEASURE_FIXED_BY_PIN = "measure_fixed_by_pin"
 
 
 class Action(StrictModel):

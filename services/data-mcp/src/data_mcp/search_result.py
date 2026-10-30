@@ -13,9 +13,18 @@ A success result carries three things:
 
 A refusal keeps its own `structuredContent` (`data_mcp.tool_errors`) and
 carries no envelope.
+
+A call may carry `_meta[SEARCH_CONTEXT_META_KEY]`, the conversation a
+search is made in (`data_mcp.search_tool.SearchContext`). The harness sends
+it; the tool's input schema leaves it out, so an outside client is never
+asked for it.
 """
 
 from __future__ import annotations
 
 # The result `_meta` key under which `search` carries the upstream envelope.
 SEARCH_ENVELOPE_META_KEY = "org.one.dfo/search_envelope"
+
+# The request `_meta` key under which a caller sends `search` the conversation
+# it searches in (`data_mcp.search_tool.SearchContext`).
+SEARCH_CONTEXT_META_KEY = "org.one.dfo/search_context"

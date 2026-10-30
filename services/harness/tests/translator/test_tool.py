@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import translator.tool
@@ -47,6 +47,7 @@ from planner.plan import (
     AskAnswer,
     Coverage,
     DatasetRequirement,
+    DecisionFixes,
     Entity,
     FirstYear,
     GrowthRequirement,
@@ -54,6 +55,7 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    RankRequirement,
     RequirementSide,
     ShareOfRequirement,
     Unit,
@@ -69,8 +71,13 @@ from planner.plan import (
     split_of,
 )
 from planner.records import (
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
+    EntityCandidate,
+    EntityKey,
     GroupBy,
+    RankAmong,
+    RankDirection,
     RelativePeriod,
     RollingWindow,
     SourceNameCandidate,
@@ -87,13 +94,22 @@ from translator.discovery import (
     save_log,
 )
 from translator.mechanical import TranslatorCore
-from translator.referral import Referral, ReferralKind, load_referral, save_referral
+from translator.referral import (
+    ENTITY_CHOICE_REPAIR,
+    Referral,
+    ReferralKind,
+    load_referral,
+    save_referral,
+)
 from translator.tool import (
+    ANCHOR_READS_STATE_KEY,
     IssueResolution,
     _compile_failure_action,
     _referral_payload,
+    authored_answer,
     build_translate,
     build_translator_core,
+    held_anchor_reads,
     issue_resolution,
     permitted_repair,
 )
@@ -143,7 +159,7 @@ class _UnreadableSurface(FixtureSurface):
 
 
 class _CountingSurface(FixtureSurface):
-    """A `FixtureSurface` that counts each tool it was asked to call.
+    """A `FixtureSurface` that counts each tool it was asked to call, and each list.
 
     Proves `propose_operations`'s `describe` fetch is memoized on a
     same-revision retry, rather than only checking the result.
@@ -152,6 +168,11 @@ class _CountingSurface(FixtureSurface):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.calls: dict[str, int] = {}
+        self.listed = 0
+
+    async def list_tools(self) -> list[ToolSchema]:
+        self.listed += 1
+        return await super().list_tools()
 
     async def call_tool(
         self,
@@ -1166,6 +1187,88 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
     assert [source.spec_id for source in stored.workflow.sources] == [SPEC_AFRICA]
 
 
+# DAC1 grant equivalents over 2015-2024 with all 50 providers left open on `origin`
+# and no entity resolved.
+SPEC_OPEN_DONORS = "spec_944230c2" + "0" * 24
+_OPEN_DONORS_BLOCK = _spec(
+    SPEC_OPEN_DONORS,
+    "Grant equivalents from 50 providers for official development assistance",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[],
+    role_axis_facts=[{"role": "origin", "member_count": 50}],
+)
+
+
+class _SearchRecordingSurface(_CountingSurface):
+    """A `_CountingSurface` that keeps the parts of every `search` it was asked to make."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.searched: list[object] = []
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: dict[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name == "search":
+            self.searched.append(arguments.get("parts"))
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+@pytest.mark.parametrize(
+    ("entities", "across", "searched"),
+    [
+        ([Entity(name="Japan", role="donor"), Entity(name="Italy", role="donor")], (), True),
+        ([], ("donor",), False),
+    ],
+    ids=["donors-named", "donors-across"],
+)
+async def test_a_pin_leaving_open_the_side_its_names_sit_on_is_searched_with_them(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    entities: list[Entity],
+    across: tuple[str, ...],
+    searched: bool,
+) -> None:
+    """Ten donors named on a pin holding every donor open would fail at run time, one
+    `entity_missing` each. The pin is searched again with the donors as donors, so the
+    source approved binds them. A pin read across every donor is honoured as it is."""
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_OPEN_DONORS)],
+            evidence_requirements=[
+                requirement(
+                    measure="official development assistance",
+                    entities=entities,
+                    across=across,
+                    source_spec_id=SPEC_OPEN_DONORS,
+                    unit=None,
+                ),
+                derived_requirement(),
+            ],
+        )
+    )
+    save_pin_sources(
+        context.state, {SPEC_OPEN_DONORS: PinSource(block=_OPEN_DONORS_BLOCK, settled=True)}
+    )
+    surface = _SearchRecordingSurface(schemas=real_schemas)
+
+    await build_translate(surface=surface)(context)
+
+    if not searched:
+        assert surface.searched == []
+        return
+    ((part,),) = surface.searched
+    assert part["entities"] == [{"text": entity.name, "role": "donor"} for entity in entities]
+
+
 @pytest.mark.parametrize(
     ("entity_groups", "named"), [(_GROUP_CLOSED, True), ({}, False)], ids=["named", "set-aside"]
 )
@@ -1179,7 +1282,9 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     entity_groups: dict[str, Any],
     named: bool,
 ) -> None:
-    """The group rewrite and discovery both read the pin's identity on record, off one resolve."""
+    """The group rewrite and discovery both read the pin's identity on record, off one resolve,
+    and so does the next translation of the plan, as a switch or an amendment translates it
+    again. Each translation lists the surface once."""
     pinned = requirement(
         measure="official development assistance",
         entities=[Entity(name="France", role="donor")],
@@ -1207,10 +1312,71 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     )
     surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": resolved})
 
-    answer = await build_translate(surface=surface)(context)
+    translate = build_translate(surface=surface)
+    answer = await translate(context)
 
     assert surface.calls["resolve_definition"] == 1
+    # Only a translation that reaches a compile lists the surface. The set-aside one
+    # goes back before it.
+    assert surface.listed == int(named)
     assert ("named_in_place_of_across" in answer) is named
+
+    translated = context.state[PLAN_STATE_KEY]
+    context.state[PLAN_STATE_KEY] = draft(
+        decisions=[pinning_decision(SPEC_AFRICA)],
+        evidence_requirements=[pinned, derived_requirement()],
+    ).model_dump_json()
+    again = await translate(context)
+
+    assert surface.calls["resolve_definition"] == 1
+    assert surface.listed == 2 * int(named)
+    assert again == answer
+    assert context.state[PLAN_STATE_KEY] == translated
+
+
+async def test_translate_asks_search_once_for_a_pinned_identity_it_cannot_reach(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    """Search cannot be reached for the pin's identity on record. The group rewrite
+    and discovery share the one refusal, and the next translation asks again."""
+    pinned = requirement(
+        measure="official development assistance",
+        entities=[Entity(name="France", role="donor")],
+        across=("recipient",),
+        source_spec_id=SPEC_AFRICA,
+        unit=None,
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_AFRICA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    identity = {"seed": "africa", "requested_window": period_window(pinned.period)}
+    save_windowed_pins(
+        context.state,
+        [WindowedPin(spec_id=SPEC_AFRICA, identity=identity, windowed_from=SPEC_OTHER)],
+    )
+    unavailable = ToolCallResult(
+        is_error=True,
+        structured_content={"code": "upstream_unavailable", "retry_mode": "retry_after_delay"},
+    )
+    surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": unavailable})
+    translate = build_translate(surface=surface)
+
+    answer = await translate(context)
+
+    assert answer["kind"] == ReferralKind.DISCOVERY_UNAVAILABLE.value, answer
+    assert surface.calls["resolve_definition"] == 1
+
+    await translate(context)
+
+    assert surface.calls["resolve_definition"] == 2
 
 
 SPEC_G7 = "spec_9c7a11e2" + "0" * 24
@@ -1295,6 +1461,98 @@ async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
     assert isinstance(total, DatasetRequirement)
     assert (total.entities, total.across) == (
         ((kenya, g7), ()) if named else ((kenya,), ("donor",))
+    )
+
+
+# DAC1 grant equivalents with the donor side bound to the members of "DAC members",
+# read as members.
+SPEC_DAC_MEMBERS = "spec_2a9984cd" + "0" * 24
+_DAC_MEMBERS_BLOCK = _spec(
+    SPEC_DAC_MEMBERS,
+    "Grant equivalents from 32 DAC members for official development assistance",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[
+        {"role": "origin", "label": "United States", "ref": "country/USA"},
+        {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        {"role": "origin", "label": "Japan", "ref": "country/JPN"},
+    ],
+    entity_groups={"origin": {"label": "DAC members", "ref": "DACMembers"}},
+)
+
+
+@pytest.mark.parametrize(
+    ("entity_groups", "named"),
+    [
+        ({"origin": {"label": "DAC members", "ref": "DACMembers"}}, True),
+        ({"origin": {"label": "DAC members", "total": "DACCountriesTotal"}}, False),
+        ({}, False),
+    ],
+    ids=["group-of-members", "group-total", "members-alone"],
+)
+@pytest.mark.parametrize("axis", ["donor", None], ids=["axis-stated", "axis-the-sole-role"])
+async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
+    real_schemas: list[ToolSchema],
+    decision: Callable[..., Any],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+    entity_groups: dict[str, Any],
+    named: bool,
+    axis: str | None,
+) -> None:
+    """For "largest DAC donors", a rank over every donor pinned to the DAC members, the
+    pin giving way would rank 50 providers, Turkey among the top ten. The group is named
+    for its members in place of `across`, so the rank keeps to them, whether it states
+    its axis or ranks over its input's one role. A group the pin binds as its published
+    total, or a side held to named members alone, is left as it is."""
+    context = context_holding(
+        draft(
+            decisions=[
+                pinning_decision(SPEC_DAC_MEMBERS),
+                decision(
+                    slot="donor_population_scope",
+                    options=["all reporting DAC members", "only DAC countries"],
+                    chosen="all reporting DAC members",
+                    fixes=DecisionFixes(among=RankAmong.POPULATION),
+                ),
+            ],
+            evidence_requirements=[
+                requirement(
+                    id="req_oda",
+                    measure="official development assistance",
+                    entities=[],
+                    across=("donor",),
+                    source_spec_id=SPEC_DAC_MEMBERS,
+                    unit=None,
+                ),
+                RankRequirement(
+                    id="req_rank",
+                    decision_ids=["donor_population_scope"],
+                    input_id="req_oda",
+                    direction=RankDirection.HIGHEST_FIRST,
+                    among=RankAmong.POPULATION,
+                    axis=axis,
+                    limit=10,
+                    window_start=2024,
+                    window_end=2024,
+                ),
+            ],
+        )
+    )
+    block = _DAC_MEMBERS_BLOCK | {
+        "resolved": _DAC_MEMBERS_BLOCK["resolved"] | {"entity_groups": entity_groups}
+    }
+    save_pin_sources(context.state, {SPEC_DAC_MEMBERS: PinSource(block=block, settled=True)})
+
+    found = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+
+    members = Entity(name="DAC members", role="donor", members=True)
+    assert found == ((NamedGroup("req_oda", members, "donor"),) if named else ())
+    ranked = _stored(context).requirement("req_oda")
+    assert isinstance(ranked, DatasetRequirement)
+    assert (ranked.entities, ranked.across, ranked.source_spec_id) == (
+        ((members,), (), SPEC_DAC_MEMBERS) if named else ((), ("donor",), SPEC_DAC_MEMBERS)
     )
 
 
@@ -1398,37 +1656,71 @@ async def test_translate_refers_a_search_never_issued_back_marked_not_issued(
     assert "was not called" in answer["reason"]
 
 
-def test_return_to_planner_carries_the_source_names_search_offered(
-    real_schemas, draft, context_holding
+_SOURCE_GROUP = AmbiguousSourceReading(
+    text="shared",
+    candidates=(
+        SourceNameCandidate(ref="provenance/a", label="A", kind="provenance"),
+        SourceNameCandidate(ref="provenance/b", label="B", kind="provenance"),
+    ),
+)
+_ENTITY_GROUP = AmbiguousEntityReading(
+    text="Congo",
+    candidates=(
+        EntityCandidate(ref="country/COD", label="Democratic Republic of the Congo"),
+        EntityCandidate(ref="country/COG", label="Republic of the Congo"),
+    ),
+    entity=EntityKey(name="Congo", role="donor"),
+)
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason", "field", "group"),
+    [
+        (
+            ReferralKind.SOURCE_NAME_AMBIGUOUS,
+            "source_ambiguous",
+            "ambiguous_sources",
+            _SOURCE_GROUP,
+        ),
+        (
+            ReferralKind.ENTITY_NAME_AMBIGUOUS,
+            "entity_ambiguous",
+            "ambiguous_entities",
+            _ENTITY_GROUP,
+        ),
+    ],
+    ids=["source", "entity"],
+)
+def test_return_to_planner_carries_the_choices_search_offered(
+    real_schemas, draft, context_holding, kind, reason, field, group
 ):
     context = context_holding(draft())
     ask = draft().requirement("annual_debt_service")
-    group = AmbiguousSourceReading(
-        text="shared",
-        candidates=(
-            SourceNameCandidate(ref="provenance/a", label="A", kind="provenance"),
-            SourceNameCandidate(ref="provenance/b", label="B", kind="provenance"),
-        ),
-    )
     record = DiscoveryRecord(
         revision=plan_revision(draft()),
         tool="search",
         requirement_id=ask.id,
         requirement_key=requirement_revision(ask),
         status=DiscoveryStatus.NO_DATA,
-        reason="source_ambiguous",
-        ambiguous_sources=(group,),
+        reason=reason,
+        **{field: (group,)},
     )
     save_log(context.state, load_log(context.state).with_record(record, ()))
     result = _core(real_schemas).return_to_planner(
-        kind=ReferralKind.SOURCE_NAME_AMBIGUOUS,
-        reason="Choose publisher",
+        kind=kind,
+        reason="Choose one",
         requirement_id=ask.id,
         tool_context=context,
     )
     assert result["outcome"] == "referred"
-    assert result["referral"]["ambiguous_sources"] == [group.model_dump(mode="json")]
+    # An entity reading reaches the planner with its picks naming the requirement.
+    offered = group.picked_under(ask.id) if isinstance(group, AmbiguousEntityReading) else group
+    assert result["referral"][field] == [offered.model_dump(mode="json")]
     assert result["referral"]["candidates"] == []
+    # Only the entity referral carries how to settle its choice.
+    assert result["referral"].get("repair") == (
+        ENTITY_CHOICE_REPAIR if kind is ReferralKind.ENTITY_NAME_AMBIGUOUS else None
+    )
 
 
 @pytest.mark.parametrize(
@@ -1493,6 +1785,38 @@ async def test_a_referral_on_a_copy_names_its_origin_to_the_model(
     assert stored.requirement_id == "debt_history"
 
 
+@pytest.mark.parametrize("requirement_id", ["debt", "debt_history"])
+def test_an_entity_referral_offers_its_authored_requirement_picks(decision, requirement_id):
+    reading = AmbiguousEntityReading(
+        text="Central Africa",
+        entity=EntityKey(name="Central Africa", role="recipient"),
+        candidates=(
+            EntityCandidate(
+                ref="region/UN_CentralAfrica", label="UN", restate_as="Central Africa (UN)"
+            ),
+            EntityCandidate(ref="region/AU_CentralAfrica", label="AU"),
+        ),
+    )
+    referral = Referral(
+        kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+        reason="r",
+        requirement_id=requirement_id,
+        ambiguous_entities=(reading,),
+        repair=ENTITY_CHOICE_REPAIR,
+    )
+    payload = _referral_payload(referral)
+
+    answer = authored_answer(payload, split_of(split_draft(decision)))
+    readings = cast("list[dict[str, Any]]", answer["ambiguous_entities"])
+
+    assert answer["requirement_id"] == "debt"
+    assert [candidate["pick"] for candidate in readings[0]["candidates"]] == [
+        "debt|recipient|Central Africa|Central Africa (UN)",
+        "debt|recipient|Central Africa|region/AU_CentralAfrica",
+    ]
+    assert payload == _referral_payload(referral)
+
+
 def _offer(spec_id: str) -> dict[str, object]:
     return {"spec_id": spec_id, "sentence": "external debt service paid"}
 
@@ -1549,3 +1873,16 @@ def test_a_referral_joins_what_it_offers_a_copy_and_its_origin(
     assert mapped["stale_pins"] == []
     assert mapped["requirement_id"] == "debt"
     assert {field: mapped[field] for field in joined} == joined
+
+
+def test_an_anchor_reads_value_that_is_no_mapping_holds_no_reads(
+    empty_context: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    empty_context.state[ANCHOR_READS_STATE_KEY] = ["x"]
+
+    with caplog.at_level("WARNING", logger="translator.tool"):
+        held = held_anchor_reads(empty_context.state)
+
+    assert held == ()
+    assert ANCHOR_READS_STATE_KEY in caplog.text
+    assert "list" in caplog.text

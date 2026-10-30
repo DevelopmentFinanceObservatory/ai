@@ -8,8 +8,10 @@ revision, the outputs, and one line per step. `SearchReading` is one part of
 a `search` result as `harness.tool_contracts._part_summary` builds it, plus
 the facts a later `fetch` of its spec_id adds.
 
-A family of StatVars appears as a count. Neither record holds a StatVar
-dcid, so no rendering of either can inline one.
+A family of StatVars appears as a count, and no rendering of either record
+inlines a StatVar dcid. The identities a record keeps for later pins
+(`PlanSource.identity`, a scope's identities) can name one, and no
+rendering reads them.
 
 `PlanRecord.render` and `render_readings` are deterministic and take a
 character budget. Over budget they shed detail in the fixed order each
@@ -26,34 +28,49 @@ from datetime import datetime
 from typing import Any, Literal, NamedTuple, cast
 
 from common.place_type import FLOW_ROLE_COLUMNS
-from compiler.evidence import read_unit_currency
-from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
-from data_mcp.scope import ScopeAxis
+from compiler.evidence import read_unit_currency, read_unit_dcid
+from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count
+from data_mcp.scope import ScopeAxis, ScopeEntry, TextOrigin
 from executor.ledger import RunStatus
-from planner.parties import PARTY_ROLES, column_party_roles
+from planner.parties import PARTY_ROLES, column_party_roles, party_role
 from planner.plan import (
     DatasetRequirement,
     Decline,
+    FilterRequirement,
     Plan,
     PlanStatus,
     ResolvedBy,
     UnsupportedOperation,
     cut_user_text,
+    inputs_of,
     plan_revision,
 )
 from planner.records import (
     AmbiguousSourceReading,
+    PlaceLevel,
     ResolvedSourceMention,
     StatVarReading,
     StrictModel,
 )
 from planner.workflow import ElectedMeasure, MeasureAlternative, ResolvedGroup
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, ValidationError, model_validator
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
-from harness.scope_choices import PartScope, ServedScope
-from harness.tool_contracts import requested_range, series_description
+from harness.scope_choices import (
+    PROVIDER_STREAMS,
+    REASON_COPY,
+    SERVED_OTHERWISE,
+    EntitiesBinding,
+    Option,
+    PartScope,
+    ProviderScope,
+    ScopeChoice,
+    ServedScope,
+    ShapeBinding,
+    block_dataset,
+)
+from harness.tool_contracts import reading_facts, requested_range, series_description
 
 # Where a source or reading came from: the orchestrator's `search`, the
 # translator's own discovery, or a dataset the user brought from Search
@@ -101,6 +118,32 @@ class PlanPeriod(StrictModel):
     requirement_ids: tuple[str, ...]
 
 
+class AlignedBasis(StrictModel):
+    """How a compile alignment moved inputs onto counts them, for the basis line.
+
+    `scope` is the compile's own scope (`SearchReading.scope` of its block),
+    and `name` the part's name in a basis line naming several parts
+    (`part_name`), read off the compile's block under the words of the
+    stated input's reading (`aligned_basis`). `served` is how the plan's
+    retrieval of the compile was counted, as a search reading's fetch keeps
+    it (`FetchReading.served`); `None` when no retrieval of it was recorded.
+    Only `basis_line` reads it: a later turn takes no block, pin or marks
+    from it.
+    """
+
+    name: str
+    scope: PartScope
+    served: ServedScope | None = Field(default=None, exclude_if=lambda served: served is None)
+
+
+class RoleNarrowing(StrictModel):
+    """The level of place a filter keeps on one `role` of a source's rows,
+    in a decision option's words (`plan_display.place_level_words`)."""
+
+    role: str
+    words: str
+
+
 class PlanSource(StrictModel):
     """One source the compiled plan retrieves.
 
@@ -124,6 +167,22 @@ class PlanSource(StrictModel):
     `elected_measure` is the source's `SelectedSource.elected_measure`, so a
     later turn's reading of the source states how it is counted
     (`source_readings`); left out when the source carried none.
+    `windowed_from` is the spec_id a windowed copy was copied from
+    (`planner.plan.WindowedPin.windowed_from`), the one the turn's search
+    read, so the basis line finds that reading; left out for a source
+    retrieved as it was found. `aligned_from` are the pins the inputs
+    alignment moved onto this source state (`planner.plan.AlignedInput.stated_pin`),
+    so a later turn holds the block of each one the user's search read
+    (`harness.studio_state.ConversationState.close_turn`) and the answer's
+    loose-match notes name a loose stated series (`loose_match_notes`); left
+    out when alignment moved none onto it. `aligned_basis` is how the source
+    counts those inputs, which `basis_line` states, since the turn holds no
+    reading of a compile; left out when alignment moved none onto it or its
+    block carries no scope choices. `narrowed` is the level of place each filter
+    reading the source's rows keeps on a role (`RoleNarrowing`), so the basis
+    line states a stated scope entry Search dropped on that role's axis as
+    read through the filter (`basis_line`); left out when no filter keeps a
+    level on a role.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -151,6 +210,10 @@ class PlanSource(StrictModel):
     elected_measure: ElectedMeasure | None = Field(
         default=None, exclude_if=lambda elected: elected is None
     )
+    windowed_from: str | None = Field(default=None, exclude_if=lambda origin: origin is None)
+    aligned_from: tuple[str, ...] = Field(default=(), exclude_if=lambda stated: not stated)
+    aligned_basis: AlignedBasis | None = Field(default=None, exclude_if=lambda basis: basis is None)
+    narrowed: tuple[RoleNarrowing, ...] = Field(default=(), exclude_if=lambda kept: not kept)
 
 
 class RecordedIdentity(StrictModel):
@@ -267,6 +330,9 @@ class PlanRecord(StrictModel):
         searched: Collection[str] = (),
         failed_steps: Collection[str] = (),
         run_id: str | None = None,
+        windowed_from: Mapping[str, str] | None = None,
+        aligned_from: Mapping[str, Collection[str]] | None = None,
+        aligned_bases: Mapping[str, AlignedBasis] | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
 
@@ -275,6 +341,12 @@ class PlanRecord(StrictModel):
             searched: Spec ids the turn's `search` calls returned.
             failed_steps: The ids of the steps the run's stop landed on, if any.
             run_id: The run the plan executed as, if the ledger admitted one.
+            windowed_from: The spec_id each windowed copy the plan pins was
+                copied from, by the copy's spec_id (`planner.plan.windowed_pins`).
+            aligned_from: The pins the inputs alignment moved onto each compile
+                state, by the compile's spec_id (`aligned_from`).
+            aligned_bases: How each of those compiles counts the inputs moved
+                onto it, by the compile's spec_id (`aligned_basis`).
 
         A source's origin is `search` when `searched` names it, else
         `translator`.
@@ -298,7 +370,13 @@ class PlanRecord(StrictModel):
             revision=plan_revision(plan),
             approved_revision=plan.approved_revision,
             periods=_periods(shown),
-            sources=_sources(shown, searched=searched),
+            sources=_sources(
+                shown,
+                searched=searched,
+                windowed_from=windowed_from or {},
+                aligned_from=aligned_from or {},
+                aligned_bases=aligned_bases or {},
+            ),
             decisions=tuple(
                 PlanDecision(
                     slot=decision.slot,
@@ -603,10 +681,12 @@ class FetchReading(StrictModel):
     """What a retrieval of the reading's spec_id returned: a `fetch`'s summary
     or refusal code, or, when `plan_step`, a plan step's retrieval, which the
     planner's ledger text does not show (`render_readings`). `served` is how
-    the figures served were counted, and `args` the arguments that shaped
-    each distinct `fetch` of the reading that returned data, oldest first, as
-    JSON. `plan_step`, `served` and `args` arrive only on records a later
-    release stored; nothing here sets them."""
+    the figures served were counted, kept for a reading with scope choices
+    whose retrieval stated it. `args` holds, for each distinct `fetch` of the
+    reading that returned data, oldest first, the arguments that shaped its
+    frame (`scope`, `stat_vars`, `breakdown`), as JSON, so a chip fetches the
+    switched reading each of those ways
+    (`harness.graph.switch.apply_stored_choice`)."""
 
     summary: str | None = None
     refusal_code: str | None = None
@@ -652,12 +732,18 @@ class SearchReading(StrictModel):
     of such a spec_id gains (`harness.orchestrator_tools`), whose
     `counted_as` is then the count it reads: the offered count, or the
     offering reading's own in other prices. `scope` is how search counted
-    the part (`harness.scope_choices.PartScope`), `planner_axes` the scope
-    axes the planner's own words settled on it, `entity_groups` the named
-    sets its places were asked for as, and `entity_groups_unreadable` true
-    when its block named sets whose posted identity could not be read. Those
-    four arrive only on records a later release stored; nothing here sets or
-    renders them. `observed_at` is stored and not rendered.
+    the part (`harness.scope_choices.PartScope`), its scope choices with
+    their options and the entries that settled them; `None` when the part's
+    block carries none. `planner_axes` are the scope axes the planner's own
+    words settled on the part (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`,
+    copied from its block): their entries are the planner's.
+    `entity_groups` are the named sets the part's places were asked for as
+    (`resolved.entity_groups`), each holding what a resubmit of the reading posts
+    again (`harness.graph.switch`); stored and not rendered.
+    `entity_groups_unreadable` is true when the part's block named sets whose
+    posted identity this release could not read (`compiler.sources.block_wire_groups`), so
+    `entity_groups` is empty without the part having none, and that resubmit
+    refuses. It is stored and not rendered, as is `observed_at`.
     """
 
     text: str | None
@@ -744,10 +830,11 @@ class SearchReading(StrictModel):
 
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
-        `open_roles` (`harness.orchestrator_tools`) when present. A `no_data` part's
-        `reason` is the reading's `refusal_code`, and `counted_as`,
-        `alternatives` and `other_prices` are
-        `harness.tool_contracts.measure_choice`'s.
+        `open_roles` (`harness.orchestrator_tools`) when present, `scope`
+        among them, `planner_axes`, `entity_groups` and
+        `entity_groups_unreadable` too. A `no_data` part's `reason` is the
+        reading's `refusal_code`, and `counted_as`, `alternatives` and
+        `other_prices` are `harness.tool_contracts.measure_choice`'s.
         """
         window = part.get("window")
         return cls(
@@ -810,24 +897,51 @@ class SearchReading(StrictModel):
             counted_as=_str_or_none(part.get("counted_as")),
             alternatives=_offers(part.get("alternatives")),
             other_prices=_offers(part.get("other_prices")),
+            scope=part.get("scope"),
+            planner_axes=tuple(part.get("planner_axes") or ()),
+            entity_groups=tuple(part.get("entity_groups") or ()),
+            entity_groups_unreadable=part.get("entity_groups_unreadable") is True,
             origin=origin,
             observed_at=observed_at,
         )
 
-    def with_fetch(self, result: Mapping[str, Any]) -> SearchReading:
-        """This reading with the outcome of a `fetch` result for its spec_id.
+    def with_fetch(
+        self,
+        result: Mapping[str, Any],
+        *,
+        served: Mapping[str, Any] | None = None,
+        args: Mapping[str, Any] | None = None,
+    ) -> SearchReading:
+        """This reading with the outcome of a `fetch` result for its spec_id,
+        and `served`, the retrieval's `harness.scope_choices.served_facts`,
+        when the reading has scope choices. A fetch that returned data adds
+        `args`, the arguments that shaped it, to those of the reading's earlier
+        fetches (`FetchReading.args`) unless they hold the same; a refused one
+        keeps the earlier ones. As with `served`, only a reading with scope
+        choices keeps them, since only its chips read them."""
+        held = self.fetch.args if self.fetch is not None else ()
+        if result.get("code"):
+            fetched = FetchReading(refusal_code=str(result["code"]), args=held)
+        else:
+            shaped = dict(args or {})
+            fetched = FetchReading(
+                summary=_str_or_none(result.get("summary")),
+                args=held if self.scope is None or shaped in held else (*held, shaped),
+            )
+        reading = self.model_copy(update={"fetch": fetched})
+        return reading.with_served(served) if served is not None else reading
 
-        The fetch's `served` and `args`, which a later release stores, are
-        kept. It is no longer only a plan step's retrieval (`plan_step`)."""
-        refused = bool(result.get("code"))
-        outcome: dict[str, Any] = {
-            "summary": None if refused else _str_or_none(result.get("summary")),
-            "refusal_code": str(result["code"]) if refused else None,
-            "plan_step": False,
-        }
-        return self.model_copy(
-            update={"fetch": (self.fetch or FetchReading()).model_copy(update=outcome)}
-        )
+    def with_served(self, served: Mapping[str, Any]) -> SearchReading:
+        """This reading with `served`, a retrieval's
+        `harness.scope_choices.served_facts`, kept on its fetch. A reading
+        no `fetch` reached gains a `plan_step` one. A reading with no scope
+        choices is returned as it is, since nothing reads the record without
+        them."""
+        if self.scope is None:
+            return self
+        fetched = self.fetch or FetchReading(plan_step=True)
+        record = ServedScope.of(served, scope=self.scope)
+        return self.model_copy(update={"fetch": fetched.model_copy(update={"served": record})})
 
 
 def _offers(offers: Sequence[Any] | None) -> tuple[CandidateReading, ...]:
@@ -851,6 +965,54 @@ def newest_per_spec_id(readings: Sequence[SearchReading]) -> list[SearchReading]
         for index, reading in enumerate(readings)
         if reading.spec_id is None or last[reading.spec_id] == index
     ]
+
+
+# How `open_prices` words the prices search read, and the prices it offers
+# when search lists no other prices of its own.
+CURRENT_PRICES = "current prices"
+CONSTANT_PRICES = "constant prices"
+
+
+def open_prices(
+    block: Mapping[str, Any],
+    *,
+    window: Mapping[str, Any] | None,
+    other_prices: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """The options of the prices choice a `definite` part leaves open, empty when its prices are settled.
+
+    Prices are open when the part's `window` (`harness.tool_contracts._window`)
+    spans more than one year, its spec block's unit is money in current
+    prices, and the request did not bind the prices. The unit's prices are
+    the request's (`definition.identity.facets.unit.request.prices`) when
+    search bound the unit through the request form, and otherwise the
+    native unit's own: a currency unit id with no constant base year
+    (`compiler.evidence.read_unit_dcid` on `resolved.facets.unit.ref`). The
+    request bound the prices when `resolved.facets.unit.request_basis.prices`
+    is `bound`.
+
+    The first option is the prices search read, with no spec_id. Each of
+    the part's `other_prices` offers (`harness.tool_contracts.measure_choice`)
+    follows with its spec_id, or constant prices with none when search
+    offers no other prices.
+    """
+    if not isinstance(window, Mapping) or window.get("start") == window.get("end"):
+        return []
+    unit = ((block.get("resolved") or {}).get("facets") or {}).get("unit") or {}
+    if (unit.get("request_basis") or {}).get("prices") == "bound":
+        return []
+    identity = (block.get("definition") or {}).get("identity") or {}
+    request = ((identity.get("facets") or {}).get("unit") or {}).get("request")
+    if isinstance(request, Mapping) and request.get("prices") is not None:
+        current = request["prices"] == "current"
+    else:
+        ref = unit.get("ref")
+        reading = read_unit_dcid(ref if isinstance(ref, str) else None)
+        current = reading.currency not in (None, "PPP") and reading.prices != "constant"
+    if not current:
+        return []
+    others = [dict(offer) for offer in other_prices] or [{"label": CONSTANT_PRICES}]
+    return [{"label": CURRENT_PRICES}, *others]
 
 
 def measure_choice_text(
@@ -908,8 +1070,10 @@ def loose_match_notes(
 
     A reading is a loose match when it carries a `closest_match` departure,
     or `retrieval_score_weak` and is no `definite` reading. The turn used it
-    when a fetch of its spec_id returned data or a plan record names it as a
-    source. The sentence
+    as `_used_readings` reads it, a stated pin alignment moved onto a compile
+    (`PlanSource.aligned_from`) included: the looseness is the Search's that
+    answered the user's words with that pin, and the compile moved only the
+    input's basis or provider. The sentence
     names what was asked and the series' heading and byline
     (`harness.tool_contracts.series_description` of its block in `specs`,
     the reading's resolved sentence when the block is missing), then what
@@ -934,20 +1098,53 @@ def loose_match_notes(
         specs: The spec blocks the turn's searches returned, by spec_id.
         plans: The turn's plan records, as `PlanRecord` JSON.
     """
+    notes: dict[str, str] = {}
+    for reading in _used_readings(readings, plans=plans, stated=True):
+        assert reading.spec_id is not None
+        if reading.spec_id not in notes and _loose(reading):
+            notes[reading.spec_id] = _loose_match_note(reading, specs.get(reading.spec_id))
+    return list(notes.values())
+
+
+def _used_readings(
+    readings: Sequence[Mapping[str, Any]],
+    *,
+    plans: Sequence[Mapping[str, Any]],
+    stated: bool = False,
+) -> list[SearchReading]:
+    """The turn's readings of parts it used, in order.
+
+    The turn used a part when a fetch of its spec_id returned data, or a
+    plan record names it as a source, directly or as the spec_id a windowed
+    copy was copied from (`PlanSource.windowed_from`), and, when `stated`,
+    as a pin alignment moved onto a compile (`PlanSource.aligned_from`).
+
+    Args:
+        readings: The turn's search readings, as `SearchReading` JSON.
+        plans: The turn's plan records, as `PlanRecord` JSON.
+        stated: Whether the stated pins of aligned inputs count as used.
+    """
     planned = {
-        source.get("spec_id")
+        spec_id
         for plan in plans
         for source in plan.get("sources") or ()
         if isinstance(source, Mapping)
+        for spec_id in (
+            source.get("spec_id"),
+            source.get("windowed_from"),
+            *(source.get("aligned_from") or () if stated else ()),
+        )
+        if spec_id is not None
     }
-    notes: dict[str, str] = {}
-    for reading in (SearchReading.model_validate(r) for r in readings):
-        if reading.spec_id is None or reading.spec_id in notes or not _loose(reading):
-            continue
-        fetched = reading.fetch is not None and reading.fetch.refusal_code is None
-        if fetched or reading.spec_id in planned:
-            notes[reading.spec_id] = _loose_match_note(reading, specs.get(reading.spec_id))
-    return list(notes.values())
+    return [
+        reading
+        for reading in (SearchReading.model_validate(r) for r in readings)
+        if reading.spec_id is not None
+        and (
+            (reading.fetch is not None and reading.fetch.refusal_code is None)
+            or reading.spec_id in planned
+        )
+    ]
 
 
 def _loose(reading: SearchReading) -> bool:
@@ -1021,6 +1218,499 @@ def _measures_money(block: Mapping[str, Any]) -> bool:
     )
 
 
+def aligned_basis(
+    block: Mapping[str, Any], *, words: str | None, served: Mapping[str, Any] | None
+) -> AlignedBasis | None:
+    """How the compile `block` counts the inputs alignment moved onto it, as
+    a reading of it under `words`, the stated input's, would read: its scope
+    and its name (`part_name`), with `served`, the plan's retrieval of it as
+    `harness.scope_choices.served_facts` reads it, when one was recorded.
+    `None` when the block carries no scope choices."""
+    reading = SearchReading.from_part(
+        {"variable": words, "status": "definite", **reading_facts(block)}
+    )
+    if reading.scope is None:
+        return None
+    return AlignedBasis(
+        name=part_name(reading, block),
+        scope=reading.scope,
+        served=ServedScope.of(served, scope=reading.scope) if served is not None else None,
+    )
+
+
+def _aligned_bases(
+    plans: Sequence[Mapping[str, Any]], *, read: Collection[str | None]
+) -> list[AlignedBasis]:
+    """The basis of each compile `plans` moved inputs onto and no spec_id in
+    `read` names, the newest plan's for each, in the order the plans first
+    name them. A windowed copy of a compile is that compile."""
+    bases: dict[str, AlignedBasis] = {}
+    for plan in plans:
+        for source in plan.get("sources") or ():
+            if not isinstance(source, Mapping) or not source.get("aligned_basis"):
+                continue
+            compiled = str(source.get("windowed_from") or source["spec_id"])
+            if compiled not in read and source["spec_id"] not in read:
+                bases[compiled] = AlignedBasis.model_validate(source["aligned_basis"])
+    return list(bases.values())
+
+
+# How the basis line opens and joins one part's clauses.
+_BASIS_LEAD = "Counted as: "
+_CLAUSE_JOIN = " · "
+
+
+def basis_line(
+    readings: Sequence[Mapping[str, Any]],
+    *,
+    specs: Mapping[str, Mapping[str, Any]],
+    plans: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """One line on how the turn's figures were counted, from its stored readings.
+
+    `None` when the turn used no part with scope choices. A part is used as
+    `_used_readings` reads it; its newest reading speaks for it. A compile
+    alignment moved inputs onto speaks through its plan source's
+    `PlanSource.aligned_basis`, the newest plan's, unless a reading of its
+    own does. The stated pin's reading does not speak for it, since its
+    choices on the moved axes name the basis the compile left. Each
+    scope choice of a used part gives one clause (`_choice_clause`), and
+    each entry search left out of the part another. Parts whose
+    clauses are the same share them. Otherwise the clauses every part
+    holds come first, in the first part's order, and each part's other
+    clauses follow its name (`part_name`). Parts left with the same other
+    clauses share one name list; a part left with none goes unnamed. An
+    entry the user stated that Search dropped, on the axis of a role a
+    filter of the newest plan narrows the part's rows on, reads as the
+    filter's words (`PlanSource.narrowed`), since the plan met the request
+    another way: "bilateral: read as only donor countries".
+
+
+        Counted as: health incl. population and reproductive health
+        (CRS 120 + 130) · Africa incl. regional buckets · gross disbursements.
+
+        Counted as: gross disbursements, current USD · bilateral plus
+        imputed multilateral, 2023; health: health incl. population and
+        reproductive health (CRS 120 + 130).
+
+        Counted as: "health aid": ... · ...; "education aid": ... · ....
+
+    Args:
+        readings: The turn's search readings, as `SearchReading` JSON.
+        specs: The spec blocks the turn's searches returned, by spec_id.
+        plans: The turn's plan records, as `PlanRecord` JSON.
+    """
+    used = newest_per_spec_id(
+        [reading for reading in _used_readings(readings, plans=plans) if reading.scope is not None]
+    )
+    narrowed = _newest_narrowings(plans)
+    parts: dict[tuple[str, ...], list[str]] = {}
+    for reading in used:
+        assert reading.scope is not None
+        served = reading.fetch.served if reading.fetch is not None else None
+        clauses = _scope_clauses(
+            reading.scope, served, narrowed=narrowed.get(reading.spec_id or "", ())
+        )
+        if clauses:
+            parts.setdefault(clauses, []).append(
+                part_name(reading, specs.get(reading.spec_id or ""))
+            )
+    for basis in _aligned_bases(plans, read={reading.spec_id for reading in used}):
+        clauses = _scope_clauses(basis.scope, basis.served)
+        if clauses:
+            parts.setdefault(clauses, []).append(basis.name)
+    if not parts:
+        return None
+    first, *others = parts
+    shared = tuple(clause for clause in first if all(clause in other for other in others))
+    # Parts grouped again by the clauses they hold beyond the shared ones.
+    remainders: dict[tuple[str, ...], list[str]] = {}
+    for clauses, names in parts.items():
+        remainder = tuple(clause for clause in clauses if clause not in shared)
+        if remainder:
+            remainders.setdefault(remainder, []).extend(names)
+    pieces = [_CLAUSE_JOIN.join(shared)] if shared else []
+    pieces += [
+        f"{' and '.join(names)}: {_CLAUSE_JOIN.join(remainder)}"
+        for remainder, names in remainders.items()
+    ]
+    return f"{_BASIS_LEAD}{'; '.join(pieces)}."
+
+
+# The order chips take by axis, and how many an answer offers.
+_CHIP_AXES: tuple[str, ...] = ("sector", "region", "provider", "measure_basis")
+MAX_SCOPE_CHIPS = 4
+
+
+class ScopeChip(NamedTuple):
+    """One other option of a scope choice the answer's figures were counted
+    on, and the spec_id of the reading that holds the choice."""
+
+    label: str
+    choice_id: str
+    option_id: str
+    spec_id: str
+
+
+def scope_chips(
+    readings: Sequence[Mapping[str, Any]], *, specs: Mapping[str, Mapping[str, Any]]
+) -> list[ScopeChip]:
+    """The chips an answer offers: one per other option of each scope choice
+    on the parts its fetches used, at most `MAX_SCOPE_CHIPS`.
+
+    A part is used when a `fetch` of its spec_id returned data; its newest
+    reading speaks for it. A plan step's retrieval is no fetch, and the plan card
+    switches those. A choice offers chips only on the newest of `readings`
+    holding it (`stored_choice`), the one a chip applies to, so a reading a
+    switch compiled again offers none on the choices it shares. Each choice
+    offers every option other than its active one that Search can serve
+    (`available` or `partial`), labelled with the option's label, after the
+    part's name (`part_name`) when the chips offered span several parts. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
+    whose options bind entities (a region's members) offers none when the
+    fetch named its own places (`entities` in the scope of any of
+    `FetchReading.args`). The chip refetches with those places, which replace
+    every role's entities, so the choice would change nothing.
+
+    Args:
+        readings: The turn's search readings, as `SearchReading` JSON.
+        specs: The spec blocks the turn's searches returned, by spec_id,
+            which name a part `part_name` does not name by its words.
+    """
+    used = newest_per_spec_id(
+        [
+            reading
+            for reading in (SearchReading.model_validate(r) for r in readings)
+            if reading.scope is not None
+            and reading.spec_id is not None
+            and reading.fetch is not None
+            and reading.fetch.refusal_code is None
+            and not reading.fetch.plan_step
+        ]
+    )
+    offered: list[tuple[int, SearchReading, ScopeChoice, Option]] = []
+    for reading in used:
+        assert reading.scope is not None
+        assert reading.fetch is not None
+        placed = any("entities" in (args.get("scope") or {}) for args in reading.fetch.args)
+        for choice in reading.scope.choices:
+            if placed and any(isinstance(o.binding, EntitiesBinding) for o in choice.options):
+                continue
+            newest = stored_choice(readings, choice.id)
+            if newest is None or newest[0].spec_id != reading.spec_id:
+                continue
+            rank = _CHIP_AXES.index(choice.axis) if choice.axis in _CHIP_AXES else len(_CHIP_AXES)
+            offered.extend(
+                (rank, reading, choice, option)
+                for option in choice.options
+                if option.option_id != choice.active and option.availability.status != "unavailable"
+            )
+    offered.sort(key=lambda item: item[0])
+    offered = offered[:MAX_SCOPE_CHIPS]
+    several = len({id(reading) for _, reading, _, _ in offered}) > 1
+    return [
+        ScopeChip(
+            label=(
+                f"{part_name(reading, specs.get(reading.spec_id or ''))}: {option.label}"
+                if several
+                else option.label
+            ),
+            choice_id=choice.id,
+            option_id=option.option_id,
+            spec_id=cast(str, reading.spec_id),  # `used` holds readings with a spec_id
+        )
+        for _, reading, choice, option in offered
+    ]
+
+
+# What a chip that no longer applies to its answer says: the studio's refusal of
+# it (`harness.studio`) and the turn that finds it stale (`harness.graph.switch`).
+CHIP_STALE_NOTE = "This answer has changed since that suggestion was offered, so nothing changed."
+
+
+def stored_choice(
+    readings: Sequence[Mapping[str, Any]], choice_id: str
+) -> tuple[SearchReading, ScopeChoice] | None:
+    """The newest of `readings` whose scope holds the choice `choice_id`, with that choice.
+
+    A choice keeps its id through a switch (`"<base spec_id>:<axis>"`), so
+    the newest reading holds the option it is on now. A reading this release
+    cannot read is passed over.
+
+    Args:
+        readings: Stored readings, oldest first, as `SearchReading` JSON.
+    """
+    for raw in reversed(readings):
+        try:
+            reading = SearchReading.model_validate(raw)
+        except ValidationError:
+            continue
+        if reading.scope is None or reading.spec_id is None:
+            continue
+        choice = next((c for c in reading.scope.choices if c.id == choice_id), None)
+        if choice is not None:
+            return reading, choice
+    return None
+
+
+def chip_kept(applied: Mapping[str, Any], readings: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the turn after one that applied a chip kept it.
+
+    `applied` is the earlier turn's `applied_choice` record
+    (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). The turn reversed it
+    when its newest reading holding the chip's choice is back on the option
+    the chip moved from, by a chip or a plan card's switch; it kept it
+    otherwise, a turn that read no part with that choice included.
+
+    Args:
+        readings: The later turn's search readings, as `SearchReading` JSON.
+    """
+    found = stored_choice(readings, str(applied.get("choice_id")))
+    return found is None or found[1].active != applied.get("from_option_id")
+
+
+def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
+    """The part's name, for a basis line naming several parts and for a
+    sentence naming a requirement that pins it (`harness.planner_seam`).
+
+    The part's own words, quoted, while they describe the pin it was served
+    from. They do not once the pin was compiled again from one of its scope
+    choices, by a switch on the plan card (`harness.graph.switch`) or onto
+    its calculation's basis (`planner.agent.compile_on_basis`), each an
+    explicit entry from a choice (`ChoiceOrigin`): the reading keeps the
+    words written for the pin it replaced. Nor do they when an option they
+    stated is not the one the part's choice on that axis holds. Then the
+    part is named by Search's label for its block (`_served_name`), unquoted,
+    or by Search's sentence for the pin when the block yields no label.
+
+    A part with no words of its own, or none left to name it by, is named
+    by what its block measures (`_served_name`, else `measure_label`), else
+    by the title of the dataset it counts from, else "these figures".
+    """
+    scope = reading.scope
+    assert scope is not None
+    active = {choice.axis: choice.active for choice in scope.choices}
+    stated = [*scope.entries, *(dropped.entry for dropped in scope.dropped_entries)]
+    repinned = any(
+        entry.provenance == "explicit" and entry.origin.kind == "choice" for entry in scope.entries
+    )
+    contradicted = any(
+        entry.origin.kind == "text" and active.get(entry.axis) != entry.option_id
+        for entry in stated
+    )
+    if repinned or contradicted:
+        return _served_name(block) or reading.sentence or _unworded_name(block)
+    words = reading.text or reading.sentence
+    return f'"{words}"' if words else _unworded_name(block)
+
+
+def _unworded_name(block: Mapping[str, Any] | None) -> str:
+    """A part's name with none of its own words: what `block` measures, else the name of
+    the dataset it counts from (`BlockDataset.name`), else "these figures"."""
+    resolved = (block or {}).get("resolved") or {}
+    measure = resolved.get("measure_label")
+    return (
+        _served_name(block)
+        or (measure if isinstance(measure, str) and measure else None)
+        or block_dataset(block).name
+        or "these figures"
+    )
+
+
+def _served_name(block: Mapping[str, Any] | None) -> str | None:
+    """Search's name for what `block` counts: `resolved.concept_label`, which
+    states no basis, since the basis line states the measure as a clause, else
+    `resolved.shape.label`, the `measure` the search digest shows the model
+    (`data_mcp.digest`), as Search composed it. `None` when the block states
+    neither.
+    """
+    concept = block_concept_label(block)
+    if concept:
+        return concept
+    resolved = (block or {}).get("resolved") or {}
+    label = (resolved.get("shape") or {}).get("label")
+    return label if isinstance(label, str) and label else None
+
+
+def _newest_narrowings(
+    plans: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[RoleNarrowing, ...]]:
+    """What the newest of `plans` keeps by filter on each role of each
+    source's rows (`PlanSource.narrowed`), by the source's spec_id and the
+    spec_id a windowed copy was copied from."""
+    if not plans:
+        return {}
+    narrowed: dict[str, tuple[RoleNarrowing, ...]] = {}
+    for source in plans[-1].get("sources") or ():
+        if not isinstance(source, Mapping) or not source.get("narrowed"):
+            continue
+        kept = tuple(RoleNarrowing.model_validate(n) for n in source["narrowed"])
+        for spec_id in (source.get("spec_id"), source.get("windowed_from")):
+            if spec_id is not None:
+                narrowed[str(spec_id)] = kept
+    return narrowed
+
+
+def _scope_clauses(
+    scope: PartScope, served: ServedScope | None, *, narrowed: Sequence[RoleNarrowing] = ()
+) -> tuple[str, ...]:
+    """The basis line's clauses for one used part's `scope`: one per scope
+    choice that names its active option, then one per entry Search dropped.
+
+    A composite frame's `served` components state what its figures count
+    (`ServedScope.composite_clause`) in place of the choice on that clause's
+    axis, or after the choices when the part has none on it. An entry the
+    user stated reads as what a filter keeps (`narrowed`) on the role its
+    axis names (`planner.parties.party_role`), where one does; otherwise as
+    why it was dropped (`REASON_COPY`)."""
+    composite = served.composite_clause() if served is not None else None
+    clauses = [
+        composite[1]
+        if composite is not None and choice.axis == composite[0]
+        else _choice_clause(choice, served)
+        for choice in scope.choices
+    ]
+    clauses = [clause for clause in clauses if clause is not None]
+    if composite is not None and all(choice.axis != composite[0] for choice in scope.choices):
+        clauses.append(composite[1])
+    for dropped in scope.dropped_entries:
+        stood_in = (
+            _stood_in(dropped.entry, narrowed)
+            if dropped.code == "stated_choice_not_applied"
+            else None
+        )
+        if stood_in is not None:
+            clauses.append(f"{_asked_words(dropped.entry)}: read as {stood_in}")
+            continue
+        label = next(
+            (
+                option.label
+                for choice in scope.choices
+                if choice.axis == dropped.entry.axis
+                for option in choice.options
+                if option.option_id == dropped.entry.option_id
+            ),
+            None,
+        )
+        why = REASON_COPY[dropped.code]
+        clauses.append(f"{why}: {label}" if label else why)
+    return tuple(dict.fromkeys(clauses))
+
+
+def _stood_in(entry: ScopeEntry, narrowed: Sequence[RoleNarrowing]) -> str | None:
+    """The words of the narrowing in `narrowed` on the role `entry`'s axis
+    names ("provider" names the donor), or `None` when none is on it."""
+    role = party_role(entry.axis)
+    if role is None:
+        return None
+    return next((n.words for n in narrowed if party_role(n.role) == role), None)
+
+
+def _asked_words(entry: ScopeEntry) -> str:
+    """The user's words `entry` was read from, else its option's value as
+    words: "bilateral" for `provider:bilateral`."""
+    if isinstance(entry.origin, TextOrigin):
+        asked = entry.origin.text[entry.origin.start : entry.origin.end].strip()
+        if asked:
+            return asked
+    return entry.option_id.partition(":")[2].replace("_", " ")
+
+
+def _choice_clause(choice: ScopeChoice, served: ServedScope | None) -> str | None:
+    """One scope choice in the basis line.
+
+    The active option's label, unless the served record says the figures
+    hold another option of the choice: then that option's label, or the
+    active label with `SERVED_OTHERWISE` when they match none. A partial
+    active option adds why (`REASON_COPY`) and the years it covers. `None`
+    when the record lists no option by the active id, or when the active
+    option adds entities to a role the fetch narrowed (`ServedRole.narrowed`):
+    figures for some of a region's places hold none of its options.
+    """
+    active = choice.active_option
+    if active is None:
+        return None
+    binding = active.binding
+    if (
+        served is not None
+        and isinstance(binding, EntitiesBinding)
+        and served.narrowed(binding.role)
+    ):
+        return None
+    if served is not None and _serves(active, served, choice=choice) is False:
+        other = next(
+            (
+                option
+                for option in choice.options
+                if option.option_id != choice.active and _serves(option, served, choice=choice)
+            ),
+            None,
+        )
+        if other is None:
+            return f"{active.label} ({SERVED_OTHERWISE})"
+        return other.label
+    availability = active.availability
+    if availability.status != "partial" or availability.code is None:
+        return active.label
+    years = ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in availability.years or ())
+    why = REASON_COPY[availability.code]
+    return f"{active.label} ({why}: {years})" if years else f"{active.label} ({why})"
+
+
+def _serves(option: Option, served: ServedScope, *, choice: ScopeChoice) -> bool | None:
+    """Whether the served figures hold `option`, one of `choice`'s; `None` when the record cannot tell.
+
+    An entities option holds when the residual buckets served on its role
+    are the ones it adds, and cannot be told on a role the fetch narrowed;
+    a measure option when the served measure and
+    netting are its own. A provider option counts whose spending is counted,
+    by its scope binding or, binding a published total's slot, by its id
+    (`Option.provider_scope`):
+    one whose scope counts imputed multilateral aid (`PROVIDER_STREAMS`)
+    holds exactly when that is a served component, and any other (bilateral
+    flows, core contributions to multilaterals, or both, as published totals
+    count them) only when it is not. The record does not tell those apart,
+    so with no imputed component such an option holds only when `choice`
+    offers no other. The record holds no what/how slot, so any other slot
+    option cannot be told.
+    """
+    binding = option.binding
+    if isinstance(binding, EntitiesBinding):
+        if all(role.role != binding.role for role in served.roles) or served.narrowed(binding.role):
+            return None
+        return frozenset(binding.add) == served.residuals(binding.role)
+    if isinstance(binding, ShapeBinding):
+        if served.measured_property is None:
+            return None
+        return (binding.measured_property, binding.netting_basis) == (
+            served.measured_property,
+            served.netting_basis,
+        )
+    if (scope := option.provider_scope) is not None:
+        return _serves_provider(scope, served, choice=choice)
+    return None
+
+
+def _serves_provider(
+    scope: ProviderScope, served: ServedScope, *, choice: ScopeChoice
+) -> bool | None:
+    """`_serves` for a provider option of `choice` counting `scope`
+    (`Option.provider_scope`), whether it binds the scope or a slot."""
+    imputed = any(component.role == "imputed" for component in served.components)
+    if _counts_imputed(scope) or imputed:
+        return _counts_imputed(scope) == imputed
+    untold = {
+        offered
+        for option in choice.options
+        if (offered := option.provider_scope) is not None and not _counts_imputed(offered)
+    }
+    return None if len(untold) > 1 else True
+
+
+def _counts_imputed(scope: ProviderScope) -> bool:
+    """Whether `scope` counts an imputed share of multilateral spending (`PROVIDER_STREAMS`)."""
+    return "imputed_multilateral" in PROVIDER_STREAMS[scope]
+
+
 def named_spec_ids(reading: SearchReading) -> list[str]:
     """The reading's own spec_id, when it has one, and each candidate's."""
     own = [reading.spec_id] if reading.spec_id else []
@@ -1053,16 +1743,17 @@ def render_readings(
     close the text, once each, those in `skills_read` marked `*`.
 
     Levels, tried in order until one fits: everything, then sentences cut to
-    160 characters and candidate labels to 60, then sentences and labels
-    dropped, then the oldest readings folded one at a time to their first
-    line and whether a fetch ran, then the oldest readings dropped one at a
-    time with a count of how many. The last level's text is cut to `budget`
+    160 characters and candidate and scope option labels to 60, then
+    sentences and labels dropped, then the oldest readings folded one at a
+    time to their first line and whether a fetch ran, then the oldest
+    readings dropped one at a time with a count of how many. The last level's text is cut to `budget`
     if it still does not fit, and by then it names no reading.
 
     `spec_ids` holds each reading's own spec_id and, unless the reading is
     folded, each of its candidates', for every reading the text shows.
     `other_counts` holds the spec_id of each other count an unfolded
-    reading names. A folded reading drops its measure choice.
+    reading names. A folded reading drops its measure choice and its scope
+    choices, each otherwise one line (`_scope_text`).
     """
     rendered = RenderedReadings("", ())
     for detail in range(3):
@@ -1148,6 +1839,8 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         lines.append(f"   {choice}")
     if sibling := _sibling_text(reading):
         lines.append(f"   {sibling}")
+    if reading.scope is not None:
+        lines.extend(f"   {_scope_text(choice, detail=detail)}" for choice in reading.scope.choices)
     if codes:
         lines.append(f"   warnings: {codes}")
     if reading.fetch is not None and not reading.fetch.plan_step:
@@ -1164,6 +1857,30 @@ def _measure_choice(reading: SearchReading) -> str:
     return measure_choice_text(
         reading.counted_as, reading.alternatives, other_prices=reading.other_prices
     )
+
+
+def _scope_text(choice: ScopeChoice, *, detail: int) -> str:
+    """One scope choice: its axis, active option, what settled it and how many
+    other options could be served.
+
+    "scope region: region:members_and_residuals Africa incl. regional buckets
+    (default; 1 of 1 other options available)". The label is cut to 60
+    characters at detail 1 and dropped at detail 2. A partial option, served
+    for some of the years asked, is counted apart.
+    """
+    active = choice.active_option
+    label = (
+        ""
+        if active is None or detail == 2
+        else f" {_cut(active.label, _LABEL_CUT if detail else None)}"
+    )
+    others = [
+        option.availability.status for option in choice.options if option.option_id != choice.active
+    ]
+    served = f"{others.count('available')} of {len(others)} other options available"
+    if partial := others.count("partial"):
+        served += f", {partial} partial"
+    return f"scope {choice.axis}: {choice.active}{label} ({choice.provenance}; {served})"
 
 
 def _sibling_text(reading: SearchReading) -> str:
@@ -1261,8 +1978,19 @@ def _periods(plan: Plan) -> tuple[PlanPeriod, ...]:
     )
 
 
-def _sources(plan: Plan, *, searched: Collection[str]) -> tuple[PlanSource, ...]:
-    """One entry per distinct spec_id the workflow retrieves, in binding order."""
+def _sources(
+    plan: Plan,
+    *,
+    searched: Collection[str],
+    windowed_from: Mapping[str, str],
+    aligned_from: Mapping[str, Collection[str]],
+    aligned_bases: Mapping[str, AlignedBasis],
+) -> tuple[PlanSource, ...]:
+    """One entry per distinct spec_id the workflow retrieves, in binding order.
+
+    A windowed copy of a compile takes the stated pins and the basis of the
+    compile it copies.
+    """
     assert plan.workflow is not None
     measures = {
         requirement.id: requirement.measure
@@ -1278,6 +2006,7 @@ def _sources(plan: Plan, *, searched: Collection[str]) -> tuple[PlanSource, ...]
         window = source.coverage_window
         asked = requested_range(source.identity or {})
         origin: Origin = "search" if source.spec_id in searched else "translator"
+        compiled = windowed_from.get(source.spec_id, source.spec_id)
         seen[source.spec_id] = PlanSource(
             spec_id=source.spec_id,
             name=source.provenance_label,
@@ -1299,8 +2028,47 @@ def _sources(plan: Plan, *, searched: Collection[str]) -> tuple[PlanSource, ...]
             identity=source.identity,
             groups=source.groups,
             elected_measure=source.elected_measure,
+            windowed_from=windowed_from.get(source.spec_id),
+            aligned_from=tuple(sorted(aligned_from.get(compiled, ()))),
+            aligned_basis=aligned_bases.get(compiled) if compiled in aligned_from else None,
+            narrowed=_narrowed(plan, source.spec_id),
         )
     return tuple(seen.values())
+
+
+def _narrowed(plan: Plan, spec_id: str) -> tuple[RoleNarrowing, ...]:
+    """The level each filter of compiled `plan` reading the rows retrieved
+    from `spec_id`, directly or through other steps, keeps on a role, the
+    first filter's words for each role. A level keeps a class of party
+    ("only donor countries"), which can stand in for a class the user stated;
+    a list of names (`EntityIn`) applies no class, so it is not one."""
+    assert plan.workflow is not None
+    retrieved = {b.requirement_id for b in plan.workflow.evidence_bindings if b.spec_id == spec_id}
+    kept: dict[str, str] = {}
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, FilterRequirement) or not _reads(
+            requirement, retrieved, plan
+        ):
+            continue
+        for predicate in requirement.predicates:
+            if isinstance(predicate, PlaceLevel) and predicate.role is not None:
+                kept.setdefault(
+                    predicate.role,
+                    plan_display.place_level_words(predicate.level, role=predicate.role),
+                )
+    return tuple(RoleNarrowing(role=role, words=words) for role, words in kept.items())
+
+
+def _reads(requirement: FilterRequirement, retrieved: Collection[str], plan: Plan) -> bool:
+    """Whether `requirement` reads the result of a requirement in `retrieved`,
+    directly or through the steps between them."""
+    pending = list(inputs_of(requirement))
+    while pending:
+        upstream = pending.pop()
+        if upstream in retrieved:
+            return True
+        pending.extend(inputs_of(plan.requirement(upstream)))
+    return False
 
 
 def _period_basis(period: PlanPeriod) -> str:

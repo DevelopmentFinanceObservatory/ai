@@ -6,10 +6,18 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
-from harness.tool_contracts import graph_envelope
+from compiler.sources import block_groups, wire_groups
+from data_mcp.digest import _dropped_cause_words
+from data_mcp.search_tool import SearchContext
+from harness.scope_choices import REASON_COPY, PartScope, ScopeEntry, ScopeReasonCode
+from harness.tool_contracts import graph_envelope, reading_facts
+from planner.workflow import ResolvedGroup
+from pydantic import ValidationError
+
+from .basis_alignment import dac1_with_contributions
 
 _DATA_MCP_FIXTURES = Path(__file__).parents[2] / "data-mcp" / "tests" / "fixtures"
 
@@ -73,6 +81,207 @@ def test_part_summary_preserves_explicit_comparison_intent(separate: bool | None
         assert summary["separate"] is True
     else:
         assert "separate" not in summary
+
+
+def _scope_choices() -> dict[str, Any]:
+    """A part's `resolved.scope_choices` as dfo-apis writes it."""
+    return json.loads((_DATA_MCP_FIXTURES / "scope_choices_us_health_africa.json").read_text())
+
+
+def test_a_stored_reading_holds_the_parts_scope_choices_and_the_model_sees_none() -> None:
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = _scope_choices()
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+    scope = reading_facts(part["spec"])["scope"]
+
+    assert PartScope.model_validate(scope) == PartScope.model_validate(_scope_choices())
+    # The identities stay as Search wrote them, so a switch posts them back unchanged.
+    assert scope["base"] == _scope_choices()["base"]
+    assert scope["compiled"]["identity"] == _scope_choices()["compiled"]["identity"]
+    shown = {key: value for key, value in summary.items() if key != "spec_block"}
+    assert "scope" not in shown
+    assert "scope_choices" not in json.dumps(shown)
+
+
+def test_a_field_search_adds_to_scope_choices_is_ignored_and_never_stored() -> None:
+    """A field a later dfo-apis release adds, on the record or inside an
+    option, leaves the part's scope choices readable and out of the stored
+    reading, which a strict read still takes back."""
+    added = _scope_choices()
+    added["rule_digest"] = "r1"
+    added["choices"][0]["options"][0]["availability"]["note"] = "new"
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = added
+
+    scope = reading_facts(part["spec"])["scope"]
+
+    assert scope == PartScope.model_validate(_scope_choices()).model_dump(mode="json")
+    assert PartScope.model_validate(scope) == PartScope.from_search(added)
+    with pytest.raises(ValidationError):
+        PartScope.model_validate(added)
+
+
+def _provider_choice(scope_id: str, *, active: str) -> dict[str, Any]:
+    """A provider choice holding a bilateral option and one of a provider scope this
+    release does not read, "pooled" (`provider:pooled`, bound either way a later
+    dfo-apis release could write it), `active` the one it holds."""
+    available = {"status": "available", "detail": {}}
+    return {
+        "id": f"{scope_id}:provider",
+        "axis": "provider",
+        "rule": "test_provider",
+        "provenance": "default",
+        "active": active,
+        "options": [
+            {
+                "option_id": "provider:bilateral",
+                "label": "bilateral flows only",
+                "binding": {"kind": "provider", "scope": "bilateral"},
+                "availability": available,
+            },
+            {
+                "option_id": "provider:pooled",
+                "label": "pooled funds",
+                "binding": {"kind": "provider", "scope": "pooled"},
+                "availability": available,
+            },
+            {
+                "option_id": "provider:pooled_total",
+                "label": "pooled funds total",
+                "binding": {
+                    "kind": "slot",
+                    "slot": "dac1AidType",
+                    "state": "value",
+                    "refs": ["DAC1AidType/9999"],
+                },
+                "availability": available,
+            },
+        ],
+    }
+
+
+def test_a_value_search_adds_to_an_open_vocabulary_degrades_only_what_holds_it() -> None:
+    """A later dfo-apis release adds an axis, a provider scope, a reason code, a
+    component role and a dropped entry's code. The record stays readable: the choice
+    and entry on the unknown axis and the option of the unknown provider scope are
+    left out, the provider choice keeping its other options, the unknown reason code
+    reads as none, the role is kept as written, and the dropped entry's code follows
+    its provenance."""
+    added = _scope_choices()
+    added["choices"].append(_provider_choice(added["id"], active="provider:bilateral"))
+    unknown_option = {
+        "option_id": "channel:ngo",
+        "label": "through NGOs",
+        "binding": {"kind": "provider", "scope": "bilateral"},
+        "availability": {"status": "available", "detail": {}},
+    }
+    added["choices"].append(
+        {
+            "id": f"{added['id']}:channel",
+            "axis": "channel",
+            "rule": "test_channel",
+            "provenance": "explicit",
+            "active": "channel:ngo",
+            "options": [unknown_option],
+        }
+    )
+    unknown_entry = {
+        "axis": "channel",
+        "option_id": "channel:ngo",
+        "provenance": "explicit",
+        "origin": {"kind": "text", "text": "NGOs", "start": 0, "end": 4},
+    }
+    added["entries"].append(unknown_entry)
+    added["choices"][2]["options"][1]["availability"]["code"] = "netting_withdrawn"
+    added["compiled"]["components"] = [{"role": "pooled", "identity": {}}]
+    added["dropped_entries"] = [
+        {"entry": added["entries"][0], "code": "entry_superseded", "cause": "superseded"},
+        {"entry": unknown_entry, "cause": "axis_absent"},
+    ]
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = added
+
+    stored = reading_facts(part["spec"])["scope"]
+
+    assert stored is not None
+    scope = PartScope.model_validate(stored)
+    assert [choice.axis for choice in scope.choices] == [
+        "sector",
+        "region",
+        "measure_basis",
+        "provider",
+    ]
+    assert [option.option_id for option in scope.choices[3].options] == ["provider:bilateral"]
+    assert [entry.axis for entry in scope.entries] == ["sector", "region"]
+    assert scope.choices[2].options[1].availability.code is None
+    assert [component.role for component in scope.compiled.components] == ["pooled"]
+    assert [(d.entry.axis, d.code) for d in scope.dropped_entries] == [
+        ("sector", "stated_choice_not_applied")
+    ]
+
+
+def test_a_dac1_total_reads_with_its_contributions_provider_scope() -> None:
+    """The US DAC1 total with the provider choice dfo-apis gives a DAC1 total: the
+    contributions option is read as the one active, beside the basis choice. Its
+    bilateral option binds DAC1 bilateral ODA's aid-type code in place of a provider
+    scope and still counts bilateral flows; the inclusive option is unavailable for
+    the reason worded for it. The stored reading keeps every option."""
+    raw = dac1_with_contributions()["resolved"]["scope_choices"]
+    scope = PartScope.from_search(raw)
+
+    assert [(c.axis, c.active) for c in scope.choices] == [
+        ("measure_basis", "measure_basis:gross"),
+        ("provider", "provider:contributions"),
+    ]
+    provider = scope.choices[1]
+    assert [
+        (
+            o.option_id,
+            o.binding.kind,
+            o.provider_scope,
+            o.availability.status,
+            o.availability.code,
+        )
+        for o in provider.options
+    ] == [
+        ("provider:bilateral", "slot", "bilateral", "available", None),
+        ("provider:inclusive", "provider", "inclusive", "unavailable", "contributions_counted"),
+        ("provider:contributions", "provider", "contributions", "available", None),
+    ]
+    assert "contributions_counted" in REASON_COPY
+    assert PartScope.model_validate(scope.model_dump(mode="json")) == scope
+
+
+@pytest.mark.parametrize("active", ["provider:pooled", "provider:pooled_total"])
+def test_a_provider_choice_holding_an_unknown_scope_is_left_out_alone(active: str) -> None:
+    """A provider choice whose active option counts a provider scope this release
+    does not read: the choice is left out, since without that option it would hold
+    nothing, and every other choice stays, so measure-basis alignment still reads
+    the part."""
+    added = _scope_choices()
+    added["choices"].append(_provider_choice(added["id"], active=active))
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = added
+
+    scope = PartScope.from_search(added)
+
+    assert [choice.axis for choice in scope.choices] == ["sector", "region", "measure_basis"]
+    stored = reading_facts(part["spec"])["scope"]
+    assert stored is not None
+    assert PartScope.model_validate(stored) == scope
+
+
+def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unreadable = _scope_choices()
+    del unreadable["base"]
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = unreadable
+
+    assert reading_facts(part["spec"])["scope"] is None
+    assert any("spec_1" in record.getMessage() for record in caplog.records)
 
 
 def test_definite_part_yields_its_spec_id_and_counts_defaulted_facets() -> None:
@@ -388,17 +597,103 @@ def test_a_part_summary_says_a_set_is_read_as_its_published_total(
     assert summary.get("group_readings") == readings
 
 
-def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None:
+@pytest.mark.parametrize(
+    ("alternatives", "offered"),
+    [
+        (
+            [{"label": "net disbursements", "axis": "what", "definition": {"spec_id": "spec_n"}}],
+            {"alternatives": [{"spec_id": "spec_n", "label": "net disbursements"}]},
+        ),
+        # Net and gross are both published, but the basis convention settles which one
+        # answers, so search lists no basis sibling and the part offers no count to ask.
+        (
+            [{"label": "constant prices", "axis": "unit", "definition": {"spec_id": "spec_c"}}],
+            {"other_prices": [{"spec_id": "spec_c", "label": "constant prices"}]},
+        ),
+        ([], {}),
+    ],
+    ids=["basis-sibling", "convention-settled-basis", "no-sibling"],
+)
+def test_a_part_summary_offers_a_count_only_when_search_lists_a_basis_sibling(
+    alternatives: list[dict[str, Any]], offered: dict[str, Any]
+) -> None:
     part = _definite("spec_a")
     part["spec"]["resolved"] |= {
-        "entity_groups": {
-            "origin": {"ref": None, "label": "DAC", "total": "DAC", "whole_of": ["party"]}
-        },
+        "measure_label": "gross disbursements",
+        "alternative_measures": alternatives,
     }
 
     (summary,) = graph_envelope({"parts": [part]})["part_digests"]
 
+    assert summary.get("alternatives") == offered.get("alternatives")
+    assert summary.get("other_prices") == offered.get("other_prices")
+    assert ("counted_as" in summary) is bool(offered)
+
+
+@pytest.mark.parametrize(
+    ("group", "stored", "unreadable"),
+    [
+        # A class of party this release does not know: the set is not readable, but
+        # what a resubmit posts of it is.
+        pytest.param(
+            {"ref": None, "label": "DAC", "total": "DAC", "whole_of": ["party"]},
+            [{"role": "origin", "label": "DAC", "ref": None}],
+            False,
+            id="unknown-class",
+        ),
+        # The same class beside a registry id that is not text: what a resubmit
+        # posts of the set is not readable either.
+        pytest.param(
+            {"label": "DAC", "total": "DAC", "whole_of": ["party"], "group_id": 7},
+            [],
+            True,
+            id="group-id-not-text",
+        ),
+        # No label: the set names nothing, so the reading stores none and reads.
+        pytest.param({"ref": None, "total": "DAC"}, [], False, id="no-label"),
+    ],
+)
+def test_a_part_summary_with_an_unreadable_set_says_no_reading(
+    group: dict[str, Any], stored: list[dict[str, Any]], unreadable: bool
+) -> None:
+    """A set that is not readable, as one naming a class of party this release does
+    not know: the summary says no reading of it. The stored reading holds what a
+    resubmit posts of each set, and where that is not readable it holds no sets
+    and says they could not be read."""
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {"entity_groups": {"origin": group}}
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+
     assert "group_readings" not in summary
+    facts = reading_facts(part["spec"])
+    assert (facts["entity_groups"], facts["entity_groups_unreadable"]) == (stored, unreadable)
+
+
+def test_a_stored_reading_keeps_a_set_without_its_members() -> None:
+    """A resubmit posts a set by label, ref and group id, so the stored set holds
+    those alone, no member list or total, and posts the same sets as the block it
+    was read from."""
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "entity_groups": {
+            "origin": {
+                "ref": None,
+                "label": "DAC countries",
+                "total": "DAC",
+                "members": ["country/FRA", "country/DEU"],
+            }
+        },
+    }
+    block_read = block_groups(part["spec"])
+
+    stored = reading_facts(part["spec"])["entity_groups"]
+
+    assert block_read[0].members == ("country/FRA", "country/DEU")
+    assert stored == [{"role": "origin", "label": "DAC countries", "ref": None}]
+    assert wire_groups([ResolvedGroup.model_validate(group) for group in stored]) == wire_groups(
+        block_read
+    )
 
 
 @pytest.mark.parametrize(
@@ -858,3 +1153,43 @@ def test_a_declined_answer_carries_its_reason_in_plain_words() -> None:
         "Search read this question as asking for a judgement and naming no data to show."
     )
     assert out_of_scope["scope_place"] is None
+
+
+_ENTRY = {
+    "axis": "sector",
+    "option_id": "sector:120",
+    "provenance": "carried",
+    "concept": "health",
+    "origin": {"kind": "choice", "choice_id": "spec_1:sector"},
+}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param({**_ENTRY, "concept": ""}, id="empty-concept"),
+        pytest.param(
+            {**_ENTRY, "origin": {"kind": "choice", "choice_id": "c" * 201}}, id="long-id"
+        ),
+        pytest.param(
+            {**_ENTRY, "origin": {"kind": "text", "text": "net", "start": -1, "end": 3}},
+            id="negative-offset",
+        ),
+        pytest.param({**_ENTRY, "option_id": f"sector:{'1' * 200}"}, id="long-option"),
+    ],
+)
+def test_an_entry_search_context_refuses_is_one_a_scope_record_refuses(
+    entry: dict[str, Any],
+) -> None:
+    """A scope entry the harness reads is one it can carry to a later search."""
+    with pytest.raises(ValidationError):
+        SearchContext(carried_entries=[entry])
+    with pytest.raises(ValidationError):
+        ScopeEntry.model_validate(entry)
+
+
+def test_a_dropped_entry_and_a_basis_line_word_each_reason_code_alike() -> None:
+    """The search digest's words for a dropped entry's cause and the basis line's
+    words for a reason code are the same for every reason code."""
+    for code in get_args(ScopeReasonCode):
+        assert _dropped_cause_words(code, axis="sector", availability={}) == REASON_COPY[code]

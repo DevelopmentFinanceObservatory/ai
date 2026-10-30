@@ -45,13 +45,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
 from data_mcp import resolution
 from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import NodesResponse
 from data_mcp.node_lookup import NodeOutcome
+from data_mcp.search_tool import SearchContext
 from google.adk import Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
@@ -70,7 +71,12 @@ from google.genai import types
 from harness.graph.seams import PlannerModel
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
 from harness.graph.workflow import planner_entry
-from harness.orchestrator_tools import HANDED_OFF, AskedOutput, build_orchestrator_tools
+from harness.orchestrator_tools import (
+    HANDED_OFF,
+    AskedOutput,
+    Resolver,
+    build_orchestrator_tools,
+)
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
@@ -498,11 +504,11 @@ def _outcome(recorded: Mapping[str, Any] | None) -> resolution.ResolutionOutcome
     )
 
 
-async def _no_anchor_read(workflow: Any, plan: Plan, *, surface: Any) -> None:
+async def _no_anchor_read(workflow: Any, plan: Plan, *, surface: Any, held: Any) -> None:
     """The newest-year read a replayed translation makes: none. That read reads the
     data, which no recording holds, so it is skipped, as production skips it when the
     entry has no time left for it."""
-    del workflow, plan, surface
+    del workflow, plan, surface, held
 
 
 class RecordingMismatchError(RuntimeError):
@@ -513,10 +519,14 @@ class TaskStateError(RuntimeError):
     """The orchestrator's own tools refused a task's search or hand-off."""
 
 
-class Resolver(Protocol):
-    async def __call__(
-        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
-    ) -> dict[str, Any]: ...
+def search_context_meta(context: SearchContext | None) -> dict[str, Any] | None:
+    """The `_meta` a search carries for `context`, as `harness.mcp_client.McpResolver`
+    sends it, or `None` when `context` states nothing Search reads
+    (`data_mcp.search_tool.to_wire_request`): no user message and no carried
+    entries send the same request as no context."""
+    if context is None or (context.user_message is None and not context.carried_entries):
+        return None
+    return context.model_dump(mode="json", exclude_none=True)
 
 
 class RecordedResolver:
@@ -531,12 +541,22 @@ class RecordedResolver:
         self._calls = list(calls)
 
     async def __call__(
-        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
+        self,
+        *,
+        question: str,
+        parts: list[dict[str, Any]],
+        raw_text: bool = False,
+        context: SearchContext | None = None,
     ) -> dict[str, Any]:
         if not self._calls:
             raise RecordingMismatchError(f"no recorded search left for {question!r}")
         call = self._calls.pop(0)
-        asked = {"question": question, "parts": parts, "raw_text": raw_text}
+        asked = {
+            "question": question,
+            "parts": parts,
+            "raw_text": raw_text,
+            "context": search_context_meta(context),
+        }
         recorded = {key: call.get(key) for key in asked}
         if asked != recorded:
             raise RecordingMismatchError(f"search {asked} was recorded as {recorded}")
@@ -697,19 +717,19 @@ class Probe:
     def watch(self, seam: PlannerModel) -> PlannerModel:
         """`seam`, noting the code of each refusal it answers, and `GAVE_UP` when it
         raises `PlannerSeamError`."""
+        return _Watched(seam, self)
 
-        async def planner(**kwargs: Any) -> dict[str, Any]:
-            try:
-                answer = await seam(**kwargs)
-            except PlannerSeamError:
-                self.refused_code = GAVE_UP
-                raise
-            if "refused" in answer:
-                code = answer["refused"]["code"]
-                self.refused_code = None if code is None else str(code)
-            return answer
-
-        return planner
+    async def note(self, answering: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+        """`answering`'s answer, its refusal code noted as `watch` describes."""
+        try:
+            answer = await answering
+        except PlannerSeamError:
+            self.refused_code = GAVE_UP
+            raise
+        if "refused" in answer:
+            code = answer["refused"]["code"]
+            self.refused_code = None if code is None else str(code)
+        return answer
 
     def before_model(
         self, callback_context: CallbackContext, llm_request: LlmRequest
@@ -748,6 +768,20 @@ class Probe:
                 "latency_s": round(time.perf_counter() - self._started, 3),
             }
         return None
+
+
+class _Watched:
+    """The `PlannerModel` `Probe.watch` returns."""
+
+    def __init__(self, seam: PlannerModel, probe: Probe) -> None:
+        self._seam = seam
+        self._probe = probe
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._probe.note(self._seam(**kwargs))
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._probe.note(self._seam.revise(**kwargs))
 
 
 def build_seam(
@@ -1194,6 +1228,7 @@ __all__ = [
     "record_period_reduction",
     "run_entry",
     "save_recording",
+    "search_context_meta",
     "stray_recordings",
     "surface_key",
 ]

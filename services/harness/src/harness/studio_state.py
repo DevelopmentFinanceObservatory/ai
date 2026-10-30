@@ -9,7 +9,7 @@ mutations, `_next_manifest` for every new revision.
 
 Every durable field of a conversation, everything but the identity field
 `conversation_id` and the process-local `lock`, `cancel_event`,
-`cancel_reason`, `_telemetry_span` and `_composition_ops`, lives in a
+`cancel_reason`, `switch_stop`, `_telemetry_span` and `_composition_ops`, lives in a
 per-conversation ADK "ledger" session, the same session service the runner
 already uses, keyed `(app_name, user_id=principal,
 session_id=conversation_id)`. Any instance can load a conversation's ledger
@@ -82,6 +82,7 @@ from harness.wire import (
     CompositionManifest,
     ErrorCode,
     PinOp,
+    PlanProposed,
     RemoveOp,
     ReorderOp,
     RetryMode,
@@ -323,6 +324,25 @@ class _PendingQuestion:
     skippable: bool = False
 
 
+@dataclass(frozen=True)
+class _PendingOption:
+    """One option of a scope choice the plan card shows, as `/interrupt`
+    checks a switch against it: its label and whether it can be served
+    (`available`, `partial`, `unavailable`)."""
+
+    label: str
+    status: str
+
+
+@dataclass(frozen=True)
+class _PendingChoice:
+    """A scope choice the plan card shows, as `/interrupt` checks a switch
+    against it: its active option and each option by id."""
+
+    active: str
+    options: dict[str, _PendingOption] = field(default_factory=dict)
+
+
 @dataclass
 class _PendingInterrupt:
     """One wire interrupt id, mapped back to its ADK interrupt."""
@@ -363,6 +383,22 @@ class _PendingInterrupt:
     # recorded alongside `resuming_segment` so a retried resume can be
     # verified against what actually resumed.
     answer: dict[str, Any] | None = None
+    # A plan's scope choices the card shows, by choice id: what a switch on
+    # this card may name. Empty for an elicitation, a plan with none, and a
+    # plan paused before choices were kept.
+    choices: dict[str, _PendingChoice] = field(default_factory=dict)
+    # A plan's `plan.proposed` frame as the stream sent it: the card a
+    # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
+    # None for an elicitation and a plan paused before cards were kept.
+    card: PlanProposed | None = None
+    # Whether a stream resuming this plan interrupt with an approval sent its
+    # `plan.approved` frame (`StudioRunner._checkpointed`), so a retry resuming
+    # the same answer sends it only when the dead attempt did not.
+    approved_sent: bool = False
+    # Whether this elicitation is a question the planner asked while
+    # replanning for a pick on the plan card, so the stream answering it
+    # arms the switch's Stop (`harness.graph.switch.SWITCH_STOP`).
+    pick_replan: bool = False
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -461,6 +497,11 @@ class ConversationState:
     # alive). `_sse_stream`'s cancel branch reads it once to pick the
     # frame; reset to `None` alongside `cancel_event` when the stream ends.
     cancel_reason: str | None = None
+    # Armed while a plan-card switch streams (`harness.graph.switch.
+    # SWITCH_STOP`): a Stop sets it, and the switch offers the plan
+    # unchanged and the stream ends on it. Reset to `None` when the
+    # stream ends.
+    switch_stop: asyncio.Event | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
     # Digest entries for every component this conversation streamed,
@@ -501,7 +542,12 @@ class ConversationState:
     # updates this).
     timed_out_calls: set[str] = field(default_factory=set)
     # The current turn's record-in-progress; reset by begin_turn.
+    # `turn_user_message` is the history record's text: the message, each
+    # amendment and answer, and each switch on a plan card (`add_to_turn`).
+    # `turn_user_words` holds the user's own words alone, the switches left
+    # out, and is what the turn's searches send Search as `user_message`.
     turn_user_message: str = ""
+    turn_user_words: str = ""
     turn_final_text: str = ""
     turn_components: list[dict[str, Any]] = field(default_factory=list)
     # The turn's plan records and search readings as JSON, and the spec
@@ -515,6 +561,17 @@ class ConversationState:
     turn_plans: list[dict[str, Any]] = field(default_factory=list)
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
+    # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
+    # by `harness.studio`; once the graph's `seed` node applied it, as that
+    # node wrote it, with `from_option_id` and `spec_id`
+    # (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). `close_turn` keeps it
+    # with the turn's record as `applied_choice`.
+    turn_applied_choice: dict[str, Any] | None = None
+    # The option label each scope choice of the turn's plan held on the card
+    # the user first switched it from, by the row's choice id, kept from the
+    # first switch of the turn on (`/interrupt`). `plan.approved` names it
+    # as `changed_from` for a choice that holds another label now.
+    turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
     # The current turn's telemetry root span, opened by `begin_turn` on the
     # freshly minted `trace_id`, kept open across a pause for approval, and
@@ -797,18 +854,42 @@ class ConversationState:
             text = [render_readings(readings, budget=_RECALL_TEXT_BUDGET).text]
         return {"part": part, "turn": turn, "user": record["user"], "text": text}
 
-    def close_turn(self, *, final_text: str, error: str | None = None) -> None:
+    def add_to_turn(self, line: str, *, user_words: bool) -> None:
+        """Add `line` to the turn's record as `(then: line)`, and to
+        `turn_user_words` too when the user wrote it (an amendment, an
+        answer). A switch's line names an option's label, which Search would
+        read as scope the user stated, so it goes in the record only."""
+        self.turn_user_message += f"\n(then: {line})"
+        if user_words:
+            self.turn_user_words += f"\n(then: {line})"
+
+    def close_turn(
+        self,
+        *,
+        final_text: str,
+        error: str | None = None,
+        match_notes: str | None = None,
+        basis_line: str | None = None,
+    ) -> None:
         """Append the turn's record, once -- the resume protocol can end a
         turn from more than one code path. The turn's telemetry span ends
-        with the user's message and `final_text` as its input and output, and
-        at level `ERROR` naming the `error` code when there is one."""
+        with the user's message and the reply as its input and output, and
+        at level `ERROR` naming the `error` code when there is one.
+
+        `match_notes` (`harness.turn_records.loose_match_notes`) and
+        `basis_line` (`harness.turn_records.basis_line`) are the text the code
+        appends to the reply after the model's `final_text`, in that order.
+        The record keeps each under its own key, beside the answer, so the
+        conversation digest (`_history_turn`) shows a later turn's model the
+        answer alone, and that model has no text of the code's own to copy."""
         if self.turn_recorded:
             return
         self.turn_recorded = True
+        appended = [text for text in (match_notes, basis_line) if text]
         end_turn_span(
             self._telemetry_span,
             request=self.turn_user_message,
-            response=final_text,
+            response="\n\n".join([final_text, *appended]) if appended else final_text,
             error=error,
         )
         self._telemetry_span = None
@@ -816,12 +897,18 @@ class ConversationState:
             "user": self.turn_user_message,
             "assistant": final_text,
         }
+        if match_notes:
+            record["match_notes"] = match_notes
+        if basis_line:
+            record["basis_line"] = basis_line
         if self.turn_components:
             record["cards"] = list(self.turn_components)
         if error:
             record["error"] = error
         if self.turn_plans:
             record["plans"] = list(self.turn_plans)
+        if self.turn_applied_choice:
+            record["applied_choice"] = dict(self.turn_applied_choice)
         # A source only the translator or the canvas found is read here too,
         # so a later turn's planner is shown it beside the ones a search
         # returned (`prior_ledger_state`).
@@ -833,16 +920,23 @@ class ConversationState:
         readings = [*self.turn_readings, *(reading.model_dump(mode="json") for reading in sourced)]
         if readings:
             record["readings"] = readings
-        # Keep the blocks of the sources the turn's plans used and of the source
-        # each windowed copy among them copies: a later turn can pin or fetch
-        # that source through `earlier_block`. A block can run to about 120 KB
-        # and the record is kept for the whole conversation, so no other is kept.
+        # Keep the blocks of the sources the turn's plans used, of the source
+        # each windowed copy among them copies, and of the pin each input
+        # alignment moved states (`PlanSource.aligned_from`): a later turn can
+        # pin or fetch that source through `earlier_block`. A block can run to
+        # about 120 KB and the record is kept for the whole conversation, so no
+        # other is kept.
         identities = _turn_identities(self.turn_specs, plans)
         copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
             {**self._earlier_identities(), **identities},
         )
-        used = {source.spec_id for plan in plans for source in plan.sources} | copied
+        used = {
+            spec_id
+            for plan in plans
+            for source in plan.sources
+            for spec_id in (source.spec_id, *source.aligned_from)
+        } | copied
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
             record["specs"] = specs
@@ -950,6 +1044,13 @@ class ConversationState:
         looking paused for `/interrupt` to answer again."""
         return any(p.resuming_segment is None for p in self.pending.values())
 
+    def mark_approved_sent(self, segment_id: str) -> None:
+        """Record that the stream of `segment_id` sent `plan.approved` for the
+        interrupt it resumes (`_PendingInterrupt.approved_sent`)."""
+        for p in self.pending.values():
+            if p.resuming_segment == segment_id:
+                p.approved_sent = True
+
     def drop_resuming(self, segment_id: str) -> None:
         """Remove every pending entry marked as resuming under
         `segment_id`. Called at that segment's end, win or lose (done,
@@ -986,11 +1087,14 @@ class ConversationState:
             # what was asked, with the error marked as abandoned.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
         self.turn_user_message = ""
+        self.turn_user_words = ""
         self.turn_final_text = ""
         self.turn_components = []
         self.turn_plans = []
         self.turn_readings = []
         self.turn_specs = {}
+        self.turn_applied_choice = None
+        self.turn_choice_baseline = {}
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
@@ -1039,11 +1143,14 @@ _KEY_SEGMENT = "studio:segment"
 _KEY_AUTO_ADD = "studio:auto_add"
 _KEY_TIMED_OUT_CALLS = "studio:timed_out_calls"
 _KEY_TURN_USER_MESSAGE = "studio:turn_user_message"
+_KEY_TURN_USER_WORDS = "studio:turn_user_words"
 _KEY_TURN_FINAL_TEXT = "studio:turn_final_text"
 _KEY_TURN_COMPONENTS = "studio:turn_components"
 _KEY_TURN_RECORDED = "studio:turn_recorded"
 _KEY_TURN_PLANS = "studio:turn_plans"
 _KEY_TURN_READINGS = "studio:turn_readings"
+_KEY_TURN_APPLIED_CHOICE = "studio:turn_applied_choice"
+_KEY_TURN_CHOICE_BASELINE = "studio:turn_choice_baseline"
 
 # `StudioStore.checkpoint`'s fetch-merge-append cycles, capping how long a
 # conversation under sustained contention retries before it raises.
@@ -1121,7 +1228,7 @@ _RUN_ITEM_PREFIXES = (
 # `StudioStore.append_run_items`' fetch-fence-append cycles.
 _RUN_ITEMS_RETRY_ATTEMPTS = 3
 
-# Identity, the five process-local runtime objects, and the turn's spec
+# Identity, the six process-local runtime objects, and the turn's spec
 # blocks (`turn_specs`, read back from the turn's own ADK session by
 # `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
@@ -1130,6 +1237,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "lock",
         "cancel_event",
         "cancel_reason",
+        "switch_stop",
         "_telemetry_span",
         "_composition_ops",
         "_removal_unreported",
@@ -1170,6 +1278,19 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "step_labels": dict(p.step_labels),
             "resuming_segment": p.resuming_segment,
             "answer": p.answer,
+            "choices": {
+                choice_id: {
+                    "active": choice.active,
+                    "options": {
+                        option_id: {"label": option.label, "status": option.status}
+                        for option_id, option in choice.options.items()
+                    },
+                }
+                for choice_id, choice in p.choices.items()
+            },
+            "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
+            "approved_sent": p.approved_sent,
+            "pick_replan": p.pick_replan,
         }
         for interrupt_id, p in pending.items()
     }
@@ -1185,6 +1306,19 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         step_labels=dict(entry.get("step_labels") or {}),
         resuming_segment=entry.get("resuming_segment"),
         answer=entry.get("answer"),
+        choices={
+            choice_id: _PendingChoice(
+                active=choice["active"],
+                options={
+                    option_id: _PendingOption(label=option["label"], status=option["status"])
+                    for option_id, option in choice["options"].items()
+                },
+            )
+            for choice_id, choice in (entry.get("choices") or {}).items()
+        },
+        card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
+        approved_sent=bool(entry.get("approved_sent")),
+        pick_replan=bool(entry.get("pick_replan")),
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -1236,11 +1370,14 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_AUTO_ADD: state.auto_add,
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
+        _KEY_TURN_USER_WORDS: state.turn_user_words,
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
         _KEY_TURN_COMPONENTS: state.turn_components,
         _KEY_TURN_RECORDED: state.turn_recorded,
         _KEY_TURN_PLANS: state.turn_plans,
         _KEY_TURN_READINGS: state.turn_readings,
+        _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
+        _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index:04d}"] = turn
@@ -1294,6 +1431,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.timed_out_calls = set(value)
         elif key == _KEY_TURN_USER_MESSAGE:
             state.turn_user_message = value
+        elif key == _KEY_TURN_USER_WORDS:
+            state.turn_user_words = value
         elif key == _KEY_TURN_FINAL_TEXT:
             state.turn_final_text = value
         elif key == _KEY_TURN_COMPONENTS:
@@ -1304,6 +1443,10 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_plans = list(value)
         elif key == _KEY_TURN_READINGS:
             state.turn_readings = list(value)
+        elif key == _KEY_TURN_APPLIED_CHOICE:
+            state.turn_applied_choice = dict(value) if value else None
+        elif key == _KEY_TURN_CHOICE_BASELINE:
+            state.turn_choice_baseline = dict(value or {})
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):
@@ -1649,7 +1792,13 @@ class StudioStore:
         raise last_error
 
     async def renew(
-        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
+        self,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        *,
+        timeout: float = 5.0,
+        consume_cancel: bool = False,
     ) -> Literal["ok", "cancelled", "lost"]:
         """Push `segment_id`'s TTL forward by `SEGMENT_TTL_S`, writing only
         the `studio:segment` key under compare-and-swap. Fetches the
@@ -1662,8 +1811,10 @@ class StudioStore:
         (another instance took over after this one's TTL lapsed); the
         caller ends the stream fatally. `"cancelled"` when it is still
         `segment_id` but its `cancel` flag is set, still renewed, so the
-        flag keeps being observed until the caller reacts to it. `"ok"`
-        otherwise. A `StaleSessionError` still standing after
+        flag keeps being observed until the caller reacts to it. With
+        `consume_cancel` the same write clears the flag, so a later
+        `request_cancel` sets it again and the next renewal reports that
+        Stop on its own. `"ok"` otherwise. A `StaleSessionError` still standing after
         `_SEGMENT_WRITE_RETRY_ATTEMPTS` attempts, or any other exception
         the session service raises, propagates, as does a `TimeoutError`
         when the renewal takes longer than `timeout`. The caller's own
@@ -1675,11 +1826,23 @@ class StudioStore:
         cancelled whenever its stream ends.
         """
         return await _run_to_completion(
-            self._renew(principal, conversation_id, segment_id, timeout=timeout)
+            self._renew(
+                principal,
+                conversation_id,
+                segment_id,
+                timeout=timeout,
+                consume_cancel=consume_cancel,
+            )
         )
 
     async def _renew(
-        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float
+        self,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        *,
+        timeout: float,
+        consume_cancel: bool,
     ) -> Literal["ok", "cancelled", "lost"]:
         """`renew`'s write, run as its own task."""
         async with asyncio.timeout(timeout):
@@ -1693,7 +1856,11 @@ class StudioStore:
                     )
                     if session is None or segment is None or segment.id != segment_id:
                         return "lost"
-                    renewed = dataclasses.replace(segment, expires_at=self._clock() + SEGMENT_TTL_S)
+                    renewed = dataclasses.replace(
+                        segment,
+                        expires_at=self._clock() + SEGMENT_TTL_S,
+                        cancel=segment.cancel and not consume_cancel,
+                    )
                     event = Event(
                         author="studio",
                         actions=EventActions(
@@ -1714,7 +1881,7 @@ class StudioStore:
                         and live_state.segment.id == renewed.id
                     ):
                         live_state.segment = renewed
-                    return "cancelled" if renewed.cancel else "ok"
+                    return "cancelled" if segment.cancel else "ok"
             assert last_error is not None
             raise last_error
 

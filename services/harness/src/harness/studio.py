@@ -33,7 +33,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import AbstractContextManager, aclosing, nullcontext, suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -58,15 +58,24 @@ from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorde
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
-from harness.conversation import current_conversation_id, current_conversation_key
+from harness.conversation import (
+    current_conversation_id,
+    current_conversation_key,
+    current_user_message,
+)
+from harness.decision_pick import is_decision_choice
+from harness.early_mint import EarlyMints
 from harness.graph.seams import Executor
 from harness.graph.state import (
     AGENT_NAME,
+    APPLY_CHOICE_STATE_KEY,
+    ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
+from harness.graph.switch import SWITCH_STOP
 from harness.provenance import ProvenanceStore
 from harness.seeds import seeds_slot
 from harness.sentences import failure_sentence
@@ -90,13 +99,16 @@ from harness.studio_translate import (
     _stream_fatal,
     _Translator,
     failure_detail,
+    held_labels,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
+from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
     MAX_TURN_REQUEST_BYTES,
     ActivityStep,
     AddOp,
+    ApplyChoice,
     CancelRequest,
     ComponentRefIntent,
     CompositionActor,
@@ -110,6 +122,8 @@ from harness.wire import (
     InterruptResponse,
     MessageComplete,
     OptionAnswer,
+    PlanProposed,
+    PlanRevisionStaleError,
     RetryMode,
     SkippedAnswer,
     StepStatus,
@@ -122,6 +136,9 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 5.0
 SSE_MEDIA_TYPE = "text/event-stream"
+# How long a stream a Stop reached while a plan-card switch ran waits for the
+# `switch` node to offer the plan again before it ends as any Stop does.
+SWITCH_REOFFER_SECONDS = 10.0
 
 # The wire decision on a plan interrupt, as the record `/interrupt` keeps of it.
 _APPROVAL_DECISION = {
@@ -170,14 +187,27 @@ def _elicitation_refusal(pending: _PendingInterrupt, body: InterruptResponse) ->
 
 
 def _interrupt_refusal(
-    pending: _PendingInterrupt | None, body: InterruptResponse
+    pending_by_id: dict[str, _PendingInterrupt], body: InterruptResponse
 ) -> JSONResponse | None:
     """Everything that can be wrong with an interrupt.response, as one HTTP
     refusal: unknown id, a decision foreign to the interrupt kind, an
-    elicitation's answers (`_elicitation_refusal`), and the plan payload
+    elicitation's answers (`_elicitation_refusal`), the plan payload
     discipline (delta 12: amend carries the text it acts on, the other
-    decisions must not smuggle one)."""
+    decisions must not smuggle one), an approve's revision, and a switch's
+    revision and option (`_switch_refusal`).
+
+    An answer naming a plan revision that is not the one awaiting an answer
+    gets that plan's card back (`_stale_plan_refusal`), including when its
+    interrupt is gone because a later card replaced it."""
+    pending = pending_by_id.get(body.interrupt_id)
     if pending is None:
+        current = _current_plan(pending_by_id)
+        if (
+            body.plan_revision is not None
+            and current is not None
+            and body.plan_revision != current.plan_revision
+        ):
+            return _stale_plan_refusal(current)
         return _tool_error_response(
             ToolError(
                 error=ErrorCode.NOT_FOUND,
@@ -189,7 +219,12 @@ def _interrupt_refusal(
     allowed = (
         {InterruptDecision.ANSWER, InterruptDecision.SKIP}
         if pending.kind == "elicitation"
-        else {InterruptDecision.APPROVE, InterruptDecision.AMEND, InterruptDecision.REJECT}
+        else {
+            InterruptDecision.APPROVE,
+            InterruptDecision.AMEND,
+            InterruptDecision.REJECT,
+            InterruptDecision.SWITCH,
+        }
     )
     detail: str | None = None
     fix: str | None = None
@@ -205,6 +240,10 @@ def _interrupt_refusal(
             detail = "decision 'amend' requires a text payload"
     elif body.payload is not None:
         detail = f"decision {body.decision.value!r} does not take a payload"
+    elif body.decision is InterruptDecision.SWITCH:
+        return _switch_refusal(pending, body)
+    elif body.plan_revision is not None and body.plan_revision != pending.plan_revision:
+        return _stale_plan_refusal(pending)
     if detail is None:
         return None
     return _tool_error_response(
@@ -215,6 +254,132 @@ def _interrupt_refusal(
             fix=fix,
         ),
         status_code=422,
+    )
+
+
+def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSONResponse | None:
+    """What is wrong with a `switch` on a plan card, as one HTTP refusal, or `None`.
+
+    A switch names the revision of the plan the user saw, or is refused
+    409 `plan_revision_stale`. It moves a choice the card shows
+    (`_PendingInterrupt.choices`), a scope choice or a planner decision
+    (`harness.decision_pick.is_decision_choice`), to an option the card
+    offers as available or partial, other than the active one, or is refused
+    422 `switch_option_unavailable`. `detail` is copy the card shows.
+    """
+    if body.plan_revision != pending.plan_revision:
+        return _stale_plan_refusal(pending)
+    choice = pending.choices.get(body.choice_id or "")
+    option = choice.options.get(body.option_id or "") if choice is not None else None
+    if choice is None:
+        detail = "That choice cannot be switched on this plan."
+    elif option is None:
+        detail = "That option is not offered for this choice."
+    elif body.option_id == choice.active:
+        verb = "uses" if is_decision_choice(body.choice_id or "") else "counts"
+        detail = f"The plan already {verb} {option.label}."
+    elif option.status == "unavailable":
+        detail = f"{option.label} cannot be counted for this plan."
+    else:
+        return None
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.CORRECT_AND_RETRY,
+            constraint_id="switch_option_unavailable",
+            detail=detail,
+            fix="choose an option the plan card offers",
+        ),
+        status_code=422,
+    )
+
+
+def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSONResponse:
+    """The label of the option a chip moves to, or the HTTP refusal of a chip that cannot apply.
+
+    A chip applies only on the answer that offered it. It is refused 422
+    `scope_choice_stale` when that answer's turn (`ApplyChoice.turn`) is not
+    the conversation's latest answered turn, or when the newest reading
+    holding its choice (`harness.turn_records.stored_choice`), over the
+    recorded turns and a turn still paused on its plan, is not the reading
+    the chip switches (`ApplyChoice.spec_id`): a plan card's switch in a
+    later turn compiles a new reading of the same choice. The chip is stale
+    too when its choice is already on its option. An option the choice does
+    not offer, or one Search cannot serve, is refused 422
+    `switch_option_unavailable`, as a plan card's switch is. `detail` is copy
+    the client shows.
+    """
+    answered = [
+        number
+        for number, turn in enumerate(conversation.turns, start=1)
+        if turn.get("assistant") and not turn.get("error")
+    ]
+    readings = [reading for turn in conversation.turns for reading in turn.get("readings") or ()]
+    if not conversation.turn_recorded:
+        readings.extend(conversation.turn_readings)
+    found = stored_choice(readings, pick.choice_id)
+    reading, choice = found if found is not None else (None, None)
+    option = (
+        next((o for o in choice.options if o.option_id == pick.option_id), None)
+        if choice is not None
+        else None
+    )
+    if (
+        answered[-1:] != [pick.turn]
+        or reading is None
+        or choice is None
+        or reading.spec_id != pick.spec_id
+        or (option is not None and pick.option_id == choice.active)
+    ):
+        constraint, detail = "scope_choice_stale", CHIP_STALE_NOTE
+    elif option is None:
+        constraint, detail = "switch_option_unavailable", "That option is not offered here."
+    elif option.availability.status == "unavailable":
+        constraint, detail = (
+            "switch_option_unavailable",
+            f"{option.label} cannot be counted for this answer.",
+        )
+    else:
+        return option.label
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.DO_NOT_RETRY,
+            constraint_id=constraint,
+            detail=detail,
+            pointer="/apply_choice",
+        ),
+        status_code=422,
+    )
+
+
+def _current_plan(pending_by_id: dict[str, _PendingInterrupt]) -> _PendingInterrupt | None:
+    """The plan pause awaiting an answer, or `None`: the latest plan entry
+    no segment is resuming."""
+    return next(
+        (
+            pending
+            for pending in reversed(pending_by_id.values())
+            if pending.kind == "plan" and pending.resuming_segment is None
+        ),
+        None,
+    )
+
+
+def _stale_plan_refusal(current: _PendingInterrupt) -> JSONResponse:
+    """409 `plan_revision_stale`: the answer names a plan the user is no
+    longer being asked about. The body carries `current`'s card as the
+    stream sent it, for the client to show in place of the one answered."""
+    return _tool_error_response(
+        PlanRevisionStaleError(
+            error=ErrorCode.EDIT_CONFLICT,
+            retry=RetryMode.REFRESH_THEN_RETRY,
+            constraint_id="plan_revision_stale",
+            detail="This plan has changed since you chose. Choose again on the plan shown now.",
+            fix="answer the plan in current_plan",
+            current_plan=current.card,
+        ),
+        status_code=409,
     )
 
 
@@ -355,8 +520,9 @@ async def _sse_stream(
     frames: AsyncGenerator[Any],
     *,
     conversation: ConversationState | None = None,
+    switch: bool = False,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str]:
     """Serialise frames as SSE `data:` lines, one loop owning all three
     transport concerns: `: ka` comment heartbeats while the next frame is
     slow; cancellation via the conversation's cancel event when one is
@@ -371,7 +537,18 @@ async def _sse_stream(
     `conversation.cancel_reason` (set alongside the event by whoever armed
     it, `POST /cancel` or `StudioRunner._locked`'s heartbeat). `"cancelled"`
     (a client's Stop, from this instance or another) closes the turn and
-    yields the stream-fatal `cancelled` error frame, same as always.
+    yields the stream-fatal `cancelled` error frame, except
+    on a stream running a plan-card switch (`switch`, which arms
+    `conversation.switch_stop` and `SWITCH_STOP` for the frames this stream
+    reads, and clears the one it armed when it ends): the first Stop there
+    sets `switch_stop` and the stream reads
+    on, ending on the `plan.proposed` the `switch` node offers with the
+    plan unchanged (`harness.graph.switch.SWITCH_STOP`). The cancel event
+    is armed again, so a second Stop ends the stream as any Stop does, and
+    so does the stream reaching `SWITCH_REOFFER_SECONDS` after the first
+    with no `plan.proposed`: a Stop never leaves a stream open. Once that
+    frame passes, the deadline is met, so a slow unwind after it leaves the
+    paused turn open.
     `"segment_lost"` (this stream's segment lease was taken over, or this
     instance's own renewal could not keep it alive) yields a stream-fatal
     `transient_unavailable` frame without closing the turn. Another
@@ -402,10 +579,25 @@ async def _sse_stream(
         conversation.in_turn_span() if conversation is not None else nullcontext()
     )
     cancel_wait: asyncio.Future[Any] | None = None
+    # The loop time by which a stopped switch must have ended the stream.
+    reoffer_by: float | None = None
+    loop = asyncio.get_running_loop()
     open_steps = _OpenSteps()
+    switch_stop: asyncio.Event | None = None
+    # The cancel event this stream last armed, so its `finally` clears only
+    # that one and not the event of a request that took the conversation after
+    # `_locked` released it.
+    armed_cancel: asyncio.Event | None = None
     if conversation is not None:
-        conversation.cancel_event = asyncio.Event()
-        cancel_wait = asyncio.ensure_future(conversation.cancel_event.wait())
+        armed_cancel = conversation.cancel_event = asyncio.Event()
+        # A reason left by an earlier stream was aimed at that stream.
+        conversation.cancel_reason = None
+        cancel_wait = asyncio.ensure_future(armed_cancel.wait())
+        if switch:
+            # Armed here, by the stream the switch runs on, so an earlier
+            # stream's `finally` cannot clear it.
+            switch_stop = conversation.switch_stop = asyncio.Event()
+            SWITCH_STOP.set(switch_stop)
     with turn_span:
         try:
             async with aclosing(frames) as source:
@@ -417,14 +609,43 @@ async def _sse_stream(
                             race = {next_frame, cancel_wait} if cancel_wait else {next_frame}
                             done, _ = await asyncio.wait(
                                 race,
-                                timeout=heartbeat_seconds,
+                                timeout=heartbeat_seconds
+                                if reoffer_by is None
+                                else max(0.0, min(heartbeat_seconds, reoffer_by - loop.time())),
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
-                            if next_frame in done:
+                            if (
+                                next_frame in done
+                                and next_frame.exception() is None
+                                and isinstance(next_frame.result(), PlanProposed)
+                            ):
+                                # The stopped switch offered its plan in time.
+                                reoffer_by = None
+                            # Checked on every frame too, since a stopped switch
+                            # that keeps sending frames is not idle.
+                            overdue = reoffer_by is not None and loop.time() >= reoffer_by
+                            if next_frame in done and not overdue:
                                 break
-                            if cancel_wait is not None and cancel_wait in done:
-                                await _unwind(next_frame)
+                            if overdue or (cancel_wait is not None and cancel_wait in done):
                                 assert conversation is not None
+                                if overdue and conversation.cancel_reason is None:
+                                    # The stopped switch offered nothing in
+                                    # time. A takeover recorded in the same
+                                    # wait keeps its own reason.
+                                    conversation.cancel_reason = "cancelled"
+                                stop = conversation.switch_stop
+                                if (
+                                    conversation.cancel_reason == "cancelled"
+                                    and stop is not None
+                                    and not stop.is_set()
+                                ):
+                                    stop.set()
+                                    reoffer_by = loop.time() + SWITCH_REOFFER_SECONDS
+                                    armed_cancel = conversation.cancel_event = asyncio.Event()
+                                    conversation.cancel_reason = None
+                                    cancel_wait = asyncio.ensure_future(armed_cancel.wait())
+                                    continue
+                                await _unwind(next_frame)
                                 if conversation.cancel_reason == "segment_lost":
                                     # Another instance took the segment over.
                                     lost = failure_sentence(
@@ -503,14 +724,17 @@ async def _sse_stream(
             if cancel_wait is not None:
                 await _unwind(cancel_wait)
             if conversation is not None:
-                conversation.cancel_event = None
-                conversation.cancel_reason = None
+                if conversation.cancel_event is armed_cancel:
+                    conversation.cancel_event = None
+                    conversation.cancel_reason = None
+                if conversation.switch_stop is switch_stop:
+                    conversation.switch_stop = None
             await flush_telemetry()
 
 
 def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
-    """Keep the plan records, search readings and spec blocks `event` writes
-    to the turn's session state, for `ConversationState.close_turn` to store
+    """Keep the plan records, search readings, spec blocks and applied chip
+    `event` writes to the turn's session state, for `ConversationState.close_turn` to store
     with the turn. Each key holds the turn's whole value, so the latest
     write replaces. The blocks stay in process (`turn_specs`) until the turn
     closes."""
@@ -521,6 +745,8 @@ def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
         conversation.turn_readings = list(delta[ORCHESTRATOR_SEARCHES_KEY])
     if ORCHESTRATOR_SPECS_KEY in delta:
         conversation.turn_specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
+    if ORCHESTRATOR_APPLIED_KEY in delta:
+        conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
 
 
 async def _unwind(pending: asyncio.Future[Any]) -> None:
@@ -603,7 +829,10 @@ class StudioRunner:
     is `None` for a caller that has no `ToolSurface` to give it (a test that
     does not exercise plan steps); `create_workflow` gets `None` through in
     that case, and the graph's `execute` node is what refuses loudly if it
-    is ever reached.
+    is ever reached. `early_mints` is the workflow's own
+    (`harness.early_mint`): a segment's response waits for the calls of the
+    card it offered before it closes, while the request still has CPU
+    (`_settling`).
     """
 
     def __init__(
@@ -617,8 +846,10 @@ class StudioRunner:
         app_name: str | None = None,
         edit_model: Any | None = None,
         provenance: ProvenanceStore | None = None,
+        early_mints: EarlyMints | None = None,
     ) -> None:
         self.edit_model = edit_model
+        self.early_mints = early_mints
         # Resolved before the workflow exists (`AGENT_NAME` is the fixed
         # name every `create_root_workflow` call gives its `Workflow`, so
         # this matches `workflow.name` in every real caller) because the
@@ -678,8 +909,13 @@ class StudioRunner:
         principal: str,
         conversation: ConversationState,
         message: types.Content,
+        approving: PlanProposed | None = None,
     ) -> AsyncGenerator[Any]:
         """Run one segment (fresh turn or resume) and yield wire frames.
+
+        `approving` is the plan card a first answer to its interrupt approves,
+        which `plan.approved` states once the graph takes the approval
+        (`_Translator`).
 
         Failures are serialised into the stream as a stream-fatal `error`
         frame. SSE headers are already on the wire, so an exception can't
@@ -690,6 +926,7 @@ class StudioRunner:
             conversation=conversation,
             recorder=self.recorder,
             surface_recorder=self.surface_recorder,
+            approving=approving,
         )
         try:
             async with aclosing(
@@ -718,6 +955,23 @@ class StudioRunner:
             if self.surface_recorder is not None:
                 self.surface_recorder.drain(current_conversation_id.get())
 
+    async def _settling(self, stream: AsyncGenerator[str]) -> AsyncGenerator[str]:
+        """`stream`, then the wait for the early calls of the card it offered
+        (`harness.early_mint.EarlyMints.settle`).
+
+        The wait starts once `stream` has ended, so the conversation lock and
+        the segment are released and an answer to the card is taken at once.
+        It sends nothing and only keeps the response, and so the request's
+        CPU, open. A client that leaves first ends it. `stream` flushed the
+        telemetry as it ended, so a wait that ran flushes again, exporting
+        the spans of the calls it waited for.
+        """
+        async with aclosing(stream):
+            async for chunk in stream:
+                yield chunk
+        if self.early_mints is not None and await self.early_mints.settle():
+            await flush_telemetry()
+
     async def _heartbeat(
         self,
         principal: str,
@@ -732,6 +986,13 @@ class StudioRunner:
         with that reason. `_sse_stream`'s cancel branch turns it into the
         matching frame, one mechanism for every kind of mid-stream stop.
 
+        On a stream running a plan-card switch whose Stop has not come yet
+        (`conversation.switch_stop` armed and unset), the renewal clears the
+        flag it reports (`StudioStore.renew`'s `consume_cancel`) and the
+        heartbeat keeps watching: that first Stop only stops the switch
+        (`_sse_stream`), and a second one, from any instance, sets the flag
+        again and ends the stream.
+
         A `renew` call that raises is retried every interval until
         `SEGMENT_TTL_S - 10` seconds of the segment's own remaining life are
         left, then also ends the stream as lost: an instance this deaf to
@@ -740,8 +1001,12 @@ class StudioRunner:
         """
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+            stop = conversation.switch_stop
+            switching = stop is not None and not stop.is_set()
             try:
-                result = await self.store.renew(principal, conversation_id, segment_id)
+                result = await self.store.renew(
+                    principal, conversation_id, segment_id, consume_cancel=switching
+                )
             except Exception:
                 logger.exception(
                     "studio segment heartbeat: conversation %s segment %s renewal failed",
@@ -758,6 +1023,8 @@ class StudioRunner:
             if result == "ok":
                 continue
             _end_stream(conversation, "cancelled" if result == "cancelled" else "segment_lost")
+            if result == "cancelled" and switching:
+                continue
             return
 
     async def _checkpointed(
@@ -777,7 +1044,11 @@ class StudioRunner:
         on the same frame it reaches the ledger. A checkpoint that fails
         (the segment was taken over, or the write itself failed) yields a
         stream-fatal error frame instead of the pause or terminal frame it
-        would have carried, and ends the stream there. This is the one
+        would have carried, and ends the stream there. Once a `plan.approved`
+        frame is sent, the interrupt it answers records it
+        (`ConversationState.mark_approved_sent`) and is checkpointed: a lost
+        segment ends the stream the same way, and any other failure there is
+        logged alone. This is the one
         interception point for every route this runs under (`/turn`, its
         edit-card branch, and `/interrupt`)."""
         async for frame in frames:
@@ -799,6 +1070,28 @@ class StudioRunner:
                 if event == "done":
                     outgoing = frame.model_copy(update={"composition": conversation.composition})
             yield outgoing
+            if event == "plan.approved":
+                # Saved once sent, so a retry of the same answer after this
+                # segment dies does not send it again. A crash before the
+                # save sends it twice, which beats never.
+                conversation.mark_approved_sent(segment_id)
+                try:
+                    await self.store.checkpoint(principal, conversation_id, segment_id)
+                except SegmentLost as exc:
+                    logger.warning(
+                        "studio segment lost after plan.approved: conversation %s segment %s",
+                        conversation_id,
+                        segment_id,
+                    )
+                    yield _checkpoint_failed_frame(conversation, exc)
+                    return
+                except Exception:
+                    logger.warning(
+                        "studio checkpoint after plan.approved failed: conversation %s segment %s",
+                        conversation_id,
+                        segment_id,
+                        exc_info=True,
+                    )
 
     async def _locked(
         self,
@@ -980,9 +1273,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
-                if body.component_ref is not None:
-                    # The client refers to state (a card to edit, or to
-                    # follow up on) this store never had.
+                if body.component_ref is not None or body.apply_choice is not None:
+                    # The client refers to state (a card to edit or to follow
+                    # up on, or a chip under an answer) this store never had.
                     lock.release()
                     return _unknown_conversation_response(body.conversation_id)
                 try:
@@ -1016,9 +1309,29 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                     status_code=404,
                 )
+            chip_label: str | None = None
+            if (pick := body.apply_choice) is not None:
+                label = _chip_label(conversation, pick)
+                if isinstance(label, JSONResponse):
+                    lock.release()
+                    return label
+                chip_label = label
             conversation.begin_turn()
             conversation.auto_add = body.auto_add
-            conversation.turn_user_message = body.message
+            if pick is None:
+                conversation.turn_user_message = body.message
+                conversation.turn_user_words = body.message
+            else:
+                # The history record names the option the chip counts. Search
+                # would read its label as scope the user stated, so the words
+                # later searches send leave it out, as a plan card's switch does.
+                conversation.turn_user_message = f"count {chip_label}"
+                conversation.turn_user_words = ""
+                # The record's `spec_id` is the reading the `seed` node compiles,
+                # set once the chip applies, so the chip's own origin stays out.
+                conversation.turn_applied_choice = pick.model_dump(
+                    include={"choice_id", "option_id"}
+                )
             # Set in the request task's context (each request gets a fresh
             # one, so nothing leaks across requests); the streamed generator
             # and every task spawned under it inherit the value, which is
@@ -1028,6 +1341,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # must not share a canvas.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
+            current_user_message.set(conversation.turn_user_words)
             current_earlier_block.set(conversation.earlier_block)
             current_recorded_identity.set(conversation.recorded_identity)
             # This request's model-call bounds, read by every model call the
@@ -1120,6 +1434,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             elif body.seed_spec is not None:
                 # One reference, the reserved shape: `graph.seed` reports it unused.
                 state[SEEDS_STATE_KEY] = json.dumps(body.seed_spec.model_dump(mode="json"))
+            if body.apply_choice is not None:
+                # `graph.seed` applies the chip, and the turn neither searches nor plans.
+                state[APPLY_CHOICE_STATE_KEY] = json.dumps(body.apply_choice.model_dump())
             try:
                 await studio._ensure_session(
                     user_id=principal, session_id=conversation.session_id, state=state
@@ -1129,19 +1446,22 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
                 )
-            message = types.Content(role="user", parts=[types.Part.from_text(text=body.message)])
+            text = body.message if chip_label is None else f"Count {chip_label}."
+            message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
             return StreamingResponse(
-                _sse_stream(
-                    studio._locked(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        studio._frames(
-                            principal=principal, conversation=conversation, message=message
+                studio._settling(
+                    _sse_stream(
+                        studio._locked(
+                            principal,
+                            body.conversation_id,
+                            conversation,
+                            segment_id,
+                            studio._frames(
+                                principal=principal, conversation=conversation, message=message
+                            ),
                         ),
-                    ),
-                    conversation=conversation,
+                        conversation=conversation,
+                    )
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
@@ -1247,11 +1567,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 lock.release()
                 return _unknown_conversation_response(body.conversation_id)
             pending = conversation.pending.get(body.interrupt_id)
-            refusal = _interrupt_refusal(pending, body)
+            refusal = _interrupt_refusal(conversation.pending, body)
             if refusal is not None:
                 lock.release()
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
+            # A stream that runs a plan-card switch arms the switch's Stop:
+            # one that answers the switch, and one that answers a question
+            # the planner asked while replanning for a pick on the card.
+            switching = body.decision is InterruptDecision.SWITCH or pending.pick_replan
             requested_answer: dict[str, Any] = {
                 "decision": body.decision.value,
                 "payload": body.payload,
@@ -1263,8 +1587,20 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     question_id: answer.model_dump(mode="json")
                     for question_id, answer in body.answers.items()
                 }
+            if body.decision is InterruptDecision.SWITCH:
+                # Likewise a retry switching to another option.
+                requested_answer["switch"] = {
+                    "choice_id": body.choice_id,
+                    "option_id": body.option_id,
+                }
             resuming = pending.resuming_segment is not None
-            if not resuming and pending.kind == "plan":
+            # A switch revises the plan and approves nothing, so it leaves
+            # no approval record.
+            if (
+                not resuming
+                and pending.kind == "plan"
+                and body.decision is not InterruptDecision.SWITCH
+            ):
                 # Recorded once per interrupt id, on its first answer only:
                 # a resumed retry of the SAME answer (below) must not
                 # duplicate it. The record is of the act, not of what the
@@ -1332,6 +1668,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # leaves it for this same retry path to pick back up.
             pending.answer = requested_answer
             pending.resuming_segment = segment_id
+            if body.decision is InterruptDecision.SWITCH and pending.card is not None:
+                # What each choice held before the turn's first switch of
+                # it, which `plan.approved` names as `changed_from`.
+                conversation.turn_choice_baseline = {
+                    **held_labels(pending.card),
+                    **conversation.turn_choice_baseline,
+                }
             if resuming:
                 # A retry resuming the same answer again: the dead attempt
                 # may already have sent frames the client saw, carrying a
@@ -1366,10 +1709,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
 
         if body.decision is InterruptDecision.REJECT:
-            # The plan is declined and the turn ends; nothing was computed.
+            # The plan is declined and the turn ends; nothing was computed. Its
+            # early retrievals, if any, are left to finish or lapse.
             # The paused ADK invocation is abandoned in its per-turn session.
             async def _rejected() -> AsyncGenerator[Any]:
-                text = "Plan rejected; nothing was retrieved or computed."
+                text = "Plan rejected."
                 conversation.close_turn(final_text=text)
                 yield MessageComplete(
                     event="message.complete",
@@ -1408,7 +1752,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The turn's history record must carry the answers or the
                 # next turn's digest shows only the un-refined ask.
                 for line in _answered_lines(pending, given):
-                    conversation.turn_user_message += f"\n(then: {line})"
+                    conversation.add_to_turn(line, user_words=True)
         elif body.decision is InterruptDecision.APPROVE:
             # The plan is keyed on its revision hash (`plan_revision`), and
             # the approval dated by the record of its first answer, so a
@@ -1425,31 +1769,61 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             if recorded is not None:
                 answer["at"] = recorded.at.isoformat()
+        elif body.decision is InterruptDecision.SWITCH:
+            # The graph's `switch` node revises the plan in code and offers
+            # it again; a planner decision's switch (`is_decision_choice`)
+            # replans with the pick held (`harness.decision_pick`). The
+            # turn's history record carries the choice.
+            assert body.choice_id is not None and body.option_id is not None
+            answer = {
+                "approved": None,
+                "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
+            }
+            label = pending.choices[body.choice_id].options[body.option_id].label
+            verb = "use" if is_decision_choice(body.choice_id) else "count"
+            conversation.add_to_turn(f"{verb} {label}", user_words=False)
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
             # An amendment refines the question, so the turn's history record
             # carries it.
-            conversation.turn_user_message += f"\n(then: {body.payload})"
+            conversation.add_to_turn(str(body.payload), user_words=True)
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))
+        # The user's words as amended, so a search after the resume reads the
+        # refined ask and no switch's label.
+        current_user_message.set(conversation.turn_user_words)
         current_earlier_block.set(conversation.earlier_block)
         current_recorded_identity.set(conversation.recorded_identity)
         start_turn_budget(settings)
         try:
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])
+            # The approved plan goes out once per interrupt: a retry resuming
+            # the same answer sends it only when the dead attempt did not.
+            approving = (
+                pending.card
+                if body.decision is InterruptDecision.APPROVE and not pending.approved_sent
+                else None
+            )
+            frames = studio._frames(
+                principal=principal,
+                conversation=conversation,
+                message=message,
+                approving=approving,
+            )
             return StreamingResponse(
-                _sse_stream(
-                    studio._locked(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        studio._frames(
-                            principal=principal, conversation=conversation, message=message
+                studio._settling(
+                    _sse_stream(
+                        studio._locked(
+                            principal,
+                            body.conversation_id,
+                            conversation,
+                            segment_id,
+                            frames,
                         ),
-                    ),
-                    conversation=conversation,
+                        conversation=conversation,
+                        switch=switching,
+                    )
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )

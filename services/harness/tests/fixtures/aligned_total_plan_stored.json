@@ -1,0 +1,394 @@
+{
+  "state": {
+    "planner:plan": {
+      "question": "How does US ODA compare with France's multilateral ODA?",
+      "answer_mode": "computed",
+      "decisions": [
+        {
+          "slot": "measure",
+          "description": "What to measure Kenya's dependence by.",
+          "options": [
+            "annual debt service",
+            "total debt stock"
+          ],
+          "chosen": "annual debt service",
+          "resolved_by": "planner_default",
+          "rationale": "Debt service is the standard measure for near-term dependence.",
+          "fixes": null
+        },
+        {
+          "slot": "scope_measure_basis_spec_67beb4daa2a4eacbd5f8d29ace026064",
+          "description": "Which basis the figures are measured on.",
+          "options": [
+            "gross disbursements, current USD",
+            "net disbursements, current USD",
+            "grant equivalents (OECD headline), current USD",
+            "commitments, current USD"
+          ],
+          "chosen": "gross disbursements, current USD",
+          "resolved_by": "planner_default",
+          "rationale": "Counted as gross disbursements, current USD so that every input of the calculation is on one basis.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_67beb4daa2a4eacbd5f8d29ace026064",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          },
+          "scope": {
+            "choice_id": "spec_4f3df621f84d9af58b0563b36c16c6e3:measure_basis",
+            "axis": "measure_basis",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "measure_basis:net",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "measure_basis:grant_equivalent",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "measure_basis:commitments",
+                "status": "unavailable",
+                "years": null,
+                "code": "option_not_covered"
+              }
+            ],
+            "provenance": "explicit"
+          }
+        },
+        {
+          "slot": "scope_provider_spec_67beb4daa2a4eacbd5f8d29ace026064",
+          "description": "Whose spending the figures count.",
+          "options": [
+            "bilateral flows only",
+            "bilateral plus imputed multilateral",
+            "bilateral plus core contributions to multilaterals",
+            "core contributions to multilaterals"
+          ],
+          "chosen": "core contributions to multilaterals",
+          "resolved_by": "planner_default",
+          "rationale": "The plan's wording of this input asked for core contributions to multilaterals.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_67beb4daa2a4eacbd5f8d29ace026064",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          },
+          "scope": {
+            "choice_id": "spec_4f3df621f84d9af58b0563b36c16c6e3:provider",
+            "axis": "provider",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "provider:inclusive",
+                "status": "unavailable",
+                "years": null,
+                "code": "contributions_counted"
+              },
+              {
+                "option_id": "provider:contributions",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "provider:multilateral",
+                "status": "available",
+                "years": null,
+                "code": null
+              }
+            ],
+            "provenance": "explicit"
+          }
+        },
+        {
+          "slot": "scope_measure_basis_spec_55555555555555555555555555555555",
+          "description": "Which basis the figures are measured on.",
+          "options": [
+            "gross disbursements, current USD",
+            "net disbursements, current USD",
+            "grant equivalents (OECD headline), current USD",
+            "commitments, current USD"
+          ],
+          "chosen": "gross disbursements, current USD",
+          "resolved_by": "planner_default",
+          "rationale": "Counted as gross disbursements, current USD so that every input of the calculation is on one basis.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_55555555555555555555555555555555",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          },
+          "scope": {
+            "choice_id": "spec_66666666666666666666666666666666:measure_basis",
+            "axis": "measure_basis",
+            "options": [
+              {
+                "option_id": "measure_basis:gross",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "measure_basis:net",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "measure_basis:grant_equivalent",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "measure_basis:commitments",
+                "status": "unavailable",
+                "years": null,
+                "code": "option_not_covered"
+              }
+            ],
+            "provenance": "explicit"
+          }
+        },
+        {
+          "slot": "scope_provider_spec_55555555555555555555555555555555",
+          "description": "Whose spending the figures count.",
+          "options": [
+            "bilateral flows only",
+            "bilateral plus imputed multilateral",
+            "bilateral plus core contributions to multilaterals",
+            "core contributions to multilaterals"
+          ],
+          "chosen": "core contributions to multilaterals",
+          "resolved_by": "planner_default",
+          "rationale": "The plan's wording of this input asked for core contributions to multilaterals.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_55555555555555555555555555555555",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          },
+          "scope": {
+            "choice_id": "spec_66666666666666666666666666666666:provider",
+            "axis": "provider",
+            "options": [
+              {
+                "option_id": "provider:bilateral",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "provider:inclusive",
+                "status": "unavailable",
+                "years": null,
+                "code": "contributions_counted"
+              },
+              {
+                "option_id": "provider:contributions",
+                "status": "available",
+                "years": null,
+                "code": null
+              },
+              {
+                "option_id": "provider:multilateral",
+                "status": "available",
+                "years": null,
+                "code": null
+              }
+            ],
+            "provenance": "explicit"
+          }
+        }
+      ],
+      "evidence_requirements": [
+        {
+          "kind": "dataset",
+          "id": "second",
+          "decision_ids": [
+            "measure",
+            "scope_measure_basis_spec_67beb4daa2a4eacbd5f8d29ace026064",
+            "scope_provider_spec_67beb4daa2a4eacbd5f8d29ace026064"
+          ],
+          "measure": "figure second",
+          "entities": [
+            {
+              "name": "DAC countries",
+              "role": "donor"
+            }
+          ],
+          "across": [],
+          "period": {
+            "start": 2019,
+            "end": 2019
+          },
+          "period_end_open": false,
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_ref": null,
+          "source_exclude": false,
+          "source_code": null,
+          "source_spec_id": "spec_67beb4daa2a4eacbd5f8d29ace026064",
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null,
+          "breakdown": null
+        },
+        {
+          "kind": "dataset",
+          "id": "other",
+          "decision_ids": [
+            "measure",
+            "scope_measure_basis_spec_55555555555555555555555555555555",
+            "scope_provider_spec_55555555555555555555555555555555"
+          ],
+          "measure": "figure other",
+          "entities": [
+            {
+              "name": "DAC countries",
+              "role": "donor"
+            }
+          ],
+          "across": [],
+          "period": {
+            "start": 2019,
+            "end": 2019
+          },
+          "period_end_open": false,
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_ref": null,
+          "source_exclude": false,
+          "source_code": null,
+          "source_spec_id": "spec_55555555555555555555555555555555",
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null,
+          "breakdown": null
+        },
+        {
+          "kind": "comparison",
+          "id": "compare_totals",
+          "decision_ids": [
+            "measure"
+          ],
+          "minuend": {
+            "input_id": "second",
+            "entity": null
+          },
+          "subtrahend": {
+            "input_id": "other",
+            "entity": null
+          }
+        }
+      ],
+      "declined": [],
+      "asks": [],
+      "answered": [],
+      "ask_breakdowns": [],
+      "asks_across_years": [],
+      "period_licences": [],
+      "rolling_copies": [],
+      "first_years": [],
+      "translation": null,
+      "workflow": null,
+      "version": 1,
+      "previous_version": null,
+      "status": "draft",
+      "approved_revision": null,
+      "approved_at": null
+    },
+    "planner:aligned_pins": [
+      {
+        "origin": "spec_88775d27aa3a36534fa154230512daba",
+        "option_ids": [
+          "provider:multilateral"
+        ],
+        "spec_id": "spec_67beb4daa2a4eacbd5f8d29ace026064",
+        "digest": {},
+        "whole_axis": null
+      }
+    ]
+  },
+  "revision": "82b13efa2c45a5d53eac3dd1f27c8d54d637dd8bca7ce47adf5ca6c019847eb4"
+}

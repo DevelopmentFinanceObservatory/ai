@@ -47,7 +47,7 @@ import json
 import logging
 import re
 import weakref
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
@@ -72,7 +72,7 @@ from compiler.sources import (
 )
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
-from data_mcp.search_tool import SearchPart
+from data_mcp.search_tool import SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
@@ -91,12 +91,14 @@ from planner.plan import (
     MAX_ASK_CHARS,
     MAX_PLAN_ASKS,
     AskBreakdown,
+    SessionState,
     earlier_block,
     recorded_identity,
 )
 from planner.skills import GET_SKILL, GET_SKILL_FILE
 from planner.workflow import ToolId
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
+from submission.prices_choice import measure_key
 from translator.discovery import (
     DefinitionNotResolvedError,
     PartNotResolvedError,
@@ -119,6 +121,7 @@ from harness.chart_binding import (
     select_binding_ok,
     top_members,
 )
+from harness.conversation import current_user_message
 from harness.dfo_faq import (
     CANNOT_DESCRIBE_DFO,
     DfoFaqUnavailable,
@@ -139,9 +142,12 @@ from harness.graph.state import (
     DescribedFrame,
     PendingAsk,
     PendingPlan,
+    conversation_readings,
     count_call,
     frame_store_ref,
+    open_parts,
     pending_action,
+    prices_question,
     register_frames,
     store_search,
     turn_budgets,
@@ -154,6 +160,7 @@ from harness.reply_figures import (
     with_coordinates,
 )
 from harness.rolling_cards import named_year
+from harness.scope_choices import PartScope, carried_entries
 from harness.studio_state import RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
@@ -676,15 +683,31 @@ class _Narrowed:
 _CUT_SUFFIX = re.compile(r"(?:, [\d/-]+ to [\d/-]+)? \(\d+ largest of \d+ in [^()]+\)$")
 
 
-def _card_title(subject: str, *, period: str | None, cut: TopMembers | None) -> str:
-    """A card's title: the model's `subject`, then the period the card shows,
-    then on a card cut to its largest members what the cut leaves out and the
-    period it ranked at. The subject is shortened so the title fits 120
-    characters."""
-    suffix = f", {period}" if period is not None else ""
+def _card_title(
+    subject: str, *, whole: str | None, period: str | None, cut: TopMembers | None
+) -> tuple[str, str | None]:
+    """A card's title, and the whole it leaves out.
+
+    The title is the model's `subject`, then on a card of shares the whole
+    they divide by (`harness.plan_display.share_wholes`), then the period the
+    card shows, then on a card cut to its largest members what the cut leaves
+    out and the period it ranked at, in 120 characters. A whole that fits
+    only beside a shortened subject is left out of the title and returned,
+    for the card's note (`_whole_note`); the subject is then shortened so
+    the rest fits."""
+    suffix = ""
+    if period is not None:
+        suffix = f", {period}"
     if cut is not None:
         suffix += f" ({len(cut.members)} largest of {cut.holding} in {cut.period})"
-    return f"{subject[: 120 - len(suffix)]}{suffix}"
+    if whole is not None and len(subject + _whole_clause(whole) + suffix) <= 120:
+        return f"{subject}{_whole_clause(whole)}{suffix}", None
+    return f"{subject[: max(0, 120 - len(suffix))]}{suffix}", whole
+
+
+def _whole_clause(whole: str) -> str:
+    """The clause `_card_title` states a card's whole in."""
+    return f", of the total {whole}"
 
 
 def _covered_years(view: Mapping[str, Any]) -> list[str]:
@@ -878,6 +901,15 @@ async def _top_select(
         return top if isinstance(top, _Unranked) else _Unranked("not_ranked")
     members = top.members if cut else [*top.members, *top.unvalued]
     return _Narrowed(select={**select, dimension: members}, cut=top if cut else None)
+
+
+def _whole_note(whole: str) -> str:
+    """The whole a card of shares divides by, for the model, when its title
+    leaves it out (`_card_title`)."""
+    return (
+        f"This card's values are shares of the total {whole}, which its title leaves out "
+        "for length. Say in the reply what they are shares of."
+    )
 
 
 def _cut_note(cut: TopMembers) -> str:
@@ -1293,11 +1325,21 @@ def _named_spec_ids(tool_context: ToolContext) -> set[str]:
 MAX_ASK_QUESTIONS = 3
 
 
-def _questions_refusal(questions: list[AskQuestion], named: set[str]) -> dict[str, Any] | None:
+def _questions_refusal(
+    questions: list[AskQuestion],
+    named: set[str],
+    parts: Collection[str] = (),
+    measures: Mapping[str, str | None] | None = None,
+) -> dict[str, Any] | None:
     """The refusal of an `ask_user` call that asks no question or more than
-    `MAX_ASK_QUESTIONS`, asks a question with no option, offers a spec_id no
-    search result this turn named (`_named_spec_ids`), or offers one spec_id
-    on two options of the call; None when it asks well."""
+    `MAX_ASK_QUESTIONS`, asks a question with no option, prices a part that
+    is none of `parts`, the spec_ids of the readings whose prices are open
+    (`harness.graph.state.open_parts`), prices one part, or two parts
+    measuring the same thing over other windows (equal `measures`,
+    `submission.prices_choice.measure_key`), in two questions, offers a spec_id no search result
+    this turn named (`_named_spec_ids`), or offers one spec_id on two options
+    of the call; None when it asks well. `questions` hold the options a
+    prices question is given (`harness.graph.state.prices_question`)."""
     options = [option for question in questions for option in question.options]
     spec_ids = [option.spec_id for option in options if option.spec_id is not None]
     problems = []
@@ -1306,9 +1348,31 @@ def _questions_refusal(questions: list[AskQuestion], named: set[str]) -> dict[st
             f"it asks {len(questions)} questions, and ask_user takes 1 to {MAX_ASK_QUESTIONS}"
         )
     problems += [
+        f"question {question.question!r} prices {question.prices_of}, which lists no "
+        "`open_prices` this turn"
+        for question in questions
+        if question.prices_of is not None and question.prices_of not in parts
+    ]
+    priced = [question.prices_of for question in questions if question.prices_of is not None]
+    problems += [
+        f"{part} is priced by more than one question"
+        for part in sorted(set(priced))
+        if priced.count(part) > 1
+    ]
+    by_measure: dict[str, set[str]] = {}
+    for part in priced:
+        if (key := (measures or {}).get(part)) is not None:
+            by_measure.setdefault(key, set()).add(part)
+    problems += [
+        f"{' and '.join(sorted(same))} measure one thing over other years, so one prices "
+        "question covers them"
+        for same in by_measure.values()
+        if len(same) > 1
+    ]
+    problems += [
         f"question {question.question!r} offers no option"
         for question in questions
-        if not question.options
+        if not question.options and question.prices_of is None
     ]
     problems += [
         f"option {option.label!r} carries {option.spec_id}, which no search result named this turn"
@@ -1432,8 +1496,17 @@ def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
-    """Add a `fetch` result to every stored search reading of its spec_id.
+def _attach_fetch(
+    tool_context: ToolContext,
+    result: dict[str, Any],
+    *,
+    served: Mapping[str, Any] | None = None,
+    args: Mapping[str, Any] | None = None,
+) -> None:
+    """Add a `fetch` result to every stored search reading of its spec_id,
+    with `served`, how `get_data` says the frame was counted
+    (`harness.scope_choices.served_facts`), when it said, and `args`, the
+    call's arguments that shape its frame (`FetchReading.args`).
 
     A spec_id that no reading holds as its own, but one offered as a
     candidate, as another count (`SearchReading.alternatives`) or as the
@@ -1479,9 +1552,11 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
             update |= {"sibling_of": link, "counted_as": counted_as}
         searches.append(chosen.model_copy(update=update))
     state[ORCHESTRATOR_SEARCHES_KEY] = [
-        (reading.with_fetch(result) if reading.spec_id == spec_id else reading).model_dump(
-            mode="json"
-        )
+        (
+            reading.with_fetch(result, served=served, args=args)
+            if reading.spec_id == spec_id
+            else reading
+        ).model_dump(mode="json")
         for reading in searches
     ]
 
@@ -1567,11 +1642,44 @@ def _fetch_key(args: Mapping[str, Any], block: Mapping[str, Any] | None) -> str:
 
 class Resolver(Protocol):
     """Stands in for data-mcp `search`: the question and its search parts ->
-    the search digest (`harness.tool_contracts.resolver_digest`)."""
+    the search digest (`harness.tool_contracts.resolver_digest`).
+
+    `context` is the conversation a parsed search is made in
+    (`_search_context`); a raw-text search is sent none.
+    """
 
     async def __call__(
-        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
+        self,
+        *,
+        question: str,
+        parts: list[dict[str, Any]],
+        raw_text: bool = False,
+        context: SearchContext | None = None,
     ) -> dict[str, Any]: ...
+
+
+def _search_context(state: SessionState) -> SearchContext:
+    """The conversation a parsed search is made in: the user's message for the
+    turn (`current_user_message`) and the entries carried from the scope
+    choices of every earlier search, the earlier turns' readings
+    (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
+    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first (`carried_entries`), less
+    the axes the planner's own words settled on a reading (`planner_axes`).
+    """
+    scoped = [reading for reading in conversation_readings(state) if reading.get("scope")]
+    scopes = [PartScope.model_validate(reading["scope"]) for reading in scoped]
+    planner = {
+        scope.compiled.spec_id: reading["planner_axes"]
+        for scope, reading in zip(scopes, scoped, strict=True)
+        if reading.get("planner_axes")
+    }
+    return SearchContext(
+        user_message=current_user_message.get() or None,
+        carried_entries=[
+            entry.model_dump(mode="json", exclude_none=True)
+            for entry in carried_entries(scopes, planner=planner)
+        ],
+    )
 
 
 def build_orchestrator_tools(
@@ -1646,7 +1754,11 @@ def build_orchestrator_tools(
         region as one place. All parts go in one call. A flow measure such
         as aid, donors or recipients needs `role` on each entity in
         `entities`, as spoken. Use `to` for a recipient and `from` for a
-        donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. A "by
+        donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. Names an
+        earlier turn gave as donors or recipients keep that side when the
+        user points back at them ("those donors"): each goes with `from` or
+        `to`, since search refuses names it cannot place on a side
+        (`role_not_resolved`). A "by
         creditor" or "which donors" question leaves that flow side open in
         `open_roles`. A total across a side leaves it out of `open_roles` and
         names the population the user asked for: "aid to Ethiopia from all
@@ -1677,6 +1789,12 @@ def build_orchestrator_tools(
         "members": true}`, and an explicitly named country stays an entity,
         independently of the ranking axis. Do not add "World" as a stand-in for
         an open population; retain it when the user asks for the World total.
+        Two entities written alike stay two rows when each carries its `name`
+        or `dcid`, never both: "aid from Congo to Congo" sends `{"text":
+        "Congo", "role": "from", "name": "Democratic Republic of the Congo"}`
+        and `{"text": "Congo", "role": "to", "name": "Republic of the Congo"}`,
+        and an `entity_ambiguous` row is resent with the chosen candidate's
+        `dcid`, keeping its `text` and `role`.
 
         A comparison of two categories of one measure ("health versus
         education aid") is one part per category, each with `separate:
@@ -1710,9 +1828,12 @@ def build_orchestrator_tools(
         group's published total, and the window it covers. A definite part
         whose count search chose among others states it as `counted_as`,
         with other counts under `alternatives` and the same count in other
-        prices under `other_prices`, each with its spec_id and label, and
-        lists the `source_codes` of the indicators it found, each with the
-        publisher that issues it when search names one. And
+        prices under `other_prices`, each with its spec_id and label. A
+        definite part whose prices the user left open over several years
+        lists `open_prices`, the options of a prices question, the prices
+        search read first. A definite part lists the `source_codes` of the
+        indicators it found, each with the publisher that issues it when
+        search names one. And
         `skills`: background a result calls for, each by id and
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
@@ -1732,10 +1853,15 @@ def build_orchestrator_tools(
         if spent:
             return spent
         parts = parts or []
-        raw_text = as_text or not parts
-        wire_parts = [] if raw_text else [part.model_dump(exclude_none=True) for part in parts]
         try:
-            digest = await resolver(question=query, parts=wire_parts, raw_text=raw_text)
+            if as_text or not parts:
+                digest = await resolver(question=query, parts=[], raw_text=True)
+            else:
+                digest = await resolver(
+                    question=query,
+                    parts=[part.model_dump(exclude_none=True) for part in parts],
+                    context=_search_context(tool_context.state),
+                )
         except ResolverError as exc:
             # The service's own code and retry mode word the user's line for
             # the failed search.
@@ -1805,6 +1931,15 @@ def build_orchestrator_tools(
         spent = _spend(tool_context, "fetch")
         if spent:
             return spent
+        # The arguments that shape the frame, kept on the reading so a chip
+        # fetches the switched reading the same way.
+        shaped: dict[str, Any] = {}
+        if scope is not None:
+            shaped["scope"] = scope.model_dump(exclude_none=True)
+        if stat_vars is not None:
+            shaped["stat_vars"] = stat_vars
+        if breakdown is not None:
+            shaped["breakdown"] = breakdown.model_dump()
         args: dict[str, Any] = {"spec_id": spec_id}
         if scope is not None:
             args["scope"] = scope.model_dump(exclude_none=True)
@@ -1855,7 +1990,7 @@ def build_orchestrator_tools(
                     "same_data_as": earlier["spec_id"],
                 }
             )
-            _attach_fetch(tool_context, found)
+            _attach_fetch(tool_context, found, served=earlier.get("served"), args=shaped)
             return found
         try:
             data = await executor(tool="get_data", args=args)
@@ -1930,9 +2065,10 @@ def build_orchestrator_tools(
                 "summary": found["summary"],
                 **_period_note_entry(found),
                 "frames": [entry["frame"] for entry in found["frames"]],
+                **({"served": data["served"]} if data.get("served") else {}),
             }
             tool_context.state[_FETCHES_KEY] = fetches
-        _attach_fetch(tool_context, found)
+        _attach_fetch(tool_context, found, served=data.get("served"), args=shaped)
         return found
 
     def _canvas_series(tool_context: ToolContext) -> list[str]:
@@ -2018,9 +2154,11 @@ def build_orchestrator_tools(
         frame: Mapping[str, Any],
         on_canvas: list[str],
         cut: TopMembers | None,
+        whole: str | None,
     ) -> dict[str, Any]:
         """What `make_charts` returns of a card on the canvas: its title,
-        `_card_result` and, on a cut card, what the cut leaves out."""
+        `_card_result` and a note of the `whole` its title leaves out and, on
+        a cut card, of what the cut leaves out."""
         try:
             held = await _card_result(chart, component, frame=frame, on_canvas=on_canvas, cut=cut)
         except Exception:
@@ -2029,8 +2167,12 @@ def build_orchestrator_tools(
             logger.exception("make_charts: reading the figures of %r failed", title)
             held = _figures_unread()
         entry = {"title": title, **held}
-        if cut is not None:
-            entry["note"] = _cut_note(cut)
+        notes = [
+            *([] if whole is None else [_whole_note(whole)]),
+            *([] if cut is None else [_cut_note(cut)]),
+        ]
+        if notes:
+            entry["note"] = " ".join(notes)
         return entry
 
     async def _draw(charts: list[Chart], tool_context: ToolContext) -> list[dict[str, Any]]:
@@ -2070,8 +2212,12 @@ def build_orchestrator_tools(
                     )
                     continue
                 # A title the model copied from a card already cut loses that
-                # suffix, so the card's own suffix is the only one.
+                # suffix, and one copied from a card of shares everything from
+                # the whole's clause on, its period included, so the card's own
+                # suffixes are the only ones.
                 subject = _CUT_SUFFIX.sub("", chart.title)
+                if (whole := frame.get("whole")) is not None:
+                    subject = subject.partition(_whole_clause(whole))[0]
                 if (refusal := _title_refusal(subject, frame["view"])) is not None:
                     drawn.append(_not_drawn(chart, refusal["message"], refusal=refusal))
                     continue
@@ -2143,7 +2289,7 @@ def build_orchestrator_tools(
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
                 period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
-                title = _card_title(subject, period=period, cut=cut)
+                title, untitled = _card_title(subject, whole=whole, period=period, cut=cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
@@ -2175,7 +2321,13 @@ def build_orchestrator_tools(
                 ):
                     read = True
                     entry = await _card_entry(
-                        chart, stored, title=title, frame=frame, on_canvas=on_canvas, cut=cut
+                        chart,
+                        stored,
+                        title=title,
+                        frame=frame,
+                        on_canvas=on_canvas,
+                        cut=cut,
+                        whole=untitled,
                     )
                     drawn.append(
                         entry
@@ -2226,7 +2378,13 @@ def build_orchestrator_tools(
                 landed = True
                 drawn.append(
                     await _card_entry(
-                        chart, component, title=title, frame=frame, on_canvas=on_canvas, cut=cut
+                        chart,
+                        component,
+                        title=title,
+                        frame=frame,
+                        on_canvas=on_canvas,
+                        cut=cut,
+                        whole=untitled,
                     )
                 )
                 drawn_cards[identity] = {
@@ -2284,11 +2442,20 @@ def build_orchestrator_tools(
         Ask only what changes the answer. Each question offers at least one
         option. An option for a count or prices that a search result names
         carries the spec_id the result gives it, and the answer names that
-        spec_id when the user picks it. Each spec_id goes on one option. End
+        spec_id when the user picks it. A prices question names its part in
+        `prices_of`, and its options are filled in. Each spec_id goes on one option. End
         your turn after calling ask_user. Every answer comes back as the next
         message.
         """
-        refused = _questions_refusal(questions, _named_spec_ids(tool_context))
+        parts = open_parts(tool_context.state)
+        questions = [prices_question(question, parts) for question in questions]
+        blocks = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+        refused = _questions_refusal(
+            questions,
+            _named_spec_ids(tool_context),
+            parts,
+            {part: measure_key(blocks[part]) for part in parts if part in blocks},
+        )
         if refused:
             return refused
         spent = _spend(tool_context, "ask_user")

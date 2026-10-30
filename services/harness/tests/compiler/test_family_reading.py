@@ -80,6 +80,7 @@ from planner.records import (
     StatVarReading,
 )
 from planner.workflow import OpenAxis, ReadingSetBy, SelectedSource
+from submission import service as submission_service
 
 _BLOCKS: dict[str, Any] = json.loads(
     (Path(__file__).parent.parent / "fixtures" / "family_spec_blocks.json").read_text()
@@ -391,9 +392,11 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
     ("block", "clause"),
     [
         pytest.param(_place_open(), None, id="one-confirmed-no-open-axis"),
+        # Search confirms members at probe places, so a retrieval over every
+        # place can hold others, and no served count states the family's size.
         pytest.param(
             _place_open(member_count=3, member_count_exact=True),
-            "kept as 3 separate indicators by default",
+            "kept as separate indicators by default",
             id="three-confirmed",
         ),
         # Search counts the members it confirmed as a floor, so the mint may
@@ -410,7 +413,7 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
         ),
         pytest.param(
             _stating_no_summable(_donor_open(confirmed=2, served=2)),
-            "kept as 2 separate indicators by default",
+            "kept separate over whichever of its 2 indicators hold data by default",
             id="two-served",
         ),
         pytest.param(
@@ -752,6 +755,48 @@ def _gross_and_net_kenya() -> SelectedSource:
     block = _block("germany_oda_to_kenya")
     _slot(block, "nettingBasis")["binding"] = {"kind": "unbound"}
     return source_from_spec_block(block)
+
+
+@pytest.mark.parametrize(
+    ("source", "requested", "passed"),
+    [
+        # Germany's bilateral ODA: the rule sums the family, one series a year.
+        pytest.param(_source("germany_bilateral_oda"), None, True, id="summed-by-the-rule"),
+        # An open netting basis: the rule keeps gross and net apart, so a sum by
+        # year folds two series into one figure a year.
+        pytest.param(_gross_and_net_kenya(), None, False, id="separate-by-the-rule"),
+        # The plan's own reading overrides the rule, as the compiler reads it.
+        pytest.param(_gross_and_net_kenya(), StatVarReading.SUM, True, id="summed-by-the-plan"),
+        pytest.param(
+            _source("germany_bilateral_oda"),
+            StatVarReading.SEPARATE,
+            False,
+            id="separate-by-the-plan",
+        ),
+        # One StatVar has no reading: one series.
+        pytest.param(_source("life_expectancy_ghana"), None, True, id="one-stat-var"),
+    ],
+)
+def test_a_yearly_sum_passes_its_input_through_only_where_the_compiler_reads_one_series(
+    source: SelectedSource, requested: StatVarReading | None, passed: bool
+) -> None:
+    """A sum by year over a dataset naming one entity per role leaves its input's
+    frame as it is only where the retrieval reads one series, its StatVars read as
+    the compiler reads them (`stat_var_reading`)."""
+    dataset = _dataset(
+        "oda",
+        [Entity(name="Germany", role="donor")],
+        Period(start=2000, end=2024),
+        source_spec_id=source.spec_id,
+        stat_vars=requested,
+    )
+    requirements = {"oda": dataset, "yearly_total": _yearly_total("oda")}
+
+    through = submission_service._passed_through(
+        requirements["yearly_total"], requirements, {source.spec_id: source}.get
+    )
+
+    assert (through == "oda") is passed
 
 
 def test_a_total_over_a_family_the_rule_leaves_separate_is_refused_at_compile_time(

@@ -162,7 +162,8 @@ class ScriptedSurface:
     order a serial loop would have called in. `max_concurrency` counts the
     wait alone: it is the highest number of calls this surface ever held in
     that wait at once, across every tool, so a test can prove two steps
-    overlapped rather than merely both having run.
+    overlapped rather than merely both having run. `listed` counts the
+    `list_tools` reads.
     """
 
     def __init__(
@@ -176,10 +177,12 @@ class ScriptedSurface:
         self.queues = {name: deque(items) for name, items in responses.items()}
         self.delays = dict(delays or {})
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.listed = 0
         self.max_concurrency = 0
         self._in_flight = 0
 
     async def list_tools(self) -> list[ToolSchema]:
+        self.listed += 1
         return list(self.schemas)
 
     async def call_tool(

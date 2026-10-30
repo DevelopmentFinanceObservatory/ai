@@ -12,7 +12,9 @@ own `Outcome` vocabulary: `choice_required`, `invalid_input` (input the
 planner can repair), `unsupported`, `transient` and `internal`. A compiled
 plan, the sixth, is no referral at all. `requirement_needs_repair` names the
 compile issue code the requirement breaks as `constraint` and what the
-planner may change as `repair`; `internal_failure` carries the `reference`
+planner may change as `repair`; `entity_name_ambiguous` carries how to settle
+its `ambiguous_entities` as `repair` (`REPAIR_OF`), so the planner reads that
+guidance only when it applies, and its instruction need not name the kind; `internal_failure` carries the `reference`
 its log line is written under. `repeated` marks a referral for a translation
 that already failed with the same issues earlier in the session
 (`translator.mechanical`'s loop guard). The plan was not changed where it
@@ -82,16 +84,22 @@ translator handed the plan back without it riding along on the plan itself.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 from enum import StrEnum
 
 from compiler.compile import CompileIssueCode
 from planner.parties import flow_side, party_role
 from planner.plan import SessionState
-from planner.records import AmbiguousSourceReading, Identifier, StrictModel, warn_left_out
+from planner.records import (
+    AmbiguousEntityReading,
+    AmbiguousSourceReading,
+    Identifier,
+    StrictModel,
+    warn_left_out,
+)
 from planner.tool_results import Outcome
 from planner.workflow import SelectedSource
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +113,7 @@ class ReferralKind(StrEnum):
 
     SOURCE_AMBIGUOUS = "source_ambiguous"
     SOURCE_NAME_AMBIGUOUS = "source_name_ambiguous"
+    ENTITY_NAME_AMBIGUOUS = "entity_name_ambiguous"
     NO_DATA = "no_data"
     UNSUPPORTED_ASK = "unsupported_ask"
     REQUIREMENT_UNMEETABLE = "requirement_unmeetable"
@@ -129,10 +138,34 @@ class ReferralKind(StrEnum):
     INTERNAL_FAILURE = "internal_failure"
 
 
+# The `repair` every `entity_name_ambiguous` referral carries: how the planner
+# settles each reading of its `ambiguous_entities`.
+ENTITY_CHOICE_REPAIR = (
+    "Search could not tell which graph node an entity's words name. Each reading in "
+    "`ambiguous_entities` names one `entity` and the `candidates` its words could mean. "
+    "Restate each entity whose node the question or the brief settles with the "
+    "candidate's `ref` as its `dcid`, keeping its name and role. Ask the user about each "
+    "other reading in an `adk_request_input` call of its own, one reading per call, with "
+    "exactly that reading's candidates as options, each as `spec_id` (the candidate's "
+    "`pick`) and `label`. State the `ref` of the candidate the user picked as that "
+    "entity's `dcid`. A candidate with `restate_as` is stated instead by setting the "
+    "entity's `name` to its `restate_as`, `members` true and no `dcid`, keeping its role."
+)
+
+# The kinds whose every referral carries how to settle it as its `repair`, the
+# guidance the planner's instruction would otherwise hold for them. The
+# instruction need not name these kinds, since each referral says what to do;
+# `Referral` refuses one of them that carries any other `repair`.
+REPAIR_OF: Mapping[ReferralKind, str] = {
+    ReferralKind.ENTITY_NAME_AMBIGUOUS: ENTITY_CHOICE_REPAIR,
+}
+
+
 # What each kind asks of the planner, in the planner's own `Outcome` vocabulary.
 OUTCOME_OF: Mapping[ReferralKind, Outcome] = {
     ReferralKind.SOURCE_AMBIGUOUS: Outcome.CHOICE_REQUIRED,
     ReferralKind.SOURCE_NAME_AMBIGUOUS: Outcome.CHOICE_REQUIRED,
+    ReferralKind.ENTITY_NAME_AMBIGUOUS: Outcome.CHOICE_REQUIRED,
     ReferralKind.PINNED_SOURCE_NOT_FOUND: Outcome.CHOICE_REQUIRED,
     ReferralKind.NO_DATA: Outcome.INVALID_INPUT,
     ReferralKind.REQUIREMENT_UNMEETABLE: Outcome.INVALID_INPUT,
@@ -164,6 +197,7 @@ ABOUT_A_REQUIREMENT = frozenset(
     {
         ReferralKind.SOURCE_AMBIGUOUS,
         ReferralKind.SOURCE_NAME_AMBIGUOUS,
+        ReferralKind.ENTITY_NAME_AMBIGUOUS,
         ReferralKind.NO_DATA,
         ReferralKind.UNSUPPORTED_ASK,
         ReferralKind.REQUIREMENT_UNMEETABLE,
@@ -203,7 +237,9 @@ class WithheldSource(StrictModel):
     dropped: tuple[str, ...] = Field(min_length=1)
 
 
-def dropped_scope(held: SelectedSource, found: SelectedSource) -> tuple[str, ...]:
+def dropped_scope(
+    held: SelectedSource, found: SelectedSource, *, columns: Collection[str] | None = None
+) -> tuple[str, ...]:
     """The scope `held`, a pinned dataset's source, holds on each role column that `found` drops.
 
     A column `held` closes, by binding entities on it or naming a group on
@@ -212,13 +248,15 @@ def dropped_scope(held: SelectedSource, found: SelectedSource) -> tuple[str, ...
     members only as a group and `found` names no group of that label there.
     A column `held` leaves open is never dropped: a source that closes it
     narrows the population to what the requirement names. Empty when `found`
-    keeps the scope on every column.
+    keeps the scope on every column. `columns`, when given, are the only
+    columns judged.
     """
     found_open = {axis.column: axis.member_count for axis in found.open_entity_axes or ()}
     held_open = {axis.column for axis in held.open_entity_axes or ()}
     closed = {entity.role for entity in held.entities} | {group.role for group in held.groups}
     dropped: list[str] = []
-    for column in sorted(closed - held_open):
+    judged = closed - held_open if columns is None else (closed - held_open) & set(columns)
+    for column in sorted(judged):
         refs = {entity.ref for entity in held.entities if entity.role == column}
         group = next((group for group in held.groups if group.role == column), None)
         if group is not None:
@@ -265,7 +303,7 @@ def closing_group(held: SelectedSource, across: str) -> str | None:
     return next(iter(labels)) if len(labels) == 1 else None
 
 
-def scope_repair(held: SelectedSource, across: str) -> str | None:
+def scope_repair(held: SelectedSource, across: str, *, members: bool = False) -> str | None:
     """The change to a requirement that restates the scope `held` keeps on the side the `across` word opens, or `None`.
 
     `held` is a pinned dataset's source set aside because it holds that side
@@ -273,8 +311,10 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
     requirement can name that member under the side's `PARTY_ROLES` word and
     drop the word from `across`, which brings the pinned source's scope back.
     Several named members, or a word naming no single role, give `None`.
-    The repair leaves one member on the side, so it answers only a plan whose
+    The repair leaves one member on the side, so it answers a plan whose
     readers sum the side away (`translator.discovery.DiscoveryLog.scope_kept`).
+    With `members`, for a plan whose readers rank over the side, only a group
+    is named, for its members, so the rank orders them.
     """
     role = party_role(across)
     side = flow_side(across)
@@ -282,11 +322,32 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
         return None
     groups = {group.label for group in held.groups if flow_side(group.role) == side}
     entities = {entity.label for entity in held.entities if flow_side(entity.role) == side}
-    labels = groups or entities
+    labels = groups if members else groups or entities
     if len(labels) != 1:
         return None
     (label,) = labels
-    return f"name {label!r} as {role} in `entities` and drop {across!r} from `across`"
+    named = "with `members: true` " if members else ""
+    return f"name {label!r} as {role} in `entities` {named}and drop {across!r} from `across`"
+
+
+def kept_scope_repair(kept: Sequence[Mapping[str, object]]) -> str | None:
+    """The change to a requirement that names each party in `kept`, or `None` when `kept` is empty.
+
+    `kept` are the `search` entities a pin, set aside for leaving open the
+    side a named entity sits on, holds its other sides to
+    (`translator.discovery._kept_scope`): each with its `text`, its `role`
+    and, for a group read as its members, `members`. Naming each in the
+    requirement's `entities` under its role brings the pinned source's
+    scope back, as Kenya named recipient does for "Japan's ODA to Kenya".
+    """
+    return (
+        "; ".join(
+            f"name {party['text']!r} as {party['role']} in `entities`"
+            + (" with `members: true`" if party.get("members") else "")
+            for party in kept
+        )
+        or None
+    )
 
 
 class StalePin(StrictModel):
@@ -294,7 +355,8 @@ class StalePin(StrictModel):
 
     `withheld` are the sources found that drop the scope its pinned source
     held (`WithheldSource`), which it may not pin, and `repair` the change
-    to the requirement that keeps that scope (`scope_repair`), when one does.
+    to the requirement that keeps that scope (`scope_repair`,
+    `kept_scope_repair`), when one does.
     """
 
     requirement_id: Identifier
@@ -318,6 +380,9 @@ class Referral(StrictModel):
     candidates: tuple[SelectedSource, ...] = ()
     no_data_reason: str | None = None
     ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
+    ambiguous_entities: tuple[AmbiguousEntityReading, ...] = Field(
+        default=(), exclude_if=lambda groups: not groups
+    )
     constraint: CompileIssueCode | None = None
     repair: str | None = Field(default=None, min_length=1)
     reference: str | None = Field(default=None, min_length=1)
@@ -345,6 +410,22 @@ class Referral(StrictModel):
             offers = {self.requirement_id: self.candidates, **offers}
         return offers
 
+    @field_validator("ambiguous_entities")
+    @classmethod
+    def _picks_name_the_requirement(
+        cls, readings: tuple[AmbiguousEntityReading, ...], info: ValidationInfo
+    ) -> tuple[AmbiguousEntityReading, ...]:
+        """Each reading's candidates with their `pick` naming the referral's requirement.
+
+        A pick stays the same id across referrals about one requirement, so an
+        answer the user gave under an earlier one still names its reading, and
+        no answer about another requirement can.
+        """
+        requirement_id = info.data.get("requirement_id")
+        if requirement_id is None:
+            return readings
+        return tuple(reading.picked_under(requirement_id) for reading in readings)
+
     @model_validator(mode="after")
     def _names_what_it_is_about(self) -> Referral:
         about_requirement = self.kind in ABOUT_A_REQUIREMENT
@@ -364,6 +445,9 @@ class Referral(StrictModel):
                 )
         elif self.constraint is not None:
             raise ValueError(f"a {self.kind.value} referral names no constraint")
+        elif self.kind in REPAIR_OF:
+            if self.repair != REPAIR_OF[self.kind]:
+                raise ValueError(f"a {self.kind.value} referral carries its own guidance as repair")
         elif self.repair is not None and not self.withheld:
             raise ValueError(
                 f"a {self.kind.value} referral names a repair only for a scope it withholds"
@@ -386,6 +470,15 @@ class Referral(StrictModel):
                 )
         elif self.ambiguous_sources:
             raise ValueError("only a source_name_ambiguous referral carries ambiguous_sources")
+        if self.kind is ReferralKind.ENTITY_NAME_AMBIGUOUS:
+            if not self.ambiguous_entities or any(
+                len(reading.candidates) < 2 for reading in self.ambiguous_entities
+            ):
+                raise ValueError(
+                    "an entity_name_ambiguous referral carries the offered graph nodes"
+                )
+        elif self.ambiguous_entities:
+            raise ValueError("only an entity_name_ambiguous referral carries ambiguous_entities")
         if self.kind is ReferralKind.SOURCE_AMBIGUOUS and len(self.candidates) < 2:
             raise ValueError("a source_ambiguous referral carries the candidate sources")
         if self.kind not in MAY_CARRY_CANDIDATES and self.candidates:

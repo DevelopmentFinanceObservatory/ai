@@ -77,7 +77,8 @@ class ResolvedGroup(StrictModel):
     graph node, `None` when the graph holds none (a resolver group such as
     "G7"). `group_id` is the membership registry's id for a set the graph holds
     no node for ("groups/OECD.DAC.Region.Asia"), `None` when `ref` is set or
-    the set is no registry group.
+    the set is no registry group; a resubmit posts it so Search restores the
+    set and the total its dataset publishes for it (`compiler.sources.wire_groups`).
     `total` is the party the dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
     when the role binds the set's members, one entity each. `whole_of` names
@@ -98,8 +99,6 @@ class ResolvedGroup(StrictModel):
     so. `holds_multilaterals` says, for a donor set read
     as a published total or a whole population, whether that population holds a
     multilateral organisation; `None` where Search states nothing.
-    `group_id`, `members`, `left_out`, `sum_differs` and `holds_multilaterals`
-    arrive only on records a later release stored; no code here sets or reads them.
     A requirement's `Entity` naming the label, case-folded, on the set's side
     of the flow is met by the source under either reading
     (`compiler.evidence.resolve_group`), except that one asking for the members
@@ -264,6 +263,16 @@ class SelectedSource(StrictModel):
     `measure_label` is `resolved.shape.label`, the name `search` gives what
     the definition measures; `None` when the envelope states none.
 
+    `concept_label` is `resolved.concept_label`, what the series count in a
+    reader's words with no basis, codes, provider scope or dataset ("health"
+    for CRS 120 and 130, "official development assistance" for DAC1), and
+    `published_tables` is `resolved.published_tables`, the tables the figures
+    are published in, a composite's joined ("OECD Creditor Reporting System
+    (CRS) and ONE Imputed Multilateral Sectors"). Each is `None` when the
+    envelope states none, as from a Search that predates them or on a source
+    recorded before them; the plan card then names the source by the labels
+    Search composed (`harness.plan_display.concept_name`).
+
     `elected_measure` is the measure partition `search` elected among those
     the definition's family holds, with the others it offers in its place
     (`ElectedMeasure`); `None` when the envelope states no
@@ -337,10 +346,11 @@ class SelectedSource(StrictModel):
     (`compiler.evidence.named_members`). Empty until that resolve runs, and
     for a source whose names all match by label.
 
-    `bound_refs` maps each entity text of the search part, case-folded, to
-    the refs Search states it bound (the part's `entity_refs`,
-    `compiler.sources.bound_refs`), so "G7" names the set Search labels
-    "Group of Seven" by its ref `GroupOfSeven`
+    `bound_refs` holds one `BoundEntity` for each entity row of the search
+    part that Search bound refs for, in row order (the part's
+    `entity_refs`, `compiler.sources.bound_refs`), so "G7" names the set
+    Search labels "Group of Seven" by its ref `GroupOfSeven`, and two rows
+    written "Congo" each name the Congo they pin
     (`compiler.evidence.named_members`). Empty for a part stating no
     `entity_refs`, and for a source read from a block no search part
     carried: a pin copied over another window
@@ -386,6 +396,14 @@ class SelectedSource(StrictModel):
     confidence: str | None = None
     has_data: bool | None
     measure_label: Annotated[str | None, HASHED_WHEN_SET] = None
+    # Left out of every dump while unset, so a source saved without them keeps
+    # its serialised form.
+    concept_label: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda label: label is None
+    )
+    published_tables: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda tables: tables is None
+    )
     # Left out of every dump while unset, so a source saved without it keeps
     # its serialised form.
     elected_measure: Annotated[ElectedMeasure | None, HASHED_WHEN_SET] = Field(
@@ -405,8 +423,8 @@ class SelectedSource(StrictModel):
     )
     # Left out of every dump while empty, so a source saved without it keeps
     # its serialised form.
-    bound_refs: Annotated[dict[str, tuple[str, ...]], HASHED_WHEN_SET] = Field(
-        default_factory=dict, exclude_if=lambda refs: not refs
+    bound_refs: Annotated[tuple[BoundEntity, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda refs: not refs
     )
     # Left out of every dump while empty, so a source saved without it keeps
     # its serialised form.

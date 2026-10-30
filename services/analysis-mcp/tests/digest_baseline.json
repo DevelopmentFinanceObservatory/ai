@@ -2,11 +2,11 @@
   "cases": [
     {
       "id": "capped_25_groups",
-      "digest_chars": 1085
+      "digest_chars": 1125
     },
     {
       "id": "capped_30_groups",
-      "digest_chars": 1085
+      "digest_chars": 1125
     },
     {
       "id": "compare_2000_stat_vars_per_side",
@@ -22,7 +22,7 @@
     },
     {
       "id": "empty_group_by",
-      "digest_chars": 416
+      "digest_chars": 418
     },
     {
       "id": "filter_capped_25_rows",
@@ -38,15 +38,15 @@
     },
     {
       "id": "five_groups",
-      "digest_chars": 498
+      "digest_chars": 508
     },
     {
       "id": "frame_pair_fat",
-      "digest_chars": 382
+      "digest_chars": 384
     },
     {
       "id": "frame_pair_lean",
-      "digest_chars": 382
+      "digest_chars": 384
     },
     {
       "id": "growth_capped_25_entities",
@@ -70,7 +70,7 @@
     },
     {
       "id": "max_min_groups",
-      "digest_chars": 362
+      "digest_chars": 364
     },
     {
       "id": "quotient_of_capped_25_keys",
@@ -86,15 +86,15 @@
     },
     {
       "id": "rank_capped_25_entities",
-      "digest_chars": 1388
+      "digest_chars": 1428
     },
     {
       "id": "rank_limit_10_of_25_entities",
-      "digest_chars": 1591
+      "digest_chars": 1631
     },
     {
       "id": "rank_single_entity",
-      "digest_chars": 347
+      "digest_chars": 349
     },
     {
       "id": "share_of_capped_25_periods",
@@ -106,11 +106,11 @@
     },
     {
       "id": "single_group",
-      "digest_chars": 382
+      "digest_chars": 384
     },
     {
       "id": "sparse_coverage",
-      "digest_chars": 614
+      "digest_chars": 632
     },
     {
       "id": "sum_of_2000_stat_vars_per_side",
@@ -126,19 +126,19 @@
     },
     {
       "id": "wide_band_100000_groups",
-      "digest_chars": 1177
+      "digest_chars": 1217
     },
     {
       "id": "wide_band_1000_groups",
-      "digest_chars": 1091
+      "digest_chars": 1131
     },
     {
       "id": "wide_band_25_groups",
-      "digest_chars": 1060
+      "digest_chars": 1100
     },
     {
       "id": "with_warnings",
-      "digest_chars": 440
+      "digest_chars": 442
     }
   ]
 }

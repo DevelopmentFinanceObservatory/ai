@@ -15,9 +15,8 @@ periods one side alone reports, which it leaves out.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
-from dfo_frame_grammar import Frame
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
@@ -26,6 +25,7 @@ from analysis_mcp.compare_tool import (
     _refusal_for_engine_error,
     resolve_slice_pair,
 )
+from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_sum_of_digest
 from analysis_mcp.engine.aggregate import ComposedUnitSumError
 from analysis_mcp.engine.sum_of import SumOfResult, run_sum_of
@@ -53,6 +53,9 @@ from analysis_mcp.tool_pipeline import (
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from analysis_mcp.units import unit_json
 
+if TYPE_CHECKING:
+    from analysis_mcp.frame_ref_resolution import AdmittedFrame
+
 
 def _sum_step(op_spec: SumOfOpSpec, result: SumOfResult, *, trace: Trace) -> Step:
     """The step record of `result`, stored on `trace`: the periods it summed,
@@ -77,16 +80,17 @@ def _sum_step(op_spec: SumOfOpSpec, result: SumOfResult, *, trace: Trace) -> Ste
 
 
 def _sum_or_refusal(
-    op_spec: SumOfOpSpec, *, left: Frame, right: Frame, stat_var: str
+    op_spec: SumOfOpSpec, *, left: AdmittedFrame, right: AdmittedFrame, stat_var: str
 ) -> SumOfResult | ToolResult:
     """Run the engine over the two resolved sides, labelling the result
     `dcid:<stat_var>`, or return the refusal of the rule the call breaks:
-    one of the pairing's, as `compare` refuses it, or a side in a composed
+    one of the pairing's, as `compare` refuses it (`composite_refusal` for a
+    composite side read one series per StatVar), or a side in a composed
     unit (`composed_unit_sum_unsupported`)."""
     try:
         return run_sum_of(
-            left,
-            right,
+            left.frame,
+            right.frame,
             stat_var=f"dcid:{stat_var}",
             left_entity=canonical_entity_binding(op_spec.left_entity),
             right_entity=canonical_entity_binding(op_spec.right_entity),
@@ -94,7 +98,9 @@ def _sum_or_refusal(
             right_pinned_unit=op_spec.right_unit,
         )
     except SLICE_PAIR_ERRORS as exc:
-        return to_tool_result(_refusal_for_engine_error(exc))
+        return to_tool_result(
+            composite_refusal(_refusal_for_engine_error(exc), [left.trace, right.trace])
+        )
     except ComposedUnitSumError as exc:
         return to_tool_result(
             ToolRefusal.composed_unit_sum_unsupported(verb="sum_of", unit=exc.unit, side=exc.side)
@@ -209,7 +215,7 @@ async def sum_of(
         return sides
     left, right, input_content_versions = sides
 
-    result = _sum_or_refusal(op_spec, left=left.frame, right=right.frame, stat_var=op_spec_hash)
+    result = _sum_or_refusal(op_spec, left=left, right=right, stat_var=op_spec_hash)
     if isinstance(result, ToolResult):
         return result
 

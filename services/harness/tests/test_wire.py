@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,8 @@ from harness.wire import (
     OperationAxis,
     OperationVerb,
     OptionAnswer,
+    PlanApproved,
+    PlanDecision,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
@@ -82,6 +85,9 @@ EVENT_FIXTURES = {
     "event-12-done.json": Done,
     "event-13-elicitation-skippable.json": ElicitationRequest,
     "event-14-elicitation-questions.json": ElicitationRequest,
+    "event-15-suggestions-apply-choice.json": Suggestions,
+    "event-16-plan-approved.json": PlanApproved,
+    "event-17-plan-proposed-switch-failed.json": PlanProposed,
 }
 
 REQUEST_FIXTURES = {
@@ -97,6 +103,7 @@ REQUEST_FIXTURES = {
     "request-10-cancel.json": CancelRequest,
     "request-11-turn-seeded.json": TurnRequest,
     "request-12-interrupt-answers.json": InterruptResponse,
+    "request-13-turn-apply-choice.json": TurnRequest,
 }
 
 
@@ -345,6 +352,67 @@ def test_a_plan_proposed_without_the_new_fields_still_validates() -> None:
     assert all(step.args is None for step in frame.steps)
 
 
+_SCOPE_ROW: dict[str, Any] = {
+    "id": "scope_sector_spec_a",
+    "question": "Which sector codes the figures count.",
+    "chosen": "health (CRS 120)",
+    "reason": "The user's question asked for health (CRS 120).",
+    "resolved_by": "user",
+    "alternatives": ["health incl. population and reproductive health", "health (CRS 120)"],
+    "choice_id": "spec_base:sector",
+    "active_option_id": "sector:120",
+    "options": [
+        {"option_id": "sector:120+130", "label": "health incl. population", "status": "available"},
+        {
+            "option_id": "sector:120",
+            "label": "health (CRS 120)",
+            "status": "partial",
+            "reason": "imputed multilateral aid covers only some years",
+            "years": [[2011, 2024]],
+        },
+    ],
+}
+
+
+def test_a_plan_proposed_carries_a_scope_decision_with_its_choice_and_options() -> None:
+    raw = _load("event-03-plan-proposed.json")
+    raw["decisions"].append(_SCOPE_ROW)
+
+    raw["actions"].append("switch")
+    raw["moved"] = [
+        {
+            "choice_id": "spec_base:region",
+            "from_label": "Africa incl. regional buckets",
+            "to_label": "Africa's countries only",
+            "reason": "Regional buckets apply only to a summed region.",
+        }
+    ]
+
+    frame = STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+    assert isinstance(frame, PlanProposed)
+    assert frame.model_dump(mode="json", exclude_unset=True) == raw
+    assert all(d.choice_id is None for d in frame.decisions[:-1])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"choice_id": None},
+        {"active_option_id": None},
+        {"options": None},
+        {"active_option_id": "sector:999"},
+        {"options": [{**_SCOPE_ROW["options"][0], "status": "maybe"}]},
+    ],
+    ids=["no-choice", "no-active", "no-options", "active-not-offered", "unknown-status"],
+)
+def test_a_scope_decision_missing_or_misstating_a_member_is_refused(
+    change: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError):
+        PlanDecision.model_validate({**_SCOPE_ROW, **change})
+
+
 def test_studio_frame_adapter_still_discriminates_plan_proposed() -> None:
     frame = STUDIO_FRAME_ADAPTER.validate_python(_load("event-03-plan-proposed.json"))
 
@@ -406,6 +474,114 @@ def test_an_interrupt_payload_must_be_text() -> None:
     # shape, the one member that differs.
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python({**answer, "payload": {"spec_id": "spec_1"}})
+
+
+_CHIP = {
+    "kind": "turn.request",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "apply_choice": {
+        "choice_id": "spec_base:sector",
+        "option_id": "sector:120",
+        "turn": 1,
+        "spec_id": "spec_pin",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"message": "health aid"}, id="with-message"),
+        pytest.param({"apply_choice": None}, id="neither-message-nor-chip"),
+        pytest.param(
+            {"component_ref": {"component_id": "cmp_1", "intent": "follow_up"}}, id="with-card"
+        ),
+        pytest.param({"apply_choice": {"choice_id": "spec_base:sector"}}, id="without-option"),
+        pytest.param(
+            {"apply_choice": {**_CHIP["apply_choice"], "choice_id": ""}}, id="empty-choice"
+        ),
+        pytest.param(
+            {"apply_choice": {k: v for k, v in _CHIP["apply_choice"].items() if k != "turn"}},
+            id="without-turn",
+        ),
+        pytest.param({"apply_choice": {**_CHIP["apply_choice"], "turn": 0}}, id="turn-zero"),
+        pytest.param(
+            {"apply_choice": {k: v for k, v in _CHIP["apply_choice"].items() if k != "spec_id"}},
+            id="without-reading",
+        ),
+    ],
+)
+def test_a_chip_comes_alone_with_its_choice_option_and_origin(change: dict[str, Any]) -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(_CHIP)
+
+    assert isinstance(accepted, TurnRequest)
+    assert accepted.apply_choice is not None and accepted.message == ""
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_CHIP, **change})
+
+
+_SWITCH = {
+    "kind": "interrupt.response",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "interrupt_id": "plan_1",
+    "decision": "switch",
+    "choice_id": "spec_base:sector",
+    "option_id": "sector:120+130",
+    "plan_revision": "rev_1",
+}
+
+
+def test_a_switch_names_its_choice_option_and_plan_revision() -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(_SWITCH)
+
+    assert isinstance(accepted, InterruptResponse)
+    assert (accepted.decision, accepted.choice_id, accepted.option_id, accepted.plan_revision) == (
+        "switch",
+        "spec_base:sector",
+        "sector:120+130",
+        "rev_1",
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"choice_id": None}, id="switch-without-choice"),
+        pytest.param({"option_id": None}, id="switch-without-option"),
+        pytest.param({"plan_revision": None}, id="switch-without-revision"),
+        pytest.param({"option_id": ""}, id="switch-with-empty-option"),
+        pytest.param({"decision": "approve"}, id="approve-with-switch-members"),
+        pytest.param(
+            {"decision": "amend", "payload": "x", "choice_id": None}, id="amend-with-some"
+        ),
+    ],
+)
+def test_switch_members_come_together_and_only_with_switch(change: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_SWITCH, **change})
+
+
+@pytest.mark.parametrize(
+    ("decision", "accepted"),
+    [("approve", True), ("amend", False), ("reject", False)],
+)
+def test_only_an_approve_may_name_the_plan_revision_alone(decision: str, accepted: bool) -> None:
+    body = {
+        **_SWITCH,
+        "decision": decision,
+        "choice_id": None,
+        "option_id": None,
+        "payload": "x" if decision == "amend" else None,
+    }
+    if accepted:
+        parsed = STUDIO_REQUEST_ADAPTER.validate_python(body)
+        assert isinstance(parsed, InterruptResponse)
+        assert parsed.plan_revision == "rev_1"
+    else:
+        with pytest.raises(ValidationError):
+            STUDIO_REQUEST_ADAPTER.validate_python(body)
 
 
 _ANSWER = {
@@ -920,6 +1096,24 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
                 "side_classes": ("official", "private", "residual"),
             },
         ),
+        (
+            {
+                "label": "Africa",
+                "ref": "africa",
+                "left_out": ["Africa, unallocated by country (DAC)"],
+                "sum_differs": True,
+            },
+            {
+                "label": "Africa",
+                "ref": "africa",
+                "left_out": ("Africa, unallocated by country (DAC)",),
+                "sum_differs": True,
+            },
+        ),
+        (
+            {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "left_out": []},
+            {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "left_out": ()},
+        ),
     ],
     ids=[
         "single-total",
@@ -927,6 +1121,8 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
         "without-the-field",
         "empty-field-is-absent",
         "with-the-sides-classes",
+        "members-leaving-out-residuals",
+        "registry-set-leaving-nothing-out",
     ],
 )
 def test_a_seed_carries_the_classes_a_whole_total_holds(
@@ -941,27 +1137,103 @@ def test_a_seed_carries_the_classes_a_whole_total_holds(
     assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == kept
 
 
+# A dcid past the 256 characters of any other seed text, within the 1,024 apis
+# bounds every identity string at.
+_LONG_REF = "dcid:" + "x" * 900
+
+
 @pytest.mark.parametrize(
-    "whole_of",
-    ["official", [""], list(range(2)), ["party"]],
-    ids=["a-string", "blank-class", "not-text", "a-party-kind"],
+    "group",
+    [
+        {"label": "Africa", "ref": _LONG_REF},
+        {"label": "DAC countries", "total": "DACCountriesTotal", "members": [_LONG_REF]},
+        {"label": "Africa", "ref": "africa", "left_out": ["L" * 2_000]},
+    ],
+    ids=["long-ref", "long-member", "long-left-out-label"],
 )
-def test_a_set_whose_whole_of_is_not_a_list_of_classes_is_dropped(whole_of: object) -> None:
+def test_a_set_within_search_s_own_bounds_seeds_whole(group: dict[str, Any]) -> None:
+    """A set Search's `EntityGroup` can serve seeds with every key as served: refs
+    and members up to apis' 1,024-character identity strings, and residual labels,
+    which apis does not bound."""
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {"observationAbout": group}
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert (
+        seed.spec.entity_groups["observationAbout"].model_dump(mode="json", exclude_none=True)
+        == group
+    )
+
+
+@pytest.mark.parametrize("case", ["dac1", "dac1_non_dac", "dac1_bilateral_uncovered"])
+def test_a_seed_takes_every_key_search_serves_on_a_set(case: str) -> None:
+    """DAC countries' total as Search serves it, with its registry id, its members and
+    whether it holds a multilateral, seeds with every key it was served."""
+    fixture = Path(__file__).parent / "fixtures" / "share_whole_dac_donor_wholes.json"
+    block = json.loads(fixture.read_text())[case]["whole"]
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert {
+        role: group.model_dump(mode="json", exclude_none=True)
+        for role, group in seed.spec.entity_groups.items()
+    } == block["resolved"]["entity_groups"]
+
+
+@pytest.mark.parametrize(
+    "unread",
+    [
+        {"whole_of": "official"},
+        {"whole_of": [""]},
+        {"whole_of": list(range(2))},
+        {"whole_of": ["party"]},
+        {"side_classes": ["sovereign"]},
+        {"total": 7},
+        {"members": "country/KEN"},
+        {"left_out": [f"residual {n}" for n in range(65)]},
+        {"sum_differs": "often"},
+        {"holds_multilaterals": [True]},
+    ],
+    ids=[
+        "whole-of-a-string",
+        "whole-of-blank-class",
+        "whole-of-not-text",
+        "whole-of-a-party-kind",
+        "side-classes-unknown-class",
+        "total-not-text",
+        "members-not-a-list",
+        "left-out-past-64",
+        "sum-differs-not-a-flag",
+        "holds-multilaterals-not-a-flag",
+    ],
+)
+def test_a_set_keeps_its_posted_identity_past_a_field_it_does_not_post(
+    unread: dict[str, object],
+) -> None:
+    """A resubmit posts a set's label and node alone (`compiler.sources.wire_groups`),
+    so a field it does not post that does not parse is dropped and the set stands."""
     block = _region_members_block()
     block["resolved"]["entity_groups"] = {
-        "observationAbout": {"label": "Africa", "whole_of": whole_of}
+        "observationAbout": {"label": "Africa", "ref": "africa", **unread}
     }
 
     seed = Seed.model_validate({"spec": block, "operations": []})
 
-    assert seed.spec.entity_groups is None
+    assert seed.spec.entity_groups is not None
+    assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == {
+        "label": "Africa",
+        "ref": "africa",
+    }
 
 
 @pytest.mark.parametrize(
     "group",
     [
         {"dcid": "africa", "label": "Africa"},
-        {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
+        {"ref": "africa", "label": "Africa", "member_dcids": ["country/KEN"]},
         {"label": "all donors", "side_kinds": ["official"]},
     ],
     ids=["dcid-before-ref", "unknown-member", "earlier-name-of-side-classes"],
@@ -982,20 +1254,36 @@ def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: obje
         {"label": ""},
         {"label": None, "ref": "africa"},
         {"label": "A" * 121, "ref": "africa"},
+        {"label": "Africa", "ref": ""},
+        {"label": "Africa", "group_id": 7},
         "Africa",
     ],
-    ids=["empty-label", "null-label", "label-too-long", "not-an-object"],
+    ids=[
+        "empty-label",
+        "null-label",
+        "label-too-long",
+        "empty-ref",
+        "group-id-not-text",
+        "not-an-object",
+    ],
 )
-def test_a_set_search_would_not_take_is_dropped_and_the_seed_stands(group: object) -> None:
+def test_a_set_search_would_not_take_is_dropped_and_the_seed_stands(
+    group: object, caplog: pytest.LogCaptureFixture
+) -> None:
     # A set with no usable name is left out, as `compiler.sources` leaves out a
-    # nameless one; the seed's spec_id and identity still hand over.
+    # nameless one; the seed's spec_id and identity still hand over, and the drop
+    # is logged with the role.
     block = _region_members_block()
     block["resolved"]["entity_groups"] = {"observationAbout": group}
 
-    seed = Seed.model_validate({"spec": block, "operations": []})
+    with caplog.at_level(logging.WARNING, logger="harness.wire"):
+        seed = Seed.model_validate({"spec": block, "operations": []})
 
     assert seed.spec.entity_groups is None
     assert seed.spec.definition.spec_id == block["spec_id"]
+    assert [record.args[0] for record in caplog.records if record.name == "harness.wire"] == [
+        "observationAbout"
+    ]
 
 
 def test_a_set_on_a_role_the_identity_binds_nothing_on_is_dropped() -> None:

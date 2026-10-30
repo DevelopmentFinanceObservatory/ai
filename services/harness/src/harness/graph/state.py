@@ -17,7 +17,7 @@ from collections.abc import (
     Sequence,
 )
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
 from google.adk import Context, Event
@@ -30,7 +30,7 @@ from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_valid
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn_records import Origin, SearchReading
+from harness.turn_records import Origin, SearchReading, open_prices
 
 # The ADK app name every stored conversation's sessions are keyed under.
 AGENT_NAME = "dfo_analyst_graph"
@@ -48,7 +48,8 @@ STEP_PROGRESS_KEY = "step_progress"
 
 # The `custom_metadata` key the `planner` node's first event travels under,
 # as it starts a draft: `{"revising": bool}`, true when the draft revises a
-# plan already on record. Read by `harness.studio_translate._Translator`.
+# plan already on record, with `"pick": True` added when it replans for a
+# pick on the plan card. Read by `harness.studio_translate._Translator`.
 PLANNER_STARTED_KEY = "planner_started"
 
 # The orchestrator's session state (`create_root_workflow`'s
@@ -68,6 +69,12 @@ ORCHESTRATOR_SEARCHES_KEY = "orchestrator:searches"
 # Every plan this turn ran, oldest first, as `PlanRecord` JSON, written by
 # `plan_done`; `harness.studio` keeps it with the turn's record.
 ORCHESTRATOR_PLAN_RECORDS_KEY = "orchestrator:plan_records"
+# Compile spec_id -> how a plan step's retrieval of it was served, as
+# `harness.scope_choices.served_facts` JSON, for each compile alignment moved
+# inputs onto (`planner.plan.aligned_pins`), which no search reading holds.
+# Written by `execute` (`record_served_scopes`), read by `plan_done`
+# (`record_plan`) into the plan record's `PlanSource.aligned_basis`.
+ORCHESTRATOR_ALIGNED_SERVED_KEY = "orchestrator:aligned_served"
 # spec_id -> the warnings of the search part that returned it, as `search`
 # stores its block under `ORCHESTRATOR_SPECS_KEY`.
 ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
@@ -81,10 +88,27 @@ ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
 ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
+# The chip a turn applies, as `{"choice_id", "option_id"}` JSON
+# (`harness.wire.ApplyChoice`), seeded by `harness.studio` for a turn
+# requested with `apply_choice`; `seed` applies it
+# (`harness.graph.switch.apply_stored_choice`) and `turn_budgets` reads it.
+APPLY_CHOICE_STATE_KEY = "apply_choice"
+# The chip `seed` applied this turn: `{"choice_id", "option_id",
+# "from_option_id", "spec_id"}`, the option it moved from and the spec_id
+# Search compiled. `harness.studio` keeps it with the turn's record
+# (`ConversationState.turn_applied_choice`), where the next turn reads whether
+# the user kept it.
+ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # Ask number -> the terminal frames of the latest run of this plan call that
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The state a planner entry replanning for a pick on the plan card puts back
+# when the replan does not land (`harness.graph.planning`), written when the
+# replan pauses on a planner-side ask and cleared when the entry ends, so it
+# is set only while such a replan is paused. Outside the drafting prefixes
+# the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
+PICK_REPLAN_KEY = "switch:pick_replan"
 # The `custom_metadata` key an orchestrator node's own status line travels
 # under ("Reading your question"), read by `studio_translate._Translator`.
 ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
@@ -136,7 +160,15 @@ class AskQuestion(BaseModel):
 
     question: str = Field(description="the question as the user reads it")
     options: Annotated[list[AskOption], BeforeValidator(ask_options)] = Field(
-        description="the likely answers, at least one; the user may also write their own"
+        default_factory=list,
+        description=(
+            "the likely answers, at least one; the user may also write their own. Leave it "
+            "empty for a prices question, whose options are filled in for you"
+        ),
+    )
+    prices_of: str | None = Field(
+        default=None,
+        description="for the prices question of a part that lists `open_prices`, that part's spec_id",
     )
 
 
@@ -172,24 +204,123 @@ class PendingPlan(BaseModel):
     asks_across_years: list[int] = []
 
 
-def ask_candidates(options: list[AskOption]) -> list[dict[str, str]]:
+def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
+    """The `open_prices` entries of each reading of the turn whose prices are open,
+    by its spec_id, each with its `prices`: the first the prices search read,
+    current, and each after it constant (`harness.turn_records.open_prices`).
+
+    Read over the readings of `ORCHESTRATOR_SEARCHES_KEY` and the blocks of
+    `ORCHESTRATOR_SPECS_KEY`. Only code reads `prices`: the readings the model
+    reads carry the entries without it (`store_search`).
+    """
+    specs = state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    parts: dict[str, list[dict[str, Any]]] = {}
+    for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or ():
+        reading = SearchReading.model_validate(stored)
+        block = specs.get(reading.spec_id) if reading.spec_id is not None else None
+        if block is None or reading.spec_id is None:
+            continue
+        entries = open_prices(
+            block,
+            window=reading.window.model_dump() if reading.window is not None else None,
+            other_prices=[offer.model_dump() for offer in reading.other_prices],
+        )
+        if entries:
+            parts[reading.spec_id] = [
+                {**entry, "prices": "current" if index == 0 else "constant"}
+                for index, entry in enumerate(entries)
+            ]
+    return parts
+
+
+def prices_question(
+    question: AskQuestion, parts: Mapping[str, list[dict[str, Any]]]
+) -> AskQuestion:
+    """`question` with, when it prices a part of `parts` (`AskQuestion.prices_of`),
+    that part's `open_prices` entries as its options."""
+    entries = parts.get(question.prices_of) if question.prices_of is not None else None
+    if entries is None:
+        return question
+    return question.model_copy(
+        update={
+            "options": [
+                AskOption(label=entry["label"], spec_id=entry.get("spec_id")) for entry in entries
+            ]
+        }
+    )
+
+
+def priced_options(
+    questions: list[AskQuestion], state: SessionState
+) -> list[dict[int, PricedOption]]:
+    """For each of `questions`, the place of each option offering prices, with
+    the part it prices and the prices: each option of a question pricing a
+    part (`AskQuestion.prices_of`) that is one of the part's `open_prices`
+    entries (`open_parts`), matched by spec_id, else by label among the
+    entries carrying none. A question pricing no part has none."""
+    parts = open_parts(state)
+    priced: list[dict[int, PricedOption]] = []
+    for question in questions:
+        entries = parts.get(question.prices_of) if question.prices_of is not None else None
+        marks: dict[int, PricedOption] = {}
+        for index, option in enumerate(question.options):
+            entry = next(
+                (
+                    entry
+                    for entry in entries or ()
+                    if entry.get("spec_id") == option.spec_id
+                    and (option.spec_id is not None or entry["label"] == option.label)
+                ),
+                None,
+            )
+            if entry is not None and question.prices_of is not None:
+                marks[index] = PricedOption(question.prices_of, entry["prices"])
+        priced.append(marks)
+    return priced
+
+
+class PricedOption(NamedTuple):
+    """The prices an `ask_user` option offers, as code reads them off the turn's
+    search results (`priced_options`): `part`, the
+    spec_id of the reading whose `open_prices` the option is one of, and
+    `prices`, `current` or `constant`."""
+
+    part: str
+    prices: Literal["current", "constant"]
+
+
+def ask_candidates(
+    options: list[AskOption], priced: Mapping[int, PricedOption] | None = None
+) -> list[dict[str, str]]:
     """One question's options as the clarify interrupt's candidates: a count
     under its own spec_id, so a pick returns it, and any other answer under
-    `o{n}`, its place in the question's list."""
+    `o{n}`, its place in the question's list. An option of `priced`, by
+    place, carries its `part` and `prices`, which the planner reads off the
+    answered interrupt (`planner.agent._prices_chosen`)."""
+    priced = priced or {}
     return [
-        {"spec_id": option.spec_id or f"o{index + 1}", "label": option.label}
+        {
+            "spec_id": option.spec_id or f"o{index + 1}",
+            "label": option.label,
+            **(priced[index]._asdict() if index in priced else {}),
+        }
         for index, option in enumerate(options)
     ]
 
 
-def ask_questions(questions: list[AskQuestion]) -> list[dict[str, Any]]:
+def ask_questions(
+    questions: list[AskQuestion], priced: Sequence[Mapping[int, PricedOption]] = ()
+) -> list[dict[str, Any]]:
     """`PendingAsk.questions` as the clarify interrupt's payload entries: each
-    under `q{n}`, its place in the call, with its candidates (`ask_candidates`)."""
+    under `q{n}`, its place in the call, with its candidates (`ask_candidates`),
+    each question's priced options read from `priced` by place."""
     return [
         {
             "id": f"q{index + 1}",
             "question": question.question,
-            "candidates": ask_candidates(question.options),
+            "candidates": ask_candidates(
+                question.options, priced[index] if index < len(priced) else None
+            ),
         }
         for index, question in enumerate(questions)
     ]
@@ -252,12 +383,19 @@ BUDGETS = {
 }
 # The download surface fetches one dataset and never plans.
 DOWNLOAD_BUDGETS = {**BUDGETS, "fetch": 1, "plan": 0}
+# A turn applying a chip answers from the data `seed` fetched for it, so it
+# neither searches nor plans.
+APPLY_CHOICE_BUDGETS = {**BUDGETS, "search": 0, "plan": 0}
 
 
 def turn_budgets(state: Any) -> dict[str, int]:
-    """The calls this turn may make of each orchestrator tool: `DOWNLOAD_BUDGETS`
-    on the download surface, `BUDGETS` otherwise. `state` is any mapping-like
-    read of session state (`Context.state`, a dict)."""
+    """The calls this turn may make of each orchestrator tool:
+    `APPLY_CHOICE_BUDGETS` on a turn applying a chip
+    (`APPLY_CHOICE_STATE_KEY`), `DOWNLOAD_BUDGETS` on the download surface,
+    `BUDGETS` otherwise. `state` is any mapping-like read of session state
+    (`Context.state`, a dict)."""
+    if state.get(APPLY_CHOICE_STATE_KEY):
+        return APPLY_CHOICE_BUDGETS
     return DOWNLOAD_BUDGETS if state.get("surface") == "download" else BUDGETS
 
 
@@ -292,6 +430,7 @@ def register_frames(
     described: Sequence[DescribedFrame],
     *,
     fetch_args: dict[str, Any] | None = None,
+    wholes: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Add each (frame ref, `describe_frame` view, store ref) to the frames in
     `state` (`ORCHESTRATOR_FRAMES_KEY`) under its id, and return the entries
@@ -304,6 +443,9 @@ def register_frames(
     frame ref (`frame_store_ref`). `fetch_args` are the arguments of the
     `fetch` that retrieved the frames, kept on each entry because
     `make_charts` asks the same retrieval again for the frame's members' kinds.
+    `wholes` maps the id of a frame holding shares to the whole they divide
+    by (`harness.plan_display.share_wholes`), kept as the entry's `whole`,
+    which `make_charts` states in the card's title.
 
     A frame id the frames did not hold clears the turn's count of calls that
     drew nothing (`make_charts_failed`), so a chart of a frame that arrived
@@ -321,6 +463,8 @@ def register_frames(
             frames[frame_id]["store_ref"] = store_ref
         if fetch_args is not None:
             frames[frame_id]["fetch_args"] = fetch_args
+        if wholes and frame_id in wholes:
+            frames[frame_id]["whole"] = wholes[frame_id]
         entries.append({"frame": frame_id, "view": view})
     state[ORCHESTRATOR_FRAMES_KEY] = frames
     calls = state.get(ORCHESTRATOR_CALLS_KEY) or {}
@@ -364,7 +508,9 @@ def store_search(
     `asked` holds each part's asked flow parties by position, and
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
-    known.
+    known. A `definite` part whose prices are open over several years reads
+    with `open_prices`, the options of its prices question
+    (`harness.turn_records.open_prices`).
     """
     specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
@@ -383,6 +529,12 @@ def store_search(
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
             facts = reading_facts(part["spec_block"])
+            if prices := open_prices(
+                part["spec_block"],
+                window=part.get("window"),
+                other_prices=part.get("other_prices") or (),
+            ):
+                reading["open_prices"] = prices
         if mentions := reading.get("resolved_sources"):
             blocks = {
                 spec_id: {**block, "_resolved_sources": mentions}
@@ -407,6 +559,16 @@ def store_search(
     return readings
 
 
+def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
+    """The conversation's stored search readings as JSON, oldest first: the
+    earlier turns' (`ORCHESTRATOR_PRIOR_LEDGER_KEY`), then this turn's
+    (`ORCHESTRATOR_SEARCHES_KEY`)."""
+    return [
+        *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+        *(state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+    ]
+
+
 def state_json(ctx: Context, key: str, default: Any = None) -> Any:
     """Decode a JSON blob out of session state, `default` when absent."""
     raw = ctx.state.get(key)
@@ -424,6 +586,8 @@ class GraphState(BaseModel):
     # also takes. Host-seeded fresh per turn under `planner.plan.SEEDS_STATE_KEY`;
     # `seed` reads it once and clears it.
     seeds: str | None = None
+    # The chip a turn applies, as JSON, under `APPLY_CHOICE_STATE_KEY`.
+    apply_choice: str | None = None
     awaiting_approve: bool = False
     plan: str | None = None
     replans: int = 0

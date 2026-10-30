@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
+from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_growth_digest
 from analysis_mcp.engine.common import (
     FacetHeterogeneousError,
@@ -417,7 +418,7 @@ async def growth(
         GrowthEndpointsMissingError,
         GrowthNonFiniteResultError,
     ) as exc:
-        return to_tool_result(_refusal_for_engine_error(exc))
+        return to_tool_result(composite_refusal(_refusal_for_engine_error(exc), [input_trace]))
 
     input_cv = input_content_version(input_trace)
     identity = mint_identity_or_refusal(op_spec, input_content_versions=[input_cv])

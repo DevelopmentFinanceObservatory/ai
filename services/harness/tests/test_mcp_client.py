@@ -27,11 +27,13 @@ from common.caller import conversation_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
 from compiler.surface import ProgressReport
-from data_mcp import stat_var_list
+from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
 from data_mcp.manifest import Manifest
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.search_tool import SearchContext
+from data_mcp.server import mcp as data_mcp
 from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import MAX_ATTEMPTS_PER_STEP
@@ -57,6 +59,7 @@ from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 
 from .resolved_revision import resolved_revision
+from .test_turn_records import _manifest, _served_identity
 
 
 class _StopAtConnectError(Exception):
@@ -216,6 +219,58 @@ async def test_a_raw_text_search_sends_the_question_without_parts(
         await resolver(question="ODA to Kenya from all official donors", parts=[], raw_text=True)
 
     assert sent == [{"tool": "search", "raw_query": "ODA to Kenya from all official donors"}]
+
+
+async def test_a_parsed_search_carries_its_context_through_data_mcp_to_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The context rides the call's `_meta` to data-mcp's own `search`, which
+    posts it to Search as the parsed input's members."""
+    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", "true")
+    envelope = json.loads(
+        (
+            Path(__file__).parents[2] / "data-mcp/tests/fixtures/resolve_aid_france_kenya.json"
+        ).read_text()
+    )
+    posted: list[dict[str, Any]] = []
+
+    def search_api(request: httpx2.Request) -> httpx2.Response:
+        posted.append(json.loads(request.content))
+        return httpx2.Response(200, json=envelope)
+
+    carried = {
+        "axis": "region",
+        "option_id": "region:members_only",
+        "provenance": "carried",
+        "origin": {"kind": "choice", "choice_id": "spec_0123:region"},
+    }
+    context = SearchContext(
+        user_message="aid to Africa\n(then: now Kenya)", carried_entries=[carried]
+    )
+    client_holder.set_client(
+        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(search_api))
+    )
+    try:
+        async with Client(data_mcp) as client:
+
+            async def get() -> Client:
+                return client
+
+            async def release(_client: Client) -> None:
+                return None
+
+            resolver = McpResolver(settings=Settings())
+            monkeypatch.setattr(resolver, "_clients", SimpleNamespace(get=get, release=release))
+            digest = await resolver(
+                question="aid from France to Kenya", parts=[{"variable": "aid"}], context=context
+            )
+    finally:
+        client_holder.set_client(None)
+
+    (body,) = posted
+    assert body["input"]["user_message"] == "aid to Africa\n(then: now Kenya)"
+    assert body["input"]["carried_entries"] == [carried]
+    assert digest["part_digests"]
 
 
 async def test_the_executor_get_data_client_carries_its_180s_deadline(
@@ -545,6 +600,32 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
     assert store.get(conversation=conversation, **typed) == store.get(
         conversation=conversation, **minted
     )
+
+
+async def test_a_fetch_states_how_its_frame_was_counted_from_the_manifest(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """`get_data` hands on the minted definition's entities, measure and
+    netting and the covered window as `served`, for the `fetch` tool to keep."""
+    spec_id = "spec_" + "1" * 32
+    identity = _served_identity(residuals=False)
+    manifest = {
+        **_manifest(identity, spec_id=spec_id),
+        "content_version": "cv_" + "1" * 32,
+        "trace": {},
+    }
+    scripted_presentation_client([_tool_result(manifest)])
+    executor = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
+
+    fetched = await executor(tool="get_data", args={"spec_id": spec_id})
+
+    assert fetched["served"] == {
+        "spec_id": spec_id,
+        "entities": {"origin": ["country/USA"], "destination": ["country/GHA", "country/KEN"]},
+        "measured_property": "amount",
+        "netting_basis": "Gross",
+        "components": [{"role": "whole", "periods": [[2015, 2024]]}],
+    }
 
 
 async def test_a_fetch_that_states_no_frame_ref_logs_which_spec_was_read_by_its_served_pair(
@@ -1545,6 +1626,66 @@ async def test_the_executor_hands_a_get_data_steps_progress_to_on_progress(
         ProgressReport(progress=0, total=None, message="submitted"),
         ProgressReport(progress=4.0, total=None, message="running"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "problem", "outcome"),
+    [
+        (
+            503,
+            {"code": "service_unavailable", "constraint_id": "mint_background_declined"},
+            "declined",
+        ),
+        (503, {"code": "service_unavailable"}, "service_unavailable"),
+    ],
+    ids=["declined", "unavailable"],
+)
+async def test_a_background_get_data_marks_its_mint_post_and_is_sent_once(
+    monkeypatch: pytest.MonkeyPatch, status: int, problem: dict[str, Any], outcome: str
+) -> None:
+    """Through the real data-mcp to a fake apis: the background call's mint POST
+    carries the admission header and is not retried, apis' decline reads as
+    `declined`, and a run's own `get_data` call sends no header."""
+    posts: list[str | None] = []
+
+    def apis(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/datasets", request.url.path
+        posts.append(request.headers.get("X-DFO-Mint-Admission"))
+        body = {"title": "refused", "detail": "busy", "retryable": True, **problem}
+        return httpx2.Response(status, json=body, headers={"Retry-After": "1"})
+
+    def _in_memory_client(
+        self: McpTimeoutPolicy,
+        url: str,
+        *,
+        auth: str | None,
+        caller: str | None,
+        tool: str | None = None,
+    ) -> Any:
+        return Client(data_mcp)
+
+    monkeypatch.setattr(McpTimeoutPolicy, "client", _in_memory_client)
+    # The in-memory client has no HTTP request for the harness's loopback guard to
+    # mark, so the mark is read as set.
+    monkeypatch.setattr(mint_admission, "is_loopback_request", lambda: True)
+    client_holder.set_client(
+        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(apis))
+    )
+    executor = McpExecutor(settings=Settings(), sleep=_no_sleep)
+    try:
+        background = await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
+        assert posts == ["background"]
+        await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
+    finally:
+        await executor.aclose()
+        client_holder.set_client(None)
+
+    assert background == outcome
+    assert set(posts[1:]) == {None}
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
 
 
 # --- the period note a get_data result carries ------------------------------

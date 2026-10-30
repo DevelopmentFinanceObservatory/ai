@@ -79,7 +79,7 @@ from planner.workflow import SelectedSource
 from . import drawn_cards
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
-from .test_turn_records import _top_donors
+from .test_turn_records import _scoped_part, _top_donors
 
 CONVERSATION = "conv_01test0000"
 
@@ -1463,33 +1463,6 @@ def test_a_ledger_turn_holding_keys_this_release_does_not_declare_still_loads():
     )
 
 
-def test_a_ledger_turn_a_later_release_stored_reads_whole_into_the_next_turn(caplog):
-    """A later release stores readings with their scope choices, served counts and
-    named sets, and named sets with their members, residuals and registry ids on
-    plan sources and recorded identities. The fixture is that release's own dump.
-    The next turn closes, and reads every record back unchanged with none skipped."""
-    turn = json.loads(
-        (Path(__file__).parent / "fixtures" / "ledger_turn_later_release.json").read_text()
-    )
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.turns = [turn]
-
-    with caplog.at_level(logging.WARNING, logger="harness.studio_state"):
-        state.close_turn(final_text="Done.")
-        ledger = state.prior_ledger_state()
-        ((spec_id, identity),) = turn["identities"].items()
-        recorded = state.recorded_identity(spec_id)
-
-    assert "skipping a stored" not in caplog.text
-    assert ledger is not None
-    assert ledger["readings"] == turn["readings"]
-    assert recorded is not None
-    assert recorded.model_dump(mode="json") == identity
-    ((plan_source,),) = [plan["sources"] for plan in turn["plans"]]
-    ((source,),) = [PlanRecord.model_validate(plan).sources for plan in turn["plans"]]
-    assert source.model_dump(mode="json")["groups"] == plan_source["groups"]
-
-
 def _recallable() -> ConversationState:
     state = ConversationState(conversation_id=CONVERSATION)
     state.turns = [
@@ -1815,6 +1788,29 @@ async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(sessio
     resumed.close_turn(final_text="The top donor was the United States.")
 
     assert resumed.turns[-1]["specs"] == {used: blocks[used]}
+
+
+async def test_a_readings_scope_choices_survive_the_turns_close_and_a_reload(
+    session_service,
+) -> None:
+    """A later turn on another instance reads the scope choices a search stored,
+    which its searches carry."""
+    scoped = SearchReading.from_part(_scoped_part())
+    store_a = StudioStore(session_service, app_name="app")
+    state = await store_a.create("principal", CONVERSATION)
+    state.begin_turn()
+    state.turn_user_message = "health aid to Africa, CRS 120 alone"
+    state.turn_readings = [scoped.model_dump(mode="json")]
+    state.close_turn(final_text="Health aid to Africa was $1.2bn.")
+    await store_a.save("principal", CONVERSATION)
+
+    loaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+
+    assert loaded is not None
+    ledger = loaded.prior_ledger_state()
+    assert ledger is not None
+    (reading,) = (SearchReading.model_validate(stored) for stored in ledger["readings"])
+    assert reading.scope == scoped.scope
 
 
 async def test_round_trip_of_every_durable_field(session_service) -> None:
@@ -2744,6 +2740,18 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
     assert pending.step_order == ("step_a",)
     assert pending.step_labels == {}
     assert (pending.questions, pending.legacy) == ((), False)
+
+
+def test_a_turns_choice_baseline_reloads_on_another_instance() -> None:
+    """The labels `plan.approved` names as `changed_from` are durable, so an
+    approve answered on another instance states them."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
+    reloaded = ConversationState(conversation_id=CONVERSATION)
+
+    studio_state._apply_delta(reloaded, studio_state._serialize_durable(state))
+
+    assert reloaded.turn_choice_baseline == state.turn_choice_baseline
 
 
 def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:

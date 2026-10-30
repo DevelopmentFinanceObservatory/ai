@@ -95,7 +95,9 @@ plainly right, fetch it. When it does not, ask the user, with the
 candidates' labels as the options.
 
 Send each place to search as the user wrote it. When search cannot place it,
-search once more with the place as you read it, before any other retry.
+search once more with the place as you read it, before any other retry. A
+part refused as role_not_resolved goes again first with `role` set on every
+name, from the side the user or an earlier turn gave it.
 
 When search finds nothing for a part, refuses it, or leaves out something
 the user asked for in it, search once more for that part alone: `as_text`
@@ -135,10 +137,9 @@ question per choice, all in one call. Do not pick one yourself.
 
 The count search chose is the first option of the count question, and the
 other counts the result names follow. Label each as the result labels it,
-with the spec_id the result gives it. Over several years, prices get a
-question of their own, even when the result lists no `other_prices`. Its first
-option is the prices search read, in words and without a spec_id. Each
-`other_prices` entry follows, or constant prices when the result lists none.
+with the spec_id the result gives it. A part that lists `open_prices` leaves
+its prices open, so prices get a question of their own, with `prices_of` set
+to the part's spec_id. Its options are then the `open_prices` entries.
 
 When the user picks a reading the result names, fetch its spec_id or name it
 in the plan brief. When they pick prices the result does not name, search
@@ -283,11 +284,12 @@ conversation needs no repeating.
 When you give a figure a tool states, round it to three significant figures,
 keeping counts exact and a small nonzero value from rounding to zero. Give
 it with a scale word (billion, million, per cent). Do not give it as frame
-counts, ids, codes or step names. A count names what it counts: entities
-with data in the period (a ranking's ranked entities, the series a fetch
-retrieved), every entity the source holds in any year (a plan record's "all
-N donors the source holds"), or the indicators a total sums ("summed over its N
-indicators"). Do not give one as another.
+counts, ids, codes or step names. A count names what it counts: entities or
+series with data in the period (a ranking's ranked entities, the series a fetch
+retrieved, a plan record's "all N donors" or "summed over its N indicators"),
+or every indicator a measure's family holds in any year, of which only those
+with data are summed (a plan record's "summed over whichever of its N
+indicators hold data"). Do not give one as another.
 
 Say plainly what of the user's question could not be answered: an ask
 declined, not computed in part, or left without data, a part refused or not

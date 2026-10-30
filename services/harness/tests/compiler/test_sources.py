@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -10,20 +11,22 @@ import pytest
 from compiler.sources import (
     DiscoveryStatus,
     MembersAnswer,
+    block_wire_groups,
     bound_refs,
     is_family,
     measure_named_by_query,
     members_reading,
     outcome_from_envelope,
     pinned_stat_var,
+    readable_source,
+    readable_wire_groups,
     source_from_spec_block,
     stat_var_count,
     total_reading,
     wire_groups,
 )
-from harness.tool_contracts import resolver_digest
-from planner.records import Period
-from planner.workflow import OpenEntityAxis
+from planner.records import EntityCandidate, EntityKey, Period
+from planner.workflow import BoundEntity, OpenEntityAxis, SelectedSource
 
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
@@ -80,132 +83,92 @@ def _envelope(status: str, **payload: Any) -> dict[str, Any]:
     return {"schema_version": 1, "status": status, "parts": [_part(status, **payload)]}
 
 
+def _rows(*rows: dict[str, Any]) -> dict[str, Any]:
+    """The restatement entity rows of a part."""
+    return {"entities": list(rows)}
+
+
+_CONGO_PART = {
+    "restatement": _rows(
+        {"text": "Congo", "dcid": "country/COD", "role_text": "from"},
+        {"text": "Congo", "dcid": "country/COG", "role_text": "to"},
+    ),
+    "entity_refs": [
+        {"text": "Congo", "refs": ["country/COD"]},
+        {"text": "Congo", "refs": ["country/COG"]},
+    ],
+}
+
+
 @pytest.mark.parametrize(
     ("part", "expected"),
     [
         (
             {
+                "restatement": _rows(
+                    {"text": "G7", "role_text": "from"}, {"text": "Africa", "role_text": "to"}
+                ),
                 "entity_refs": [
                     {"text": "G7", "refs": ["GroupOfSeven"]},
                     {"text": "Africa", "refs": ["DACAfrica"]},
-                ]
+                ],
             },
-            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+            [
+                BoundEntity(identity="G7", text="G7", role="from", refs=("GroupOfSeven",)),
+                BoundEntity(identity="Africa", text="Africa", role="to", refs=("DACAfrica",)),
+            ],
         ),
-        # A text Search bound nothing for names nothing by ref.
-        ({"entity_refs": [{"text": "Atlantis", "refs": []}]}, {}),
-        # A Search that predates `entity_refs` states none, whatever it restates.
-        ({"restatement": {"entities": [{"text": "G7", "role_text": "from"}]}}, {}),
-        # A text stated twice binds every ref either row states.
+        # A row Search bound nothing for names nothing by ref.
         (
             {
-                "entity_refs": [
-                    {"text": "Kenya", "refs": ["country/KEN"]},
-                    {"text": "kenya", "refs": ["KEN2"]},
-                ]
+                "restatement": _rows({"text": "Atlantis"}),
+                "entity_refs": [{"text": "Atlantis", "refs": []}],
             },
-            {"kenya": ("country/KEN", "KEN2")},
+            [],
         ),
-    ],
-)
-def test_each_entity_text_maps_to_the_refs_it_bound(
-    part: dict[str, Any], expected: dict[str, tuple[str, ...]]
-) -> None:
-    assert bound_refs(part) == expected
-
-
-_RELEASE_ROWS = json.loads(
-    (Path(__file__).parent.parent / "fixtures" / "bound_refs_release_rows.json").read_text()
-)["cases"]
-
-
-def _restated(*texts: str, entity_refs: list[dict[str, Any]]) -> dict[str, Any]:
-    """A part restating one entity row per text, with the `entity_refs` Search states beside it."""
-    return {
-        "restatement": {"entities": [{"text": text} for text in texts]},
-        "entity_refs": entity_refs,
-    }
-
-
-# "aid from G7 to Africa and Africa": Search states one `entity_refs` entry per
-# distinct text, so the restatement holds one row more than the entries.
-_REPEATED_TEXT = _restated(
-    "G7",
-    "Africa",
-    "Africa",
-    entity_refs=[
-        {"text": "G7", "refs": ["GroupOfSeven"]},
-        {"text": "Africa", "refs": ["DACAfrica"]},
-    ],
-)
-
-
-def test_a_definite_parts_block_stores_one_bound_row_per_text() -> None:
-    """The release reads `_bound_refs` only as `BoundEntity` rows. A block stored
-    here holds one per text, the rows the migration writes for a stored mapping."""
-    envelope = _envelope("definite", spec=_spec(), **_REPEATED_TEXT)
-
-    assert resolver_digest(envelope)["spec_block"]["_bound_refs"] == [
-        {"identity": "g7", "text": "g7", "role": None, "refs": ["GroupOfSeven"]},
-        {"identity": "africa", "text": "africa", "role": None, "refs": ["DACAfrica"]},
-    ]
-
-
-@pytest.mark.parametrize(
-    "part",
-    [
-        _REPEATED_TEXT,
-        _restated(
-            "G7",
-            "Atlantis",
-            entity_refs=[
-                {"text": "G7", "refs": ["GroupOfSeven"]},
-                {"text": "Atlantis", "refs": []},
+        # A Search that predates `entity_refs` states none, whatever it restates.
+        ({"restatement": _rows({"text": "G7", "role_text": "from"})}, []),
+        # Nor does one stating an entry per text rather than per row.
+        (
+            {
+                "restatement": _rows({"text": "Congo"}, {"text": "Congo"}),
+                "entity_refs": [{"text": "Congo", "refs": ["country/COD", "country/COG"]}],
+            },
+            [],
+        ),
+        # Two rows written alike stay two entities, each keyed by what it pins or names.
+        (
+            _CONGO_PART,
+            [
+                BoundEntity(
+                    identity="country/COD", text="Congo", role="from", refs=("country/COD",)
+                ),
+                BoundEntity(identity="country/COG", text="Congo", role="to", refs=("country/COG",)),
+            ],
+        ),
+        (
+            {
+                "restatement": _rows(
+                    {"text": "Congo", "name": "Republic of the Congo"},
+                    {"text": "Congo"},
+                ),
+                "entity_refs": [
+                    {"text": "Congo", "refs": ["country/COG"]},
+                    {"text": "Congo", "refs": ["country/COD"]},
+                ],
+            },
+            [
+                BoundEntity(identity="Republic of the Congo", text="Congo", refs=("country/COG",)),
+                BoundEntity(identity="Congo", text="Congo", refs=("country/COD",)),
             ],
         ),
     ],
-    ids=["repeated-text", "unbound-text"],
+    ids=["texts", "unbound", "no-entity-refs", "per-text", "pinned-alike", "named-alike"],
 )
-def test_a_part_binds_the_same_refs_live_and_from_its_stored_block(part: dict[str, Any]) -> None:
-    envelope = _envelope("definite", spec=_spec(), **part)
-
-    (live,) = outcome_from_envelope(envelope).sources
-    stored = source_from_spec_block(resolver_digest(envelope)["spec_block"])
-
-    assert live.bound_refs
-    assert stored.bound_refs == live.bound_refs
-
-
-@pytest.mark.parametrize(
-    ("stored", "expected"),
-    [
-        (
-            {"g7": ["GroupOfSeven"], "africa": ["DACAfrica"]},
-            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
-        ),
-        (
-            _RELEASE_ROWS[0]["bound_refs"],
-            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
-        ),
-        # Two rows written alike bind every ref either row states.
-        (_RELEASE_ROWS[1]["bound_refs"], {"congo": ("country/COD", "country/COG")}),
-        (None, {}),
-    ],
-    ids=["mapping", "rows", "rows-written-alike", "absent"],
-)
-def test_a_stored_block_reads_its_bound_refs_as_rows_or_as_the_older_mapping(
-    stored: Any, expected: dict[str, tuple[str, ...]]
+def test_each_entity_row_keeps_the_refs_it_bound(
+    part: dict[str, Any], expected: list[BoundEntity]
 ) -> None:
-    block = _spec() if stored is None else {**_spec(), "_bound_refs": stored}
-
-    assert source_from_spec_block(block).bound_refs == expected
-
-
-def test_a_stored_bound_row_missing_its_refs_makes_the_block_unusable() -> None:
-    block = {**_spec(), "_bound_refs": [{"identity": "G7", "text": "G7", "refs": []}]}
-
-    with pytest.raises(ValueError, match="not usable as a source"):
-        source_from_spec_block(block)
+    assert list(bound_refs(part)) == expected
 
 
 def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:
@@ -295,6 +258,39 @@ def test_a_shape_without_a_digest_reads_as_none(shape: dict[str, Any] | None) ->
     assert source.shape_member_count == (shape or {}).get("member_count")
 
 
+@pytest.mark.parametrize(
+    ("labels", "read"),
+    [
+        (
+            {
+                "concept_label": "health",
+                "published_tables": "OECD Creditor Reporting System (CRS) and ONE Imputed "
+                "Multilateral Sectors",
+            },
+            (
+                "health",
+                "OECD Creditor Reporting System (CRS) and ONE Imputed Multilateral Sectors",
+            ),
+        ),
+        ({"concept_label": None, "published_tables": None}, (None, None)),
+        ({}, (None, None)),
+    ],
+    ids=["stated", "null", "before-the-fields"],
+)
+def test_the_concept_and_tables_search_states_are_read_as_stated(
+    labels: dict[str, Any], read: tuple[str | None, str | None]
+) -> None:
+    source = source_from_spec_block(_spec(**labels))
+
+    assert (source.concept_label, source.published_tables) == read
+    # A source stating neither keeps the serialised form of one saved before them.
+    dumped = source.model_dump()
+    assert ("concept_label" in dumped, "published_tables" in dumped) == (
+        read[0] is not None,
+        read[1] is not None,
+    )
+
+
 def test_a_source_without_a_provenance_facet_has_no_provenance() -> None:
     block = _spec()
     del block["resolved"]["facets"]["provenance"]
@@ -346,6 +342,210 @@ def test_no_data_carries_a_reason_this_service_does_not_yet_recognise() -> None:
 
     assert outcome.status is DiscoveryStatus.NO_DATA
     assert outcome.reason == "entity_set_too_large"
+
+
+_CONGO_CANDIDATES = [
+    {"ref": "country/COD", "label": "Democratic Republic of the Congo", "kind": "country"},
+    {"ref": "country/COG", "label": "Republic of the Congo", "kind": "country"},
+]
+
+
+def _entity_ambiguous(*rows: dict[str, Any]) -> dict[str, Any]:
+    """Search's `entity_ambiguous` answer to the parsed door's `rows`, as C50c and C50e state it.
+
+    Rows sent by text alone share one identity, so every "Congo" row is one
+    group, and each option pins all of them to its candidate. Every option
+    also pins a row that resolved to one node, here "France".
+    """
+
+    def pinned(row: dict[str, Any], ref: str) -> dict[str, Any]:
+        return {**row, "dcid": ref if row["text"] == "Congo" else "country/FRA"}
+
+    return {
+        "reason": "entity_ambiguous",
+        "category": "unresolved",
+        "ambiguous_entities": [{"text": "Congo", "candidates": _CONGO_CANDIDATES}],
+        "options": [
+            {
+                "mentions": ["Congo"],
+                "label": candidate["label"],
+                "entity_choice": 0,
+                "data_query": {
+                    "parts": [
+                        {
+                            "variable": "aid",
+                            "entities": [pinned(row, candidate["ref"]) for row in rows],
+                        }
+                    ]
+                },
+            }
+            for candidate in _CONGO_CANDIDATES
+        ],
+    }
+
+
+_FROM_CONGO = {"text": "Congo", "role_text": "donor"}
+_TO_CONGO = {"text": "Congo", "role_text": "recipient"}
+_TO_FRANCE = {"text": "France", "role_text": "recipient"}
+
+
+@pytest.mark.parametrize(
+    ("rows", "pinned"),
+    [
+        ((_FROM_CONGO, _TO_CONGO), (0, 1)),
+        ((_FROM_CONGO, _TO_FRANCE), (0,)),
+    ],
+    ids=["both_ends", "one_end"],
+)
+def test_no_data_reads_an_ambiguous_wording_once_per_entity_it_pins(
+    rows: tuple[dict[str, Any], ...], pinned: tuple[int, ...]
+) -> None:
+    entities = [EntityKey(name=row["text"], role=row["role_text"]) for row in rows]
+
+    outcome = outcome_from_envelope(
+        _envelope("no_data", no_data=_entity_ambiguous(*rows)), entities=entities
+    )
+
+    # One reading per entity the group pins, each its own choice.
+    readings = outcome.ambiguous_entities
+    assert [reading.entity for reading in readings] == [entities[i] for i in pinned]
+    for reading in readings:
+        assert reading.text == "Congo"
+        assert reading.candidates == (
+            EntityCandidate(ref="country/COD", label="Democratic Republic of the Congo"),
+            EntityCandidate(ref="country/COG", label="Republic of the Congo"),
+        )
+
+
+def _no_option_settles_the_group(no_data: dict[str, Any]) -> None:
+    for option in no_data["options"]:
+        option["entity_choice"] = 1
+
+
+def _an_option_drops_a_row(no_data: dict[str, Any]) -> None:
+    no_data["options"][0]["data_query"]["parts"][0]["entities"].pop()
+
+
+def _the_options_pin_alike(no_data: dict[str, Any]) -> None:
+    no_data["options"][1] = no_data["options"][0]
+
+
+def _a_candidate_has_no_ref(no_data: dict[str, Any]) -> None:
+    del no_data["ambiguous_entities"][0]["candidates"][0]["ref"]
+
+
+@pytest.mark.parametrize(
+    "malform",
+    [
+        _no_option_settles_the_group,
+        _an_option_drops_a_row,
+        _the_options_pin_alike,
+        _a_candidate_has_no_ref,
+    ],
+)
+def test_an_ambiguous_entity_group_pinning_no_sent_row_is_refused(
+    malform: Callable[[dict[str, Any]], None],
+) -> None:
+    no_data = _entity_ambiguous(_FROM_CONGO, _TO_CONGO)
+    malform(no_data)
+    entities = [EntityKey(name="Congo", role="donor"), EntityKey(name="Congo", role="recipient")]
+
+    with pytest.raises(ValueError, match=r"ambiguous entity group|ref"):
+        outcome_from_envelope(_envelope("no_data", no_data=no_data), entities=entities)
+
+
+_CENTRAL_AFRICA = [
+    {"ref": "region/UN_CentralAfrica", "label": "Central Africa (UN)", "kind": "group"},
+    {"ref": "region/AU_CentralAfrica", "label": "Central Africa (AU)", "kind": "region"},
+    {"ref": "region/WB_CentralAfrica", "label": "Central Africa (WB)", "kind": "region"},
+]
+
+
+def _members_ambiguous(*options: dict[str, Any]) -> dict[str, Any]:
+    """Search's answer to one row asked for its members (`"members": true`), as
+    `conjoin._entity_options` builds its options: a group node posts the group's
+    registered name and no dcid, any other candidate its dcid."""
+    return {
+        "reason": "entity_ambiguous",
+        "category": "unresolved",
+        "ambiguous_entities": [{"text": "Central Africa", "candidates": _CENTRAL_AFRICA}],
+        "options": [
+            {
+                "mentions": ["Central Africa"],
+                "label": label,
+                "entity_choice": 0,
+                "data_query": {
+                    "parts": [{"variable": "aid", "entities": [{**row, "members": True}]}]
+                },
+            }
+            for label, row in options
+        ],
+    }
+
+
+_BY_GROUP_NAME = ("Central Africa (UN)", {"text": "Central Africa (UN)"})
+_AU = ("Central Africa (AU)", {"text": "Central Africa", "dcid": "region/AU_CentralAfrica"})
+_WB = ("Central Africa (WB)", {"text": "Central Africa", "dcid": "region/WB_CentralAfrica"})
+_UN_KEPT = ("region/UN_CentralAfrica", "Central Africa (UN)")
+_AU_KEPT = ("region/AU_CentralAfrica", None)
+_WB_KEPT = ("region/WB_CentralAfrica", None)
+
+
+@pytest.mark.parametrize(
+    ("options", "kept"),
+    [
+        ((_BY_GROUP_NAME, _AU, _WB), [_UN_KEPT, _AU_KEPT, _WB_KEPT]),
+        ((_BY_GROUP_NAME, _AU), [_UN_KEPT, _AU_KEPT]),
+        # A group node with no registered name has no option, so it is no candidate.
+        ((_AU, _WB), [_AU_KEPT, _WB_KEPT]),
+    ],
+    ids=["un-au-wb", "un-au", "no-group-name"],
+)
+def test_a_members_row_keeps_a_group_node_by_the_name_its_option_posts(
+    options: tuple[tuple[str, dict[str, Any]], ...], kept: list[tuple[str, str | None]]
+) -> None:
+    entities = [EntityKey(name="Central Africa", role="recipient")]
+
+    outcome = outcome_from_envelope(
+        _envelope("no_data", no_data=_members_ambiguous(*options)), entities=entities
+    )
+
+    (reading,) = outcome.ambiguous_entities
+    assert reading.entity == entities[0]
+    assert [(c.ref, c.restate_as) for c in reading.candidates] == kept
+
+
+def _shared_label(no_data: dict[str, Any]) -> None:
+    no_data["ambiguous_entities"][0]["candidates"][1]["label"] = "Central Africa (UN)"
+
+
+def _not_members(no_data: dict[str, Any]) -> None:
+    del no_data["options"][0]["data_query"]["parts"][0]["entities"][0]["members"]
+
+
+def _no_text(no_data: dict[str, Any]) -> None:
+    no_data["options"][0]["data_query"]["parts"][0]["entities"][0]["text"] = ""
+
+
+@pytest.mark.parametrize("others", [(_AU,), (_AU, _WB)], ids=["au", "au-wb"])
+@pytest.mark.parametrize(
+    "malform",
+    [_shared_label, _not_members, _no_text],
+    ids=["shared-label", "not-members", "no-text"],
+)
+def test_a_members_option_no_one_candidate_can_be_stated_by_is_refused(
+    malform: Callable[[dict[str, Any]], None], others: tuple[tuple[str, dict[str, Any]], ...]
+) -> None:
+    # The UN option cannot be replayed as one candidate's, so the group is
+    # refused whatever choice the others would leave.
+    no_data = _members_ambiguous(_BY_GROUP_NAME, *others)
+    malform(no_data)
+
+    with pytest.raises(ValueError, match="ambiguous entity group 0 has an option"):
+        outcome_from_envelope(
+            _envelope("no_data", no_data=no_data),
+            entities=[EntityKey(name="Central Africa", role="recipient")],
+        )
 
 
 def test_unsupported_carries_the_detail_and_names_no_source() -> None:
@@ -481,6 +681,18 @@ def test_an_entity_without_its_role_is_refused() -> None:
     # be compiled against, so the block is refused rather than trimmed.
     with pytest.raises(ValueError, match="not usable as a source"):
         source_from_spec_block(_spec(entities=[{"label": "Kenya", "ref": "country/KEN"}]))
+
+
+def test_a_readable_source_is_none_with_a_warning_for_an_unusable_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A caller naming by the source reads an unusable block as none, logged once,
+    and a usable one as `source_from_spec_block` reads it."""
+    block = _spec()
+    assert readable_source(block) == source_from_spec_block(block)
+    with caplog.at_level("WARNING", logger="compiler.sources"):
+        assert readable_source(_spec("spec-abc")) is None
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
 
 
 # --- Whether a source mints as one StatVar ------------------------------------------
@@ -692,20 +904,32 @@ def test_both_open_flow_sides_are_read_and_an_uncounted_one_stays_unknown() -> N
     )
 
 
-def test_a_scope_and_a_role_axis_fact_on_one_column_keep_the_scopes_count() -> None:
-    # The scope lists the members it counts; the fact only counts them.
-    donors = [
-        {"ref": ref, "label": ref, "entity_type": "Country", "role": "origin"}
-        for ref in ("country/FRA", "country/GBR", "country/USA")
+@pytest.mark.parametrize(
+    ("column", "fact_count", "count"),
+    [
+        # On a flow side the fact counts the parties and the scope also lists
+        # group totals, which a flow retrieval does not return.
+        pytest.param("origin", 2, 2, id="flow-side-fact-counts-parties"),
+        pytest.param("origin", None, 3, id="flow-side-uncounted-fact-keeps-scope"),
+        # On the place axis the scope lists the members it counts.
+        pytest.param("observationAbout", 55, 3, id="place-axis-keeps-scope"),
+    ],
+)
+def test_a_scope_and_a_role_axis_fact_on_one_column_count_parties_on_a_flow_side(
+    column: str, fact_count: int | None, count: int
+) -> None:
+    members = [
+        {"ref": ref, "label": ref, "entity_type": "Country", "role": column}
+        for ref in ("country/FRA", "country/GBR", "DACCountries")
     ]
     block = _spec(
         entities=[],
-        scope={"axis": "origin", "members": donors},
-        role_axis_facts=[{"role": "origin", "member_count": 55, "members_available": True}],
+        scope={"axis": column, "members": members},
+        role_axis_facts=[{"role": column, "member_count": fact_count, "members_available": True}],
     )
 
     assert source_from_spec_block(block).open_entity_axes == (
-        OpenEntityAxis(column="origin", member_count=3),
+        OpenEntityAxis(column=column, member_count=count),
     )
 
 
@@ -759,6 +983,79 @@ def test_a_resubmit_posts_each_set_without_its_total() -> None:
         "destination": {"label": "Africa", "ref": "africa"},
         "origin": {"label": "G7"},
     }
+
+
+def test_a_resubmit_posts_the_registry_id_of_a_set_the_graph_holds_no_node_for() -> None:
+    # Search keeps a set with no node of its own, read as its members, only through
+    # its registry id, which restores the total its dataset publishes for it.
+    asia = {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia", "total": None}
+    source = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups={"destination": asia}))
+
+    assert wire_groups(source.groups) == {
+        "destination": {"label": "Asia", "group_id": "groups/OECD.DAC.Region.Asia"}
+    }
+
+
+def test_a_resubmit_reads_each_sets_posted_identity_whatever_else_it_states() -> None:
+    # Africa names a class of party this release does not know, so the full set is
+    # not readable; a resubmit posts only its label, ref and registry id.
+    africa = {**_GROUPS["destination"], "whole_of": ["sovereign_fund"], "group_id": None}
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+    with pytest.raises(ValueError, match="sovereign_fund"):
+        source_from_spec_block(block)
+
+    assert wire_groups(block_wire_groups(block)) == {
+        "destination": {"label": "Africa", "ref": "africa"},
+        "origin": {"label": "G7"},
+    }
+    assert wire_groups(block_wire_groups(block, leaving_out="destination")) == {
+        "origin": {"label": "G7"}
+    }
+
+
+@pytest.mark.parametrize(
+    "africa",
+    [
+        pytest.param({"label": "Africa", "ref": 5}, id="ref-not-text"),
+        pytest.param({"label": "Africa", "group_id": 7}, id="group-id-not-text"),
+        pytest.param("Africa", id="not-an-object"),
+    ],
+)
+def test_a_resubmit_refuses_a_set_whose_posted_identity_does_not_read(africa: object) -> None:
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+
+    with pytest.raises(ValueError, match="destination"):
+        block_wire_groups(block)
+    assert readable_wire_groups(block) is None
+    assert wire_groups(block_wire_groups(block, leaving_out="destination")) == {
+        "origin": {"label": "G7"}
+    }
+
+
+@pytest.mark.parametrize(
+    "africa",
+    [
+        pytest.param({"ref": "africa", "total": "DACAfrica"}, id="no-label"),
+        pytest.param({"label": "", "ref": "africa"}, id="empty-label"),
+    ],
+)
+def test_a_resubmit_posts_without_a_set_stating_no_label(africa: object) -> None:
+    # A set stating no label names nothing a resubmit can post, and the source
+    # reading the block skips it too.
+    block = _spec(entities=_ENTITIES, entity_groups={**_GROUPS, "destination": africa})
+
+    assert [group.role for group in source_from_spec_block(block).groups] == ["origin"]
+    assert wire_groups(readable_wire_groups(block) or ()) == {"origin": {"label": "G7"}}
+
+
+@pytest.mark.parametrize("key", ["ref", "group_id"])
+def test_a_resubmit_posts_a_set_without_an_empty_ref_or_group_id(key: str) -> None:
+    # The source reading the block reads an empty ref or group_id as absent, so the
+    # resubmit posts the set with its label alone.
+    block = _spec(entities=_ENTITIES, entity_groups={"destination": {"label": "Africa", key: ""}})
+
+    assert source_from_spec_block(block).groups[0].label == "Africa"
+    assert wire_groups(readable_wire_groups(block) or ()) == {"destination": {"label": "Africa"}}
 
 
 # "ODA to Ethiopia from all donors" binds the OECD's official-donors total; the
@@ -853,10 +1150,155 @@ def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
     assert members_reading(union, answer=MembersAnswer.SUMMED) is None
 
 
+# Sets summed as their members, as Search states them: `left_out` names the
+# residuals the set's published total counts beside the members, absent where
+# the members leave none out and for a set with no published total, such as
+# the G7 read as its members. `sum_differs` says the source publishes its own
+# figure for the set, which can differ from the members' sum, in a sentence of
+# its own, so the residuals' list ends before it.
+_AFRICA_LEFT_OUT = (
+    " and leaves out what the data allocates to no single country: "
+    "Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC)."
+)
+_PUBLISHED = (
+    " The source publishes its own figure for {label}, "
+    "which can differ from one built from its members."
+)
+
+
+@pytest.mark.parametrize(
+    ("group", "tail"),
+    [
+        (
+            {"origin": {"ref": "DAC", "label": "DAC members", "total": None}},
+            ".",
+        ),
+        (
+            {"destination": {"ref": "africa", "label": "Africa", "total": None}},
+            ".",
+        ),
+        (
+            {"origin": {"ref": None, "label": "G7", "total": None}},
+            ".",
+        ),
+        (
+            {
+                "destination": {
+                    "ref": "africa",
+                    "label": "Africa",
+                    "total": None,
+                    "left_out": [
+                        "Africa, unallocated by country (DAC)",
+                        "North of Sahara, unallocated by country (DAC)",
+                    ],
+                }
+            },
+            _AFRICA_LEFT_OUT,
+        ),
+        (
+            {"origin": {"ref": None, "label": "G7", "total": None, "sum_differs": True}},
+            "." + _PUBLISHED.format(label="G7"),
+        ),
+        (
+            {
+                "destination": {
+                    "ref": "africa",
+                    "label": "Africa",
+                    "total": None,
+                    "left_out": [
+                        "Africa, unallocated by country (DAC)",
+                        "North of Sahara, unallocated by country (DAC)",
+                    ],
+                    "sum_differs": True,
+                }
+            },
+            _AFRICA_LEFT_OUT + _PUBLISHED.format(label="Africa"),
+        ),
+        (
+            {
+                "origin": {
+                    "ref": "DAC",
+                    "label": "DAC members",
+                    "total": None,
+                    "left_out": ["DAC donors, unspecified"],
+                }
+            },
+            " and leaves out what the source's total for DAC members counts beside them: "
+            "DAC donors, unspecified.",
+        ),
+    ],
+    ids=[
+        "donor-members-leave-nothing-out",
+        "recipient-members-leave-nothing-out",
+        "donor-set-with-no-published-total",
+        "recipient-members-leave-out-residuals",
+        "donor-total-differs-from-its-members-sum",
+        "residuals-end-before-the-published-figure",
+        "donor-members-leave-out-residuals",
+    ],
+)
+def test_summed_members_state_only_the_residuals_search_names(
+    group: dict[str, dict[str, object]], tail: str
+) -> None:
+    (read,) = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=group)).groups
+
+    assert members_reading(read, answer=MembersAnswer.SUMMED) == (
+        f"The figure for {read.label} adds up its members' figures{tail}"
+    )
+
+
+def test_an_unknown_answer_still_states_that_the_published_figure_can_differ() -> None:
+    group = {"origin": {"ref": "DAC", "label": "DAC members", "total": None, "sum_differs": True}}
+    (read,) = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=group)).groups
+
+    assert members_reading(read, answer=None) == (
+        f"The figures for {read.label} come from its members' figures."
+        + _PUBLISHED.format(label=read.label)
+    )
+
+
+def test_a_stored_set_reads_the_residuals_it_was_stored_with() -> None:
+    stated = {"ref": "africa", "label": "Africa", "total": None}
+    blocks = [
+        {"destination": stated},
+        {"destination": {**stated, "left_out": ["Africa, unallocated by country (DAC)"]}},
+    ]
+    stored = [
+        SelectedSource.model_validate(
+            source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=block)).model_dump(
+                mode="json"
+            )
+        )
+        for block in blocks
+    ]
+
+    assert [
+        members_reading(source.groups[0], answer=MembersAnswer.SUMMED) for source in stored
+    ] == [
+        "The figure for Africa adds up its members' figures.",
+        "The figure for Africa adds up its members' figures and leaves out what the data "
+        "allocates to no single country: Africa, unallocated by country (DAC).",
+    ]
+
+
 def test_a_resubmit_posts_a_whole_total_without_its_marker() -> None:
     source = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL))
 
     assert wire_groups(source.groups) == {"origin": {"label": "all donors"}}
+
+
+def test_a_block_carries_its_parts_bound_rows_back_into_the_source() -> None:
+    rows = bound_refs(_CONGO_PART)
+    block = {**_spec(), "_bound_refs": [row.model_dump(mode="json") for row in rows]}
+
+    assert source_from_spec_block(block).bound_refs == rows
+
+
+def test_a_block_holding_bound_refs_by_text_is_not_usable() -> None:
+    block = {**_spec(), "_bound_refs": {"congo": ["country/COD", "country/COG"]}}
+
+    with pytest.raises(ValueError, match="not usable as a source"):
+        source_from_spec_block(block)
 
 
 def test_a_source_saved_before_entity_refs_dumps_as_it_did() -> None:

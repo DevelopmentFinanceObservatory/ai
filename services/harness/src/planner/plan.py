@@ -46,15 +46,18 @@ import itertools
 import json
 import logging
 import re
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
+from compiler.sources import source_from_spec_block
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.scope import ChoiceProvenance, ScopeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -80,6 +83,7 @@ from planner.records import (
     GrowthChange,
     Identifier,
     OpenPeriodFault,
+    OptionStatus,
     Period,
     PeriodThreshold,
     PlaceLevel,
@@ -162,6 +166,14 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 # Unset, the entry carries no amendment.
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
+# The session-state slot holding the option the user picked for a planner
+# decision on the plan card, as a `DecisionPick` dump, when the planner's
+# current entry replans to hold that pick. `harness.planner_seam.PlannerSeam`
+# writes it, or clears it, with `AMENDMENT_ENTRY_STATE_KEY` when an entry
+# starts, so an ask-the-user resume inside one entry keeps it. Admission
+# refuses a plan that does not state the pick (`submission.service.admit`).
+DECISION_PICK_STATE_KEY = "planner:decision_pick"
+
 # The session-state slot holding the `UnsupportedOperation` of every decline
 # earned in the planner's current entry that the recorded plan may make but
 # need not: a first-draft entry or a translation that refers a requirement
@@ -205,6 +217,18 @@ SEEDS_STATE_KEY = "seeds"
 # is stored whole, its identity included.
 # Unset until a plan pins such a copy.
 WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
+
+# The session-state slot holding each pin compiled to put a calculation's
+# inputs on one measure basis or provider scope, or a declared whole over its
+# part (`AlignedPin`), which `submission.service._aligned_bases` reads and
+# `planner.agent.with_source_reads` writes (`submission.service.save_aligned_pin`).
+ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
+
+# The session-state slot holding an `AlignedInput` for every dataset
+# requirement of the plan `planner.agent.propose_plan` last recorded that
+# admission pinned to a compiled pin (`AlignedPin`) in place of the pin it
+# states. Unset until a plan holds one.
+ALIGNMENTS_STATE_KEY = "planner:alignments"
 
 # The session-state slot holding what `planner.agent.propose_plan` read about
 # every year a pinned dataset holds, by the pin's spec_id, as its first year and
@@ -262,6 +286,11 @@ MAX_PLAN_DECISIONS = 24
 # calculations is roughly twice the budget, so a plan at the cap is refused
 # for its size rather than for a discovery budget it can never spend.
 MAX_PLAN_REQUIREMENTS = 24
+
+# The most requirements a plan holds: the model writes at most
+# `MAX_PLAN_REQUIREMENTS` (`Plan._record_fits_the_size_limit`), and
+# `whole_history_split` copies each of them at most once.
+MAX_HELD_REQUIREMENTS = 2 * MAX_PLAN_REQUIREMENTS
 
 # The most asks one brief may list, and the longest each may run. An ask is a
 # short line naming one output the user asked for, such as a chart or a
@@ -372,6 +401,21 @@ class Entity(StrictModel):
             "figure. A set is named once, never listed member by member."
         ),
     )
+    dcid: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda dcid: dcid is None,
+        description="Graph node from an entity_name_ambiguous referral.",
+    )
+
+
+class BaseYearUnstatedError(ValueError):
+    """A `Unit` states constant prices with no `base_year`.
+
+    Typed so `propose_plan` answers it with the base year the requirement's
+    source states, where one does (`submission.prices_choice.base_year_refusal`).
+    """
 
 
 # Stated in the frame grammar's own `currency`, `prices` and `base_year`,
@@ -398,7 +442,7 @@ class Unit(StrictModel):
     @model_validator(mode="after")
     def _base_year_goes_with_constant_prices(self) -> Unit:
         if self.prices == "constant" and self.base_year is None:
-            raise ValueError("constant prices need a base_year")
+            raise BaseYearUnstatedError("constant prices need a base_year")
         if self.prices == "current" and self.base_year is not None:
             raise ValueError("current prices take no base_year")
         return self
@@ -428,9 +472,10 @@ class DecisionFixes(StrictModel):
 
     `settle_decisions` writes it from the field names a `DecisionDraft`
     lists, reading each value off the requirements that cite the decision.
-    `propose_plan` sets `source_spec_id` on the measure decision it writes
-    for a pin (`submission.service._measure_decisions`) and moves it with the
-    pin (`submission.service._repinned`). Every requirement citing a decision
+    `propose_plan` sets `source_spec_id` on the measure and scope decisions
+    it writes for a pin (`submission.service._measure_decisions`,
+    `_scope_decisions`) and moves it with the pin
+    (`submission.service._repinned`). Every requirement citing a decision
     states each value it fixes, `source_spec_id` aside (`fix_disagreements`).
     """
 
@@ -532,6 +577,16 @@ class DecisionFixes(StrictModel):
         default=None,
         description="How many places a rank this decision fixes keeps, when it fixes that.",
     )
+    # Set only on the decision `propose_plan` writes for the prices the user
+    # chose for a part (`submission.prices_choice`): the unit's price basis
+    # alone, so each requirement keeps its own currency and base year. Not a
+    # `FixedField`, so a draft cannot name it, and left out of every dump
+    # while unset.
+    prices: Annotated[Literal["current", "constant"] | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda prices: prices is None,
+        description="The price basis of the unit this decision fixes, when it fixes that alone.",
+    )
 
 
 class _Choice(StrictModel):
@@ -609,6 +664,55 @@ class _Choice(StrictModel):
         return self
 
 
+# The longest scope choice id, option id and reason code a scope decision
+# holds, and the most year spans a partial option lists. A choice id is a
+# spec_id and an axis (51 characters at most), an option id an axis and a
+# value such as `sector:120+130`, and a partial option covers one span or a
+# few; each limit sits several times above that.
+MAX_SCOPE_ID_CHARS = 200
+MAX_SCOPE_YEAR_SPANS = 50
+
+
+class ScopeOptionState(StrictModel):
+    """One option of a scope choice as Search offered it for the pinned part:
+    its id, whether it can be served, the years a partial option covers and
+    the reason code of a partial or unavailable one."""
+
+    option_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
+    status: OptionStatus
+    years: tuple[tuple[int, int], ...] | None = Field(default=None, max_length=MAX_SCOPE_YEAR_SPANS)
+    code: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
+
+
+class DecisionScope(StrictModel):
+    """The scope choice a scope decision states (`harness.scope_choices.ScopeChoice`).
+
+    `choice_id` names the choice and `axis` the axis it settles. `options`
+    holds one state per `Decision.options` label, in the same order.
+    `provenance` is how the choice came to hold its option, `"default"` when
+    Search's default settled it, and `None` on a decision recorded without it.
+    """
+
+    choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
+    axis: ScopeAxis
+    options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
+    provenance: Annotated[ChoiceProvenance | None, HASHED_WHEN_SET] = None
+
+
+# How a calculation qualifies the answer where its inputs differ on one aligned
+# axis, one caveat per axis (`submission.service._DIFFERENCES`).
+DifferenceCaveat = Literal["providers_differ", "bases_differ"]
+
+# How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`): a
+# calculation's inputs differing on an axis, or a whole compiled from its part.
+DecisionCaveat = Literal[DifferenceCaveat, "derived_whole"]
+
+# The most decisions qualifying the answer one requirement carries: a calculation
+# states at most one per axis its inputs differ on, and a whole, a dataset
+# requirement, only `derived_whole`.
+MAX_REQUIREMENT_CAVEATS = len(get_args(DifferenceCaveat))
+
+
 class Decision(_Choice):
     """One methodological choice the plan makes explicit."""
 
@@ -618,6 +722,40 @@ class Decision(_Choice):
             "The requirement fields this decision settles; unset when it is a rationale only."
         ),
     )
+    # Set only on a decision `propose_plan` writes for a scope choice of a
+    # pinned source (`submission.service._scope_decisions`). Left out of
+    # every dump while unset, so a plan stating none keeps its serialised
+    # form and its `plan_revision`.
+    scope: Annotated[DecisionScope | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda scope: scope is None
+    )
+    # Set only on a decision `propose_plan` writes for a choice that qualifies
+    # the answer, whose `rationale` says how: a calculation whose inputs count
+    # different providers (`providers_differ`) or are counted on different
+    # measure bases (`bases_differ`), or a total compiled from its part
+    # (`derived_whole`) (`submission.service._difference_decisions`,
+    # `_whole_decisions`). Absent from `DecisionDraft`, so the planner cannot
+    # set it.
+    caveat: Annotated[DecisionCaveat | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda caveat: caveat is None
+    )
+
+    @model_validator(mode="after")
+    def _scope_states_each_option(self) -> Decision:
+        """Reject a scope decision whose option states do not match its options one for one."""
+        if self.scope is not None and len(self.scope.options) != len(self.options):
+            raise ValueError(
+                f"a scope decision states {len(self.scope.options)} option states for "
+                f"{len(self.options)} options"
+            )
+        return self
+
+    @property
+    def active_option_id(self) -> str | None:
+        """The option id of `chosen` on a scope decision; `None` on any other."""
+        if self.scope is None:
+            return None
+        return self.scope.options[self.options.index(self.chosen)].option_id
 
 
 def search_pin_slot(spec_id: str) -> str:
@@ -640,6 +778,39 @@ def is_search_pin(decision: Decision) -> bool:
         and fixes.source_spec_id is not None
         and decision.slot == search_pin_slot(fixes.source_spec_id)
     )
+
+
+def scope_choice_slot(spec_id: str, axis: ScopeAxis) -> str:
+    """The `Decision.slot` `propose_plan` records the scope choice on `axis` of a pin of `spec_id` under.
+
+    Derived from the pin as `search_pin_slot` is, so each source's choices
+    have slots of their own.
+    """
+    return f"scope_{axis}_{spec_id}"
+
+
+def is_scope_choice(decision: Decision) -> bool:
+    """Whether `decision` is one `propose_plan` wrote for a scope choice of a pinned source."""
+    fixes = decision.fixes
+    return (
+        decision.scope is not None
+        and fixes is not None
+        and fixes.source_spec_id is not None
+        and decision.slot == scope_choice_slot(fixes.source_spec_id, decision.scope.axis)
+    )
+
+
+def pin_slot_moves(origin: str, target: str) -> dict[str, str]:
+    """Each slot `propose_plan` may write for a pin of `origin`, mapped to the one a pin of `target` takes.
+
+    The measure decision's (`search_pin_slot`) and one scope decision's per
+    axis (`scope_choice_slot`), so a moved pin renames every decision code
+    wrote for it and every citation of one.
+    """
+    moves = {search_pin_slot(origin): search_pin_slot(target)}
+    for axis in get_args(ScopeAxis):
+        moves[scope_choice_slot(origin, axis)] = scope_choice_slot(target, axis)
+    return moves
 
 
 # The name of each `DecisionFixes` field a `DecisionDraft` may list.
@@ -674,13 +845,38 @@ class DecisionDraft(_Choice):
 
     fixes: tuple[FixedField, ...] | None = Field(
         default=None,
-        max_length=len(DecisionFixes.model_fields),
+        max_length=len(DecisionFixes.model_fields.keys() - {"prices"}),
         description=(
             "The requirement fields this decision settles, by name, whenever it settles "
             "what a requirement carries: the period, the unit, the entities, the measure, "
             "or a calculation field a derived requirement reads. Each value is read off the "
             "requirements citing it. Empty when it is a rationale only."
         ),
+    )
+
+
+# What a declared whole leaves open: the part's sector, or the party it names on one
+# side of the flow (`WholeOf.axis`).
+WholeAxis = Literal["sector", "donor", "recipient"]
+
+
+class WholeOf(StrictModel):
+    """The part a dataset requirement is the whole of: that part's own dataset with one scope axis left open.
+
+    `propose_plan` compiles the whole from the part's pin with `axis` left
+    open and every other choice held, and pins the requirement to it
+    (`submission.service._declared_wholes`). The sector is opened by
+    unbinding the slot the part's sector choice binds; a donor or recipient
+    by dropping the role the part binds there, its region entry and its
+    named set, so Search serves the total that holds the part.
+    """
+
+    part: Identifier = Field(description="The dataset requirement this one is the whole of.")
+    axis: WholeAxis = Field(
+        description=(
+            "What the whole leaves open: 'sector' for every sector, 'donor' for every donor, "
+            "'recipient' for every recipient."
+        )
     )
 
 
@@ -808,6 +1004,17 @@ class DatasetRequirement(TaggedModel):
             "group_by 'breakdown' reads. Needs stat_vars 'separate'."
         ),
     )
+    # Left out of every dump while unset, as `Entity.members` is.
+    whole_of: Annotated[WholeOf | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda whole_of: whole_of is None,
+        description=(
+            "Set on the total a share_of or quotient_of divides its part by, the part over "
+            "every sector, donor or recipient: all US aid for US health aid, all aid to Kenya "
+            "for US aid to Kenya. Counted from the part's own dataset, with no search. Read "
+            "only as that denominator."
+        ),
+    )
 
     @field_validator("source_code", mode="before")
     @classmethod
@@ -823,20 +1030,25 @@ class DatasetRequirement(TaggedModel):
 
     @model_validator(mode="after")
     def _entities_are_unique(self) -> DatasetRequirement:
-        """Reject a requirement naming the same entity and role more than once."""
-        keys = [(entity.name, entity.role) for entity in self.entities]
-        seen: set[tuple[str, str | None]] = set()
+        """Reject a requirement naming the same entity, role and node more than once."""
+        keys = [(entity.name, entity.role, entity.dcid) for entity in self.entities]
+        seen: set[tuple[str, str | None, str | None]] = set()
         repeated = sorted(
-            {
-                f"{name}/{role}" if role else name
-                for name, role in keys
-                if (name, role) in seen or seen.add((name, role))
-            }
+            {"/".join(part for part in key if part) for key in keys if key in seen or seen.add(key)}
         )
         if repeated:
             raise ValueError(
-                f"every entity must be unique by name and role; repeated: {repeated!r}"
+                f"every entity must be unique by name, role and node; repeated: {repeated!r}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _nodes_are_unique(self) -> DatasetRequirement:
+        """Reject two entities stating one `dcid`: Search reads rows pinning one node
+        as one entity, so the second would lose its role or name the first again."""
+        dcids = [entity.dcid for entity in self.entities if entity.dcid is not None]
+        if repeated := sorted({dcid for dcid in dcids if dcids.count(dcid) > 1}):
+            raise ValueError(f"each entity's dcid must be its own node; repeated: {repeated!r}")
         return self
 
     @model_validator(mode="after")
@@ -1051,6 +1263,15 @@ class GrowthRequirement(TaggedModel):
         return self
 
 
+# What `accept_provider_difference` means to the planner, on each calculation
+# that subtracts, divides or adds its inputs
+# (`submission.service._PROVIDER_ALIGNED`).
+ACCEPT_PROVIDER_DIFFERENCE = (
+    "Set only when the user asks for inputs counting different providers' spending, as "
+    "'use the DAC1 total' does beside CRS aid: each input keeps its own provider scope."
+)
+
+
 class ComparisonRequirement(TaggedModel):
     """The difference between two requirements' results, at each common period.
 
@@ -1073,6 +1294,12 @@ class ComparisonRequirement(TaggedModel):
         description="The side the difference starts from: the result is `minuend` minus `subtrahend`."
     )
     subtrahend: RequirementSide = Field(description="The side subtracted from `minuend`.")
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
+    )
 
     @model_validator(mode="after")
     def _sides_differ(self) -> ComparisonRequirement:
@@ -1105,6 +1332,12 @@ class SumOfRequirement(TaggedModel):
     )
     left: RequirementSide = Field(description="One of the two series added together.")
     right: RequirementSide = Field(description="The series added to `left`.")
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
+    )
 
     @model_validator(mode="after")
     def _sides_read_different_requirements(self) -> SumOfRequirement:
@@ -1253,6 +1486,12 @@ class ShareOfRequirement(TaggedModel):
             "total, 'pooled' divides every entity by one total summed across the population."
         ),
     )
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
+    )
 
     @property
     def pools_its_own_axis(self) -> bool:
@@ -1319,6 +1558,12 @@ class QuotientRequirement(TaggedModel):
             "The denominator's name for the same entities, so each divides by its own "
             "counterpart: the role they state there, or 'country' where they state none."
         ),
+    )
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
     )
 
     @model_validator(mode="after")
@@ -1414,11 +1659,11 @@ class FilterRequirement(TaggedModel):
         resolve to one entity, which only the sources show, and the
         compiler refuses those (`compiler.arguments.op_spec_errors`).
         """
-        _reject_repeats((_predicate_key(p) for p in self.predicates), what="predicate")
+        _reject_repeats((predicate_key(p) for p in self.predicates), what="predicate")
         return self
 
 
-def _predicate_key(predicate: Predicate) -> str:
+def predicate_key(predicate: Predicate) -> str:
     """`predicate` in a form two statements of it share, its names in any order."""
     if isinstance(predicate, EntityIn):
         predicate = predicate.model_copy(update={"names": tuple(sorted(set(predicate.names)))})
@@ -1472,12 +1717,13 @@ def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
     return (requirement.input_id,)
 
 
-def _find_cycle(requirements_by_id: dict[str, EvidenceRequirement]) -> tuple[str, ...] | None:
+def _find_cycle(requirements_by_id: Mapping[str, EvidenceRequirement]) -> tuple[str, ...] | None:
     """Return one cycle of requirement ids, if the requirements do not form a DAG.
 
     A depth-first search with a coloring scheme: white is unvisited, gray is
     on the current path, black is fully explored. Finding a gray node again
-    while walking `inputs_of` means the path back to it is a cycle.
+    while walking `inputs_of` means the path back to it is a cycle. An input
+    `requirements_by_id` does not hold reads nothing, so it closes no cycle.
     """
     white, gray, black = 0, 1, 2
     color: dict[str, int] = dict.fromkeys(requirements_by_id, white)
@@ -1487,9 +1733,9 @@ def _find_cycle(requirements_by_id: dict[str, EvidenceRequirement]) -> tuple[str
         color[requirement_id] = gray
         path.append(requirement_id)
         for input_id in inputs_of(requirements_by_id[requirement_id]):
-            if color[input_id] == gray:
+            if color.get(input_id) == gray:
                 return tuple(path[path.index(input_id) :])
-            if color[input_id] == white:
+            if color.get(input_id) == white:
                 found = visit(input_id)
                 if found is not None:
                     return found
@@ -1738,6 +1984,17 @@ def _check_asks_accounted(
         raise AsksUnaccountedError(asks=asks, uncovered=uncovered, repeated=repeated)
 
 
+class DecisionsUncitedError(ValueError):
+    """A plan stating requirements makes decisions none of them cites.
+
+    `slots` are those decisions' slots, sorted (`check_references`).
+    """
+
+    def __init__(self, slots: Iterable[str]) -> None:
+        self.slots = tuple(sorted(slots))
+        super().__init__(f"no evidence requirement cites the decisions {list(self.slots)!r}")
+
+
 class WholeIsItsMemberError(ValueError):
     """A share or quotient answering an ask that totals across a party divides by its own members of that party.
 
@@ -1745,7 +2002,7 @@ class WholeIsItsMemberError(ValueError):
     `party` the party the ask totals across, `denominator_id` the dataset
     requirement its denominator reads, and `named` the entities that
     requirement names alone on that side, each of which the numerator names
-    too (`_check_wholes_span_their_totals`). `planner.agent.propose_plan`
+    too (`check_wholes_span_their_totals`). `planner.agent.propose_plan`
     answers it with a typed problem naming the ways out.
     """
 
@@ -1910,7 +2167,16 @@ def _side_dataset(
     return item if isinstance(item, DatasetRequirement) else None
 
 
-def _check_wholes_span_their_totals(plan: Plan) -> None:
+def no_refs(_dataset: DatasetRequirement | None, _entity: Entity) -> frozenset[str]:
+    """No graph ref, so the entity is compared by its name (`check_wholes_span_their_totals`)."""
+    return frozenset()
+
+
+def check_wholes_span_their_totals(
+    plan: Plan,
+    *,
+    refs: Callable[[DatasetRequirement | None, Entity], frozenset[str]] = no_refs,
+) -> None:
     """Reject a share or quotient whose denominator, on a party its ask totals across, names the numerator's members alone.
 
     An ask's `over` (`AskBreakdown.over`) is a party its answer totals
@@ -1937,8 +2203,16 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
     `share_of` operation runs over (`harness.orchestrator_tools._breakdowns_missing`).
     An ask listing a party in `by` is answered by an output keeping it
     (`_check_asks_keep_their_parties`), which an unkeyed share does not.
-    Names are compared as the plan writes them, so an alias, or a group on
-    one side beside its members on the other, is not seen. The requirements
+
+    Each entity is compared by the graph refs `refs` resolves it to, given
+    the dataset requirement its side reads, `None` through any other kind,
+    and by its name where either entity of a pair resolves none
+    (`_among_members`). `Plan` validation resolves none (`no_refs`), so it
+    compares names as the plan writes them, and an alias, or a group on one
+    side beside its members on the other, is not seen there.
+    `submission.service.admit` checks again with the refs each side's pinned
+    source resolves its names to, so "United States" and "United States of
+    America" compare equal when both resolve to one ref. The requirements
     are those the model wrote (`authored`), so a refusal names its ids.
 
     Raises:
@@ -1963,13 +2237,23 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
                 continue
             numerator = side_entities(by_id, requirement.numerator)
             denominator = side_entities(by_id, requirement.denominator)
+            numerator_dataset = _side_dataset(by_id, requirement.numerator.input_id)
+            dataset = _side_dataset(by_id, requirement.denominator.input_id)
             for word in words:
-                held = _names_on_side(denominator, word)
-                if not held or not held <= _names_on_side(numerator, word):
+                held = [(entity, refs(dataset, entity)) for entity in _on_side(denominator, word)]
+                part = [
+                    (entity, refs(numerator_dataset, entity))
+                    for entity in _on_side(numerator, word)
+                ]
+                if not held or not all(_among_members(one, part) for one in held):
                     continue
-                if len(held) > 1 and _pools_across(requirement, word):
+                # A pool's members are every ref its entities resolve to, a
+                # group counting each of its members, and the names that resolve none.
+                members = {ref for _, found in held for ref in found} | {
+                    entity.name for entity, found in held if not found
+                }
+                if len(members) > 1 and _pools_across(requirement, word):
                     continue
-                dataset = _side_dataset(by_id, requirement.denominator.input_id)
                 raise WholeIsItsMemberError(
                     requirement_id=requirement.id,
                     ask=answer.ask,
@@ -1978,7 +2262,7 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
                     denominator_id=requirement.denominator.input_id
                     if dataset is None
                     else dataset.id,
-                    named=held,
+                    named={entity.name for entity, _ in held},
                 )
 
 
@@ -1992,13 +2276,27 @@ def _pools_across(requirement: ShareOfRequirement | QuotientRequirement, word: s
     )
 
 
-def _names_on_side(entities: Iterable[Entity], word: str) -> set[str]:
-    """The names of `entities` whose role names the party `word` names (`planner.parties.same_party`)."""
-    return {
-        entity.name
-        for entity in entities
-        if entity.role is not None and same_party(entity.role, word)
-    }
+def _among_members(
+    resolved: tuple[Entity, frozenset[str]], part: Sequence[tuple[Entity, frozenset[str]]]
+) -> bool:
+    """Whether an entity of a whole, with the refs it resolves to, is among the members `part` names.
+
+    By ref, when every ref it resolves to is one `part`'s entities resolve
+    to, so a group the part names stands for each of its members; by name,
+    against an entity of `part` with the same name where either of the two
+    resolves no ref.
+    """
+    entity, found = resolved
+    if found and found <= {ref for _, theirs in part for ref in theirs}:
+        return True
+    return any(one.name == entity.name for one, theirs in part if not (found and theirs))
+
+
+def _on_side(entities: Iterable[Entity], word: str) -> tuple[Entity, ...]:
+    """The entities of `entities` whose role names the party `word` names (`planner.parties.same_party`)."""
+    return tuple(
+        entity for entity in entities if entity.role is not None and same_party(entity.role, word)
+    )
 
 
 def _check_asks_across_years(asks: Sequence[str], numbers: Sequence[int]) -> None:
@@ -2045,6 +2343,53 @@ class AnswerMode(TitlelessEnum):
     COMPUTED = "computed"
 
 
+def check_references(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    slots: Sequence[str],
+    declines: Iterable[str],
+    made: Collection[str] | None,
+) -> None:
+    """Reject a plan's parts that do not name each other once each.
+
+    Slots (`slots`), declines by key (`declines`) and requirement ids are
+    unique, so a citation is unambiguous. When `made`, every slot the plan
+    makes, is given, every citation names one of them. Once `requirements`
+    holds any, a requirement cites each of `slots` (`DecisionsUncitedError`),
+    and every input a requirement reads names one of `requirements`, with no
+    cycle.
+
+    `Plan` validation passes every decision as both `slots` and `made`.
+    `propose_plan` checks the model's drafts the same way before any Search
+    read the plan waits on (`submission.service._draft_unreferenced`), since
+    none of these rules reads a pin.
+
+    Raises:
+        DecisionsUncitedError: If a decision of `slots` is cited by none of
+            `requirements`.
+        ValueError: If any other rule is broken.
+    """
+    _reject_repeats(slots, what="decision slot")
+    _reject_repeats(declines, what="decline")
+    _reject_repeats(
+        [requirement.id for requirement in requirements], what="evidence requirement id"
+    )
+    cited = {
+        decision_id for requirement in requirements for decision_id in requirement.decision_ids
+    }
+    if made is not None:
+        unknown = sorted(cited - set(made))
+        if unknown:
+            raise ValueError(
+                f"evidence requirements cite decisions the plan does not make: {unknown!r}"
+            )
+    if requirements:
+        uncited = set(slots) - cited
+        if uncited:
+            raise DecisionsUncitedError(uncited)
+    _check_reads_resolve({r.id: r for r in requirements})
+
+
 def _check_reads_resolve(requirements_by_id: Mapping[str, EvidenceRequirement]) -> None:
     """Reject requirements reading one the plan does not state, or reading in a cycle."""
     read_ids = {
@@ -2057,9 +2402,192 @@ def _check_reads_resolve(requirements_by_id: Mapping[str, EvidenceRequirement]) 
         raise ValueError(
             f"evidence requirements read requirements this plan does not state: {unknown_inputs!r}"
         )
-    cycle = _find_cycle(dict(requirements_by_id))
+    check_acyclic(requirements_by_id)
+
+
+def check_acyclic(requirements_by_id: Mapping[str, EvidenceRequirement]) -> None:
+    """Reject requirements reading in a cycle (`_find_cycle`), so a walk down what each
+    reads ends. An input `requirements_by_id` does not hold is left for
+    `_check_reads_resolve` to refuse.
+    """
+    cycle = _find_cycle(requirements_by_id)
     if cycle is not None:
         raise ValueError(f"evidence requirements do not form a DAG; cycle: {list(cycle)!r}")
+
+
+def _check_wholes_name_their_parts(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> None:
+    """Reject a `whole_of` that cannot be compiled from its part (`whole_of_fault`)."""
+    for requirement in requirements_by_id.values():
+        if isinstance(requirement, DatasetRequirement) and (
+            fault := whole_of_fault(requirement, requirements_by_id)
+        ):
+            raise ValueError(fault)
+
+
+def whole_of_fault(
+    whole: DatasetRequirement, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> str | None:
+    """Why the `whole_of` `whole` states cannot be compiled from its part, `None` when
+    it can or `whole` states none.
+
+    The whole is compiled from the part's pin with only the part's scope
+    widened, so the part is another dataset requirement, itself no whole.
+    A whole over every sector counts the part's parties. A whole over every
+    donor or recipient holds the part only where the part names a party on
+    that side: it states the part's other entities, and `across` the part's
+    words with one word for that side added (`_entity_whole_fault`). It
+    follows its part wherever the part is counted, so it is read only as
+    the denominator of a share or quotient of its part (`_whole_read_fault`).
+    """
+    if whole.whole_of is None:
+        return None
+    part_id = whole.whole_of.part
+    part = requirements_by_id.get(part_id)
+    if not isinstance(part, DatasetRequirement) or part_id == whole.id:
+        return (
+            f"{whole.id!r} states whole_of part {part_id!r}, which is not another dataset "
+            "requirement of this plan"
+        )
+    if part.whole_of is not None:
+        return (
+            f"{whole.id!r} states whole_of part {part_id!r}, which is a whole itself; name the "
+            "part both are counted from"
+        )
+    if whole.whole_of.axis != "sector":
+        if fault := _entity_whole_fault(whole, part, whole.whole_of.axis):
+            return fault
+    elif {*whole.entities, *whole.across} != {*part.entities, *part.across}:
+        return (
+            f"{whole.id!r} is the whole of {part_id!r}, counted from its dataset for the same "
+            "parties, so it states the same entities and `across`"
+        )
+    return _whole_read_fault(whole, part_id, requirements_by_id)
+
+
+def _entity_whole_fault(
+    whole: DatasetRequirement, part: DatasetRequirement, axis: str
+) -> str | None:
+    """Why `whole`, the whole of `part` over every `axis` (a donor or a recipient),
+    does not hold `part`, `None` when it does.
+
+    The part names a party on the side of the flow `axis` is on. The whole names
+    the part's other entities and states the part's `across` words with one word
+    for that side added, so it is the total over every `axis` for the part's
+    other parties. Where Search answers the whole with that side bound to one
+    group, as DAC1 binds DAC countries' total, the translator names the group on
+    the side in place of the word (`translator.discovery.name_pinned_groups`), so
+    a whole naming one entity on that side, other than the part's, and stating
+    only the part's `across` words holds the part too. Which group Search binds
+    is known only once the whole is compiled, so admission refuses a whole
+    naming any other entity there (`submission.service._misnamed_total`).
+    """
+    side = role_party(axis)
+    named = [e for e in part.entities if e.role is not None and role_party(e.role) == side]
+    if not named and (roleless := [e.name for e in part.entities if e.role is None]):
+        return (
+            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and the side of "
+            f"{part.id!r}'s entities ({', '.join(sorted(roleless))}) is not stated; state each "
+            "entity's role, donor or recipient"
+        )
+    if not named:
+        return (
+            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, and {part.id!r} names "
+            f"no {axis} to leave open; state the whole over another axis, or a total of its own "
+            "without `whole_of`"
+        )
+    others = {*part.entities} - {*named}
+    spans = any(across_party(word) == side for word in whole.across)
+    kept = {word for word in whole.across if across_party(word) != side}
+    on_side = {e for e in whole.entities if e.role is not None and role_party(e.role) == side}
+    # The side spanned by `across`, or closed to one group other than the part's party.
+    opened = not on_side if spans else len(on_side) == 1 and not on_side & {*named}
+    if {*whole.entities} - on_side != others or not opened or kept != {*part.across}:
+        return (
+            f"{whole.id!r} is the whole of {part.id!r} over every {axis}, so it states "
+            f"{part.id!r}'s entities without its {axis}s "
+            f"({', '.join(sorted(e.name for e in named))}), and `across` "
+            f"{part.id!r}'s words with {axis!r} added"
+        )
+    return None
+
+
+def _dataset_reach(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> Callable[[str], set[str]]:
+    """The dataset requirements a requirement or input reads, directly or through
+    the calculations between, by its id."""
+    reads: dict[str, Sequence[str]] = {
+        input_id: ()
+        for requirement in requirements_by_id.values()
+        for input_id in inputs_of(requirement)
+    }
+    reads |= {rid: inputs_of(requirement) for rid, requirement in requirements_by_id.items()}
+
+    def datasets(node: str) -> set[str]:
+        return {
+            rid
+            for rid in reached(node, reads)
+            if isinstance(requirements_by_id.get(rid), DatasetRequirement)
+        }
+
+    return datasets
+
+
+def requirements_over(
+    whole_id: str, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> set[str]:
+    """The ids of the whole `whole_id` and of every calculation over it alone, such as
+    the whole summed by year: the reads that end in a divisor of the part."""
+    datasets = _dataset_reach(requirements_by_id)
+    return {rid for rid in requirements_by_id if datasets(rid) == {whole_id}}
+
+
+def _whole_read_fault(
+    whole: DatasetRequirement,
+    part_id: str,
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> str | None:
+    """Why `whole`, the whole of `part_id`, is read other than as the denominator of a
+    share or quotient of its part, `None` when it is read only so.
+
+    The whole is read directly or through calculations over it alone, such
+    as the whole summed by year. Each such read ends in a share or quotient
+    whose denominator reads it and whose numerator reads no dataset but the
+    part, directly or summed the same way. Anything else reading it, and a
+    read that ends unread, takes a plain total of its own.
+    """
+    datasets = _dataset_reach(requirements_by_id)
+    over_whole = requirements_over(whole.id, requirements_by_id)
+    readers: dict[str, list[EvidenceRequirement]] = {rid: [] for rid in over_whole}
+    for reader in requirements_by_id.values():
+        for input_id in inputs_of(reader):
+            if input_id in readers:
+                readers[input_id].append(reader)
+    rule = (
+        f"{whole.id!r} states `whole_of`, so it is read only as the denominator of a "
+        f"share_of or quotient_of whose numerator is its part {part_id!r}"
+    )
+    for read_id in sorted(over_whole):
+        if not readers[read_id]:
+            return (
+                f"{rule}, and nothing reads {read_id!r}. For a total of its own, state a "
+                "plain total: another dataset requirement without `whole_of`"
+            )
+        for reader in readers[read_id]:
+            if reader.id in over_whole or (
+                isinstance(reader, ShareOfRequirement | QuotientRequirement)
+                and reader.denominator.input_id == read_id
+                and datasets(reader.numerator.input_id) == {part_id}
+            ):
+                continue
+            return (
+                f"{rule}, and {reader.id!r} reads {read_id!r} otherwise. For "
+                f"{reader.id!r}, state a plain total: another dataset requirement without "
+                "`whole_of`, read in its place"
+            )
+    return None
 
 
 def _check_requirement_graph(
@@ -2712,7 +3240,8 @@ def _build_shapes(
     whole_history: Mapping[str, int],
     origins: Mapping[str, str],
 ) -> dict[str, FrameShape]:
-    """Walk every requirement in topological order, rejecting an illegal shape as it is found.
+    """Walk every requirement in the order the plan states them, each after its inputs
+    (`requirement_step_order`), rejecting an illegal shape as it is found.
 
     Each requirement's output shape is computed from its inputs' -- already
     built, since the walk is topological -- through the one transform
@@ -2750,7 +3279,7 @@ def _build_shapes(
         ],
     )
     shapes_by_id: dict[str, FrameShape] = {}
-    for requirement_id in _topological_order(requirements_by_id):
+    for requirement_id in requirement_step_order(requirements_by_id):
         requirement = requirements_by_id[requirement_id]
         named = origins.get(requirement_id, requirement_id)
         if named != requirement_id and not isinstance(requirement, DatasetRequirement):
@@ -2780,17 +3309,23 @@ def _build_shapes(
     return shapes_by_id
 
 
-def _topological_order(requirements_by_id: dict[str, EvidenceRequirement]) -> list[str]:
-    """Return every requirement id ordered so each comes after everything `inputs_of` names.
+def requirement_step_order(requirements_by_id: Mapping[str, EvidenceRequirement]) -> list[str]:
+    """Every requirement id in the order `requirements_by_id` holds them, each after
+    every id it reads, one per requirement.
 
-    A post-order depth-first walk. Assumes the requirements already form a
-    DAG -- `_check_reads_resolve` calls `_find_cycle` before this runs.
+    A post-order depth-first walk taking the requirements in the order the
+    mapping holds them, the order the plan states them, and each one's inputs
+    (`inputs_of`) in the order it reads them. So `_build_shapes` meets the
+    steps the model wrote in the order it wrote them, each after its inputs.
+    An input missing from `requirements_by_id` is skipped. Assumes the
+    requirements form a DAG, which `_check_reads_resolve` guarantees by calling
+    `_find_cycle` before shapes are built.
     """
     order: list[str] = []
     visited: set[str] = set()
 
     def visit(requirement_id: str) -> None:
-        if requirement_id in visited:
+        if requirement_id in visited or requirement_id not in requirements_by_id:
             return
         visited.add(requirement_id)
         for input_id in inputs_of(requirements_by_id[requirement_id]):
@@ -2854,6 +3389,41 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
         measures=measures,
         end_open=requirement.period_end_open,
     )
+
+
+def repinned(
+    requirement: DatasetRequirement, spec_id: str, exact_codes: frozenset[str]
+) -> DatasetRequirement:
+    """`requirement` pinned to `spec_id`, a dataset code chose in place of the one it named.
+
+    The source it stated goes with the pin it left: `source`, `source_ref`
+    and `source_exclude`, and `source_code` unless `exact_codes`, the codes
+    `spec_id` is exactly (`exact_codes`), hold it. Discovery checks a pin
+    against a stated source and searches again by it when they differ, so a
+    pin a scope switch (`harness.graph.switch`) or `propose_plan`'s alignment
+    (`submission.service._aligned_bases`) chose would otherwise be searched
+    back to the dataset it replaced.
+    """
+    update: dict[str, Any] = {
+        "source_spec_id": spec_id,
+        "source": None,
+        "source_ref": None,
+        "source_exclude": False,
+    }
+    if requirement.source_code not in exact_codes:
+        update["source_code"] = None
+    return requirement.model_copy(update=update)
+
+
+def exact_codes(block: Mapping[str, Any] | None) -> frozenset[str]:
+    """The publisher codes the dataset of the spec block `block` is exactly, none when it
+    cannot be read (`compiler.sources.source_from_spec_block`)."""
+    if block is None:
+        return frozenset()
+    try:
+        return frozenset(source_from_spec_block(block).exact_codes)
+    except ValueError:
+        return frozenset()
 
 
 def retrieved_period(requirement: DatasetRequirement, *, first_year: int | None) -> Period:
@@ -3478,9 +4048,28 @@ def _check_population_claims_are_cited(
 _EMPTY_STATED = frozenset({"group_by"})
 
 
+# A `DecisionFixes` field a requirement states inside one of its own fields:
+# the price basis of its `unit`.
+_NESTED_FIXES = {"prices": ("unit", "prices")}
+
+
+def _held(requirement: EvidenceRequirement, field: str) -> Any:
+    """The value `requirement` holds for `field`, read inside its own field for a `_NESTED_FIXES` one."""
+    if field not in _NESTED_FIXES:
+        return getattr(requirement, field)
+    outer, inner = _NESTED_FIXES[field]
+    value = getattr(requirement, outer)
+    return getattr(value, inner) if value is not None else None
+
+
+def _declares(requirement: EvidenceRequirement, field: str) -> bool:
+    """Whether `requirement`'s kind states `field`, a `_NESTED_FIXES` one inside its own field."""
+    return _NESTED_FIXES.get(field, (field,))[0] in type(requirement).model_fields
+
+
 def _stated(requirement: EvidenceRequirement, field: str) -> Any:
     """The value `requirement` states for `field`, a field its kind declares, or `None`."""
-    value = getattr(requirement, field)
+    value = _held(requirement, field)
     return None if value == () and field not in _EMPTY_STATED else value
 
 
@@ -3492,8 +4081,9 @@ def _same(first: Any, second: Any) -> bool:
 
 
 # The `DecisionFixes` field no requirement is held to. Code writes
-# `source_spec_id` on the decision a pin states and moves it with the pin
-# (`submission.service._measure_decisions`, `_repinned`); a draft cannot name it.
+# `source_spec_id` on the decisions a pin states and moves it with the pin
+# (`submission.service._measure_decisions`, `_scope_decisions`, `_repinned`);
+# a draft cannot name it.
 _UNCHECKED_FIXES = frozenset({"source_spec_id"})
 
 
@@ -3509,16 +4099,15 @@ def bound_fixes(requirement: EvidenceRequirement, decision: Decision) -> dict[st
     """The values `decision.fixes` states that `requirement`, citing it, is held to, by field.
 
     A field the decision leaves unset is left out, and so is one the
-    requirement's kind does not declare and `source_spec_id`
+    requirement's kind does not declare (`_declares`) and `source_spec_id`
     (`_UNCHECKED_FIXES`).
     """
     if decision.fixes is None:
         return {}
-    declared = type(requirement).model_fields
     return {
         field: fixed
         for field, fixed in decision.fixes
-        if fixed is not None and field in declared and field not in _UNCHECKED_FIXES
+        if fixed is not None and _declares(requirement, field) and field not in _UNCHECKED_FIXES
     }
 
 
@@ -3527,7 +4116,7 @@ def fix_disagreements(
 ) -> list[FixDisagreement]:
     """Each value of `bound_fixes` that `requirement` states otherwise, tuples compared as sets (`_same`)."""
     return [
-        FixDisagreement(field, fixed, getattr(requirement, field))
+        FixDisagreement(field, fixed, _held(requirement, field))
         for field, fixed in bound_fixes(requirement, decision).items()
         if not _same(fixed, _stated(requirement, field))
     ]
@@ -3595,23 +4184,27 @@ def settle_decisions(
         requirements: Every requirement the plan states once the call lands,
             carried forward or new.
     """
-    decisions: list[Decision] = []
-    for draft in drafts:
-        citing = [
-            requirement for requirement in requirements if draft.slot in requirement.decision_ids
-        ]
-        fixed: dict[str, Any] = {}
-        for field in dict.fromkeys(draft.fixes or ()):
-            stated = [_stated(r, field) for r in citing if field in type(r).model_fields]
-            if stated and stated[0] is not None and all(_same(stated[0], v) for v in stated):
-                fixed[field] = stated[0]
-        decisions.append(
-            Decision(
-                **draft.model_dump(exclude={"fixes"}),
-                fixes=DecisionFixes(**fixed) if fixed else None,
-            )
+    return [
+        Decision(
+            **draft.model_dump(exclude={"fixes"}),
+            fixes=read_fixes(requirements, slot=draft.slot, fields=draft.fixes or ()),
         )
-    return decisions
+        for draft in drafts
+    ]
+
+
+def read_fixes(
+    requirements: Sequence[EvidenceRequirement], *, slot: str, fields: Iterable[str]
+) -> DecisionFixes | None:
+    """The value of each of `fields` that the requirements citing `slot` and
+    declaring it all state, or `None` when no field settles (`settle_decisions`)."""
+    citing = [requirement for requirement in requirements if slot in requirement.decision_ids]
+    fixed: dict[str, Any] = {}
+    for field in dict.fromkeys(fields):
+        stated = [_stated(r, field) for r in citing if field in type(r).model_fields]
+        if stated and stated[0] is not None and all(_same(stated[0], v) for v in stated):
+            fixed[field] = stated[0]
+    return DecisionFixes(**fixed) if fixed else None
 
 
 class PlanStatus(TitlelessEnum):
@@ -3676,9 +4269,12 @@ class Plan(StrictModel):
             "without the field."
         ),
     )
+    # Past `MAX_PLAN_DECISIONS`, a plan carries the decisions qualifying its answer
+    # (`Decision.caveat`, `_decisions_fit_the_cap`), at most `MAX_REQUIREMENT_CAVEATS`
+    # for each requirement it states.
     decisions: tuple[Decision, ...] = Field(
         default=(),
-        max_length=MAX_PLAN_DECISIONS,
+        max_length=MAX_PLAN_DECISIONS + MAX_REQUIREMENT_CAVEATS * MAX_HELD_REQUIREMENTS,
         description=(
             f"The methodological choices this plan makes, at most "
             f"{MAX_PLAN_DECISIONS}; a plan names its parts by `slot`, so no two decisions "
@@ -3686,11 +4282,9 @@ class Plan(StrictModel):
             "requirement."
         ),
     )
-    # The model writes at most `MAX_PLAN_REQUIREMENTS` (`_record_fits_the_size_limit`),
-    # and `whole_history_split` copies each of them at most once.
     evidence_requirements: tuple[EvidenceRequirement, ...] = Field(
         default=(),
-        max_length=2 * MAX_PLAN_REQUIREMENTS,
+        max_length=MAX_HELD_REQUIREMENTS,
         description=(
             f"What the answer rests on, at most {MAX_PLAN_REQUIREMENTS} requirements: a "
             "dataset requirement per measure and source, naming every entity, and a derived "
@@ -3777,6 +4371,19 @@ class Plan(StrictModel):
         return question
 
     @model_validator(mode="after")
+    def _decisions_fit_the_cap(self) -> Plan:
+        """Reject a plan stating more than `MAX_PLAN_DECISIONS` decisions that qualify
+        nothing. A decision qualifying the answer (`Decision.caveat`) is not counted:
+        `propose_plan` writes it for the plan whatever else it states."""
+        counted = sum(decision.caveat is None for decision in self.decisions)
+        if counted > MAX_PLAN_DECISIONS:
+            raise ValueError(
+                f"the plan states {counted} decisions, over the {MAX_PLAN_DECISIONS} a plan "
+                "may take"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _record_fits_the_size_limit(self) -> Plan:
         """Reject a plan whose model-authored part states more than `MAX_PLAN_REQUIREMENTS` requirements or serialises past `MAX_PLAN_RECORD_CHARS`.
 
@@ -3785,7 +4392,11 @@ class Plan(StrictModel):
         planner's brief can carry. The message names the measured size and the
         parts that take the most of it, so the model can shorten those. Both
         limits measure the plan the model wrote (`authored`), without the
-        copies `whole_history_split` adds.
+        copies `whole_history_split` adds. The size leaves out the scope
+        decisions and the decisions qualifying the answer that `propose_plan`
+        writes (`is_scope_choice`, `Decision.caveat`): the model cannot shorten
+        them, and `MAX_PLAN_DECISIONS` and the requirements bound how many a
+        plan holds.
         """
         written = authored(self)
         if len(written.evidence_requirements) > MAX_PLAN_REQUIREMENTS:
@@ -3794,6 +4405,11 @@ class Plan(StrictModel):
                 f"over the {MAX_PLAN_REQUIREMENTS} a plan may take"
             )
         record = written.model_dump(mode="json", include=_MODEL_AUTHORED)
+        record["decisions"] = [
+            dumped
+            for dumped, decision in zip(record["decisions"], written.decisions, strict=True)
+            if not is_scope_choice(decision) and decision.caveat is None
+        ]
         size = _serialised_chars(record)
         if size <= MAX_PLAN_RECORD_CHARS:
             return self
@@ -3821,7 +4437,7 @@ class Plan(StrictModel):
         """Reject a plan whose parts do not agree with each other.
 
         Slots, requirement ids and declines (by code and ask) are unique, so a
-        citation is unambiguous.
+        citation is unambiguous (`check_references`).
         Every `decision_ids` entry names a decision the plan makes, and once
         the plan states any requirement, every decision is cited by one: a
         decision no requirement rests on is either a decision about nothing or
@@ -3843,7 +4459,7 @@ class Plan(StrictModel):
         party its ask breaks down by unless that part is declined
         (`_check_asks_keep_their_parties`), and a share or quotient answering
         an ask that totals across a party divides by a whole spanning more
-        than the numerator's own members of it (`_check_wholes_span_their_totals`).
+        than the numerator's own members of it (`check_wholes_span_their_totals`).
 
         The requirements are judged as they run: split so each dataset read
         from its first year serves only its rolling-start readers
@@ -3857,27 +4473,18 @@ class Plan(StrictModel):
         its text (`_naming_origins`).
         """
         slots = [decision.slot for decision in self.decisions]
-        _reject_repeats(slots, what="decision slot")
-        _reject_repeats([decline.key for decline in self.declined], what="decline")
-        _reject_repeats(
-            [requirement.id for requirement in self.evidence_requirements],
-            what="evidence requirement id",
+        check_references(
+            self.evidence_requirements,
+            slots=slots,
+            declines=[decline.key for decline in self.declined],
+            made=slots,
         )
-        cited = {
-            decision_id
-            for requirement in self.evidence_requirements
-            for decision_id in requirement.decision_ids
-        }
-        unknown = sorted(cited - set(slots))
-        if unknown:
-            raise ValueError(
-                f"evidence requirements cite decisions the plan does not make: {unknown!r}"
-            )
-        if self.evidence_requirements:
-            uncited = sorted(set(slots) - cited)
-            if uncited:
-                raise ValueError(f"no evidence requirement cites the decisions {uncited!r}")
-        _check_reads_resolve({r.id: r for r in self.evidence_requirements})
+        # The model's own requirements: a copy the split adds reads copies of a
+        # whole's part.
+        copied = copy_origins(self.rolling_copies)
+        _check_wholes_name_their_parts(
+            {r.id: _reading(r, copied) for r in self.evidence_requirements if r.id not in copied}
+        )
         _check_first_years(self)
         split = split_of(self)
         if split.first_year_unknown:
@@ -3898,7 +4505,7 @@ class Plan(StrictModel):
         _check_population_claims_are_cited(self.evidence_requirements, decisions_by_slot)
         _check_asks_accounted(self.asks, self.answered, self.declined, self.evidence_requirements)
         _check_asks_keep_their_parties(self)
-        _check_wholes_span_their_totals(self)
+        check_wholes_span_their_totals(self)
         _check_asks_across_years(self.asks, self.asks_across_years)
         self._translation_and_workflow_agree()
         return self
@@ -5531,6 +6138,80 @@ def recorded_identity(spec_id: str) -> RecordedDefinition | None:
     return lookup(spec_id) if lookup is not None else None
 
 
+@contextmanager
+def definitions_on_record(definitions: Mapping[str, RecordedDefinition]) -> Iterator[None]:
+    """Put `definitions`, by spec_id, on record inside the block (`recorded_identity`).
+
+    Each is looked up before what the conversation recorded. A plan card
+    switch (`harness.graph.switch`) puts the datasets Search compiled for it
+    on record while the plan is revised, since the conversation records a
+    search only once the node that made it yields.
+    """
+    outer = current_recorded_identity.get()
+
+    def lookup(spec_id: str) -> RecordedDefinition | None:
+        found = definitions.get(spec_id)
+        if found is None and outer is not None:
+            return outer(spec_id)
+        return found
+
+    token = current_recorded_identity.set(lookup)
+    try:
+        yield
+    finally:
+        current_recorded_identity.reset(token)
+
+
+class _ShownDefinition(NamedTuple):
+    """The definition of a dataset the planner was shown, as its block carries it,
+    with the sets its places were asked for as."""
+
+    identity: Mapping[str, Any]
+    groups: tuple[ResolvedGroup, ...] = ()
+    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
+
+
+def identity_on_record(
+    pin: str,
+    *,
+    shown: Mapping[str, PinSource],
+    end_open: bool,
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+) -> RecordedDefinition | None:
+    """The definition on record for `pin`; `None` when none is.
+
+    The definition is the one a search in the conversation recorded
+    (`recorded_identity`), else the one `definition_lookup` answers:
+    `submission.service.admit` and the translator pass the discovery log's
+    (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
+    each source the translator offered. With `end_open` it is otherwise the
+    one the block the planner was shown carries (`shown_identity`). Admission
+    asks for it only for a requirement stating `period_end_open`: the
+    translator can find a closed requirement's pin by searching its stated
+    years, and no search finds a definition with no end year. The translator
+    always asks for it, since a pin compiled in code during the request (a
+    scope choice switched on the plan card, `harness.graph.switch`, or an
+    input put on its calculation's basis, `planner.agent.compile_on_basis`)
+    is held there and nowhere a search recorded it. A shown block that is
+    not readable as a source (`compiler.sources.source_from_spec_block`)
+    puts none on record.
+    """
+    recorded: RecordedDefinition | None = recorded_identity(pin)
+    if recorded is None and definition_lookup is not None:
+        recorded = definition_lookup(pin)
+    if recorded is not None or not end_open or pin not in shown:
+        return recorded
+    identity = shown_identity(pin, shown[pin])
+    block = shown[pin].spec_block(pin)
+    if identity is None or block is None:
+        return None
+    try:
+        source = source_from_spec_block(block)
+    except ValueError:
+        return None
+    return _ShownDefinition(identity, source.groups, source.resolved_sources)
+
+
 # The seconds a discovery call made now may take inside a planner entry. That is
 # what remains of the request's wall-clock bound (`harness.turn_budget.TurnBudget`).
 # Set by `harness.planner_seam` for each planner run inside a request. Unset
@@ -5595,6 +6276,184 @@ def save_pin_sources(state: SessionState, sources: Mapping[str, PinSource]) -> N
     }
 
 
+class AlignedPin(StrictModel):
+    """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
+
+    `option_ids` holds one option per axis moved, measure basis or provider
+    scope, sorted (`submission.service.Realignment.option_ids`). `digest` is
+    Search's answer as a search's digest
+    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    as a reading of the conversation.
+
+    A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is
+    the part pinned to `origin` with its choice on `whole_axis` left open
+    and every other choice on the part's options, and moves no option
+    (`option_ids` empty, `submission.service.Realignment.whole_axis`).
+    """
+
+    origin: str
+    option_ids: tuple[str, ...]
+    spec_id: str
+    digest: dict[str, Any]
+    whole_axis: str | None = None
+
+    @property
+    def key(self) -> tuple[str, tuple[str, ...], str | None]:
+        """What this pin was compiled for: its origin, its options and the axis it leaves open."""
+        return self.origin, self.option_ids, self.whole_axis
+
+    @property
+    def block(self) -> Mapping[str, Any] | None:
+        """The spec block Search answered the compile with, `None` where it states none."""
+        block = self.digest.get("spec_block")
+        return block if isinstance(block, Mapping) else None
+
+
+def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
+    """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
+    return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
+
+
+def held_sources(state: SessionState) -> dict[str, PinSource]:
+    """The spec block on record for each spec_id `state` holds one for: the datasets
+    the planner was shown (`pin_sources`), then each compiled pin's
+    (`AlignedPin.block`) the planner was not shown.
+
+    Read for what a spec_id is, its identity, years and codes, which every
+    holder of the spec_id shares. A compiled pin's entry states that block
+    alone, so nothing about how the pin was chosen is read from it.
+    """
+    shown = pin_sources(state)
+    compiled = {
+        pin.spec_id: PinSource(block=dict(block))
+        for pin in aligned_pins(state)
+        if pin.spec_id not in shown and (block := pin.block) is not None
+    }
+    return {**compiled, **shown}
+
+
+class AlignedInput(StrictModel):
+    """A dataset requirement admission pinned to the compiled pin `spec_id` in place of the pin it states.
+
+    `submission.service._aligned_bases` derives it on every proposal, from
+    the requirement as the planner states it and the pins compiled so far,
+    as `key` names the compile (`AlignedPin.key`). The recorded plan pins
+    `spec_id`. `stated_pin` and the source fields are the requirement's as
+    stated, which the pin to `spec_id` cleared (`repinned`), so the
+    requirement reads as stated again (`unaligned_requirement`).
+    """
+
+    requirement_id: str
+    spec_id: SpecId
+    origin: str
+    option_ids: tuple[str, ...] = ()
+    whole_axis: str | None = None
+    stated_pin: SpecId | None
+    source: str | None = None
+    source_ref: str | None = None
+    source_exclude: bool = False
+    source_code: str | None = None
+
+    @property
+    def key(self) -> tuple[str, tuple[str, ...], str | None]:
+        """The compile the requirement is pinned to (`AlignedPin.key`)."""
+        return self.origin, self.option_ids, self.whole_axis
+
+
+def aligned_input(requirement: DatasetRequirement, pin: AlignedPin) -> AlignedInput:
+    """`requirement`, as stated, pinned to the compiled `pin`."""
+    return AlignedInput(
+        requirement_id=requirement.id,
+        spec_id=pin.spec_id,
+        origin=pin.origin,
+        option_ids=pin.option_ids,
+        whole_axis=pin.whole_axis,
+        stated_pin=requirement.source_spec_id,
+        source=requirement.source,
+        source_ref=requirement.source_ref,
+        source_exclude=requirement.source_exclude,
+        source_code=requirement.source_code,
+    )
+
+
+def alignments(state: SessionState) -> dict[str, AlignedInput]:
+    """The entries `ALIGNMENTS_STATE_KEY` holds, by requirement id; empty when unset.
+
+    An entry stored in a shape `AlignedInput` rejects is left out, and the
+    omission is logged. Its requirement then reads as pinned to the compile.
+    """
+    held: dict[str, AlignedInput] = {}
+    errors: list[ValidationError] = []
+    for raw in state.get(ALIGNMENTS_STATE_KEY) or []:
+        try:
+            entry = AlignedInput.model_validate(raw)
+        except ValidationError as exc:
+            errors.append(exc)
+        else:
+            held[entry.requirement_id] = entry
+    if errors:
+        warn_left_out(logger, ALIGNMENTS_STATE_KEY, errors, entries=len(errors))
+    return held
+
+
+def aligned_stated_pins(state: SessionState) -> dict[str, set[str]]:
+    """The pins the inputs alignment moved onto each compile state, by the
+    compile's spec_id (`alignments`, `AlignedInput.stated_pin`)."""
+    stated: dict[str, set[str]] = {}
+    for entry in alignments(state).values():
+        if entry.stated_pin is not None:
+            stated.setdefault(entry.spec_id, set()).add(entry.stated_pin)
+    return stated
+
+
+def save_alignments(state: SessionState, entries: Iterable[AlignedInput]) -> None:
+    """Record `entries` as the requirements the recorded plan pins to compiled pins."""
+    state[ALIGNMENTS_STATE_KEY] = [entry.model_dump(mode="json") for entry in entries]
+
+
+def compiled_pin(state: SessionState, entry: AlignedInput) -> AlignedPin | None:
+    """The compile `entry` pins its requirement to (`AlignedInput.key`), `None` when none is held."""
+    return next((pin for pin in aligned_pins(state) if pin.key == entry.key), None)
+
+
+def aligned_entry(
+    requirement: EvidenceRequirement, held: Mapping[str, AlignedInput]
+) -> AlignedInput | None:
+    """The record of `held` pinning `requirement` to a compiled pin, when the
+    requirement pins that compile. `None` where its pin is the planner's own,
+    as for a declared whole restated on its compile without `whole_of`, which
+    is a plain requirement the planner pins to that compile directly."""
+    entry = held.get(requirement.id)
+    if (
+        entry is None
+        or not isinstance(requirement, DatasetRequirement)
+        or requirement.source_spec_id != entry.spec_id
+        or (entry.whole_axis is not None and requirement.whole_of is None)
+    ):
+        return None
+    return entry
+
+
+def unaligned_requirement(
+    requirement: EvidenceRequirement, held: Mapping[str, AlignedInput]
+) -> EvidenceRequirement:
+    """`requirement` as the planner states it: one `held` pins to a compiled pin
+    (`aligned_entry`) reads its stated pin and source fields again; any other
+    pin is the planner's own."""
+    entry = aligned_entry(requirement, held)
+    if entry is None:
+        return requirement
+    return requirement.model_copy(
+        update={
+            "source_spec_id": entry.stated_pin,
+            "source": entry.source,
+            "source_ref": entry.source_ref,
+            "source_exclude": entry.source_exclude,
+            "source_code": entry.source_code,
+        }
+    )
+
+
 def dataset_of(identity: Mapping[str, Any]) -> dict[str, Any]:
     """`identity` without its years: what a dataset and every copy of it over another window share."""
     return {key: value for key, value in identity.items() if key != "requested_window"}
@@ -5645,6 +6504,13 @@ def save_plan(state: SessionState, plan: Plan) -> None:
     state[PLAN_STATE_KEY] = plan.model_dump_json()
 
 
+def clear_plan(state: SessionState) -> None:
+    """Clear the plan session `state` holds, with the alignments that belong to it
+    (`ALIGNMENTS_STATE_KEY`), so the next plan reads none of them."""
+    state[PLAN_STATE_KEY] = None
+    state[ALIGNMENTS_STATE_KEY] = None
+
+
 def load_plan_rounds(state: SessionState) -> int:
     """Return how many plans the planner has proposed in its current entry; 0 when none."""
     raw = state.get(PLAN_ROUNDS_STATE_KEY)
@@ -5664,6 +6530,193 @@ def amendment_entry(state: SessionState) -> bool:
 def save_amendment_entry(state: SessionState, amended: bool) -> None:
     """Record whether the planner's current entry opened with the user's amendment of the plan."""
     state[AMENDMENT_ENTRY_STATE_KEY] = amended
+
+
+class DecisionPick(StrictModel):
+    """The option `chosen` the user picked on the plan card for the planner
+    decision under `slot`, exactly as the decision's `options` states it,
+    with the scope the replan for it may change.
+
+    `origin_fixes` is what that decision fixed on the card, which the picked
+    option must change. Call C the card's requirements citing `slot`. The
+    replan replaces them: `replaced_readings` holds what each root of C
+    read (`requirement_roots`, `requirement_readings`), `replaced_kinds`
+    the kinds of those roots, which tell a change of shape apart,
+    `cited_by_every`
+    the decisions every replacing requirement cites, `slot` and each
+    decision of the user's every member of C cited, and `cited_by_any` each
+    other decision of the user's some member of C cited, which some
+    replacing requirement cites. Decisions code writes (`is_code_written`)
+    are left out of both, `slot` too when code writes it, as it writes the
+    user's prices: admission derives their citations. Everything
+    else on the card stands as the planner wrote it: `kept_requirements`
+    holds each other requirement's `requirement_digest` by id, and
+    `kept_decisions` the `content_digest` of each decision but `slot` and
+    those code writes that the user made or a kept requirement cites, by
+    slot. Every proposal of the replan is held against them
+    (`submission.service._outside_pick`, `_picked_decision`). Built by
+    `on_card`.
+    """
+
+    slot: str
+    chosen: str
+    origin_fixes: DecisionFixes
+    replaced_readings: tuple[str, ...]
+    replaced_kinds: tuple[str, ...]
+    cited_by_every: tuple[str, ...]
+    cited_by_any: tuple[str, ...]
+    kept_requirements: dict[str, str]
+    kept_decisions: dict[str, str]
+
+    @classmethod
+    def on_card(cls, card: Plan, *, slot: str, chosen: str) -> DecisionPick:
+        """The pick of `chosen` for the decision under `slot` on `card`, which fixes something.
+
+        `card` is the plan as the model wrote it (`authored`), with every
+        windowed copy's pin moved back to the pin it copies, as admission
+        reads the plan a proposal amends.
+        """
+        requirements = card.evidence_requirements
+        replaced = [r for r in requirements if slot in r.decision_ids]
+        kept = [r for r in requirements if slot not in r.decision_ids]
+        readings = requirement_readings(requirements)
+        code_written = {d.slot for d in card.decisions if is_code_written(d)}
+        users = {
+            d.slot
+            for d in card.decisions
+            if d.resolved_by is ResolvedBy.USER and d.slot not in code_written
+        }
+        cited_by_kept = {cited for requirement in kept for cited in requirement.decision_ids}
+        every = users.intersection(*(r.decision_ids for r in replaced))
+        some = {cited for requirement in replaced for cited in requirement.decision_ids}
+        origin = next(d for d in card.decisions if d.slot == slot)
+        if origin.fixes is None:
+            raise ValueError(f"decision {slot!r} fixes nothing, so no option of it can be picked")
+        return cls(
+            slot=slot,
+            chosen=chosen,
+            origin_fixes=origin.fixes,
+            replaced_readings=tuple(sorted({readings[r.id] for r in requirement_roots(replaced)})),
+            replaced_kinds=tuple(sorted({r.kind for r in requirement_roots(replaced)})),
+            cited_by_every=tuple(sorted(({slot} - code_written) | every)),
+            cited_by_any=tuple(sorted((users & some) - every)),
+            kept_requirements={
+                r.id: requirement_digest(r, code_written=code_written) for r in kept
+            },
+            kept_decisions={
+                d.slot: content_digest(d)
+                for d in card.decisions
+                if d.slot != slot
+                and d.slot not in code_written
+                and (d.slot in users or d.slot in cited_by_kept)
+            },
+        )
+
+
+def requirement_roots(requirements: Sequence[EvidenceRequirement]) -> list[EvidenceRequirement]:
+    """Each of `requirements` that no other of them reads (`inputs_of`): the figures they end in."""
+    read = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
+    return [requirement for requirement in requirements if requirement.id not in read]
+
+
+def is_code_written(decision: Decision) -> bool:
+    """Whether `propose_plan` wrote `decision` itself: a search pin's measure
+    (`is_search_pin`), a scope choice (`Decision.scope`), a caveat
+    (`Decision.caveat`), or the prices the user chose for a part, the one
+    decision fixing `DecisionFixes.prices` (`submission.prices_choice`).
+    Admission rewrites these on every proposal."""
+    return (
+        decision.scope is not None
+        or decision.caveat is not None
+        or is_search_pin(decision)
+        or (decision.fixes is not None and decision.fixes.prices is not None)
+    )
+
+
+def content_digest(item: StrictModel) -> str:
+    """The digest of `item`'s whole content. Canonical JSON (RFC 8785) under SHA-256."""
+    return _digest(item.model_dump(mode="json"))
+
+
+def requirement_digest(requirement: EvidenceRequirement, *, code_written: Collection[str]) -> str:
+    """The `content_digest` of `requirement` less its citations of the decisions
+    under `code_written`, which admission derives itself."""
+    content = requirement.model_dump(mode="json")
+    content["decision_ids"] = [
+        slot for slot in requirement.decision_ids if slot not in code_written
+    ]
+    return _digest(content)
+
+
+def requirement_readings(requirements: Sequence[EvidenceRequirement]) -> dict[str, str]:
+    """The digest of what each of `requirements` reads, by id.
+
+    Each requirement enters as its content less `id` and `decision_ids`,
+    with every input it reads (`inputs_of`) standing for that input's own
+    reading. So a digest moves only when the requirement, or one under it,
+    reads something else: renaming one or citing other decisions from it
+    leaves it as it was. `requirements` must not read one another in a
+    cycle. Canonical JSON (RFC 8785) under SHA-256, as `plan_revision`.
+    """
+    by_id = {requirement.id: requirement for requirement in requirements}
+    digests: dict[str, str] = {}
+
+    def digest(requirement: EvidenceRequirement) -> str:
+        if requirement.id not in digests:
+            read = _reading(
+                requirement,
+                {
+                    input_id: digest(by_id[input_id])
+                    for input_id in inputs_of(requirement)
+                    if input_id in by_id
+                },
+            )
+            digests[requirement.id] = _digest(
+                read.model_dump(mode="json", exclude={"id", "decision_ids"})
+            )
+        return digests[requirement.id]
+
+    return {requirement.id: digest(requirement) for requirement in requirements}
+
+
+def _digest(content: dict[str, Any] | list[str]) -> str:
+    return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
+
+
+class UnreadablePickError(ValueError):
+    """A pick stored in a shape this release does not read, such as one an
+    earlier release wrote mid-entry. Read as no pick, it would let the
+    replan change the plan unchecked, so every reader refuses it."""
+
+
+def decision_pick(state: SessionState) -> DecisionPick | None:
+    """The pick on the plan card that the planner's current entry holds
+    (`DECISION_PICK_STATE_KEY`), or `None`.
+
+    Raises:
+        UnreadablePickError: If the slot holds a pick this release cannot read.
+    """
+    return pick_of(state.get(DECISION_PICK_STATE_KEY))
+
+
+def pick_of(raw: object) -> DecisionPick | None:
+    """The `DecisionPick` a pick stored as its JSON dump states, or `None` when none is stored.
+
+    Raises:
+        UnreadablePickError: If `raw` is something other than `None` or a
+            dump of a `DecisionPick` this release reads.
+    """
+    if raw is None:
+        return None
+    try:
+        return DecisionPick.model_validate(raw)
+    except ValidationError as exc:
+        raise UnreadablePickError("the pick on the plan card cannot be read") from exc
+
+
+def save_decision_pick(state: SessionState, pick: DecisionPick | None) -> None:
+    """Record the pick the planner's current entry holds, or clear it with `None`."""
+    state[DECISION_PICK_STATE_KEY] = None if pick is None else pick.model_dump(mode="json")
 
 
 def load_unsupported(state: SessionState) -> frozenset[UnsupportedOperation]:

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 from data_mcp.digest import render_answer, render_digest
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 # Envelope factories. `spec_id`/`sentence`/`confidence`/`coverage`/`stat_vars`/
 # `entities`/`facets` mirror one resolved spec; `_part` wraps one status
@@ -534,6 +538,266 @@ def test_a_definite_spec_names_its_elected_measure_and_each_sibling(
         assert "Counted as" not in digest
     else:
         assert line in digest.splitlines()
+
+
+def _scope_spec() -> dict[str, Any]:
+    """A spec carrying the recorded US health aid to Africa `PartScope` as served."""
+    part_scope = json.loads((_FIXTURES / "scope_choices_us_health_africa.json").read_text())
+    spec = _spec()
+    spec["resolved"]["scope_choices"] = part_scope
+    return spec
+
+
+def test_each_scope_choice_renders_one_line_with_its_active_option_provenance_and_others() -> None:
+    digest = render_digest(_envelope("definite", spec=_scope_spec()))
+
+    lines = [line for line in digest.splitlines() if line.startswith("Scope choice")]
+    assert lines == [
+        "Scope choice sector: sector:120 (explicit); 1 other option available [sector:120+130].",
+        "Scope choice region: region:members_only (carried); "
+        "1 other option available [region:members_and_residuals].",
+        # measure_basis:net is unavailable, so only grant equivalents are offered.
+        "Scope choice measure_basis: measure_basis:gross (default); "
+        "1 other option available [measure_basis:grant_equivalent].",
+    ]
+
+
+def test_a_scope_choice_with_no_other_option_says_so_and_a_partial_option_is_offered() -> None:
+    spec = _scope_spec()
+    choices = spec["resolved"]["scope_choices"]["choices"]
+    for option in choices[0]["options"]:
+        option["availability"] = {"status": "unavailable", "code": "conflicts_with", "detail": {}}
+    choices[1]["options"][0]["availability"] = {"status": "partial", "years": [[2011, 2024]]}
+
+    lines = [
+        line
+        for line in render_digest(_envelope("definite", spec=spec)).splitlines()
+        if line.startswith("Scope choice")
+    ]
+
+    assert lines[0] == "Scope choice sector: sector:120 (explicit); no other option available."
+    assert "[region:members_and_residuals]" in lines[1]
+
+
+def test_the_structured_answer_carries_the_scope_choices_of_a_definite_spec() -> None:
+    answer = render_answer(_envelope("definite", spec=_scope_spec()))
+
+    assert answer["parts"][0]["specs"][0]["scope_choices"][1] == {
+        "axis": "region",
+        "provenance": "carried",
+        "active": {"option_id": "region:members_only", "label": "region:members_only"},
+        "other_options": ["region:members_and_residuals"],
+    }
+
+
+def _inclusive_request_served_bilateral() -> dict[str, Any]:
+    """The scope spec with a provider choice served bilateral, where the user's words asked
+    for bilateral plus imputed multilateral and the imputed table covers only 2011 to 2024."""
+    spec = _scope_spec()
+    scope = spec["resolved"]["scope_choices"]
+    scope["choices"].append(
+        {
+            "id": f"{scope['id']}:provider",
+            "axis": "provider",
+            "rule": "test_provider_convention",
+            "provenance": "default",
+            "active": "provider:bilateral",
+            "options": [
+                {
+                    "option_id": "provider:bilateral",
+                    "label": "bilateral",
+                    "binding": {"kind": "provider", "scope": "bilateral"},
+                    "availability": {"status": "available", "detail": {}},
+                },
+                {
+                    "option_id": "provider:inclusive",
+                    "label": "bilateral plus imputed multilateral",
+                    "binding": {"kind": "provider", "scope": "inclusive"},
+                    "availability": {
+                        "status": "partial",
+                        "years": [[2011, 2024]],
+                        "code": "imputed_coverage",
+                        "detail": {},
+                    },
+                },
+            ],
+        }
+    )
+    scope["dropped_entries"] = [
+        {
+            "entry": {
+                "axis": "provider",
+                "option_id": "provider:inclusive",
+                "provenance": "explicit",
+                "origin": {
+                    "kind": "text",
+                    "text": "bilateral plus imputed multilateral",
+                    "start": 0,
+                    "end": 35,
+                },
+            },
+            "code": "stated_choice_not_applied",
+            "cause": "imputed_coverage",
+        }
+    ]
+    return spec
+
+
+def test_a_dropped_entry_states_the_option_asked_for_and_why_in_text_and_structured_content() -> (
+    None
+):
+    envelope = _envelope("definite", spec=_inclusive_request_served_bilateral())
+
+    lines = render_digest(envelope).splitlines()
+    answer = render_answer(envelope)["parts"][0]["specs"][0]
+
+    assert (
+        "Scope choice provider not applied: asked for bilateral plus imputed multilateral "
+        "(explicit); served bilateral, because imputed multilateral aid covers only some "
+        "years (2011 to 2024)."
+    ) in lines
+    assert answer["dropped_scope_entries"] == [
+        {
+            "axis": "provider",
+            "requested": {
+                "option_id": "provider:inclusive",
+                "label": "bilateral plus imputed multilateral",
+            },
+            "provenance": "explicit",
+            "served": {"option_id": "provider:bilateral", "label": "bilateral"},
+            "cause": "imputed_coverage",
+            "reason": "imputed multilateral aid covers only some years (2011 to 2024)",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cause", "because"),
+    [
+        ("axis_absent", "this answer has no provider choice"),
+        ("cause_from_a_later_release", "Search could not apply it [cause_from_a_later_release]"),
+    ],
+    ids=["axis-absent", "unknown-cause"],
+)
+def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_served_option(
+    cause: str, because: str
+) -> None:
+    """A cause this release has no words for says only that Search could not
+    apply the entry, never that it conflicts with another choice."""
+    spec = _scope_spec()
+    spec["resolved"]["scope_choices"]["dropped_entries"] = [
+        {
+            "entry": {
+                "axis": "provider",
+                "option_id": "provider:inclusive",
+                "provenance": "carried",
+                "origin": {"kind": "choice", "choice_id": "earlier:provider"},
+            },
+            "cause": cause,
+        }
+    ]
+
+    envelope = _envelope("definite", spec=spec)
+
+    assert (
+        "Scope choice provider not applied: asked for provider:inclusive (carried), "
+        f"because {because}."
+    ) in render_digest(envelope).splitlines()
+    dropped = render_answer(envelope)["parts"][0]["specs"][0]["dropped_scope_entries"]
+    assert dropped[0]["served"] is None
+
+
+_IMPUTED_BASIS_WORDS = "imputed multilateral aid is not published on that measure basis"
+
+
+def _declared_conflict(cause: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "code": "conflicts_with",
+        "detail": {"entry": "measure_basis:net", "cause": cause},
+    }
+
+
+@pytest.mark.parametrize(
+    ("cause", "availability", "because"),
+    [
+        (
+            "imputed_gross_disbursements_only",
+            _declared_conflict("imputed_gross_disbursements_only"),
+            _IMPUTED_BASIS_WORDS,
+        ),
+        (
+            "imputed_gross_disbursements_only",
+            {"status": "available", "detail": {}},
+            _IMPUTED_BASIS_WORDS,
+        ),
+        (
+            "both_composite_sources",
+            _declared_conflict("both_composite_sources"),
+            "imputed multilateral aid cannot be added to the OECD headline series",
+        ),
+        (
+            "unworded_conflict",
+            _declared_conflict("unworded_conflict"),
+            "it conflicts with another choice [unworded_conflict]",
+        ),
+        (
+            "unworded_conflict",
+            {"status": "available", "detail": {}},
+            "Search could not apply it [unworded_conflict]",
+        ),
+        (
+            "unworded_conflict",
+            {"status": "unavailable", "code": "conflicts_with", "detail": "measure_basis:net"},
+            "Search could not apply it [unworded_conflict]",
+        ),
+    ],
+    ids=[
+        "imputed-basis-declared",
+        "imputed-basis-no-conflict-stated",
+        "both-composite-sources",
+        "unworded-declared",
+        "unworded-no-conflict-stated",
+        "unworded-detail-not-a-mapping",
+    ],
+)
+def test_a_dropped_entry_a_declared_conflict_kept_out_reads_as_a_conflict(
+    cause: str, availability: dict[str, Any], because: str
+) -> None:
+    """An entry dropped under a conflict cause Search declares reads as that
+    cause's words, whatever the option's availability states. A cause with no
+    words, which the option it asked for names as the conflict blocking it,
+    reads as a conflict; the same cause on an option naming no conflict, or
+    naming one in a `detail` that is no mapping, says only that Search could
+    not apply it."""
+    spec = _inclusive_request_served_bilateral()
+    scope = spec["resolved"]["scope_choices"]
+    (provider,) = [c for c in scope["choices"] if c["axis"] == "provider"]
+    provider["options"][1]["availability"] = availability
+    scope["dropped_entries"][0]["cause"] = cause
+
+    envelope = _envelope("definite", spec=spec)
+
+    assert (
+        "Scope choice provider not applied: asked for bilateral plus imputed multilateral "
+        f"(explicit); served bilateral, because {because}."
+    ) in render_digest(envelope).splitlines()
+    dropped = render_answer(envelope)["parts"][0]["specs"][0]["dropped_scope_entries"]
+    assert dropped[0]["reason"] == because
+
+
+def test_no_dropped_entry_adds_no_line_and_no_answer_field() -> None:
+    envelope = _envelope("definite", spec=_scope_spec())
+
+    assert "not applied" not in render_digest(envelope)
+    assert "dropped_scope_entries" not in render_answer(envelope)["parts"][0]["specs"][0]
+
+
+def test_a_spec_without_scope_choices_renders_no_scope_line_and_no_answer_field() -> None:
+    envelope = _envelope("definite", spec=_spec())
+
+    assert "Scope choice" not in render_digest(envelope)
+    assert "scope_choices" not in render_answer(envelope)["parts"][0]["specs"][0]
 
 
 def test_a_spec_with_no_elected_stat_vars_renders_no_measure_line() -> None:

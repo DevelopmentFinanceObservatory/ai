@@ -50,7 +50,8 @@ def _strip_titles(schema: JsonSchemaValue) -> None:
 # A name a plan uses to refer to one of its own parts -- a decision's slot, a
 # requirement's id, an operation's id. Lower-case identifiers, so a reference
 # compares exactly.
-Identifier = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+MAX_IDENTIFIER_CHARS = 64
+Identifier = Annotated[str, Field(pattern=rf"^[a-z][a-z0-9_]{{0,{MAX_IDENTIFIER_CHARS - 1}}}$")]
 
 # The longest entity name and role phrase a plan or an operation states, and the
 # most entities one field lists. A name is the entity in the question's own words
@@ -80,7 +81,9 @@ RankLimit = Annotated[int, Field(ge=1, le=MAX_RANK_LIMIT)]
 SpecId = Annotated[str, Field(pattern=r"^spec_[0-9a-f]{32}$")]
 
 # Whether one of a Search part's scope choice options can be served
-# (`harness.scope_choices`).
+# (`harness.scope_choices`). A plan's scope decision states it too
+# (`planner.plan.DecisionScope`), beside the choice's axis
+# (`data_mcp.scope.ScopeAxis`).
 OptionStatus = Literal["available", "partial", "unavailable"]
 
 
@@ -599,6 +602,7 @@ class EvidenceIssueCode(TitlelessEnum):
     DATA_UNVERIFIED = "data_unverified"
     IDENTITY_UNVERIFIED = "identity_unverified"
     ENTITY_MISSING = "entity_missing"
+    ENTITY_NO_SERIES = "entity_no_series"
     ENTITY_UNVERIFIED = "entity_unverified"
     ENTITY_ROLE_AMBIGUOUS = "entity_role_ambiguous"
     ENTITY_ROLE_MISMATCH = "entity_role_mismatch"
@@ -713,3 +717,77 @@ class AmbiguousSourceReading(StrictModel):
 
     text: str
     candidates: tuple[SourceNameCandidate, ...]
+
+
+class EntityCandidate(StrictModel):
+    """A graph node Search offers for ambiguous entity wording: its dcid and label.
+
+    `restate_as` is set when the candidate is a group's own node on a row
+    asked for its members: Search's option posts the group's registered name
+    with `members` and no dcid, since a pinned group node cannot ask for its
+    members, so the entity states that name in place of the `ref`. It is left
+    out of a dump while unset.
+
+    `pick` is the id an ask offers the candidate under, naming the
+    requirement and the reading as well as the candidate (`entity_pick`). The
+    referral holding the reading fills it (`AmbiguousEntityReading.picked_under`),
+    and it is left out of a dump while unset.
+    """
+
+    ref: str
+    label: str
+    restate_as: str | None = Field(default=None, exclude_if=lambda name: name is None)
+    pick: str = Field(default="", exclude_if=lambda pick: not pick)
+
+
+class EntityKey(StrictModel):
+    """A requirement entity as `(name, role)`, the entity an ambiguous reading is about."""
+
+    name: str
+    role: str | None = None
+
+
+def entity_pick(requirement_id: str, entity: EntityKey, choice: str) -> str:
+    """The id an ask offers a candidate under for the reading about `entity` in `requirement_id`.
+
+    The requirement, then the entity's role, then its name, then `choice`,
+    the candidate's node or the group name it is restated as
+    (`EntityCandidate.restate_as`), so an answer naming it says which entity
+    of which requirement the user settled as well as how:
+    "flows|donor|Congo|country/COD" and "flows|recipient|Congo|country/COD"
+    are two different answers, and a later referral about the same
+    requirement offers the same ids for the same readings. An entity with no
+    role leaves its field empty.
+    """
+    return f"{requirement_id}|{entity.role or ''}|{entity.name}|{choice}"
+
+
+class AmbiguousEntityReading(StrictModel):
+    """One requirement entity whose words Search cannot tie to one graph node,
+    with the nodes it offers.
+
+    Each reading is one decision. Discovery sends rows by text alone, so rows
+    written alike share one identity and one Search group: "aid from Congo to
+    Congo" is one group, read as two readings, one per end.
+    """
+
+    text: str
+    candidates: tuple[EntityCandidate, ...]
+    entity: EntityKey
+
+    def picked_under(self, requirement_id: str) -> AmbiguousEntityReading:
+        """This reading with each candidate's `pick` naming it within `requirement_id` (`entity_pick`)."""
+        return self.model_copy(
+            update={
+                "candidates": tuple(
+                    candidate.model_copy(
+                        update={
+                            "pick": entity_pick(
+                                requirement_id, self.entity, candidate.restate_as or candidate.ref
+                            )
+                        }
+                    )
+                    for candidate in self.candidates
+                )
+            }
+        )

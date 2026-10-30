@@ -1,0 +1,68 @@
+"""The option a user picks for a planner decision on the plan card.
+
+The card offers the options of a planner decision it can switch
+(`harness.plan_display.switchable_decision`) under the row id
+`"decision/<slot>"`. A `switch` naming such a row resumes the paused
+`approve` node, which replans with the pick held: `decision_pick` reads the
+pick off the plan the card showed, as the planner states it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+from planner.plan import AlignedInput, DecisionPick, Plan
+from submission.service import statement
+
+from harness.plan_display import (
+    DECISION_CHOICE_PREFIX,
+    decision_option_id,
+    switchable_decision,
+)
+
+
+def is_decision_choice(choice_id: str) -> bool:
+    """Whether `choice_id` names a planner decision's row."""
+    return choice_id.startswith(DECISION_CHOICE_PREFIX)
+
+
+def decision_pick(
+    plan: Plan,
+    *,
+    choice_id: str,
+    option_id: str,
+    to_origin: Mapping[str, str],
+    alignments: Mapping[str, AlignedInput],
+) -> DecisionPick | None:
+    """The pick a switch of row `choice_id` to option `option_id` makes on `plan`.
+
+    The pick records, off `plan` as the planner states it
+    (`submission.service.statement`), with `to_origin` mapping each windowed
+    copy's spec_id to the pin it copies and `alignments` each requirement
+    pinned to a compile (`planner.plan.alignments`), what the replan for it
+    may change and what it must keep (`DecisionPick.on_card`): the origin
+    every proposal of the replan is held against, in the view
+    `submission.service.admit` reads each proposal in. `None` when `choice_id` names no switchable
+    planner decision of `plan`, or `option_id` none of its options or the
+    one it has chosen, so that switch does not apply.
+    """
+    if not is_decision_choice(choice_id):
+        return None
+    slot = choice_id.removeprefix(DECISION_CHOICE_PREFIX)
+    decision = next((d for d in plan.decisions if d.slot == slot), None)
+    if decision is None or decision.fixes is None or not switchable_decision(decision):
+        return None
+    option = next((o for o in decision.options if decision_option_id(o) == option_id), None)
+    if option is None or option == decision.chosen:
+        return None
+    return DecisionPick.on_card(
+        statement(plan, to_origin=to_origin, alignments=alignments), slot=slot, chosen=option
+    )
+
+
+def picks_the_chosen_option(plan: Plan, *, choice_id: str, option_id: str) -> bool:
+    """Whether `choice_id` names a planner decision of `plan` and `option_id` the option it has chosen."""
+    if not is_decision_choice(choice_id):
+        return False
+    slot = choice_id.removeprefix(DECISION_CHOICE_PREFIX)
+    return any(d.slot == slot and decision_option_id(d.chosen) == option_id for d in plan.decisions)

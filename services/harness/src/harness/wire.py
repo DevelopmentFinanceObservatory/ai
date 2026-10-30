@@ -34,6 +34,7 @@ these bodies -- see `harness.auth`.
 from __future__ import annotations
 
 import json
+import logging
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast, get_args
 
@@ -45,8 +46,13 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
     model_validator,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _WireModel(BaseModel):
@@ -629,39 +635,87 @@ MAX_SEED_GROUP_LABEL_CHARS = 120
 # `common.place_type.PartyClass`.
 MAX_SEED_PARTY_CLASSES = len(get_args(PartyClass))
 
+# The most members a set's `members` lists, and residual labels its `left_out` names,
+# as apis bounds `EntityGroup.members` and `EntityGroup.left_out`.
+MAX_SEED_GROUP_MEMBERS = 1024
+MAX_SEED_GROUP_LEFT_OUT = 64
+
+# The most characters a set's dcid may span, its `ref`, `entity_type`, `total`,
+# `group_id` and each of its `members`, as apis bounds every identity string
+# (`search.models.identity.IdentityString`).
+MAX_SEED_GROUP_DCID_CHARS = 1024
+
+# One dcid a set names or lists.
+SeedGroupDcid = Annotated[str, Field(max_length=MAX_SEED_GROUP_DCID_CHARS)]
+
+
+def _unposted(default: object) -> WrapValidator:
+    """Read a set's field a resubmit does not post, `default` with a warning where
+    it does not parse, so the field and not the set is lost."""
+
+    def read(value: object, handler: ValidatorFunctionWrapHandler, info: ValidationInfo) -> object:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            logger.warning(
+                "seed set field dropped: field=%s errors=%s",
+                info.field_name,
+                sorted({error["type"] for error in exc.errors()}),
+            )
+            return default
+
+    return WrapValidator(read)
+
 
 class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
-    `total` is the published total party the role bound for the set, absent
-    when it bound the members (`planner.workflow.ResolvedGroup.total`).
-    `whole_of` names the classes of party that total, or the set of totals the
-    role bound, holds in full, absent for any other set
-    (`planner.workflow.ResolvedGroup.whole_of`). `side_classes` names the classes
-    of party, totals aside, the dataset publishes on that set's side, absent for
-    any other set and from a Search that predates it
-    (`planner.workflow.ResolvedGroup.side_classes`). The
-    members are apis' `EntityGroup` fields, and any other key is refused,
+    The members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
+    The seed's resubmit (`harness.seeds.resolve_seed`) posts each set's `label`
+    and its `ref` or `group_id` on its role (`compiler.sources.wire_groups`), and
+    those are held as `compiler.sources.block_wire_groups` reads them, each to the
+    bound apis sets on it: a set failing one is not one Search would take.
+    Every other field is read to its own type and bound and falls back to its
+    default where it does not parse (`_unposted`), since the set posts the same
+    without it; a residual label in `left_out`, which apis does not bound, is
+    held only by the seed's byte cap (`MAX_SEED_SPEC_BYTES`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
-    ref: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
-    entity_type: str | None = Field(
+    ref: SeedGroupDcid | None = Field(default=None, min_length=1)
+    group_id: SeedGroupDcid | None = Field(
         default=None,
-        max_length=MAX_SEED_TEXT_CHARS,
-        exclude_if=lambda entity_type: entity_type is None,
+        min_length=1,
+        exclude_if=lambda group_id: group_id is None,
     )
-    total: str | None = Field(
-        default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
+    entity_type: Annotated[SeedGroupDcid | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda entity_type: entity_type is None
     )
-    whole_of: tuple[PartyClass, ...] = Field(
+    total: Annotated[SeedGroupDcid | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda total: total is None
+    )
+    whole_of: Annotated[tuple[PartyClass, ...], _unposted(())] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
-    side_classes: tuple[PartyClass, ...] = Field(
+    side_classes: Annotated[tuple[PartyClass, ...], _unposted(())] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
+    )
+    members: Annotated[tuple[SeedGroupDcid, ...], _unposted(())] = Field(
+        default=(), max_length=MAX_SEED_GROUP_MEMBERS, exclude_if=lambda members: not members
+    )
+    holds_multilaterals: Annotated[bool | None, _unposted(None)] = Field(
+        default=None, exclude_if=lambda holds: holds is None
+    )
+    left_out: Annotated[tuple[str, ...] | None, _unposted(None)] = Field(
+        default=None,
+        max_length=MAX_SEED_GROUP_LEFT_OUT,
+        exclude_if=lambda labels: labels is None,
+    )
+    sum_differs: Annotated[bool, _unposted(False)] = Field(
+        default=False, exclude_if=lambda differs: not differs
     )
 
 
@@ -672,9 +726,9 @@ class SeedSpec(BaseModel):
     The website posts the block as Search served it. `entity_groups` is read
     from its `resolved.entity_groups`, so the seed's resubmit posts the sets
     beside the identity and Search, which keeps only a set the graph
-    confirms, names them again. Only a set on a role the identity binds, with
-    a name Search would take, is kept; any other is dropped and the seed
-    stands without it, as `compiler.sources` drops a nameless one. A set
+    confirms, names them again. Only a set on a role the identity binds, whose
+    posted name and node Search would take, is kept; any other is dropped and
+    the seed stands without it, as `compiler.sources` drops a nameless one. A set
     carrying a key `SeedEntityGroup` does not know refuses the seed. Every other member, the rest of `resolved`
     among them, is dropped as the block is read, so nothing
     in the harness reads it from the browser: `harness.graph`'s `seed` node
@@ -719,6 +773,16 @@ class SeedSpec(BaseModel):
                     raise ValueError(
                         f"resolved.entity_groups.{role} carries unknown keys {unknown}"
                     ) from exc
+                # Only the fields a resubmit posts can fail a set (`SeedEntityGroup`),
+                # each to apis' bound, so a set failing here is one Search would not
+                # take on a resubmit; the seed stands without it.
+                label = group.get("label") if isinstance(group, dict) else None
+                logger.warning(
+                    "seed set dropped: role=%s label=%r errors=%s",
+                    role,
+                    label[:MAX_SEED_GROUP_LABEL_CHARS] if isinstance(label, str) else None,
+                    sorted({error["type"] for error in exc.errors()}),
+                )
                 continue
         return {**data, "entity_groups": groups or None}
 
@@ -794,6 +858,20 @@ class Seed(_WireModel):
     operations: list[SeedOperation] = Field(default_factory=list, max_length=MAX_SEED_OPERATIONS)
 
 
+class ApplyChoice(_WireModel):
+    """A suggestion chip the user clicked (`ApplyChoiceSuggestion`), echoed
+    whole: the scope choice, the option it moves to, the conversation turn
+    whose answer offered the chip (`turn`, from 1), and the spec_id of the
+    reading it switches (`spec_id`). The route refuses it 422
+    `scope_choice_stale` when a later turn answered, or when the choice's
+    newest reading is no longer `spec_id`."""
+
+    choice_id: str = Field(min_length=1)
+    option_id: str = Field(min_length=1)
+    turn: int = Field(ge=1)
+    spec_id: str = Field(min_length=1)
+
+
 class TurnRequest(_WireModel):
     """POST /api/studio/turn -- start or continue a turn.
 
@@ -813,12 +891,19 @@ class TurnRequest(_WireModel):
     so it seeds nothing: the turn runs from the question, as it did while
     the member was reserved, and the `seed` node reports the unused
     reference as a failed step.
+
+    `apply_choice` carries a chip's choice, option, answer turn and reading,
+    with no message text: the turn applies the option to the reading the
+    answer used, with no
+    search (`harness.graph.switch.apply_stored_choice`). It cannot come with
+    a message, seeds or a card reference. A request carries `message` or
+    `apply_choice`.
     """
 
     kind: Literal["turn.request"]
     schema_version: Literal[1]
     conversation_id: str = _CONVERSATION_ID
-    message: str
+    message: str = ""
     surface: Surface = Surface.STUDIO
     component_ref: ComponentRef | None = None
     seed_spec: (
@@ -828,6 +913,28 @@ class TurnRequest(_WireModel):
     # but are NOT appended to the composition; the client adds them later
     # with a composition.mutate "add" op (the Auto-add toggle).
     auto_add: bool = True
+    apply_choice: ApplyChoice | None = None
+
+    @model_validator(mode="after")
+    def _a_chip_comes_alone(self) -> TurnRequest:
+        """Refuse a request with neither `message` nor `apply_choice`, and an
+        `apply_choice` beside message text, seeds or a card reference."""
+        if self.apply_choice is None:
+            if "message" not in self.model_fields_set:
+                raise ValueError("turn.request requires message or apply_choice")
+            return self
+        stated = [
+            name
+            for name, value in (
+                ("message", self.message),
+                ("seed_spec", self.seed_spec),
+                ("component_ref", self.component_ref),
+            )
+            if value
+        ]
+        if stated:
+            raise ValueError(f"apply_choice does not take {', '.join(stated)}")
+        return self
 
     @model_validator(mode="after")
     def _seeds_start_a_turn_not_an_edit(self) -> TurnRequest:
@@ -850,6 +957,9 @@ class InterruptDecision(StrEnum):
     # ask closes the turn. The planner's ask counts it as the user declining
     # to choose, and the planner plans on without a pick of theirs.
     SKIP = "skip"
+    # Plan only. The user moves one scope choice to another of its options;
+    # the plan is revised in code and offered again. It approves nothing.
+    SWITCH = "switch"
 
 
 class OptionAnswer(_WireModel):
@@ -885,9 +995,14 @@ class InterruptResponse(_WireModel):
     is opaque (delta 7 -- the fixtures' literal `"approve"` is a sample
     value). An elicitation's `answer` carries `answers`, one entry per
     question id of the frame, exactly. `payload` carries the amendment text
-    for a plan's `amend`. Both are absent for approve, reject and skip. The
-    response to this POST is a NEW SSE stream continuing the same turn
-    (delta 1).
+    for a plan's `amend`. Both are absent for approve, reject, skip and
+    switch. A plan's `switch` carries `choice_id` (a `PlanDecision.choice_id`),
+    `option_id` (one of that decision's options) and `plan_revision` (the
+    `PlanProposed.revision` the user saw), all three. An `approve` may carry
+    `plan_revision` alone, and is refused when it is not the paused plan's;
+    without one it approves the paused plan, as older clients do. Every
+    other decision carries none of them. The response to this POST is a NEW SSE stream
+    continuing the same turn (delta 1).
     """
 
     kind: Literal["interrupt.response"]
@@ -901,6 +1016,33 @@ class InterruptResponse(_WireModel):
     payload: str | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
+    # A plan's `switch`: the scope choice or planner decision, the option it
+    # moves to, and the revision of the plan the user switched on. An `approve` may carry the
+    # revision alone.
+    choice_id: str | None = Field(default=None, min_length=1)
+    option_id: str | None = Field(default=None, min_length=1)
+    plan_revision: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _switch_members_come_with_switch(self) -> InterruptResponse:
+        """Refuse a `switch` missing one of its three members, and any other
+        decision carrying one, save an `approve`'s `plan_revision`."""
+        members = {
+            "choice_id": self.choice_id,
+            "option_id": self.option_id,
+            "plan_revision": self.plan_revision,
+        }
+        if self.decision is InterruptDecision.SWITCH:
+            missing = [name for name, value in members.items() if value is None]
+            if missing:
+                raise ValueError(f"decision 'switch' requires {', '.join(missing)}")
+            return self
+        if self.decision is InterruptDecision.APPROVE:
+            del members["plan_revision"]
+        stated = [name for name, value in members.items() if value is not None]
+        if stated:
+            raise ValueError(f"decision {self.decision.value!r} does not take {', '.join(stated)}")
+        return self
 
 
 class MutationOp(StrEnum):
@@ -1038,6 +1180,9 @@ class PlanStep(_WireModel):
     # to show more than the label. Optional; a step without it renders as it
     # did before v1.2.
     args: dict[str, Any] | None = None
+    # Delta 22 (v1.7): true on the one step whose result answers the user's
+    # question; at most one step of a plan carries it.
+    gives_answer: bool | None = None
 
 
 class DecisionResolvedBy(StrEnum):
@@ -1045,9 +1190,35 @@ class DecisionResolvedBy(StrEnum):
     USER = "user"
 
 
+class PlanDecisionOption(_WireModel):
+    """One option of a switchable choice on the plan card: `reason` says, in a
+    reader's words, why a partial or unavailable option is limited, and
+    `years` are the years a partial option covers. A planner decision's
+    options are all available, with neither."""
+
+    option_id: str
+    label: str
+    status: Literal["available", "partial", "unavailable"]
+    reason: str | None = None
+    years: list[tuple[int, int]] | None = None
+
+
 class PlanDecision(_WireModel):
     """One choice made on the user's behalf, with its alternatives and a
-    one-line reason -- what makes the plan reviewable."""
+    one-line reason -- what makes the plan reviewable.
+
+    A decision the user can switch carries its row's id (`choice_id`), its
+    active option (`active_option_id`) and every option (`options`), all
+    three together. A decision stating how Search counted a source has
+    `choice_id` `"<requirement id>:<axis>"` (`harness.plan_display.
+    choice_id`), the same on every plan of the conversation that shows the
+    choice, switches included. A planner decision that settles requirement
+    fields (`harness.plan_display.switchable_decision`) has `choice_id`
+    `"decision/<slot>"` and option ids derived from each option's label
+    (`harness.plan_display.decision_option_id`), the same on every plan
+    that offers that label.
+    A decision without `choice_id` cannot be switched.
+    """
 
     id: str
     question: str
@@ -1055,12 +1226,44 @@ class PlanDecision(_WireModel):
     reason: str
     resolved_by: DecisionResolvedBy
     alternatives: list[str] | None = None
+    choice_id: str | None = None
+    active_option_id: str | None = None
+    options: list[PlanDecisionOption] | None = None
+
+    @model_validator(mode="after")
+    def _scope_members_come_together(self) -> PlanDecision:
+        """Refuse a scope choice missing one of its three members, or whose
+        active option is not among its options."""
+        members = (self.choice_id, self.active_option_id, self.options)
+        if all(member is None for member in members):
+            return self
+        if any(member is None for member in members):
+            raise ValueError("choice_id, active_option_id and options are set together")
+        assert self.options is not None
+        if self.active_option_id not in {option.option_id for option in self.options}:
+            raise ValueError(f"active option {self.active_option_id!r} is not among the options")
+        return self
 
 
 class PlanAction(StrEnum):
     APPROVE = "approve"
     AMEND = "amend"
     REJECT = "reject"
+    # Listed only when some decision has a `choice_id` with an option other
+    # than its active one that is available or partial: a scope choice or a
+    # planner decision.
+    SWITCH = "switch"
+
+
+class PlanMoved(_WireModel):
+    """A scope choice a switch moved besides the one the user switched:
+    the option it held (`from_label`), the one it holds now (`to_label`)
+    and why, as a sentence."""
+
+    choice_id: str
+    from_label: str
+    to_label: str
+    reason: str
 
 
 class PlanRequirement(_WireModel):
@@ -1096,11 +1299,26 @@ class PlanAsk(_WireModel):
     not_computed: str | None = None
 
 
+class PlanSwitchFailed(_WireModel):
+    """A switch that did not apply: `choice_id` and `option_id` name the
+    option the user picked, `code` is the refusal's code, `reason` says,
+    in a reader's words, why it failed, and `retryable` whether the same
+    switch can succeed if asked again. A switch the user stopped carries
+    `code` `switch_cancelled` and `retryable` true (delta 23)."""
+
+    choice_id: str
+    option_id: str
+    code: str
+    reason: str
+    retryable: bool = False
+
+
 class PlanProposed(_WireModel):
     """The plan awaiting approval. The run is genuinely paused: nothing is
-    retrieved or computed until an interrupt.response arrives, and this
-    frame is terminal for its SSE response (delta 1 -- resume arrives as a
-    new stream from POST /api/studio/interrupt)."""
+    computed until an interrupt.response arrives (the plan's data may
+    already be loading), and this frame is terminal for its SSE response
+    (delta 1 -- resume arrives as a new stream from POST
+    /api/studio/interrupt)."""
 
     event: Literal["plan.proposed"]
     seq: int = Field(ge=0)
@@ -1121,6 +1339,26 @@ class PlanProposed(_WireModel):
     # Delta 20 (v1.5): the outputs the user asked for, in the order the
     # brief lists them; absent when the plan was given none.
     asks: list[PlanAsk] | None = None
+    # On the plan a switch offers: each other scope choice the switch moved.
+    moved: list[PlanMoved] | None = None
+    # Delta 22 (v1.7): one plain sentence saying what is counted, for whom,
+    # when and from which source; `switch_failed` is set on the plan
+    # re-offered after a switch that did not apply.
+    summary: str | None = None
+    switch_failed: PlanSwitchFailed | None = None
+    # Delta 23 (v1.8): the plan's decisions that qualify the answer, one
+    # reader sentence each, which `plan.approved` carries once it is approved.
+    caveats: list[str] = []
+
+
+class PlanRevisionStaleError(ToolError):
+    """The 409 `plan_revision_stale` body of POST /api/studio/interrupt: a
+    ToolError plus `current_plan`, the `plan.proposed` frame the stream sent
+    for the plan now awaiting an answer, exactly as sent (its `seq`
+    included). The client replaces the card the user answered with it.
+    Absent only for a pause stored before cards were kept."""
+
+    current_plan: PlanProposed | None = None
 
 
 class PlanVersioned(_WireModel):
@@ -1138,6 +1376,48 @@ class PlanVersioned(_WireModel):
     version: int = Field(ge=1)
     supersedes: str
     changed: list[str] | None = None
+
+
+class PlanApprovedStep(_WireModel):
+    """One step of the approved plan: its label, and whether its result
+    answers the user's question."""
+
+    label: str
+    gives_answer: bool | None = None
+
+
+class PlanApprovedChoice(_WireModel):
+    """One choice of the approved plan: its id (`choice_id`, the id the plan
+    card's `PlanDecision.choice_id` carries, `"decision/<slot>"` for a
+    planner decision), its short name (`question`), the option label it holds
+    (`chosen`) and, when a switch of the turn changed it, the label it held
+    on the card the user first switched from (`changed_from`)."""
+
+    # Delta 24 (v1.9): a `plan.approved` stored before it has no `choice_id`.
+    choice_id: str
+    question: str
+    chosen: str
+    changed_from: str | None = None
+
+
+class PlanApproved(_WireModel):
+    """The plan the user approved. Emitted once, on the approve answer to
+    POST /api/studio/interrupt, before the first frame of the resumed run
+    (delta 22). The client attaches it to the message that stream
+    produces. `caveats` are the plan's decisions that qualify the answer,
+    such as a share whose two sides count different providers, each one
+    sentence for a reader, as the approved card stated them (delta 23)."""
+
+    event: Literal["plan.approved"]
+    seq: int = Field(ge=0)
+    plan_version_id: str
+    version: int = Field(ge=1)
+    revision: str | None = None
+    title: str
+    summary: str | None = None
+    steps: list[PlanApprovedStep]
+    choices: list[PlanApprovedChoice]
+    caveats: list[str] = []
 
 
 class StepStatus(StrEnum):
@@ -1314,17 +1594,35 @@ class ElicitationRequest(_WireModel):
 
 
 class SuggestionItem(_WireModel):
+    """A chip that sends `prompt` as the user's next message."""
+
     label: str
     prompt: str
 
 
+class ApplyChoiceSuggestion(_WireModel):
+    """A chip that moves one scope choice of the answer's readings to another
+    option: a click sends a `TurnRequest` with `apply_choice {choice_id,
+    option_id, turn, spec_id}` and no message. `label` is the option's label,
+    `turn` the conversation turn whose answer offers the chip, counted from 1,
+    and `spec_id` the reading the chip switches."""
+
+    kind: Literal["apply_choice"]
+    label: str
+    choice_id: str
+    option_id: str
+    turn: int
+    spec_id: str
+
+
 class Suggestions(_WireModel):
-    """Follow-up chips. May be empty in v1 (delta 8 -- the frame is
-    additive)."""
+    """Follow-up chips. Empty unless the answer used readings with scope
+    choices, which give one `ApplyChoiceSuggestion` per other option it can
+    serve (`harness.turn_records.scope_chips`)."""
 
     event: Literal["suggestions"]
     seq: int = Field(ge=0)
-    items: list[SuggestionItem]
+    items: list[SuggestionItem | ApplyChoiceSuggestion]
 
 
 class ErrorFrame(_WireModel):
@@ -1354,6 +1652,7 @@ StudioFrame = Annotated[
     | MessageComplete
     | PlanProposed
     | PlanVersioned
+    | PlanApproved
     | ActivityStep
     | ComponentCreated
     | ComponentRevised

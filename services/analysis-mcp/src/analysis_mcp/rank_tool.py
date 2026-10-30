@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Annotated
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
+from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_rank_digest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
@@ -482,7 +483,7 @@ async def rank(
         NonFiniteAggregateResultError,
         PlaceLevelsMixedError,
     ) as exc:
-        return to_tool_result(_refusal_for_engine_error(exc))
+        return to_tool_result(composite_refusal(_refusal_for_engine_error(exc), [input_trace]))
 
     if result.overall_coverage_fraction < settings.aggregate_coverage_floor:
         return to_tool_result(

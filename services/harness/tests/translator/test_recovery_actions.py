@@ -32,6 +32,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 from planner.operations import Translation
+from planner.parties import party_role
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
@@ -537,6 +538,217 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
     )
 
 
+# Follow-ups of "Japan's ODA to Kenya" pinned to a source that leaves open the
+# side a named party sits on, and the sources a fresh search answers.
+SPEC_DONORS_TO_KENYA = "spec_d8a6cf4c" + "0" * 24
+SPEC_THREE_DONORS = "spec_3d0e5a77" + "0" * 24
+SPEC_JAPAN_EVERYWHERE = "spec_5e7a2b10" + "0" * 24
+SPEC_JAPAN_TO_KENYA = "spec_7f1c9d42" + "0" * 24
+_JAPAN = {"role": "origin", "label": "Japan", "ref": "country/JPN"}
+_KENYA = {"role": "destination", "label": "Kenya", "ref": "country/KEN"}
+_THREE_DONORS = [
+    {"role": "origin", "label": "United States", "ref": "country/USA"},
+    {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+    _JAPAN,
+]
+_DONORS_TO_KENYA = _spec(
+    SPEC_DONORS_TO_KENYA,
+    "Gross disbursements to Kenya from 143 providers",
+    coverage=_WINDOW,
+    entities=[_KENYA],
+    role_axis_facts=[{"role": "origin", "member_count": 143}],
+)
+_THREE_DONORS_EVERYWHERE = _spec(
+    SPEC_THREE_DONORS,
+    "Gross disbursements of the United States, Germany and Japan to 266 recipients",
+    coverage=_WINDOW,
+    entities=_THREE_DONORS,
+    role_axis_facts=[{"role": "destination", "member_count": 266}],
+)
+_DAC_COUNTRIES_EVERYWHERE = {
+    **_THREE_DONORS_EVERYWHERE,
+    "resolved": _THREE_DONORS_EVERYWHERE["resolved"]
+    | {"entity_groups": {"origin": {"label": "DAC countries", "ref": "DACCountries"}}},
+}
+_JAPAN_EVERYWHERE = _spec(
+    SPEC_JAPAN_EVERYWHERE,
+    "Japan's gross disbursements to 266 recipients",
+    coverage=_WINDOW,
+    entities=[_JAPAN],
+    role_axis_facts=[{"role": "destination", "member_count": 266, "members_available": True}],
+)
+_JAPAN_TO_KENYA = _spec(
+    SPEC_JAPAN_TO_KENYA,
+    "Japan's gross disbursements to Kenya",
+    coverage=_WINDOW,
+    entities=[_JAPAN, _KENYA],
+)
+
+
+def _answering_server(spec: dict[str, Any], searched: list[Any]) -> FastMCP:
+    """A `data-mcp` whose `search` keeps every ask in `searched` and answers `spec`."""
+    server = FastMCP(name="data-mcp")
+
+    @server.tool(name="search")
+    async def search(parts: list[dict[str, Any]], raw_query: str | None = None) -> ToolResult:
+        """Find what data exists for the ask."""
+        del raw_query
+        searched.append(parts)
+        envelope = _envelope("definite", [], spec=spec)
+        return ToolResult(
+            content="digest",
+            structured_content=render_answer(envelope),
+            meta={SEARCH_ENVELOPE_META_KEY: envelope},
+        )
+
+    return server
+
+
+_JAPAN_NAMED = [Entity(name="Japan", role="donor")]
+_JAPAN_AND_KENYA_NAMED = [*_JAPAN_NAMED, Entity(name="Kenya", role="recipient")]
+_KENYA_SENT = {"text": "Kenya", "dcid": "country/KEN", "role": "recipient"}
+
+
+@pytest.mark.parametrize(
+    ("pin", "entities", "answer", "kept"),
+    [
+        (_DONORS_TO_KENYA, _JAPAN_NAMED, _JAPAN_EVERYWHERE, True),
+        (_THREE_DONORS_EVERYWHERE, _JAPAN_AND_KENYA_NAMED, _JAPAN_TO_KENYA, False),
+        (_DAC_COUNTRIES_EVERYWHERE, _JAPAN_AND_KENYA_NAMED, _JAPAN_TO_KENYA, False),
+    ],
+    ids=["recipient-kept", "donor-named-of-members", "donor-named-of-a-group"],
+)
+async def test_a_pin_leaving_open_a_named_side_keeps_its_closed_sides_on_the_search_again(
+    pin: dict[str, Any],
+    entities: list[Entity],
+    answer: dict[str, Any],
+    kept: bool,
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # The pin binds no party on the side a name sits on, so discovery
+    # searches again. A side the pin closes and the requirement names nothing
+    # on, the recipient Kenya for "Japan's ODA" pinned to every donor's aid to
+    # Kenya, goes on that search. A source that drops it is withheld and
+    # cannot be pinned, and the repair names Kenya. A side the requirement
+    # names a party on is its own: Japan named out of the three donors or the
+    # DAC countries the pin holds, Japan's aid to Kenya is offered.
+    def japan(spec_id: str) -> Plan:
+        return draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(
+                    measure="official development assistance",
+                    entities=entities,
+                    source_spec_id=spec_id,
+                    unit=None,
+                ),
+                derived_requirement(),
+            ],
+        )
+
+    context = context_holding(japan(pin["spec_id"]))
+    save_pin_sources(context.state, {pin["spec_id"]: PinSource(block=pin, settled=True)})
+    searched: list[Any] = []
+    core = _core(McpSurface(sources={"data-mcp": _answering_server(answer, searched)}))
+
+    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    referred = await _replay_action(core, result["action"], context)
+
+    ((part,),) = searched
+    named = [{"text": entity.name, "role": party_role(entity.role)} for entity in entities]
+    assert part["entities"] == ([*named, _KENYA_SENT] if kept else named)
+    referral = referred["referral"]
+    assert referral["kind"] == "pinned_source_not_found"
+    offered = [] if kept else [answer["spec_id"]]
+    assert [candidate["spec_id"] for candidate in referral["candidates"]] == offered
+    assert referral.get("repair") == ("name 'Kenya' as recipient in `entities`" if kept else None)
+    assert [withheld["sentence"] for withheld in referral.get("withheld", [])] == (
+        [answer["resolved"]["rendered_sentence"]] if kept else []
+    )
+    refused = _choice_not_offered(japan(answer["spec_id"]), load_referral(context.state), context)
+    assert (refused is not None) == kept
+
+
+async def test_a_share_whole_pinned_to_its_numerators_donor_keeps_no_donor_on_the_search_again(
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # "The United States' share of ODA to Kenya" with the whole pinned to US
+    # aid to every recipient. Kenya sits on the side the pin leaves open, so
+    # discovery searches again. Keeping the pin's donor would divide the US by
+    # itself, so the search sends Kenya alone, every donor's aid to Kenya is
+    # offered, and no repair names the United States.
+    us_everywhere = {
+        **_spec(
+            "spec_0b2e6c18" + "0" * 24,
+            "The United States' gross disbursements to 266 recipients",
+            coverage=_KENYA_WINDOW,
+            entities=[
+                {"role": "origin", "label": "United States of America", "ref": "country/USA"}
+            ],
+            role_axis_facts=[{"role": "destination", "member_count": 266}],
+        ),
+        "_bound_refs": [
+            {"identity": "United States", "text": "United States", "refs": ["country/USA"]}
+        ],
+    }
+    spec_id = us_everywhere["spec_id"]
+    donor_open = _KENYA_ODA["donor_open"]
+    kenya = Entity(name="Kenya", role="recipient")
+
+    def plan(source_spec_id: str) -> Plan:
+        return draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(
+                    id="oda",
+                    measure="official development assistance",
+                    entities=[kenya],
+                    period=Period(start=2015, end=2022),
+                    source_spec_id=source_spec_id,
+                ),
+                requirement(
+                    id="part",
+                    measure="official development assistance",
+                    entities=[kenya, Entity(name="United States", role="donor")],
+                    period=Period(start=2015, end=2022),
+                ),
+                ShareOfRequirement(
+                    id="ratio",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="part"),
+                    denominator=RequirementSide(input_id="oda"),
+                ),
+            ],
+        )
+
+    context = context_holding(plan(spec_id))
+    save_pin_sources(context.state, {spec_id: PinSource(block=us_everywhere, settled=True)})
+    searched: list[Any] = []
+    core = _core(McpSurface(sources={"data-mcp": _answering_server(donor_open, searched)}))
+
+    result = await core.discover_source(requirement_id="oda", tool_context=context)
+    referred = await _replay_action(core, result["action"], context)
+
+    ((part,),) = searched
+    assert part["entities"] == [{"text": "Kenya", "role": "recipient"}]
+    referral = referred["referral"]
+    assert referral["kind"] == "pinned_source_not_found"
+    assert "repair" not in referral
+    assert [c["spec_id"] for c in referral["candidates"]] == [donor_open["spec_id"]]
+    assert referral.get("withheld", []) == []
+    assert (
+        _choice_not_offered(plan(donor_open["spec_id"]), load_referral(context.state), context)
+        is None
+    )
+
+
 # The planner-entry eval's recorded Kenya answers: the DAC official-donors
 # total Search binds when no donor is named, and the 143 providers it leaves
 # open when the donor side is asked for open.
@@ -589,13 +801,37 @@ _NAME_THE_TOTAL = (
 )
 
 
+# The DAC total pin with its donor side bound to the members of one group ("DAC
+# members"), read as members.
+_DAC_MEMBERS_PIN = {
+    **_KENYA_ODA["dac_total"],
+    "resolved": _KENYA_ODA["dac_total"]["resolved"]
+    | {
+        "entities": [
+            {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+            {"role": "origin", "label": "United States", "ref": "country/USA"},
+            {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        ],
+        "entity_groups": {"origin": {"label": "DAC members", "ref": "DACMembers"}},
+    },
+}
+_NAME_THE_MEMBERS = (
+    "name 'DAC members' as donor in `entities` with `members: true` and drop 'donor' from `across`"
+)
+
+
 @pytest.mark.parametrize(
-    ("reader", "repair"),
-    [(_TOP_DONORS, None), (_TOTAL, _NAME_THE_TOTAL)],
-    ids=["rank", "total"],
+    ("reader", "pin", "repair"),
+    [
+        (_TOP_DONORS, _KENYA_ODA["dac_total"], None),
+        (_TOTAL, _KENYA_ODA["dac_total"], _NAME_THE_TOTAL),
+        (_TOP_DONORS, _DAC_MEMBERS_PIN, _NAME_THE_MEMBERS),
+    ],
+    ids=["rank", "total", "rank-of-a-group-of-members"],
 )
 async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the_open_source(
     reader: EvidenceRequirement,
+    pin: dict[str, Any],
     repair: str | None,
     draft: DraftFactory,
     decision: DecisionFactory,
@@ -608,8 +844,10 @@ async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the
     # is offered and the pin gives way to it: naming the total would leave one
     # donor to rank. A total over donors sums the side away, so the pin's
     # scope is the figure asked for, the open source is withheld, and the
-    # repair names the total.
-    dac_total = _KENYA_ODA["dac_total"]["spec_id"]
+    # repair names the total. A ranking over a side the pin holds to the
+    # members of one group ranks those members, so the open source is
+    # withheld and the repair names the group for its members.
+    dac_total = pin["spec_id"]
     donor_open = _KENYA_ODA["donor_open"]["spec_id"]
 
     def oda(**overrides: Any) -> DatasetRequirement:
@@ -633,9 +871,7 @@ async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the
             evidence_requirements=[oda(source_spec_id=dac_total), reader],
         )
     )
-    save_pin_sources(
-        context.state, {dac_total: PinSource(block=_KENYA_ODA["dac_total"], settled=True)}
-    )
+    save_pin_sources(context.state, {dac_total: PinSource(block=pin, settled=True)})
     core = _core(McpSurface(sources={"data-mcp": _donor_open_server()}))
 
     result = await core.discover_source(requirement_id="oda", tool_context=context)
@@ -674,7 +910,9 @@ _US_TO_KENYA = {
             {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
         ],
     ),
-    "_bound_refs": {"united states": ["country/USA"]},
+    "_bound_refs": [
+        {"identity": "United States", "text": "United States", "refs": ["country/USA"]}
+    ],
 }
 _G7_TO_KENYA = _spec(
     "spec_9c7a11e2" + "0" * 24,
@@ -699,7 +937,10 @@ _US_AND_UK_TO_KENYA = {
             {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
         ],
     ),
-    "_bound_refs": {"united states": ["country/USA"], "united kingdom": ["country/GBR"]},
+    "_bound_refs": [
+        {"identity": "United States", "text": "United States", "refs": ["country/USA"]},
+        {"identity": "United Kingdom", "text": "United Kingdom", "refs": ["country/GBR"]},
+    ],
 }
 _KEEP_G7 = "name 'G7' as donor in `entities` and drop 'donor' from `across`"
 

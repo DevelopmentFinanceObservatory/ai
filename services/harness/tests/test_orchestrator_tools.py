@@ -35,7 +35,7 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
-from data_mcp.search_tool import MAX_PARTS
+from data_mcp.search_tool import MAX_PARTS, SearchContext
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
 from google.adk.sessions.state import State
@@ -46,6 +46,7 @@ from harness.chart_binding import (
     MAX_SERIES_PER_COMPONENT,
     empty_select_refusal,
 )
+from harness.conversation import current_user_message
 from harness.dfo_faq import CANNOT_DESCRIBE_DFO, DFO_FAQ_NOT_READ
 from harness.graph.plan_done import HandBack
 from harness.graph.state import (
@@ -67,6 +68,7 @@ from harness.orchestrator_tools import (
 )
 from harness.reply_figures import card_result, drawn_series
 from harness.rolling_cards import CardWithheld, RollingCards
+from harness.scope_choices import served_facts
 from harness.studio_edit import _revised_frames
 from harness.studio_state import (
     ConversationState,
@@ -82,7 +84,7 @@ from harness.tool_contracts import (
     reading_facts,
     resolver_digest,
 )
-from harness.turn_records import SearchReading, loose_match_notes, render_readings
+from harness.turn_records import SearchReading, basis_line, loose_match_notes, render_readings
 from harness.wire import AddOp, CompositionActor, MutationOp
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
@@ -103,7 +105,13 @@ from . import drawn_cards
 from . import test_rolling_cards as rolling_scene
 from .resolved_revision import resolved_revision
 from .search_results import search_result_parts
-from .test_turn_records import _top_donors
+from .test_turn_records import (
+    _example_part,
+    _manifest,
+    _scoped_part,
+    _served_identity,
+    _top_donors,
+)
 
 SPEC_AID = "spec_" + "a" * 32
 SPEC_LIFE = "spec_" + "b" * 32
@@ -264,6 +272,14 @@ def test_no_rule_is_stated_in_both_the_instruction_and_a_tool_declaration():
     shared = {name: instruction & _word_runs(text) for name, text in _declarations().items()}
 
     assert not any(shared.values()), shared
+
+
+def test_a_search_for_names_an_earlier_turn_listed_states_their_side():
+    """Search refuses a part whose names carry no role (`role_not_resolved`). The search
+    declaration has every name an earlier turn listed sent with its side, and the
+    instruction has a refused part sent again with roles before any other retry."""
+    assert "`role_not_resolved`" in _declarations()["search"]
+    assert "role_not_resolved" in INSTRUCTION
 
 
 def test_no_tool_declaration_names_the_implementation_behind_it():
@@ -554,6 +570,102 @@ async def test_search_without_parts_asks_search_to_read_the_query():
     assert resolver.calls == [
         {"question": "aid to Kenya from all official donors", "parts": [], "raw_text": True}
     ]
+
+
+async def test_a_parsed_search_sends_the_users_message_and_the_choices_the_conversation_settled():
+    """Every explicit or carried choice of an earlier search is carried, the
+    newest per axis and concept; a declared default is not. A raw-text search
+    is sent no context."""
+    earlier = SearchReading.from_part(_scoped_part()).model_dump(mode="json")
+    newer = copy.deepcopy(earlier)
+    sector = newer["scope"]["choices"][0]
+    sector["active"] = "sector:120+130"
+    newer["scope"]["choices"] = [sector]
+    newer["scope"]["entries"] = [
+        {
+            "axis": "sector",
+            "option_id": "sector:120+130",
+            "provenance": "explicit",
+            "concept": "health",
+            "origin": {"kind": "choice", "choice_id": sector["id"]},
+        }
+    ]
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    ctx.state["orchestrator:prior_ledger"] = {"readings": [earlier], "warnings": {}, "spec_ids": []}
+    ctx.state["orchestrator:searches"] = [newer]
+    token = current_user_message.set("health aid to Africa\n(then: now Ghana)")
+    try:
+        await tools["search"]("health aid to Ghana", ctx, [{"variable": "health aid"}])
+        await tools["search"](
+            "health aid to Ghana", ctx, [{"variable": "health aid"}], as_text=True
+        )
+    finally:
+        current_user_message.reset(token)
+
+    base = earlier["scope"]["id"]
+    parsed, raw = resolver.calls
+    assert parsed["context"] == SearchContext(
+        user_message="health aid to Africa\n(then: now Ghana)",
+        carried_entries=[
+            {
+                "axis": "region",
+                "option_id": "region:members_only",
+                "provenance": "carried",
+                "origin": {"kind": "choice", "choice_id": f"{base}:region"},
+            },
+            {
+                "axis": "sector",
+                "option_id": "sector:120+130",
+                "provenance": "carried",
+                "concept": "health",
+                "origin": {"kind": "choice", "choice_id": f"{base}:sector"},
+            },
+        ],
+    )
+    assert "context" not in raw
+
+
+@pytest.mark.parametrize(
+    ("aligned", "axes"),
+    [
+        ("measure_basis", ["sector", "region"]),
+        (None, ["sector", "region", "measure_basis"]),
+        ("provider", ["sector", "region", "measure_basis"]),
+    ],
+    ids=["compiled-by-the-planner", "switched-by-the-user", "provider-compiled-by-the-planner"],
+)
+async def test_a_basis_the_planner_compiled_is_never_carried_and_one_the_user_switched_is(
+    aligned: str | None, axes: list[str]
+):
+    """A reading whose gross basis came from an explicit entry on the plan card:
+    the planner's, compiled to put a share's inputs on one basis, carries no basis
+    to a later "US total ODA" search, while its user-stated sector and region
+    still carry; the same entry from the user's own switch carries, and so does
+    one on a reading the planner compiled on another axis."""
+    reading = SearchReading.from_part(_scoped_part()).model_dump(mode="json")
+    basis = reading["scope"]["choices"][2]
+    basis["provenance"] = "explicit"
+    reading["scope"]["entries"].append(
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": basis["id"]},
+        }
+    )
+    if aligned is not None:
+        reading["planner_axes"] = [aligned]
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    ctx.state["orchestrator:searches"] = [
+        SearchReading.model_validate(reading).model_dump(mode="json")
+    ]
+
+    await tools["search"]("US total ODA", ctx, [{"variable": "US total ODA"}])
+
+    (parsed,) = resolver.calls
+    assert [entry.axis for entry in parsed["context"].carried_entries] == axes
 
 
 @pytest.mark.parametrize("parts", [None, []])
@@ -1219,6 +1331,55 @@ async def test_fetch_of_the_same_data_twice_in_a_turn_retrieves_it_once(
     assert len([tool for tool, _ in executor.calls if tool == "get_data"]) == calls
     assert again["frames"] == first["frames"]
     assert again.get("same_data_as") == (SPEC_AID if calls == 1 else None)
+
+
+class _ServedExecutor(FakeExecutor):
+    """Answers every `get_data` with how its frame was served: the example
+    part's identity with its regional bucket left out."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.served = served_facts(_manifest(_served_identity(residuals=False)))
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        outcome = await super().__call__(tool=tool, args=args, on_progress=on_progress)
+        if tool == "get_data":
+            outcome["served"] = self.served
+        return outcome
+
+
+async def test_fetch_keeps_how_its_data_was_served_on_the_readings_and_from_the_turns_cache():
+    """A fetch keeps the served record on its spec_id's reading, and a fetch
+    of the same data again keeps the cached one, though `get_data` runs once
+    and the model reads none of it."""
+    executor = _ServedExecutor()
+    tools, ctx = _tools(executor=executor)
+    ctx.state["orchestrator:specs"] = {
+        SPEC_AID: _role_open_block(SPEC_AID),
+        SPEC_LIFE: _role_open_block(SPEC_LIFE, requested_window={"kind": "latest"}),
+    }
+    ctx.state["orchestrator:searches"] = [
+        SearchReading.from_part({**_example_part(), "spec_id": spec_id}).model_dump(mode="json")
+        for spec_id in (SPEC_AID, SPEC_LIFE)
+    ]
+
+    first = await tools["fetch"](SPEC_AID, ctx, scope={"window": WINDOW_2023})
+    again = await tools["fetch"](SPEC_LIFE, ctx, scope={"window": WINDOW_2023})
+
+    readings = [SearchReading.model_validate(r) for r in ctx.state["orchestrator:searches"]]
+    assert len([tool for tool, _ in executor.calls if tool == "get_data"]) == 1
+    assert [
+        r.fetch.served.residuals("destination") for r in readings if r.fetch and r.fetch.served
+    ] == [
+        frozenset(),
+        frozenset(),
+    ]
+    assert "served" not in first and "served" not in again
+    assert basis_line(ctx.state["orchestrator:searches"], specs={}, plans=[]) == (
+        "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+        "Africa's countries only · "
+        "gross disbursements, current USD."
+    )
 
 
 class _NotedExecutor(FakeExecutor):
@@ -2287,6 +2448,59 @@ async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
     (intent,) = _intents(executor)
     assert (intent["title"], intent.get("window")) == (title, window)
     assert result["charts"][0]["title"] == title
+
+
+# A whole naming more donors than fit beside the subject in a title of 120 characters.
+_LONG_WHOLE = (
+    "from the United States, Saint Vincent and the Grenadines, the Democratic Republic of the "
+    "Congo and the Central African Republic"
+)
+
+
+@pytest.mark.parametrize(
+    ("title", "whole", "drawn"),
+    [
+        (
+            "US share of aid to Kenya",
+            "from official donors (DAC)",
+            "US share of aid to Kenya, of the total from official donors (DAC), 2023 to 2025",
+        ),
+        (
+            "US share of aid to Kenya",
+            "from every donor",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
+        ),
+        # A title copied from a card of shares states the whole and the period once.
+        (
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
+            "from every donor",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
+        ),
+        # A whole too long for the title is stated in the card's note.
+        ("US share of aid to Kenya", _LONG_WHOLE, "US share of aid to Kenya, 2023 to 2025"),
+    ],
+    ids=["dac_donors", "all_donors", "copied", "long_whole"],
+)
+async def test_make_charts_writes_the_whole_a_card_of_shares_divides_by_into_its_title(
+    monkeypatch: pytest.MonkeyPatch, title: str, whole: str, drawn: str
+) -> None:
+    """A frame a plan handed back with the whole its shares divide by
+    (`plan_display.share_wholes`) is drawn with that whole in the card's
+    title, before the period, or in its note when the title of 120
+    characters cannot hold it beside the subject."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))
+    executor = WideFrameExecutor(providers=10, view=copy.deepcopy(TEN_VIEW))
+    tools, ctx = _tools(executor=executor)
+    hand_back = HandBack(executor)
+    await hand_back.describe(WIDE_REF, tool="share_of", store_ref=None, whole=whole)
+    hand_back.listing(ctx.state, None)
+
+    result = await tools["make_charts"]([_wide_chart(title=title)], ctx)
+
+    (intent,) = _intents(executor)
+    (entry,) = result["charts"]
+    assert intent["title"] == entry["title"] == drawn
+    assert (whole in drawn) != (whole in entry.get("note", ""))
 
 
 async def test_a_card_whose_frame_is_unread_names_no_period(
@@ -3513,6 +3727,15 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constan
     assert part.get("other_prices") == (
         [{"spec_id": SPEC_CONSTANT, "label": "constant prices"}] if constant else None
     )
+    # The answer spans 1978 to 2024 in current US dollars, and the question
+    # named no prices, so the prices are open with the offered sibling or,
+    # when search offers none, constant prices.
+    assert part["open_prices"] == [
+        {"label": "current prices"},
+        {"spec_id": SPEC_CONSTANT, "label": "constant prices"}
+        if constant
+        else {"label": "constant prices"},
+    ]
 
 
 SPEC_NET = "spec_" + "c" * 32
@@ -3598,6 +3821,10 @@ _PRICES_QUESTION = {
             [_count_question(SPEC_NET), {"question": "In which prices?", "options": []}],
             "question 'In which prices?' offers no option",
         ),
+        (
+            [{"question": "In which prices?", "prices_of": SPEC_NET}],
+            f"prices {SPEC_NET}, which lists no `open_prices` this turn",
+        ),
     ],
     ids=[
         "offered",
@@ -3609,6 +3836,7 @@ _PRICES_QUESTION = {
         "no_question",
         "four_questions",
         "no_option",
+        "prices_of_no_open_part",
     ],
 )
 async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(

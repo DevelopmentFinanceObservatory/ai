@@ -86,6 +86,7 @@ from translator.discovery import (
     resolve_definition,
     resolve_entity_refs,
     resolved_spec,
+    resolving_once,
     save_log,
 )
 from translator.referral import ReferralKind
@@ -305,10 +306,20 @@ async def test_a_stored_role_reaches_search_as_the_party_word_it_stands_for(
             Entity(name="G7", role="donor", members=True),
             {"text": "G7", "role": "donor", "members": True},
         ),
+        (
+            Entity(name="Congo", role="donor", dcid="country/COD"),
+            {"text": "Congo", "dcid": "country/COD", "role": "donor"},
+        ),
+        # A group's own node picked on a row asked for its members goes by the
+        # group's registered name, as Search's option posts it, with no dcid.
+        (
+            Entity(name="Central Africa (UN)", role="recipient", members=True),
+            {"text": "Central Africa (UN)", "role": "recipient", "members": True},
+        ),
     ],
-    ids=["set-alone", "set-members", "party-set-members"],
+    ids=["set-alone", "set-members", "party-set-members", "pinned-node", "restated-group"],
 )
-async def test_a_set_reaches_search_as_its_members_only_when_the_plan_asks_for_them(
+async def test_an_entity_reaches_search_with_the_words_and_node_the_plan_states(
     surface: McpSurface,
     draft: DraftFactory,
     requirement: RequirementFactory,
@@ -786,6 +797,7 @@ def _matching_window() -> dict[str, Any]:
     return {"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}}
 
 
+@pytest.mark.parametrize("stated_source", [None, "OECD DAC2a"], ids=["no_source", "its_source"])
 @pytest.mark.parametrize("earlier_turn", [False, True], ids=["this_turn", "an_earlier_turn"])
 async def test_a_pin_of_a_shown_dataset_builds_the_source_with_no_search(
     surface: McpSurface,
@@ -796,20 +808,31 @@ async def test_a_pin_of_a_shown_dataset_builds_the_source_with_no_search(
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
     earlier_turn: bool,
+    stated_source: str | None,
 ) -> None:
     # The pin names a dataset the planner was shown (`PIN_SOURCES_STATE_KEY`)
     # with no blocking warning, and the block's own window agrees with the
     # requirement's period: the source comes straight from that block, with
     # no `search` call at all. An earlier turn's dataset is shown with no
-    # block, and the pin reads the one that turn stored.
-    pinned = requirement(source_spec_id=SPEC_KENYA)
+    # block, and the pin reads the one that turn stored. A stated source the
+    # block's provenance names is confirmed by it, as "OECD DAC2a" is by
+    # Search's label "OECD DAC2A" for a search that named no source.
+    pinned = requirement(source_spec_id=SPEC_KENYA, source=stated_source)
     context = context_holding(
         draft(
             decisions=[pinning_decision(SPEC_KENYA)],
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
-    block = _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window())
+    block = _spec(
+        SPEC_KENYA,
+        "debt service paid by Kenya",
+        coverage=_matching_window(),
+        facets={
+            "unit": {"basis": "declared_default", "ref": "usd", "label": "US dollars"},
+            "provenance": {"ref": "provenance/OECDDAC2A", "label": "OECD DAC2A"},
+        },
+    )
     if earlier_turn:
         sources = pin_sources(context.state)
         sources[SPEC_KENYA] = PinSource(settled=True, earlier_turn=True)
@@ -1111,7 +1134,7 @@ class _SearchAndResolve:
         return await chosen.call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
-@pytest.mark.parametrize("on_record", ["copy", "identity", None])
+@pytest.mark.parametrize("on_record", ["copy", "identity", "shown", None])
 async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_with_no_search(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
@@ -1124,7 +1147,10 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
 ) -> None:
     # The pin names a dataset over the requirement's period whose identity is
     # on record: the copy `propose_plan` pinned in place of an earlier
-    # search's dataset over other years, or an earlier search's own identity.
+    # search's dataset over other years, an earlier search's own identity, or
+    # the identity of a block the planner was shown that no search returned
+    # (a scope choice switched on the plan card, an input compiled on its
+    # calculation's basis), whose breadth coverage states no window.
     # Search's answer for that identity is the source, with no `search`
     # call and nothing referred back. With nothing on record the pin is
     # searched for, and a search that does not return it refers it back.
@@ -1148,6 +1174,10 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
         earlier = _KENYA_OVER["2015-2023"]["spec_id"]
         copied = WindowedPin(spec_id=spec_id, identity=identity, windowed_from=earlier)
         save_windowed_pins(context.state, [copied])
+    if on_record == "shown":
+        shown = copy.deepcopy(answered)
+        shown["resolved"]["coverage"] = {"kind": "breadth", "has_data": True}
+        _shown(context, spec_id, shown)
     resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
 
     try:
@@ -2347,6 +2377,120 @@ async def test_a_resolve_whose_caller_is_cancelled_mid_await_is_cancelled_when_t
     assert held.cancelled is True
 
 
+class _Answering:
+    """A surface answering every `resolve_definition` with `answer`, counting the calls."""
+
+    def __init__(self, answer: ToolCallResult) -> None:
+        self.answer = answer
+        self.calls = 0
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
+    ) -> ToolCallResult:
+        del tool, arguments, on_progress
+        self.calls += 1
+        return self.answer
+
+
+_DEFINITE = ToolCallResult(
+    is_error=False,
+    meta={SEARCH_ENVELOPE_META_KEY: {"parts": [{"status": "definite", "spec": {}}]}},
+)
+_REFUSED = ToolCallResult(is_error=True, structured_content={"retry_mode": "do_not_retry"})
+_UNAVAILABLE = ToolCallResult(is_error=True, structured_content={"retry_mode": "retry_after_delay"})
+
+
+@pytest.mark.parametrize(
+    ("answer", "invocations", "keep_retryable", "calls"),
+    [
+        (_DEFINITE, (("t1", 1), ("t1", 1)), False, 1),
+        (_DEFINITE, (("t1", 1), ("t2", 1)), False, 2),
+        (_REFUSED, (("t1", 2),), False, 1),
+        (_REFUSED, (("t1", 1), ("t1", 1)), False, 2),
+        (_UNAVAILABLE, (("t1", 2),), False, 2),
+        (_UNAVAILABLE, (("t1", 2),), True, 1),
+        (_UNAVAILABLE, (("t1", 1), ("t1", 1)), True, 2),
+    ],
+    ids=[
+        "answer-kept-for-the-turn",
+        "another-turn-asks-again",
+        "refusal-kept-for-the-invocation",
+        "next-invocation-asks-a-refusal-again",
+        "retryable-refusal-asked-again",
+        "retryable-refusal-kept-for-a-translation",
+        "next-invocation-asks-a-retryable-refusal-again",
+    ],
+)
+async def test_a_turn_asks_search_once_per_resolve_unless_it_can_answer_otherwise_later(
+    answer: ToolCallResult,
+    invocations: tuple[tuple[str, int], ...],
+    keep_retryable: bool,
+    calls: int,
+) -> None:
+    """The same `resolve_definition` again in a turn reaches Search once. A definite
+    answer is kept in the turn's session state for every later invocation of it, and
+    a refusal for the rest of its invocation. One the same call can escape later is
+    asked again, unless the block is a translation's, which keeps it for the rest of
+    the block. Another turn, a session of its own, asks again."""
+    surface = _Answering(answer)
+    states: dict[str, dict[str, Any]] = {}
+
+    for turn, made in invocations:
+        with resolving_once(states.setdefault(turn, {}), keep_retryable=keep_retryable):
+            for _ in range(made):
+                if answer.is_error:
+                    with pytest.raises(DefinitionNotResolvedError):
+                        await resolve_definition(surface, spec_id=SPEC_KENYA, identity={})
+                else:
+                    await resolve_definition(surface, spec_id=SPEC_KENYA, identity={})
+
+    assert surface.calls == calls
+
+
+async def test_a_retryable_refusal_is_kept_for_its_translation_alone() -> None:
+    """Inside one planner entry, each translation (a block of its own) asks Search once
+    for a call it meets a Search outage on, however often it makes it, and the next
+    translation asks again."""
+    surface = _Answering(_UNAVAILABLE)
+
+    with resolving_once({}):
+        for _translation in range(2):
+            with resolving_once(keep_retryable=True):
+                for _call in range(2):
+                    with pytest.raises(DefinitionNotResolvedError):
+                        await resolve_definition(surface, spec_id=SPEC_KENYA, identity={})
+
+    assert surface.calls == 2
+
+
+async def test_concurrent_identical_resolves_in_one_invocation_wait_on_the_first() -> None:
+    """Two identical calls in one invocation, one inside a translation's own block
+    (`translator.tool.build_translate`), reach Search once and share its answer."""
+    held = _HeldResolve()
+    state: dict[str, Any] = {}
+
+    async def inner() -> Any:
+        with resolving_once(state):
+            return await resolve_definition(held, spec_id=SPEC_KENYA, identity={"seed": "x"})
+
+    with resolving_once(state):
+        calls = [
+            asyncio.ensure_future(
+                resolve_definition(held, spec_id=SPEC_KENYA, identity={"seed": "x"})
+            ),
+            asyncio.ensure_future(inner()),
+        ]
+        await asyncio.sleep(0.01)
+        held.release.set()
+        first, second = await asyncio.gather(*calls)
+
+    assert first == second
+    assert held.calls == 1
+
+
 async def test_keeping_a_second_task_under_a_key_cancels_the_first() -> None:
     cut_calls = CutCalls()
     first = asyncio.ensure_future(asyncio.sleep(3600))
@@ -2902,6 +3046,34 @@ async def test_names_no_label_matches_are_resolved_once_and_only_a_resolved_one_
     assert len(asked) == 1
 
 
+async def test_a_name_pinned_to_its_node_is_not_resolved_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[dict[str, list[str]]] = []
+
+    async def resolve(scope: dict[str, list[str]]) -> dict[str, dict[str, object]]:
+        asked.append({role: list(names) for role, names in scope.items()})
+        return {
+            role: {name: resolution.NotFound(near_matches=[]) for name in names}
+            for role, names in scope.items()
+        }
+
+    monkeypatch.setattr(resolution, "resolve_entities", resolve)
+    requirement = _members_requirement("Bermuda").model_copy(
+        update={"entities": (Entity(name="Bermuda", role="donor", dcid="country/BMU"),)}
+    )
+
+    await resolve_entity_refs(
+        DiscoveryLog(),
+        revision="rev",
+        requirements=[requirement],
+        requirement_keys={"oda": requirement_revision(requirement)},
+        sources={"oda": _g7_members_source()},
+    )
+
+    assert asked == []
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -3375,9 +3547,80 @@ async def test_discovery_preserves_source_name_candidates_for_the_referral(
     result = await _discover(surface, context)
     assert result["ambiguous_sources"] == groups
     assert result["action"]["arguments"]["kind"] == "source_name_ambiguous"
-    assert (
-        load_log(context.state).records[-1].ambiguous_sources[0].candidates[0].ref == "provenance/a"
+    record = load_log(context.state).records[-1]
+    assert record.ambiguous_sources[0].candidates[0].ref == "provenance/a"
+    # A record with no entity ambiguity is stored as it was before the field existed.
+    assert "ambiguous_entities" not in record.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+async def test_discovery_refers_an_ambiguous_entity_with_the_entities_it_pins(
+    draft, pinning_decision, requirement, derived_requirement, context_holding, pinned
+):
+    # The parsed door's two bare "Congo" rows share one identity, so Search
+    # answers one group whose options pin both rows. A pin is judged once the
+    # entity is settled, so a pinned requirement is referred the same way.
+    candidates = [
+        {"ref": "country/COD", "label": "Democratic Republic of the Congo", "kind": "country"},
+        {"ref": "country/COG", "label": "Republic of the Congo", "kind": "country"},
+    ]
+    sent = [{"text": "Congo", "role": "donor"}, {"text": "Congo", "role": "recipient"}]
+    envelope = {
+        "parts": [
+            {
+                "status": "no_data",
+                "no_data": {
+                    "category": "unresolved",
+                    "reason": "entity_ambiguous",
+                    "ambiguous_entities": [{"text": "Congo", "candidates": candidates}],
+                    "options": [
+                        {
+                            "mentions": ["Congo"],
+                            "label": candidate["label"],
+                            "entity_choice": 0,
+                            "data_query": {
+                                "parts": [
+                                    {
+                                        "variable": "aid",
+                                        "entities": [
+                                            {**row, "dcid": candidate["ref"]} for row in sent
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                        for candidate in candidates
+                    ],
+                },
+            }
+        ]
+    }
+    surface = FixtureSurface(
+        schemas=[],
+        responses={
+            "search": ToolCallResult(
+                is_error=False, structured_content={}, meta={SEARCH_ENVELOPE_META_KEY: envelope}
+            )
+        },
     )
+    congos = [Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient")]
+    ask = requirement(measure="aid", entities=congos, source_spec_id=SPEC_KENYA if pinned else None)
+    pins = {"decisions": [pinning_decision(SPEC_KENYA)]} if pinned else {}
+    context = context_holding(draft(evidence_requirements=[ask, derived_requirement()], **pins))
+
+    result = await _discover(surface, context)
+
+    assert result["action"]["arguments"]["kind"] == "entity_name_ambiguous"
+    readings = load_log(context.state).records[-1].ambiguous_entities
+    assert [(reading.entity.name, reading.entity.role) for reading in readings] == [
+        ("Congo", "donor"),
+        ("Congo", "recipient"),
+    ]
+    for reading in readings:
+        assert [candidate.ref for candidate in reading.candidates] == [
+            "country/COD",
+            "country/COG",
+        ]
 
 
 async def test_saved_alias_confirmation_survives_identity_resolution(
