@@ -1533,6 +1533,20 @@ async def test_a_call_with_no_anchor_key_is_not_told_to_resolve_one(
     assert structured["fix"] == fix
     assert "resolve_anchor" not in structured["message"]
     assert "anchor_key" not in structured["message"]
+    assert _OPS not in structured["message"]
+
+
+async def test_a_call_with_no_anchor_key_names_the_derived_input_it_computes_again(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    _install(_problem(422, "rolling_anchor_unresolved", fix={"detail": "no_qualifying_period"}))
+
+    result = await verbs.growth(frame_ref=_DERIVED, window_start="2021", window_end="2022")
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert _OPS in structured["message"]
 
 
 # The merged forms ------------------------------------------------------------------
@@ -1608,7 +1622,11 @@ _COMPOSED = {"numerator": "dcid:USDollar", "denominator": "dcid:Person"}
     [
         (
             {"numerator": "dcid:CurrencyUSD", "denominator": "dcid:USDollar"},
-            {"operation": "quotient"},
+            {
+                "operation": "quotient",
+                "numerator": "dcid:CurrencyUSD",
+                "denominator": "dcid:USDollar",
+            },
         ),
         (
             {"numerator": _CONVERTED, "denominator": "dcid:USDollar"},
@@ -1629,7 +1647,10 @@ async def test_a_share_across_two_unit_refs_refuses_naming_the_quotient_form(
     store: InMemoryMaterialisationStore, units: dict[str, Any], fix: dict[str, Any]
 ) -> None:
     _install(_problem(422, "cross_frame_unit_mismatch", fix=units))
-    share = await verbs.share_of(frame_ref=_FRAME, denominator_frame_ref=_DERIVED)
+    share = await verbs.share_of(
+        frame_ref=_FRAME, denominator_frame_ref=_DERIVED, rolling_follows_tree=True
+    )
+    harness_share = await verbs.share_of(frame_ref=_FRAME, denominator_frame_ref=_DERIVED)
     _install(_problem(422, "cross_frame_unit_mismatch", fix={"left": "a", "right": "b"}))
     difference = await verbs.compare(frame_ref=_FRAME, right_frame_ref=_DERIVED)
 
@@ -1638,6 +1659,8 @@ async def test_a_share_across_two_unit_refs_refuses_naming_the_quotient_form(
         "cross_frame_unit_mismatch",
         fix,
     )
+    assert harness_share.structured_content is not None
+    assert harness_share.structured_content["fix"] == units
     assert difference.structured_content is not None
     assert difference.structured_content["fix"] == {"left": "a", "right": "b"}
 

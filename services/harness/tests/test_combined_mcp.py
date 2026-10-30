@@ -55,6 +55,7 @@ from data_mcp.deadline import (
 )
 from data_mcp.definition_store import InMemoryDefinitionStore, set_store
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
+from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.mint_ledger import MintLedger
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.settings import Settings as DataMcpSettings
@@ -296,7 +297,8 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     assert {"search", "get_data", "aggregate", *PRESENTATION_TOOLS} <= _described(
         combined_tools
     ).keys()
-    # `get_data` is listed without `place_types`, every verb, `write_component` and
+    # `get_data` is listed without `place_types`, `get_skill` without `names_get_skill`,
+    # every verb, `write_component` and
     # `describe_frame` without `rebuild_lost_frames`, every verb without
     # `rolling_follows_tree`, and `growth`, `rank` and `filter` without the
     # harness's rolling arguments
@@ -305,7 +307,7 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     combined_described, direct_described = _described(combined_tools), _described(direct_tools)
     assert [
         name for name in combined_described if combined_described[name] != direct_described[name]
-    ] == ["get_data", *PUBLIC_VERBS, "write_component", "describe_frame"]
+    ] == ["get_data", "get_skill", *PUBLIC_VERBS, "write_component", "describe_frame"]
     assert any(tool.output_schema is not None for tool in direct_tools)
     assert [tool.output_schema for tool in combined_tools] == [None] * len(combined_tools)
     assert combined_templates == direct_templates
@@ -879,12 +881,18 @@ async def test_an_operation_outside_the_enum_names_the_values_it_takes(
         growth = await client.call_tool(
             "growth", {"frame_ref": UNHELD_FRAME, "window_start": "2020"}, raise_on_error=False
         )
+        long_operation = await client.call_tool(
+            "compare", {"frame_ref": UNHELD_FRAME, "operation": "x" * 5000}, raise_on_error=False
+        )
+        long_name = await client.call_tool("x" * 5000, {}, raise_on_error=False)
         listed = {tool.name: tool for tool in await client.list_tools()}
 
     assert _envelope(compare)["code"] == "request_invalid"
     assert _envelope(compare)["fix"]["problems"] == [
         "operation: must be one of difference, sum, not 'product'"
     ]
+    assert "...(truncated)" in long_operation.content[0].text
+    assert "...(truncated)" in long_name.content[0].text
     assert _envelope(growth)["fix"]["accepted"] == list(listed["growth"].input_schema["properties"])
     assert not {"rolling", "anchor_key"} & set(_envelope(growth)["fix"]["accepted"])
 
@@ -1074,10 +1082,12 @@ async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str
     arguments = {"spec_id": "spec_" + "0" * 32, **sent}
 
     async with Client(combined) as client:
+        await client.call_tool("get_skill", {"skill_id": "oda"})
         await client.call_tool("get_data", arguments)
         await client.call_tool("aggregate", {"frame_ref": UNHELD_FRAME, "aggregation": "sum"})
 
     assert forwarded.arguments == [
+        {"skill_id": "oda", NAMES_GET_SKILL: True},
         {**arguments, "place_types": True},
         {
             "frame_ref": UNHELD_FRAME,

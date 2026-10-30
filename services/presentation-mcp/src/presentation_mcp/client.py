@@ -646,8 +646,8 @@ class PlatformAssembler:
         write_token = _new_write_token()
         # A create's intent is complete. The platform resolves a `spec_` id
         # with no content_version to its newest version and stores that pair,
-        # so only another id alone is refused. A revise's patch merges into
-        # the stored frame_ref, so it goes to the platform as is.
+        # so only another id alone is refused. `frame_ref` is create-only, so
+        # a revise's patch naming one goes to the platform, which refuses it.
         frame_ref = intent.get("frame_ref")
         if (
             isinstance(frame_ref, Mapping)

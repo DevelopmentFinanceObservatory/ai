@@ -183,13 +183,21 @@ def _followable(
 ) -> ToolRefusal:
     """A runner `refusal` with advice the call's tool can follow. The runner writes
     `rolling_anchor_unresolved` for a caller of `resolve_anchor`, and a call with no
-    `anchor_key` is not one. `place_levels_mixed` asks for `place_level` only where
-    the tool takes it. A party column's message asks for no `place_level`."""
+    `anchor_key` is not one: it is told of its derived inputs, whose stored recipes
+    the call computes again, or else of the years it stated. `place_levels_mixed` asks
+    for `place_level` only where the tool takes it. A party column's message asks for
+    no `place_level`."""
     if (
         refusal.code == ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED
         and arguments.get("anchor_key") is None
     ):
-        return ToolRefusal.latest_year_unresolved(fix=refusal.fix)
+        inputs = (arguments.get(name) for name in _FRAME_ARGUMENTS)
+        derived = [
+            ref["spec_id"]
+            for ref in inputs
+            if isinstance(ref, Mapping) and str(ref.get("spec_id")).startswith("ops_")
+        ]
+        return ToolRefusal.latest_year_unresolved(fix=refusal.fix, derived=derived)
     column = refusal.fix.get("column")
     if (
         refusal.code == ToolErrorCode.PLACE_LEVELS_MIXED
@@ -365,12 +373,17 @@ def _share_of(a: Arguments) -> ShareOfOpSpec | QuotientOfOpSpec:
 
 
 def _quotient_for_two_units(a: Arguments, refusal: ToolRefusal) -> ToolRefusal:
-    """A share's `cross_frame_unit_mismatch` between two unit refs, rewritten to name
-    the quotient form. The runner's `fix` names each side's unit under its label, a
-    ref as a string. A converted or composed unit, or a side already in per cent,
-    keeps the runner's refusal, since a quotient of those would either read as a
+    """A public share's `cross_frame_unit_mismatch` between two unit refs, rewritten to
+    name the quotient form. The harness writes its own quotient, and only the public
+    server sets `FOLLOWS_TREE`. The runner's `fix` names each side's unit under its
+    label, a ref as a string. A converted or composed unit, or a side already in per
+    cent, keeps the runner's refusal, since a quotient of those would either read as a
     share or refuse itself."""
-    if a["operation"] != "share" or refusal.code != ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH:
+    if (
+        not a[FOLLOWS_TREE]
+        or a["operation"] != "share"
+        or refusal.code != ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH
+    ):
         return refusal
     units = (refusal.fix.get("numerator"), refusal.fix.get("denominator"))
     if not all(isinstance(unit, str) and unit != PERCENT_UNIT for unit in units):

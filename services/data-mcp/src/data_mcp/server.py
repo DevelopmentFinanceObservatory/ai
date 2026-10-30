@@ -46,7 +46,7 @@ from data_mcp.describe_tool import describe
 from data_mcp.export_data_tool import export_data
 from data_mcp.get_data_tool import TYPE_COLUMNS, aclose_background_mints, get_data
 from data_mcp.get_skill_file_tool import get_skill_file
-from data_mcp.get_skill_tool import get_skill
+from data_mcp.get_skill_tool import NAMES_GET_SKILL, get_skill
 from data_mcp.manifest import ARTIFACT_URI_TEMPLATE
 from data_mcp.resolve_definition_tool import resolve_definition
 from data_mcp.result_bound import ResultBoundMiddleware
@@ -170,13 +170,15 @@ mcp.tool(catalogue_counts, version="1")
 
 # The public form of each tool the combined server lists differently from this
 # mount (`common.public_shape`). Every public `get_data` frame carries the type
-# columns, and the harness asks for them per call.
+# columns, and the harness asks for them per call. `get_skill` is the public skill
+# tool, so its pages name it.
 PUBLIC_SHAPES: Mapping[str, PublicShape] = {
     "get_data": PublicShape(
         paragraphs=(TYPE_COLUMNS,),
         hidden=frozenset({"place_types"}),
         forced={"place_types": True},
     ),
+    "get_skill": PublicShape(hidden=frozenset({NAMES_GET_SKILL}), forced={NAMES_GET_SKILL: True}),
 }
 
 # A templated resource, not a tool -- it surfaces only via

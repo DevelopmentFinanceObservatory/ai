@@ -813,11 +813,21 @@ async def test_request_invalid_names_the_tools_own_argument(
     assert from_upstream_error(exc, tool=tool).fix["problems"] == [problem]
 
 
-def test_frame_ref_incomplete_caps_the_spec_id_it_echoes() -> None:
-    refusal = ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id="ops_" + "x" * 5000)
+_LONG_ID = "ops_" + "x" * 5000
 
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=_LONG_ID),
+        ToolRefusal.provenance_unavailable(spec_id=_LONG_ID),
+        ToolRefusal.frame_unavailable(spec_id=_LONG_ID, upstream_code="spec_not_found"),
+    ],
+    ids=["frame_ref_incomplete", "provenance_unavailable", "frame_unavailable"],
+)
+def test_a_refusal_caps_the_spec_id_it_echoes(refusal: ToolRefusal) -> None:
     assert "...(truncated)" in refusal.message
-    assert len(refusal.message) < 500
+    assert len(refusal.message) < 600
 
 
 async def test_request_invalid_without_a_pointer_still_names_the_detail() -> None:

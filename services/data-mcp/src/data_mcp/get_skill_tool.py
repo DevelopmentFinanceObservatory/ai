@@ -7,8 +7,11 @@ their sizes and the call that reads one, and one `resource_link` block per
 file. Structured content is the skill's SEP-2640 entry: `uri`, `frontmatter`,
 and `resources` as the full manifest of `uri`, `digest` and `size`. With a
 `path` it answers as `get_skill_file` does, through the same
-`get_skill_file_tool.read_skill_file`, naming `get_skill` in the calls it
-prints.
+`get_skill_file_tool.read_skill_file`.
+
+Every call a page prints names `get_skill_file`, the tool the harness's wrappers
+give their models. The public server lists no such tool and forces `NAMES_GET_SKILL`
+on (`server.PUBLIC_SHAPES`), so there every call names `get_skill`.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from data_mcp.skills_client import (
 )
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
 
-_TOOL = "get_skill"
+NAMES_GET_SKILL = "names_get_skill"
 
 
 def _file_size(size: int) -> str:
@@ -44,10 +47,10 @@ def _file_size(size: int) -> str:
     return f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
 
 
-def _files_block(skill: Skill) -> str:
+def _files_block(skill: Skill, *, tool: str) -> str:
     return "\n".join(
         [
-            f'Files in this skill; read one with {_TOOL}(skill_id="{skill.id}", path=…):',
+            f'Files in this skill; read one with {tool}(skill_id="{skill.id}", path=…):',
             *(f"- {file.path} ({_file_size(file.size)})" for file in skill.other_files),
         ]
     )
@@ -63,8 +66,9 @@ def _resource_link(skill_id: str, file: SkillFile) -> ResourceLink:
     )
 
 
-def _render(skill: Skill) -> str:
-    """The first page of `SKILL.md`, its closing line when it goes on, then the file list."""
+def _render(skill: Skill, *, tool: str) -> str:
+    """The first page of `SKILL.md`, its closing line when it goes on, then the file list,
+    each call named `tool`."""
     page = page_of(skill.content_text, 0)
     rendered = page.text
     if page.next_offset is not None:
@@ -76,11 +80,11 @@ def _render(skill: Skill) -> str:
                 page=page,
                 length=len(skill.content_text),
                 digest=skill.main_file.digest,
-                tool=_TOOL,
+                tool=tool,
             ),
         )
     if skill.other_files:
-        rendered = with_closing_line(rendered, _files_block(skill))
+        rendered = with_closing_line(rendered, _files_block(skill, tool=tool))
     return rendered
 
 
@@ -117,6 +121,10 @@ async def get_skill(
             description="The digest a page's closing line names; required when offset is past 0."
         ),
     ] = None,
+    names_get_skill: Annotated[
+        bool,
+        Field(description="True names get_skill in every call a page prints."),
+    ] = False,
 ) -> ToolResult:
     """Load a skill a `search` result names, or one of its files.
 
@@ -147,9 +155,10 @@ async def get_skill(
     Returns:
         The skill's SKILL.md and file list, or one page of the file at `path`.
     """
+    tool = "get_skill" if names_get_skill else "get_skill_file"
     if path is not None:
         return await read_skill_file(
-            tool=_TOOL, skill_id=skill_id, path=path, offset=offset, digest=digest
+            tool=tool, skill_id=skill_id, path=path, offset=offset, digest=digest
         )
     if offset > 0 or digest is not None:
         return to_tool_result(
@@ -168,7 +177,7 @@ async def get_skill(
         return to_tool_result(refused.refusal)
     return ToolResult(
         content=[
-            TextContent(type="text", text=_render(skill)),
+            TextContent(type="text", text=_render(skill, tool=tool)),
             *(_resource_link(skill.id, file) for file in skill.other_files),
         ],
         structured_content=skill_entry(skill),

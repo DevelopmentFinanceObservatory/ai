@@ -9,6 +9,7 @@ from typing import Any
 import httpx2
 import pytest
 from common.apis_auth import ApisAuthError
+from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.server import mcp
 from data_mcp.skills_client import PAGE_CHARS
 from fastmcp.client.client import CallToolResult
@@ -34,20 +35,32 @@ async def _get_skill(handler: Handler, skill_id: str = SKILL_ID) -> CallToolResu
     return await call_tool(handler, "get_skill", {"skill_id": skill_id})
 
 
+# What the public server forces on, and the tool each mount's pages then name.
+_PUBLIC = {NAMES_GET_SKILL: True}
+_PRINTED_TOOL = pytest.mark.parametrize(
+    ("forced", "printed"), [({}, "get_skill_file"), (_PUBLIC, "get_skill")], ids=["mount", "public"]
+)
+
+
 # A served skill
 
 
-async def test_skill_md_renders_verbatim_then_the_file_list() -> None:
+@_PRINTED_TOOL
+async def test_skill_md_renders_verbatim_then_the_file_list(
+    forced: dict[str, bool], printed: str
+) -> None:
     requests: list[httpx2.Request] = []
 
-    result = await _get_skill(serving_skill(requests=requests))
+    result = await call_tool(
+        serving_skill(requests=requests), "get_skill", {"skill_id": SKILL_ID, **forced}
+    )
 
     assert [request.url.path for request in requests] == [f"/api/skills/{SKILL_ID}"]
     assert result.is_error is False
     assert text_of(result) == (
         SKILL_MD
         + "\n"
-        + 'Files in this skill; read one with get_skill(skill_id="oda-concepts", path=…):\n'
+        + f'Files in this skill; read one with {printed}(skill_id="oda-concepts", path=…):\n'
         + "- references/core-oda.md (5.5 KB)\n"
         + "- references/donor-groupings.md (32 B)"
     )
@@ -97,17 +110,24 @@ async def test_a_skill_with_no_other_files_renders_skill_md_alone() -> None:
     assert len(result.content) == 1
 
 
-async def test_a_long_skill_md_returns_its_first_page_pointing_at_get_skill_with_its_path() -> None:
+@_PRINTED_TOOL
+async def test_a_long_skill_md_returns_its_first_page_naming_the_next_call(
+    forced: dict[str, bool], printed: str
+) -> None:
     line = "x" * 99 + "\n"
     content_text = line * (PAGE_CHARS // len(line) + 50)
 
-    result = await _get_skill(serving_skill(content_text=content_text, references={}))
+    result = await call_tool(
+        serving_skill(content_text=content_text, references={}),
+        "get_skill",
+        {"skill_id": SKILL_ID, **forced},
+    )
 
     page_end = PAGE_CHARS
     assert text_of(result) == (
         content_text[:page_end]
         + f"\nThis page ends at character {page_end:,} of {len(content_text):,}. Read the rest "
-        + f'with get_skill(skill_id="oda-concepts", path="SKILL.md", offset={page_end}, '
+        + f'with {printed}(skill_id="oda-concepts", path="SKILL.md", offset={page_end}, '
         + f'digest="{digest_of(content_text)}").'
     )
 
@@ -154,7 +174,7 @@ async def test_a_path_answers_as_get_skill_file_does_naming_get_skill(
     handler = serving_skill(references=references)
     arguments = {"skill_id": SKILL_ID, **arguments}
 
-    by_path = await call_tool(handler, "get_skill", arguments)
+    by_path = await call_tool(handler, "get_skill", {**arguments, **_PUBLIC})
     by_file = await call_tool(handler, "get_skill_file", arguments)
 
     assert by_path.is_error == by_file.is_error

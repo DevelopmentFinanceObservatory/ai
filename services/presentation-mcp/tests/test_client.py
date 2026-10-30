@@ -354,7 +354,7 @@ async def test_create_component_posts_intent_and_write_token_no_composition_id()
 )
 async def test_revise_component_patches_the_component_id(patch: dict[str, Any]) -> None:
     """A patch goes to the platform unchanged, including a frame_ref that names
-    only a spec_id, which the platform merges into the stored frame_ref."""
+    only a spec_id. `frame_ref` is create-only, so dfo-apis refuses that patch."""
     requests, handler = _counting_handler(httpx2.Response(200, json=WRITE_BODY | {"revision": 2}))
 
     async with _assembler(handler) as assembler:
