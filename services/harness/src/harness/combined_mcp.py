@@ -54,8 +54,9 @@ callers goes. `build_combined_mcp` adds it outermost first:
   overwritten.
 - `_RegisterBareSpecs` registers with dfo-apis the definition of each `spec_` id a call
   passes alone, so an id fresh from `search` reads as `get_data` would mint it
-  (`data_mcp.definition_registration`). Studio goes through `get_data`, which registers
-  as it mints.
+  (`data_mcp.definition_registration`). Each id registers once a process, a failure a
+  retry may mend lets the call run, and a 4xx refuses it. Studio goes through `get_data`,
+  which registers as it mints.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
   unknown tool name, arguments that fail the tool's input schema, or an
   exception from the tool itself. A resource read that raised an
@@ -1027,7 +1028,7 @@ def _bare_spec_ids(arguments: dict[str, Any]) -> list[str]:
 
 class _RegisterBareSpecs(Middleware):
     """Registers each `spec_` id a call passes alone before the call runs. A
-    registration dfo-apis refuses answers the call."""
+    registration dfo-apis refuses with a 4xx answers the call."""
 
     @override
     async def on_call_tool(
@@ -1035,10 +1036,15 @@ class _RegisterBareSpecs(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        for spec_id in _bare_spec_ids(context.message.arguments or {}):
-            refused = await register_held_definition(spec_id)
-            if refused is not None:
-                return refused
+        name = context.message.name
+        outcomes = await asyncio.gather(
+            *(
+                register_held_definition(spec_id, tool=name)
+                for spec_id in _bare_spec_ids(context.message.arguments or {})
+            )
+        )
+        if refused := next((outcome for outcome in outcomes if outcome is not None), None):
+            return refused
         return await call_next(context)
 
 
@@ -1209,8 +1215,9 @@ def _merged_name_refusal(name: str) -> ToolResult:
 def _problems(exc: ValidationError, parameters: dict[str, Any]) -> list[str]:
     """One `field: problem` line per error in the pydantic `ValidationError` fastmcp
     raised `exc` from. A value outside a top-level enum in `parameters` names the
-    values the enum allows. What the caller sent, an argument's name included, is
-    echoed capped (`echoed_text.truncate_value`)."""
+    values the enum allows. What the caller sent, an argument's name included, and
+    pydantic's message, which can quote it, are echoed capped
+    (`echoed_text.truncate_value`)."""
     cause = exc.__cause__
     if not isinstance(cause, PydanticValidationError):
         return [str(exc)]
@@ -1224,7 +1231,7 @@ def _problems(exc: ValidationError, parameters: dict[str, Any]) -> list[str]:
             sent = truncate_value(repr(error["input"]))
             problems.append(f"{field}: must be one of {values}, not {sent}")
         else:
-            problems.append(f"{field}: {error['msg']}")
+            problems.append(f"{field}: {truncate_value(error['msg'])}")
     return problems
 
 

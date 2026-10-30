@@ -18,10 +18,10 @@ names the dataset version apis holds and the options it was read with. Its root
 is that version with the rendering the options state: `without_party_totals`,
 `columns`, the enrichment columns sorted and each listed once, `[]` when the frame
 has none, and `groupby` when the frame was fetched with a `breakdown` or a
-`stat_vars` sum, which the dataset of the mint record is already summed for. The record
-of a bare read states the default enrichment, so its root names no `columns` and takes
-what a Spec root takes. A `spec_` pair with no mint record is sent as a version read with
-no columns. A record that does not decode
+`stat_vars` sum, which the dataset of the mint record is already summed for. On a public
+call (`default_enrichment`), a record of the plain rendering sends no `columns`, so the
+root takes what a Spec root takes. A `spec_` pair with no mint record is sent as a version
+read with no columns. A record that does not decode
 refuses `frame_integrity_failed`, and any other failed read of it
 `service_unavailable`, which a retry may mend. The runner reads a root with
 no other option, so a frame fetched with one refuses `rendering_not_recorded`.
@@ -169,7 +169,9 @@ async def _mint_record(ref: FrameRef) -> MintRecord | None | ToolRefusal:
         )
 
 
-async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
+async def root_node(
+    ref: FrameRef, *, default_enrichment: bool = False
+) -> tuple[dict[str, Any], Pair] | ToolRefusal:
     """The root node of `ref` and the pair it names, or the refusal for a frame the
     runner cannot read. See the module docstring."""
     derived = ref.spec_id.startswith("ops_")
@@ -188,17 +190,21 @@ async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
             spec_id=ref.spec_id, content_version=ref.content_version, options=unread
         )
     dataset = record.dataset
-    node = {**dataset.model_dump(), "rendering": root_rendering(record)}
+    rendering = root_rendering(record, default_enrichment=default_enrichment)
+    node = {**dataset.model_dump(), "rendering": rendering}
     return node, (dataset.spec_id, dataset.content_version)
 
 
-async def spec_root(ref: FrameRef) -> dict[str, Any] | ToolRefusal:
+async def spec_root(
+    ref: FrameRef, *, default_enrichment: bool = False
+) -> dict[str, Any] | ToolRefusal:
     """The Spec root that fetches the `spec_` frame `ref` again at its newest version,
     with the rendering its mint record states, or the refusal for a frame whose
     rendering cannot be established. See the module docstring."""
     match await frame_rendering(ref, logger=logger):
         case FrameRendering() as known:
-            return {"spec_id": ref.spec_id, "rendering": known.rendering}
+            rendering = root_rendering(known.record, default_enrichment=default_enrichment)
+            return {"spec_id": ref.spec_id, "rendering": rendering}
         case RenderingUnknown(options=options):
             return ToolRefusal.rendering_not_recorded(
                 spec_id=ref.spec_id, content_version=ref.content_version, options=options
@@ -368,11 +374,13 @@ async def verb_tree(
     anchor_key: str | None = None,
     place_level: PlaceLevel | None = None,
     replaced: Mapping[Pair, dict[str, Any]] | None = None,
+    default_enrichment: bool = False,
 ) -> Tree | ToolRefusal:
     """The one-node tree of `op_spec`, with the anchor roots of the record under
     `anchor_key` when given, or the refusal for a frame it reads. A frame ref whose
-    pair is in `replaced` is sent as the root node it maps to, and `place_level`
-    filters each input to that level first (see the module docstring)."""
+    pair is in `replaced` is sent as the root node it maps to, `place_level`
+    filters each input to that level first, and `default_enrichment` is a public
+    call's reading of a plain record (see the module docstring)."""
     arguments = op_spec.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
     inputs: dict[str, Any] = {}
     refs_by_root: dict[Pair, tuple[FrameRef, ...]] = {}
@@ -388,7 +396,7 @@ async def verb_tree(
                 (node["spec_id"], node["content_version"]) if "content_version" in node else None
             )
         else:
-            root = await root_node(ref)
+            root = await root_node(ref, default_enrichment=default_enrichment)
             if isinstance(root, ToolRefusal):
                 return root
             node, pair = root

@@ -20,11 +20,13 @@ import pytest
 from common.apis_auth import AuthProvider
 from common.caller import conversation_caller, supplied_caller
 from common.materialisation import (
+    DEFAULT_MINT_OPTIONS,
     FrameRef,
     InMemoryMaterialisationStore,
     MintRecord,
     frame_from_verified_parquet_bytes,
     frame_to_parquet_bytes,
+    record_bare_read,
 )
 from common.materialisation import set_store as set_frame_store
 from common.place_type import PARTY_KINDS
@@ -4967,6 +4969,35 @@ async def test_a_recorded_root_is_minted_again_with_its_options_and_scope(
     assert await frame_store.get_mint_record(minted.frame) == MintRecord(
         frame=minted.frame, dataset=dataset, options=options, scope=scope, stat_var_count=1
     )
+
+
+async def test_the_record_of_a_bare_read_is_minted_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = _stored_definition()
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+
+    async def degraded(*, manifest: Manifest, **_: Any):
+        return MaterialisationOutcome(
+            status="degraded", attempts=1, degraded_reason="fetch", frame_ref=mint_pair(manifest)
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", degraded)
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content)["options"])
+        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+
+    read = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    await record_bare_read(read.spec_id, read.content_version, logger=logging.getLogger("caller"))
+    record = await frame_store.get_mint_record(read)
+    assert record is not None
+
+    await _mint_recorded_root(handler, stored, record)
+
+    assert sent == [dict(DEFAULT_MINT_OPTIONS)]
 
 
 async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(

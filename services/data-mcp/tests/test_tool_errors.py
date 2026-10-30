@@ -1869,6 +1869,15 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
     "definition_not_held": ("get_data", {"definition_id": _SPEC}),
     "open_role_unavailable": ("get_data", {"pointer": "/identity/open_roles", "detail": "d"}),
     "request_invalid": ("describe", {"tool": "describe", "pointer": "/ids/0", "detail": "d"}),
+    "spec_not_registered": (
+        "export_data",
+        {
+            "tool": "export_data",
+            "spec_id": "spec_" + "1" * 32,
+            "upstream_code": "spec_id_mismatch",
+            "detail": "differs",
+        },
+    ),
     "node_not_held": ("describe", {"dcids": ["country/ZZZ"]}),
     "frame_integrity_failed": (
         "get_data",

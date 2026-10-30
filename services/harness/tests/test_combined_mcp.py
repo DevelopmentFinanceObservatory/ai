@@ -43,7 +43,13 @@ from common.materialisation import FrameRef, MintRecord
 from common.materialisation import get_store as get_frame_store
 from common.refusal import internal_error_message, refusal_meta
 from common.uri_redaction import UriRedactingExporter
-from data_mcp import artifact_resource, client_holder, get_data_tool, skills_resources
+from data_mcp import (
+    artifact_resource,
+    client_holder,
+    definition_registration,
+    get_data_tool,
+    skills_resources,
+)
 from data_mcp import server as data_server
 from data_mcp import tool_errors as data_tool_errors
 from data_mcp.client import UpstreamClient
@@ -58,6 +64,7 @@ from data_mcp.definition_store import (
     DefinitionStoreUnavailable,
     InMemoryDefinitionStore,
     StoredDefinition,
+    get_store,
     set_store,
 )
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
@@ -109,7 +116,8 @@ from presentation_mcp.platform_contract import (
     WriteReply,
 )
 from presentation_mcp.projection import ROWLESS_NOTICE, UNKNOWN_HOST_ROWLESS_NOTICE
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import ValidationError as PydanticValidationError
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -1152,6 +1160,25 @@ _BARE_UNSTORED = "spec_" + "e" * 32
 _LOST_OPS = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "d" * 32}
 
 
+def test_a_validation_message_quoting_the_caller_is_capped() -> None:
+    class Sent(BaseModel):
+        frame: str
+
+        @field_validator("frame")
+        @classmethod
+        def refused(cls, value: str) -> str:
+            raise ValueError(value)
+
+    with pytest.raises(PydanticValidationError) as caught:
+        Sent(frame="x" * 5000)
+    raised = combined_mcp.ValidationError("refused")
+    raised.__cause__ = caught.value
+
+    (problem,) = combined_mcp._problems(raised, {})
+
+    assert len(problem) < 300
+
+
 def _rebuilt_pair(lost: dict[str, str]) -> dict[str, str]:
     """The pair `_losing_platform` builds `lost` again as."""
     return {**lost, "content_version": lost["content_version"][:-32] + "9" * 32}
@@ -1250,6 +1277,7 @@ async def _bare_call_client(
             return httpx2.Response(200, json=_RELEASE)
         return handler(request)
 
+    definition_registration._registered.clear()
     transport = httpx2.MockTransport(answer)
     monkeypatch.setattr(
         presentation_server,
@@ -1312,7 +1340,7 @@ async def test_a_bare_spec_fresh_from_search_is_registered_before_its_call_runs(
     assert called.url.path.startswith(path)
 
 
-async def test_a_spec_dfo_apis_will_not_register_refuses_before_the_call_runs(
+async def test_a_spec_dfo_apis_will_not_register_refuses_in_the_calling_tools_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requests: list[httpx2.Request] = []
@@ -1320,7 +1348,7 @@ async def test_a_spec_dfo_apis_will_not_register_refuses_before_the_call_runs(
     def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
         return httpx2.Response(
-            500, json={"code": "identity_quarantined", "detail": "held", "retryable": False}
+            422, json={"code": "spec_id_mismatch", "detail": "differs", "retryable": False}
         )
 
     arguments, _ = _BARE_CALLS["aggregate"]
@@ -1328,8 +1356,67 @@ async def test_a_spec_dfo_apis_will_not_register_refuses_before_the_call_runs(
         result = await client.call_tool("aggregate", arguments, raise_on_error=False)
 
     assert result.is_error is True
-    assert _envelope(result)["code"] == "upstream_error"
+    envelope = _envelope(result)
+    assert (envelope["code"], envelope["fix"]["tool"]) == ("upstream_error", "aggregate")
     assert [request.url.path for request in requests] == ["/api/datasets/register"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx2.Response(
+            500, json={"code": "identity_quarantined", "detail": "held", "retryable": False}
+        ),
+        httpx2.TimeoutException("slow"),
+    ],
+    ids=["5xx", "timeout"],
+)
+async def test_a_failed_registration_a_retry_may_mend_lets_the_call_run(
+    failure: httpx2.Response | Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dfo-apis may already hold the id, so its answer stands."""
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path != "/api/datasets/register":
+            return httpx2.Response(200, json={})
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    arguments, path = _BARE_CALLS["aggregate"]
+    async with _bare_call_client(handler, monkeypatch) as client:
+        await client.call_tool("aggregate", arguments, raise_on_error=False)
+
+    assert requests[-1].url.path == path
+
+
+async def test_each_bare_id_of_a_call_registers_once_in_a_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_identity = {**_SEARCHED_IDENTITY, "dataset": "DAC2A"}
+    other = spec_id_for(canonicalize(other_identity))
+    registered: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets/register":
+            registered.append(json.loads(request.content)["definition"]["spec_id"])
+        return httpx2.Response(200, json={})
+
+    arguments = {"frame_ref": {"spec_id": _SEARCHED_SPEC}, "right_frame_ref": {"spec_id": other}}
+    async with _bare_call_client(handler, monkeypatch) as client:
+        await get_store().put_many(
+            [
+                StoredDefinition(
+                    spec_id=other, schema_version=1, canonical_bytes=canonicalize(other_identity)
+                )
+            ]
+        )
+        await client.call_tool("compare", arguments, raise_on_error=False)
+        await client.call_tool("compare", arguments, raise_on_error=False)
+
+    assert sorted(registered) == sorted([_SEARCHED_SPEC, other])
 
 
 @pytest.mark.parametrize("store_reads", [True, False], ids=["unheld", "store-down"])

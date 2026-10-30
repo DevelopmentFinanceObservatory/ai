@@ -1987,7 +1987,7 @@ _REFUSAL_SHAPES = {
             "code": "binding_invalid",
             "retry_mode": "correct_and_retry",
             "message": "No such recipient. Recipient: Kenya (country/KEN).",
-            "fix": {},
+            "fix": {"pointer": "/select/recipient"},
         },
     ),
     "mapping-fix-and-wait": (
@@ -2093,7 +2093,7 @@ async def test_a_bare_ops_id_refuses_frame_ref_incomplete_in_the_envelope(
         "frame_ref_incomplete",
         "correct_and_retry",
     )
-    assert envelope["fix"] == {}
+    assert envelope["fix"] == {"pointer": "/frame_ref/content_version"}
     # The message opens with the argument's name as the schema writes it.
     assert envelope["message"].startswith("frame_ref names ops_1 ")
 
@@ -2679,14 +2679,36 @@ async def test_every_presentation_code_has_a_refusal_sample() -> None:
     assert written | set(RELEASE["retry_modes"]) <= sampled
 
 
+def test_a_pointer_reaches_the_envelope_and_stays_out_of_what_a_retry_merges() -> None:
+    """The harness merges `_meta`'s `values` into a retry, so the pointer is the
+    envelope's alone."""
+    refusal = Refusal(
+        error="binding_invalid",
+        retry=RetryMode.CORRECT_AND_RETRY,
+        detail="No such recipient.",
+        fix={"recipient": "country/KEN"},
+        pointer="/select/recipient",
+    )
+
+    result = server._refusal_result(refusal, tool="write_component")
+
+    assert result.structured_content is not None
+    assert result.structured_content["fix"] == {
+        "recipient": "country/KEN",
+        "pointer": "/select/recipient",
+    }
+    assert result.meta is not None
+    assert result.meta[REFUSAL_META_KEY]["values"] == {"recipient": "country/KEN"}
+
+
 @pytest.mark.parametrize("sample", list(_REFUSAL_SAMPLES))
 async def test_a_presentation_fix_names_only_arguments_and_values_its_tool_accepts(
     sample: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A fix key that is an argument of any presentation tool is one of this tool's,
-    with a value its schema accepts. Display text and pointers stay out of the fix,
-    and a `request_invalid` fix names the tool, its accepted arguments, and problems
-    on those arguments."""
+    with a value its schema accepts. Display text stays out of the fix, and a
+    `request_invalid` fix names the tool, its accepted arguments, and problems on
+    those arguments."""
     monkeypatch.setattr(server, "PlatformAssembler", _mock_platform_assembler(RELEASE))
     tool, refusal = await _sample(sample)
 
@@ -2698,7 +2720,7 @@ async def test_a_presentation_fix_names_only_arguments_and_values_its_tool_accep
     arguments = set().union(*(schema["properties"] for schema in schemas.values()))
     properties = schemas[tool]["properties"]
     fix = envelope["fix"]
-    assert not {"advice", "pointer", "detail"} & set(fix), (sample, fix)
+    assert not {"advice", "detail"} & set(fix), (sample, fix)
     for key, value in fix.items():
         if key in arguments:
             assert key in properties, (sample, tool, key)

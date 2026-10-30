@@ -45,9 +45,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import rfc8785
 from common.materialisation import (
-    DEFAULT_ENRICHMENT,
     DEFAULT_MINT_OPTIONS,
-    ENRICHMENT,
     FrameExpired,
     FrameIntegrityError,
     FrameRef,
@@ -117,6 +115,13 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# The mint option that asks apis to add the enrichment the version's own role columns take
+# (apis' `MintOptions.enrichment`). apis answers as a mint naming the columns it resolved to,
+# and the manifest's artifact lists them in its `rendering`, so a frame minted with it is
+# named by them (`resolved_options`).
+ENRICHMENT = "enrichment"
+DEFAULT_ENRICHMENT = "default"
 
 # The bare link GET has its own small retry budget (see `_fetch_artifact_bytes_uncapped`'s
 # docstring): this hop is idempotent, so a handful of quick retries costs little and buys

@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from common.materialisation import (
+    DEFAULT_MINT_OPTIONS,
     FrameExpired,
     FrameIntegrityError,
     FrameListing,
@@ -32,6 +33,7 @@ from common.materialisation import (
     encode_mint_record,
     frame_rendering,
     record_bare_read,
+    root_rendering,
     set_store,
     store_is_set,
 )
@@ -562,7 +564,6 @@ _READ_AS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "fra
     ("options", "rendering", "summed", "default_rows"),
     [
         (_READ_AS, {"without_party_totals": False, "columns": []}, False, True),
-        ({**_READ_AS, "enrichment": "default"}, {"without_party_totals": False}, False, True),
         (
             {**_READ_AS, "columns": ["b", "a", "a"]},
             {"without_party_totals": False, "columns": ["a", "b"]},
@@ -582,7 +583,7 @@ _READ_AS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "fra
             False,
         ),
     ],
-    ids=["default", "default-enrichment", "columns", "party-total-cut", "groupby"],
+    ids=["default", "columns", "party-total-cut", "groupby"],
 )
 async def test_frame_rendering_answers_what_the_record_states(
     options: dict[str, Any], rendering: dict[str, Any], summed: bool, default_rows: bool
@@ -651,6 +652,25 @@ async def test_frame_rendering_names_the_options_no_root_reads() -> None:
     assert answer == RenderingUnknown(options=("currency", "pivot"))
 
 
+@pytest.mark.parametrize(
+    ("options", "columns_left_out"),
+    [
+        (_READ_AS, True),
+        ({**_READ_AS, "columns": ["a"]}, False),
+        ({**_READ_AS, "without_party_totals": True}, False),
+        ({**_READ_AS, "groupby": {"by": ["sector"]}}, False),
+    ],
+    ids=["plain", "columns", "party-total-cut", "groupby"],
+)
+def test_only_a_plain_record_leaves_its_columns_to_the_default_enrichment(
+    options: dict[str, Any], columns_left_out: bool
+) -> None:
+    record = MintRecord(frame=_FRAME, dataset=_DATASET, options=options)
+
+    assert "columns" in root_rendering(record)
+    assert ("columns" not in root_rendering(record, default_enrichment=True)) is columns_left_out
+
+
 async def test_a_bare_read_records_the_default_rendering_and_keeps_a_record_already_held() -> None:
     store = InMemoryMaterialisationStore()
     summed = MintRecord(frame=_DATASET, dataset=_DATASET, options={"groupby": {"by": ["sector"]}})
@@ -668,8 +688,8 @@ async def test_a_bare_read_records_the_default_rendering_and_keeps_a_record_alre
 
     assert isinstance(answer, FrameRendering)
     assert answer.record.dataset == _FRAME
-    # A root with no `columns` takes the enrichment a `get_data` frame carries.
-    assert answer.rendering == {"without_party_totals": False}
+    assert answer.record.options == DEFAULT_MINT_OPTIONS
+    assert answer.rendering == {"without_party_totals": False, "columns": []}
     assert answer.default_rows
     assert await store.get_mint_record(_DATASET) == summed
 

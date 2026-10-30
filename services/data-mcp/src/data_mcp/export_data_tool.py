@@ -53,7 +53,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
 
 from data_mcp.client import DATASETS_PREFIX
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S, CallDeadline
+from data_mcp.deadline import (
+    EXTERNAL_CALL_LIMIT_S,
+    EXTERNAL_CALL_MARGIN_S,
+    CallDeadline,
+    current_call_deadline,
+)
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
 
@@ -279,7 +284,7 @@ async def export_data(
             route=_PREPARE_ROUTE,
             json=body,
             headers=client.caller_headers(),
-            deadline=CallDeadline.after(_PREPARE_DEADLINE_S),
+            deadline=current_call_deadline() or CallDeadline.after(_PREPARE_DEADLINE_S),
         )
     except UpstreamError as exc:
         return to_tool_result(_refusal(exc, frame=frame_ref, export_format=format))

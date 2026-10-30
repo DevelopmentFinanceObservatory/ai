@@ -726,6 +726,25 @@ class ToolRefusal:
         )
 
     @classmethod
+    def spec_not_registered(
+        cls, *, tool: str, spec_id: str, upstream_code: str | None, detail: str | None
+    ) -> Self:
+        """dfo-apis refused to register the definition of `spec_id`, which `tool` was
+        passed alone (`definition_registration`). Its message names `tool`, whose
+        caller never asked for a registration. The same id reaches the same refusal, so
+        it names no delay."""
+        return cls(
+            code=ToolErrorCode.UPSTREAM_ERROR,
+            message=(
+                f"{tool} cannot read {spec_id}: the platform refused its definition "
+                f"({upstream_code or 'unclassified'}): {detail}. Call search again and "
+                f"retry {tool} with the spec_id it returns."
+            ),
+            fix={"tool": tool, "problems": [f"{spec_id}: {detail}"]},
+            upstream_code=upstream_code,
+        )
+
+    @classmethod
     def node_not_held(
         cls,
         *,

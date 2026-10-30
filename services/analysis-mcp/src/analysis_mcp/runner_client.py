@@ -525,10 +525,11 @@ def _derived_reads(refs_by_root: RefsByRoot) -> tuple[FrameRef, ...]:
     )
 
 
-async def _own_latest(ref: FrameRef) -> RecomputedInput | None:
+async def _own_latest(ref: FrameRef) -> RecomputedInput | FrameRef | None:
     """`ref` with its top verb and the latest year its own recipe was filled from;
-    `None` for a recipe with no rolling year, and for a manifest that cannot be
-    read, which is logged, since whether the input was computed again is unknown."""
+    `None` for a recipe with no rolling year, and `ref` itself for a manifest that
+    cannot be read, which is logged, since whether the input was computed again is
+    unknown."""
     try:
         manifest = await read_derived_manifest(ref)
     except DerivedUnread as exc:
@@ -538,7 +539,7 @@ async def _own_latest(ref: FrameRef) -> RecomputedInput | None:
             ref.content_version,
             exc,
         )
-        return None
+        return ref
     anchor = manifest.get("anchor")
     period = anchor.get("period") if isinstance(anchor, Mapping) else None
     if not isinstance(period, str):
@@ -559,8 +560,8 @@ async def _rolling(
     when it names none, with each of the `derived` inputs whose own recipe took
     another latest year. `derived` is empty unless the request sent
     `rolling: "tree"`, since without it each input keeps its stored periods. A
-    derived input with no rolling year of its own, one that took the same year,
-    and one whose manifest cannot be read are not named."""
+    derived input with no rolling year of its own and one that took the same year
+    are not named. One whose manifest cannot be read is named as unconfirmed."""
     if not resolved:
         return None
     try:
@@ -569,12 +570,21 @@ async def _rolling(
     except ValueError:
         return _unusable("the analysis answer's resolved_periods do not fit this service")
     recomputed: list[RecomputedInput] = []
+    unconfirmed: list[FrameRef] = []
     if derived:
         async with asyncio.TaskGroup() as group:
             reads = [group.create_task(_own_latest(ref)) for ref in derived]
         owns = [read.result() for read in reads]
-        recomputed = [own for own in owns if own is not None and own.latest != latest]
-    return Rolling(latest=latest, periods=periods, recomputed=tuple(recomputed))
+        recomputed = [
+            own for own in owns if isinstance(own, RecomputedInput) and own.latest != latest
+        ]
+        unconfirmed = [own for own in owns if isinstance(own, FrameRef)]
+    return Rolling(
+        latest=latest,
+        periods=periods,
+        recomputed=tuple(recomputed),
+        unconfirmed=tuple(unconfirmed),
+    )
 
 
 def _ready_summary(

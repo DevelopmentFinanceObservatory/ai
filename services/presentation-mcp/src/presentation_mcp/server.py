@@ -229,11 +229,12 @@ def _refusal_result(
     what a corrected call can use. For `request_invalid` that is `tool`, one
     `field: problem` line and the arguments `tool` accepts, as the combined
     server's validation refusal does. Otherwise it is `refusal.fix` when that
-    is a mapping, and `{}`.
+    is a mapping, and `{}`, with `pointer` beside it when the refusal names one.
 
     `_meta` is `refusal_meta` of the code, beside `detail`, `advice` and
     `values`. These are the refusal's detail, display-text fix and mapping fix
-    as the assembler gave them, which the harness reads.
+    as the assembler gave them, which the harness reads, so a Studio retry merges
+    `values` alone and no `pointer` into its arguments.
     """
     advice = refusal.fix if isinstance(refusal.fix, str) else None
     values = dict(refusal.fix) if isinstance(refusal.fix, Mapping) else None
@@ -241,7 +242,7 @@ def _refusal_result(
     if refusal.error == "request_invalid":
         fix: dict[str, Any] = _request_invalid_fix(refusal, tool=tool)
     else:
-        fix = values or {}
+        fix = {**(values or {}), **({"pointer": refusal.pointer} if refusal.pointer else {})}
     envelope: dict[str, Any] = {
         "code": refusal.error,
         "retry_mode": refusal.retry.value,

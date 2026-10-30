@@ -43,9 +43,7 @@ from common.materialisation.mint_record import (
     read_mint_record,
 )
 from common.materialisation.rendering import (
-    DEFAULT_ENRICHMENT,
     DEFAULT_MINT_OPTIONS,
-    ENRICHMENT,
     FrameRendering,
     RecordUnread,
     RenderingUnknown,
@@ -72,9 +70,7 @@ from common.materialisation.trace_codec import (
 )
 
 __all__ = [
-    "DEFAULT_ENRICHMENT",
     "DEFAULT_MINT_OPTIONS",
-    "ENRICHMENT",
     "AnchorPopulation",
     "AnchorRecord",
     "AnchorRecordIntegrityError",

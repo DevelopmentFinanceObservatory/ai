@@ -1472,7 +1472,8 @@ def _recomputed_name(recomputed: RecomputedInput) -> str:
 
 def _rolling_section(rolling: Rolling) -> str:
     """The latest year a call's relative periods were filled from, each period's
-    literal, and each derived input computed again under that year."""
+    literal, each derived input computed again under that year, and each whose own
+    year could not be read."""
     periods = ", ".join(
         f"{_relative_name(period.offset)} is {period.period}" for period in rolling.periods
     )
@@ -1486,6 +1487,14 @@ def _rolling_section(rolling: Rolling) -> str:
             f" This call computed its rolling inputs again under the latest year "
             f"{rolling.latest}, so their values here can differ from their own results: "
             f"{inputs}."
+        )
+    if rolling.unconfirmed:
+        inputs = "; ".join(
+            f"{frame.spec_id}, {frame.content_version}" for frame in rolling.unconfirmed
+        )
+        text += (
+            f" The latest year of each of these inputs could not be confirmed, so its values "
+            f"here can differ from its own result: {inputs}."
         )
     return text
 

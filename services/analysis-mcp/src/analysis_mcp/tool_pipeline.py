@@ -248,7 +248,9 @@ def _transient(refusal: ToolRefusal) -> bool:
     return refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE or refusal.retry_after_s is not None
 
 
-async def _rebuilt(ref: FrameRef, *, lost: ToolRefusal) -> _Rebuilt | ToolRefusal:
+async def _rebuilt(
+    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool
+) -> _Rebuilt | ToolRefusal:
     """The root that rebuilds `ref`, which the refusal `lost` names, or the refusal the
     call answers when no root can."""
     if ref.spec_id.startswith("ops_"):
@@ -256,7 +258,7 @@ async def _rebuilt(ref: FrameRef, *, lost: ToolRefusal) -> _Rebuilt | ToolRefusa
         if isinstance(replayed, ToolRefusal):
             return replayed if _transient(replayed) else lost.not_rebuilt()
         return _Rebuilt(ref=ref, node=replayed.model_dump())
-    root = await spec_root(ref)
+    root = await spec_root(ref, default_enrichment=default_enrichment)
     return root if isinstance(root, ToolRefusal) else _Rebuilt(ref=ref, node=root)
 
 
@@ -336,8 +338,13 @@ async def run_on_runner(
 
     async def run() -> VerbSummary | ToolRefusal:
         nonlocal sent
+        # Only the public server sets `follows_tree`.
         tree = await verb_tree(
-            op_spec, anchor_key=anchor_key, place_level=place_level, replaced=replaced
+            op_spec,
+            anchor_key=anchor_key,
+            place_level=place_level,
+            replaced=replaced,
+            default_enrichment=follows_tree,
         )
         if isinstance(tree, ToolRefusal):
             return tree
@@ -364,7 +371,7 @@ async def run_on_runner(
             break
         lost = answer
         for pair, ref in fresh.items():
-            root = await _rebuilt(ref, lost=lost)
+            root = await _rebuilt(ref, lost=lost, default_enrichment=follows_tree)
             if isinstance(root, ToolRefusal):
                 return to_tool_result(root)
             rebuilt[pair] = root

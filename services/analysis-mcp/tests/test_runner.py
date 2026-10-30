@@ -25,11 +25,13 @@ from analysis_mcp.summary import LIST_CAP, VerbSummary
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from common.caller import supplied_caller
 from common.materialisation import (
+    DEFAULT_MINT_OPTIONS,
     AnchorRecord,
     FrameIntegrityError,
     FrameRef,
     InMemoryMaterialisationStore,
     MintRecord,
+    record_bare_read,
     rendering,
     set_store,
 )
@@ -426,14 +428,6 @@ def _record(options: dict[str, Any]) -> MintRecord:
             },
         ),
         (
-            _record({"format": "parquet", "enrichment": "default"}),
-            {
-                "spec_id": _SPEC,
-                "content_version": _DATASET_CV,
-                "rendering": {"without_party_totals": False},
-            },
-        ),
-        (
             _record({"format": "parquet", "groupby": _SUM}),
             {
                 "spec_id": _SPEC,
@@ -495,7 +489,6 @@ def _record(options: dict[str, Any]) -> MintRecord:
     ids=[
         "no-mint-record",
         "mint-record",
-        "bare-read-record",
         "stat-vars-sum",
         "breakdown-with-columns",
         "flow-columns-sorted",
@@ -1116,6 +1109,63 @@ async def test_a_bare_spec_id_whose_read_cannot_be_recorded_names_no_pair(
     assert await store.get_mint_record(FrameRef(**_READ_FRAME)) is None
 
 
+@pytest.mark.parametrize("bare_first", [True, False], ids=["bare-first", "get-data-first"])
+@pytest.mark.parametrize(
+    ("public", "rendering"),
+    [
+        (True, {"without_party_totals": False}),
+        (False, {"without_party_totals": False, "columns": []}),
+    ],
+    ids=["public", "studio"],
+)
+async def test_a_pair_both_a_bare_read_and_get_data_name_reads_by_its_caller(
+    store: InMemoryMaterialisationStore,
+    bare_first: bool,
+    public: bool,
+    rendering: dict[str, Any],
+) -> None:
+    """The record is one whichever writes first, so only the call tells a public verb,
+    which takes the default enrichment, from Studio, which reads the plain frame."""
+    pair = FrameRef(**_FRAME)
+    fetched = MintRecord(
+        frame=pair, dataset=pair, options=dict(DEFAULT_MINT_OPTIONS), stat_var_count=1
+    )
+    if not bare_first:
+        await store.put_mint_record(fetched)
+    await record_bare_read(_SPEC, _CV, logger=logging.getLogger("caller"))
+    await store.put_mint_record(fetched)
+
+    runner = _install(httpx2.Response(200, json=_recorded_ready("aggregate")))
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum", rolling_follows_tree=public)
+
+    assert result.is_error is False, _text(result)
+    assert runner.body["tree"]["inputs"]["data"] == {**_FRAME, "rendering": rendering}
+
+
+async def test_a_public_call_fetches_a_plain_frame_again_with_the_default_enrichment(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    await store.put_mint_record(_record(dict(DEFAULT_MINT_OPTIONS)))
+    lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _reading_spec(body)
+        if "content_version" in body["tree"]["inputs"]["data"]:
+            return _problem(404, "snapshot_not_found", fix=lost)
+        return httpx2.Response(200, json=_recorded_ready("aggregate"))
+
+    runner = _install(answer)
+    await verbs.aggregate(
+        frame_ref=_FRAME, aggregation="sum", rolling_follows_tree=True, rebuild_lost_frames=True
+    )
+
+    assert _posts(runner)[1]["tree"]["inputs"]["data"] == {
+        "spec_id": _SPEC,
+        "rendering": {"without_party_totals": False},
+    }
+
+
 async def test_a_bare_spec_read_under_its_served_id_is_named_by_the_id_sent(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -1344,6 +1394,26 @@ async def test_a_lost_frame_whose_record_read_fails_refuses_retryably() -> None:
         DEFAULT_RETRY_AFTER_S,
     )
     assert len(runner.requests) == 1
+
+
+async def test_an_input_whose_year_cannot_be_read_is_named_as_unconfirmed(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    ready = _recorded_ready("growth")
+    assert ready["resolved_periods"]
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _problem(404, "snapshot_not_found")
+        return httpx2.Response(200, json=ready)
+
+    _install(answer)
+    result = await verbs.compare(
+        frame_ref=_FRAME, right_frame_ref=_DERIVED, rolling_follows_tree=True
+    )
+
+    assert result.is_error is False, _text(result)
+    assert f"from its own result: {_OPS}, {_OCV}." in _text(result)
 
 
 async def test_a_rebuilt_input_the_tree_recomputed_is_named_by_its_replayed_pair(

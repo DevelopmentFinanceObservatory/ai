@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from typing import Any
 
 import httpx2
@@ -16,6 +17,8 @@ from common.caller import (
 )
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, MintRecord, set_store
 from data_mcp import client_holder
+from data_mcp.client import UpstreamClient
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, use_call_budget
 from data_mcp.server import mcp
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
@@ -126,6 +129,23 @@ async def _call(handler: Handler, arguments: dict[str, Any], **settings: object)
         client_holder.set_client(upstream)
         async with Client(mcp) as client:
             return await client.call_tool("export_data", arguments, raise_on_error=False)
+
+
+async def test_a_prepare_gets_the_time_left_in_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given: list[float] = []
+    request = UpstreamClient.request
+
+    async def spied(self: UpstreamClient, *args: Any, **kwargs: Any) -> httpx2.Response:
+        given.append(kwargs["deadline"].remaining())
+        return await request(self, *args, **kwargs)
+
+    monkeypatch.setattr(UpstreamClient, "request", spied)
+    with use_call_budget(replace(EXTERNAL_CALL_BUDGET, deadline_s=30.0)):
+        await _call(_door([]), {"frame_ref": FETCHED})
+
+    assert 0 < given[0] <= 30.0
 
 
 @pytest.mark.parametrize("bundle", [False, True], ids=["file", "bundle"])

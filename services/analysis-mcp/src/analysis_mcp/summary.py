@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
+from common.materialisation import FrameRef
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, unit_cell_from_json
 from pydantic import BaseModel, ConfigDict, Field, PlainValidator, create_model, model_validator
 
@@ -456,14 +457,16 @@ class RecomputedInput(BaseModel):
 
 class Rolling(BaseModel):
     """The latest year a call's relative periods were filled from: `latest`,
-    each relative period with its literal (`periods`, by offset), and the
-    derived inputs computed again under `latest` (`recomputed`)."""
+    each relative period with its literal (`periods`, by offset), the derived
+    inputs computed again under `latest` (`recomputed`), and those whose own
+    latest year could not be read (`unconfirmed`)."""
 
     model_config = ConfigDict(frozen=True)
 
     latest: str
     periods: tuple[ResolvedPeriod, ...]
     recomputed: tuple[RecomputedInput, ...] = ()
+    unconfirmed: tuple[FrameRef, ...] = ()
 
 
 class VerbSummary(BaseModel):
