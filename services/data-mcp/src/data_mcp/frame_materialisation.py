@@ -60,7 +60,6 @@ from common.materialisation import (
 from common.place_type import (
     FLOW_ROLE_COLUMNS,
     PARTY_ROLES,
-    PLACE_ROLE,
     TYPED_ROLES,
     UNTYPED,
     enrichment_role,
@@ -195,23 +194,58 @@ _LEGACY_KIND_COLUMN = "kind"
 WITHOUT_PARTY_TOTALS = "without_party_totals"
 
 
-def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
-    """The `options.columns` `get_data(place_types=True)` asks apis for.
+# The mint option that asks apis to add the enrichment the version's own role columns take
+# (apis' `MintOptions.enrichment`). apis answers as a mint naming the columns it resolved to,
+# and the manifest's artifact lists them in its `rendering`, so a frame minted with it is
+# named by them (`resolved_options`).
+ENRICHMENT = "enrichment"
+DEFAULT_ENRICHMENT = "default"
 
-    A spec whose identity names a flow axis, as an entity or an open role, by its role word
-    (`origin`) or its column (`financingRecipient`), asks for each party's type and kind
-    (`FLOW_ENRICHMENT_COLUMNS`); any other spec, and a call holding no identity, for the
-    places' types. A list that names only enrichment columns adds them to every default
-    column, so the decoded `stat_var_<code system>` columns stay beside them.
+# The coverage dimension apis counts a frame's years under, beside one per role column.
+_YEARS_DIMENSION = "years"
 
-    The rule is dfo-apis' `datasets_api.analysis_roots.enrichment_columns`, which gives a
-    runner root its default columns, so a frame this mints and the analysis runner's read
-    of its Spec are one frame.
+
+def coverage_roles(manifest: Manifest) -> tuple[str, ...]:
+    """The role columns of the frame `manifest` names: its coverage dimensions, one per
+    role the frame declares, less the years."""
+    return tuple(
+        dimension.label
+        for dimension in manifest.coverage.dimensions
+        if dimension.label != _YEARS_DIMENSION
+    )
+
+
+def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mapping[str, Any]:
+    """`options` as the rendering apis minted for them. An `enrichment: "default"` request
+    is the `rendering` of the one data artifact the mint's manifest lists for it, which
+    names the columns apis resolved the enrichment to: the artifact whose rendering, its
+    columns aside, is the request's, and whose columns hold every requested one. A mint
+    response lists the rendering it served and the series statistics, nothing else. Any
+    other `options`, and a manifest listing no such artifact or more than one, are returned
+    as sent, so the frame read refuses for want of its rendering.
     """
+    if options.get(ENRICHMENT) != DEFAULT_ENRICHMENT:
+        return options
+    base = {key: value for key, value in options.items() if key not in (ENRICHMENT, "columns")}
+    requested = set(options.get("columns") or ())
+    served = [
+        artifact.rendering
+        for artifact in manifest.artifacts
+        if {key: value for key, value in artifact.rendering.items() if key != "columns"} == base
+        and isinstance(columns := artifact.rendering.get("columns", []), list)
+        and requested <= set(columns)
+    ]
+    if len(served) != 1:
+        return options
+    return dict(served[0])
+
+
+def names_flow_role(identity: Mapping[str, Any] | None) -> bool:
+    """Whether `identity` names a flow axis, as an entity or an open role, by its role word
+    (`origin`) or its column (`financingRecipient`): the spec whose open party roles
+    `without_party_totals` cuts the group totals of."""
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
-    if roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES):
-        return FLOW_ENRICHMENT_COLUMNS
-    return (type_column(PLACE_ROLE),)
+    return bool(roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES))
 
 
 def replayed_mint_options(
@@ -236,7 +270,7 @@ def replayed_mint_options(
     kind_tokens = {_LEGACY_KIND_COLUMN, *KIND_COLUMNS}
     if options.get(WITHOUT_PARTY_TOTALS) and columns and set(columns) <= kind_tokens:
         return {**options, "columns": list(KIND_COLUMNS)}
-    flow_root = place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
+    flow_root = names_flow_role(identity)
     flow_selection = any(
         column in kind_tokens or column in FLOW_ENRICHMENT_COLUMNS for column in columns
     )

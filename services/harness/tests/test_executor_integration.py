@@ -1945,7 +1945,10 @@ def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
         "content_version": GDP_CONTENT_VERSION,
         "coverage": {
             "rows": len(GDP_BY_PLACE),
-            "dimensions": [{"label": "years", "count": 1}],
+            "dimensions": [
+                {"label": "observationAbout", "count": len(GDP_BY_PLACE)},
+                {"label": "years", "count": 1},
+            ],
         },
         "citation": {"text": "World Bank, World Development Indicators", "sources": []},
         "trace": {"graph_revision": "g1", "facets": []},
@@ -2092,7 +2095,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
 
     assert finished.status is PlanStatus.COMPLETED
     assert [step.step_id for step in outcome.steps] == ["gdp", "countries", "top_two"]
-    assert options[0]["columns"][-1] == "observationAbout_type"
+    assert options[0]["enrichment"] == "default"
     assert {row["observationAbout"]: row["value"] for row in stored} == {
         "country/USA": 27.0,
         "country/CHN": 18.0,
@@ -2102,10 +2105,9 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
 def _serve_gdp_in_both_renderings(
     monkeypatch: pytest.MonkeyPatch, stats_registry: _StatsRegistry
 ) -> list[tuple[str, bool]]:
-    """Answer GDP's mint with the type column when `options.columns` asks for it, and
-    without otherwise, under one `content_version`. Each manifest lists both renderings,
-    the one not requested first, as apis lists every rendering stored under a pair.
-    Returns the frame fetches as `(content_version, typed)`, in order: the plain read
+    """Answer GDP's mint with the type column when `options.enrichment` asks for it, and
+    without otherwise, under one `content_version`. The plain manifest lists both
+    renderings, the typed one first; the typed manifest lists its own alone. Returns the frame fetches as `(content_version, typed)`, in order: the plain read
     fetches the version's canonical frame, and the typed read its rendering."""
     renderings = {
         typed: _register_statistics(stats_registry, _gdp_mint_response(place_types=typed))
@@ -2115,8 +2117,9 @@ def _serve_gdp_in_both_renderings(
     typed_by_digest = {
         artifact["artifact_digest"]: typed for typed, artifact in data_artifacts.items()
     }
-    for typed, response in renderings.items():
-        response["artifacts"].insert(0, data_artifacts[not typed])
+    # A plain mint lists the typed rendering first. A mint asking for the default enrichment
+    # lists the rendering it resolved to alone, as apis' mint lists only the requested one.
+    renderings[False]["artifacts"].insert(0, data_artifacts[True])
     fetched: list[tuple[str, bool]] = []
 
     async def fake_fetch(*, content_version: str, artifact_digest: str, **_: Any) -> bytes:
@@ -2132,7 +2135,7 @@ def _serve_gdp_in_both_renderings(
 
     def mint_handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/datasets":
-            typed = "columns" in json.loads(request.content)["options"]
+            typed = "enrichment" in json.loads(request.content)["options"]
             return httpx2.Response(200, json=renderings[typed])
         if request.url.path.endswith("/options"):
             # The spec is not in the definition store, so `get_data` reads its identity here.
@@ -2223,8 +2226,9 @@ async def test_a_reads_freshness_date_is_its_own_renderings_beside_a_sibling(
     typed: bool,
 ) -> None:
     """The harness dates a retrieval by its manifest's data artifact
-    (`harness.provenance.data_artifact`). apis lists the other rendering first
-    with its own `created_at`, and get_data's manifest keeps only the requested one."""
+    (`harness.provenance.data_artifact`). A plain mint's manifest lists the typed
+    rendering first with its own `created_at`, and get_data's manifest keeps only the
+    requested one."""
     _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 
@@ -2714,7 +2718,8 @@ def _serve_whole_totals(
     monkeypatch: pytest.MonkeyPatch, stats_registry: _StatsRegistry
 ) -> list[dict[str, Any]]:
     """Answer the whole-total specs' mints with the kind columns when `options.columns`
-    asks for them, as apis does. Returns the options of every mint."""
+    or `options.enrichment` asks for them, as apis does, an enrichment resolved to the
+    default enrichment of the frame's role columns. Returns the options of every mint."""
     renderings = {
         (spec_id, kinds): _register_statistics(
             stats_registry, _whole_totals_mint_response(spec_id, kinds=kinds)
@@ -2738,6 +2743,12 @@ def _serve_whole_totals(
             minted.append(body["options"])
             spec_id = body["input"]["spec_id"]
             columns = body["options"].get("columns")
+            if body["options"].get("enrichment") == "default":
+                # Each whole-total frame holds both party roles.
+                columns = sorted(
+                    {*(columns or ()), "financingProvider_type", "financingRecipient_type"}
+                    | set(KIND_COLUMNS)
+                )
             answer = renderings[spec_id, columns is not None]
             if columns is not None:
                 # apis records the columns the mint asked for as the artifact's rendering.
@@ -2841,7 +2852,10 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     assert refused.is_error
     assert (refused.structured_content or {})["code"] == "place_levels_mixed"
     flow_columns = ("financingProvider_type", "financingRecipient_type", *KIND_COLUMNS)
-    assert [options.get("columns") for options in minted] == [None, list(flow_columns)]
+    assert [(options.get("columns"), options.get("enrichment")) for options in minted] == [
+        (None, None),
+        (None, "default"),
+    ]
     # The frame holding the kinds is named apart from the plain one, under its file's stamp.
     assert typed_content["frame_ref"] != plain_content["frame_ref"]
     assert typed_content["frame_ref"] == frame_ref_for(

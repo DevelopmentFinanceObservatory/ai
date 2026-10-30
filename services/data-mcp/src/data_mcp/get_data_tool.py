@@ -32,7 +32,7 @@ import httpx2
 import pyarrow as pa
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
-from common.place_type import PARTY_ROLES, PLACE_ROLE, type_column
+from common.place_type import PARTY_ROLES, type_column
 from fastmcp import Context
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
@@ -58,13 +58,16 @@ from data_mcp.definition_store import (
 )
 from data_mcp.errors import UpstreamAuthUnavailable, UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import (
+    DEFAULT_ENRICHMENT,
     DEFAULT_MINT_OPTIONS,
-    FLOW_ENRICHMENT_COLUMNS,
+    ENRICHMENT,
     KIND_COLUMNS,
     WITHOUT_PARTY_TOTALS,
+    coverage_roles,
     materialise_and_register,
-    place_type_columns_for,
+    names_flow_role,
     replayed_mint_options,
+    resolved_options,
 )
 from data_mcp.get_data_digest import (
     BreakdownLevel,
@@ -223,9 +226,6 @@ type _MintOutcome = httpx2.Response | ToolRefusal | UpstreamError
 _open_mint_posts: dict[str, asyncio.Future[_MintOutcome | None]] = {}
 
 logger = logging.getLogger(__name__)
-
-# The type column of a place-subject frame.
-_PLACE_TYPE_COLUMN = type_column(PLACE_ROLE)
 
 # What every public `get_data` frame carries: the combined server sends each call
 # with `place_types` set and lists the tool without it (`server.PUBLIC_SHAPES`).
@@ -973,7 +973,9 @@ async def _finish_mint_response(
         requested_spec_id: The `spec_id` this call's own request carried, to detect a re-mint.
         options: The mint request's `options`, which name the artifact the frame is
             read from and, through `options.columns` and `options.groupby`, its frame
-            reference.
+            reference. An `enrichment: "default"` request is read as the columns apis
+            resolved it to (`frame_materialisation.resolved_options`), and its mint
+            record keeps those.
         scope: The mint request's `scope`, kept with `options` in the frame's mint
             record (`common.materialisation.MintRecord`).
         entity_labels: dcid -> name, forwarded to the digest renderer.
@@ -1010,10 +1012,11 @@ async def _finish_mint_response(
                 f"expects: {render_validation_errors(exc)}"
             )
         )
+    options = resolved_options(options, manifest=manifest)
     manifest = _narrowed_to_rendering(manifest, options=options)
     if (
         asked_for_kinds
-        and place_type_columns_for(manifest.definition.identity) == FLOW_ENRICHMENT_COLUMNS
+        and not PARTY_ROLES.isdisjoint(coverage_roles(manifest))
         and not set(KIND_COLUMNS) <= set(options.get("columns") or ())
     ):
         return to_tool_result(
@@ -1389,14 +1392,14 @@ async def _attempt_mint(
     With one contributor the two frames are the same bytes under one `content_version`.
     A `breakdown` adds its own `Breakdown.groupby` instead, which sums the StatVars
     within each code at the breakdown's level.
-    `place_types` sets `options.columns` to the columns
-    `frame_materialisation.place_type_columns_for` picks for `identity`, which adds them to
-    the default columns, and gives the frame a `content_version` of its own
-    (`frame_materialisation.frame_ref_for`). A `column_unknown` refusal of the place type
-    column from a table without one is sent once more with no columns
-    (`_without_unserved_place_type`). A refusal of a flow table's `party_kind` is relayed: a
-    flow frame without kinds would let a sum count party totals beside their parties.
-    `without_party_totals` on a flow spec asks for the kinds alone (`KIND_COLUMNS`) when
+    `place_types` sends `options.enrichment: "default"`: apis adds the enrichment the
+    version's own role columns take to the default columns, and the frame is named by
+    the columns it resolved to (`frame_materialisation.resolved_options`), a
+    `content_version` of its own when there are any (`frame_materialisation.frame_ref_for`).
+    A manifest whose frame holds a flow party role but whose rendering holds no kinds is
+    refused: a flow frame without kinds would let a sum count party totals beside their
+    parties. `without_party_totals` on a spec naming a flow axis
+    (`frame_materialisation.names_flow_role`) asks for the kinds alone (`KIND_COLUMNS`) when
     `place_types` is not set, and sends `options.without_party_totals`: apis leaves out the group
     totals of the
     party roles the identity it serves leaves open, and mints the frame that remains a
@@ -1423,11 +1426,9 @@ async def _attempt_mint(
         options["groupby"] = breakdown.groupby()
     elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
-    drops_totals = (
-        without_party_totals and place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
-    )
+    drops_totals = without_party_totals and names_flow_role(identity)
     if place_types:
-        options["columns"] = list(place_type_columns_for(identity))
+        options[ENRICHMENT] = DEFAULT_ENRICHMENT
     elif drops_totals:
         options["columns"] = list(KIND_COLUMNS)
     if drops_totals:
@@ -1459,107 +1460,62 @@ async def _attempt_mint(
             )
         )
 
-    removable = set(place_type_columns_for(identity)) if place_types else set()
-    for attempt in range(2):
-        try:
-            posted = await _post_mint(
-                client,
-                request_body,
-                spec_id=spec_id,
-                settings=settings,
-                deadline=deadline,
-                admission=admission,
-                on_sent=on_sent,
-            )
-            if isinstance(posted, ToolResult):
-                return posted
-            if admission is not None:
-                # A background caller needs only the mint started, so it neither polls nor reads a frame.
-                outcome = "queued" if posted.status_code == HTTPStatus.ACCEPTED else "minted"
-                return background_result(spec_id=spec_id, outcome=outcome)
-            resolved = await _mint_payload_or_refusal(
-                posted,
-                client=client,
-                settings=settings,
-                deadline=deadline,
-                on_poll=on_poll,
-                raise_upstream_error=True,
-            )
-        except UpstreamError as exc:
-            if attempt == 0 and _negotiate_unserved_columns(
-                options=options, refused=exc, removable=removable, spec_id=spec_id
-            ):
-                request_body["options"] = options
-                continue
-            if not sends_definition and exc.code == "spec_not_found":
-                # The sidecar-free registry-fallback request above just missed
-                # apis' own registry too: `mint_spec_id` raises exactly this
-                # code in that case, and the platform contract's
-                # `definition_not_held` -- "held by neither store nor registry"
-                # -- is what this completes.
-                return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-            refusal = from_upstream_error(exc, tool="get_data")
-            if admission is not None:
-                refusal = declined_in_background(refusal, exc)
-            return minted(to_tool_result(refusal))
-        if isinstance(resolved, ToolResult):
-            return minted(resolved)
-        payload, operation_poll = resolved
-        return await _finish_mint_response(
-            payload,
-            requested_spec_id=spec_id,
-            options=options,
-            scope=wire_scope,
-            entity_labels=entity_labels,
-            dropped_roles=dropped_roles,
+    try:
+        posted = await _post_mint(
+            client,
+            request_body,
+            spec_id=spec_id,
             settings=settings,
             deadline=deadline,
-            asked_for_kinds=place_types or without_party_totals,
-            operation_poll=operation_poll,
-            breakdown=(
-                None
-                if breakdown is None
-                else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
-            ),
+            admission=admission,
+            on_sent=on_sent,
         )
-    raise AssertionError("two mint attempts must return or raise")
-
-
-def _without_unserved_place_type(
-    options: dict[str, Any],
-    refused: UpstreamError,
-    *,
-    removable: set[str],
-    spec_id: str,
-) -> bool:
-    """Drop `options.columns` when it asks for the place type column alone and a
-    `column_unknown` refusal lists that column as unserved, and say whether it did. A
-    refusal of any other code or request, or one whose list is truncated, changes
-    nothing.
-    """
-    alternatives = refused.extensions.get("alternatives")
-    if (
-        refusal_code(refused) != "column_unknown"
-        or refused.extensions.get("pointer") != "/options/columns"
-        or options.get("columns") != [_PLACE_TYPE_COLUMN]
-        or _PLACE_TYPE_COLUMN not in removable
-        or refused.extensions.get("truncated")
-        or not isinstance(alternatives, list)
-        or not all(
-            isinstance(item, dict) and isinstance(item.get("ref"), str) for item in alternatives
+        if isinstance(posted, ToolResult):
+            return posted
+        if admission is not None:
+            # A background caller needs only the mint started, so it neither polls nor reads a frame.
+            outcome = "queued" if posted.status_code == HTTPStatus.ACCEPTED else "minted"
+            return background_result(spec_id=spec_id, outcome=outcome)
+        resolved = await _mint_payload_or_refusal(
+            posted,
+            client=client,
+            settings=settings,
+            deadline=deadline,
+            on_poll=on_poll,
+            raise_upstream_error=True,
         )
-    ):
-        return False
-    served = {alternative["ref"] for alternative in alternatives}
-    if _PLACE_TYPE_COLUMN in served:
-        return False
-    logger.info(
-        "get_data: %s serves no %s; minting again with the default columns",
-        spec_id,
-        _PLACE_TYPE_COLUMN,
+    except UpstreamError as exc:
+        if not sends_definition and exc.code == "spec_not_found":
+            # The sidecar-free registry-fallback request above just missed
+            # apis' own registry too: `mint_spec_id` raises exactly this
+            # code in that case, and the platform contract's
+            # `definition_not_held` -- "held by neither store nor registry"
+            # -- is what this completes.
+            return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
+        refusal = from_upstream_error(exc, tool="get_data")
+        if admission is not None:
+            refusal = declined_in_background(refusal, exc)
+        return minted(to_tool_result(refusal))
+    if isinstance(resolved, ToolResult):
+        return minted(resolved)
+    payload, operation_poll = resolved
+    return await _finish_mint_response(
+        payload,
+        requested_spec_id=spec_id,
+        options=options,
+        scope=wire_scope,
+        entity_labels=entity_labels,
+        dropped_roles=dropped_roles,
+        settings=settings,
+        deadline=deadline,
+        asked_for_kinds=place_types or without_party_totals,
+        operation_poll=operation_poll,
+        breakdown=(
+            None
+            if breakdown is None
+            else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
+        ),
     )
-    del options["columns"]
-    return True
 
 
 def _without_unserved_flow_types(
@@ -1614,9 +1570,7 @@ def _negotiate_unserved_columns(
     refused: UpstreamError,
 ) -> bool:
     """Narrow policy-added metadata after one complete column refusal."""
-    return _without_unserved_place_type(
-        options, refused, removable=removable, spec_id=spec_id
-    ) or _without_unserved_flow_types(options, refused, removable=removable)
+    return _without_unserved_flow_types(options, refused, removable=removable)
 
 
 @dataclass(frozen=True, kw_only=True)

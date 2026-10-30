@@ -303,6 +303,23 @@ def _manifest_response(
     }
 
 
+def _apis_rendering(options: dict[str, Any], dimensions: list[dict[str, Any]]) -> dict[str, Any]:
+    """The `rendering` apis records for the mint `options` of a frame whose coverage counts
+    `dimensions`: an `enrichment: "default"` request as the columns apis resolves it to
+    (dfo-apis `datasets_api.default_enrichment`), the requested ones, the type column of
+    each typed role and the party cells when a party role is present, sorted."""
+    if options.get("enrichment") != "default":
+        return options
+    roles = {dimension["label"] for dimension in dimensions} - {"years"}
+    typed = roles & {"observationAbout", "financingProvider", "financingRecipient"}
+    kinds = KIND_COLUMNS if roles & {"financingProvider", "financingRecipient"} else ()
+    columns = sorted({*(options.get("columns") or ()), *(f"{r}_type" for r in typed), *kinds})
+    rendering = {
+        key: value for key, value in options.items() if key not in ("enrichment", "columns")
+    }
+    return rendering | ({"columns": columns} if columns else {})
+
+
 def _manifest_response_with_two_artifacts(
     *, spec_id: str, content_version: str = "cv_1"
 ) -> dict[str, Any]:
@@ -4470,15 +4487,26 @@ async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_erro
 
 
 @pytest.mark.parametrize(
+    "identity",
+    [
+        {},
+        {"entities": {"destination": ["country/KEN"]}, "open_roles": ["origin"]},
+        {"entities": {}, "open_roles": ["origin"]},
+        {"entities": {}},
+    ],
+    ids=["place", "named-and-open-axes", "dac1-open-donor-axis", "no-role"],
+)
+@pytest.mark.parametrize(
     ("stat_vars", "groupby"),
     [("separate", None), ("sum", {"by": ["time_period"], "op": "sum"})],
 )
-async def test_place_types_asks_for_the_type_column_alone(
-    stat_vars: str, groupby: dict[str, Any] | None
+async def test_place_types_asks_for_the_default_enrichment(
+    identity: dict[str, Any], stat_vars: str, groupby: dict[str, Any] | None
 ) -> None:
-    # A list naming only an enrichment adds it to every default column, so the
-    # decoded `stat_var_<code system>` columns stay.
-    stored = _stored_definition()
+    # apis adds the enrichment the version's own role columns take to every default
+    # column, so the decoded `stat_var_<code system>` columns stay, and the identity
+    # chooses nothing.
+    stored = _stored_definition(**identity)
     options: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -4498,7 +4526,7 @@ async def test_place_types_asks_for_the_type_column_alone(
             "bundle": False,
             "layout": "frame",
             **({} if groupby is None else {"groupby": groupby}),
-            "columns": ["observationAbout_type"],
+            "enrichment": "default",
         }
     ]
 
@@ -4564,27 +4592,6 @@ def _failed_operation_column_unknown(
             "cause": {"code": "column_unknown"},
         },
     )
-
-
-async def test_place_types_a_table_without_the_place_column_mints_the_default_columns(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.INFO, logger="data_mcp.get_data_tool")
-    stored = _stored_definition(entities={"recipient": ["country/KEN"]})
-    options: list[dict[str, Any]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        options.append(json.loads(request.content)["options"])
-        if len(options) == 1:
-            return _column_unknown(served=["stat_var", "entity", "entity_type", "value"])
-        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
-    )
-
-    assert result.is_error is False, result.structured_content
-    assert [sent.get("columns") for sent in options] == [["observationAbout_type"], None]
 
 
 @pytest.mark.parametrize("queued", [False, True], ids=["direct", "terminal-operation"])
@@ -4656,76 +4663,6 @@ async def test_an_ineligible_nonflow_place_type_refusal_is_relayed_without_a_ret
     assert result.structured_content is not None
     assert result.structured_content["upstream_code"] == "column_unknown"
     assert len(posts) == 1
-
-
-async def test_a_polled_column_refusal_retries_with_the_flow_metadata_the_table_serves() -> None:
-    stored = _stored_definition(entities={"origin": ["country/FRA"]})
-    options: list[dict[str, Any]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path == "/api/datasets":
-            options.append(json.loads(request.content)["options"])
-            if len(options) == 1:
-                return httpx2.Response(
-                    202,
-                    json={
-                        "operation": {
-                            "operation_id": _OPERATION_ID,
-                            "status": "failed",
-                            "poll": _OPERATION_POLL_PATH,
-                        }
-                    },
-                )
-            return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
-        assert request.url.path == _OPERATION_POLL_PATH
-        return _failed_operation_column_unknown(
-            served=["financingProvider_type", "financingProvider_party_kind"]
-        )
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
-    )
-
-    assert result.is_error is False, result.structured_content
-    assert [sent["columns"] for sent in options] == [
-        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
-        ["financingProvider_type", *KIND_COLUMNS],
-    ]
-
-
-async def test_a_second_mixed_column_refusal_does_not_submit_a_third_mint() -> None:
-    stored = _stored_definition(entities={"origin": ["country/FRA"]})
-    posts: list[dict[str, Any]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path == "/api/datasets":
-            posts.append(json.loads(request.content)["options"])
-            if len(posts) == 1:
-                return _column_unknown(
-                    served=["financingProvider_type", "financingProvider_party_kind"]
-                )
-            return httpx2.Response(
-                202,
-                json={
-                    "operation": {
-                        "operation_id": _OPERATION_ID,
-                        "status": "failed",
-                        "poll": _OPERATION_POLL_PATH,
-                    }
-                },
-            )
-        assert request.url.path == _OPERATION_POLL_PATH
-        return _failed_operation_column_unknown(
-            served=["financingProvider_type", "financingProvider_party_kind"]
-        )
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
-    )
-
-    assert result.is_error is True
-    assert result.structured_content["upstream_code"] == "column_unknown"
-    assert len(posts) == 2
 
 
 @pytest.mark.parametrize(
@@ -4836,94 +4773,6 @@ async def test_place_types_a_flow_table_serving_no_kind_is_refused(served: list[
 
 
 @pytest.mark.parametrize(
-    "identity",
-    [
-        {"entities": {"destination": ["country/KEN"]}, "open_roles": ["origin"]},
-        {"entities": {}, "open_roles": ["origin"]},
-    ],
-    ids=["named-and-open-axes", "dac1-open-donor-axis"],
-)
-async def test_place_types_a_spec_naming_a_flow_axis_asks_for_kinds(
-    identity: dict[str, Any],
-) -> None:
-    # A bare `kind` covers every entity column the table has, including a side the
-    # identity leaves unnamed, and cannot name a side the table lacks.
-    stored = _stored_definition(**identity)
-    options: list[dict[str, Any]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        options.append(json.loads(request.content)["options"])
-        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
-    )
-
-    assert result.is_error is False, result.structured_content
-    assert [sent["columns"] for sent in options] == [
-        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]
-    ]
-
-
-@pytest.mark.parametrize(
-    ("entities", "served", "expected"),
-    [
-        (
-            {"origin": ["country/FRA"]},
-            ["financingProvider_type", "financingProvider_party_kind"],
-            ["financingProvider_type", *KIND_COLUMNS],
-        ),
-        (
-            {"destination": ["country/KEN"]},
-            ["financingRecipient_type", "financingRecipient_party_kind"],
-            ["financingRecipient_type", *KIND_COLUMNS],
-        ),
-    ],
-    ids=["provider-only", "destination-only"],
-)
-async def test_place_types_retries_with_the_flow_metadata_the_table_serves(
-    entities: dict[str, list[str]], served: list[str], expected: list[str]
-) -> None:
-    stored = _stored_definition(entities=entities)
-    options: list[dict[str, Any]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        options.append(json.loads(request.content)["options"])
-        return (
-            _column_unknown(served=served)
-            if len(options) == 1
-            else httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
-        )
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
-    )
-
-    assert result.is_error is False, result.structured_content
-    assert [sent["columns"] for sent in options] == [
-        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
-        expected,
-    ]
-
-
-async def test_a_second_flow_metadata_refusal_is_relayed_after_one_retry() -> None:
-    stored = _stored_definition(entities={"origin": ["country/FRA"]})
-    calls: list[httpx2.Request] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        calls.append(request)
-        return _column_unknown(served=["financingProvider_type", "financingProvider_party_kind"])
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
-    )
-
-    assert result.is_error is True
-    assert result.structured_content["upstream_code"] == "column_unknown"
-    assert len(calls) == 2
-
-
-@pytest.mark.parametrize(
     "served",
     [
         ["financingProvider_party_kind"],
@@ -4993,11 +4842,12 @@ async def test_a_column_unknown_listing_a_truncated_set_is_refused_without_a_ret
 
 class _PlainAndTypedMint:
     """apis for one place-subject spec: the default columns, or the place-type
-    column added when `options.columns` names it, both under one `content_version`
-    (apis keeps it across renderings), each its own artifact. Every manifest lists
-    both renderings, the one not requested first, as a done operation lists every
-    rendering stored under its pair. Records every artifact fetch as
-    `(content_version, artifact_digest)`."""
+    column added when `options.enrichment` asks for the default enrichment, both under
+    one `content_version` (apis keeps it across renderings), each its own artifact. A
+    plain mint's manifest lists both renderings, the one not requested first; an
+    enrichment's lists the rendering it resolved to alone, as apis' mint and done
+    operation list only the requested rendering beside the statistics. Records every
+    artifact fetch as `(content_version, artifact_digest)`."""
 
     def __init__(self, *, spec_id: str) -> None:
         self.spec_id = spec_id
@@ -5042,8 +4892,9 @@ class _PlainAndTypedMint:
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/datasets"
-        is_typed = "columns" in json.loads(request.content)["options"]
+        is_typed = "enrichment" in json.loads(request.content)["options"]
         response = _manifest_response(spec_id=self.spec_id, content_version=self.content_version)
+        response["coverage"]["dimensions"] = [{"count": 3, "label": "observationAbout"}]
         plain = response["artifacts"][0]
         renderings = {
             False: plain["rendering"],
@@ -5052,7 +4903,7 @@ class _PlainAndTypedMint:
         response["artifacts"] = [
             plain
             | {"artifact_digest": self.digest_by_rendering[typed], "rendering": renderings[typed]}
-            for typed in (not is_typed, is_typed)
+            for typed in ((True,) if is_typed else (True, False))
         ]
         return httpx2.Response(200, json=response)
 
@@ -5641,29 +5492,20 @@ _PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
 
 
 @pytest.mark.parametrize(
-    ("identity", "arguments", "columns", "cut"),
+    ("identity", "arguments", "columns", "enriched", "cut"),
     [
-        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, list(KIND_COLUMNS), True),
-        (
-            _FLOW_OPEN_PROVIDER,
-            {"place_types": True},
-            ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
-            False,
-        ),
+        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, list(KIND_COLUMNS), False, True),
+        (_FLOW_OPEN_PROVIDER, {"place_types": True}, None, True, False),
         (
             _FLOW_OPEN_PROVIDER,
             {"without_party_totals": True, "place_types": True},
-            ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            None,
+            True,
             True,
         ),
-        (_FLOW_OPEN_PROVIDER, {}, None, False),
-        (_PLACE_SPEC, {"without_party_totals": True}, None, False),
-        (
-            _PLACE_SPEC,
-            {"without_party_totals": True, "place_types": True},
-            ["observationAbout_type"],
-            False,
-        ),
+        (_FLOW_OPEN_PROVIDER, {}, None, False, False),
+        (_PLACE_SPEC, {"without_party_totals": True}, None, False, False),
+        (_PLACE_SPEC, {"without_party_totals": True, "place_types": True}, None, True, False),
     ],
     ids=[
         "flow-totals-only",
@@ -5679,6 +5521,7 @@ async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
     identity: dict[str, Any],
     arguments: dict[str, Any],
     columns: list[str] | None,
+    enriched: bool,
     cut: bool,
 ) -> None:
     stored = _stored_definition(**identity)
@@ -5696,8 +5539,13 @@ async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
     sent: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
-        sent.append(json.loads(request.content)["options"])
-        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+        options = json.loads(request.content)["options"]
+        sent.append(options)
+        response = _manifest_response(spec_id=stored.spec_id)
+        response["artifacts"][0]["rendering"] = _apis_rendering(
+            options, response["coverage"]["dimensions"]
+        )
+        return httpx2.Response(200, json=response)
 
     result = await _call_get_data(
         handler, _StubStore(stored), {"spec_id": stored.spec_id, **arguments}
@@ -5705,11 +5553,17 @@ async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
 
     assert result.is_error is False, result.structured_content
     assert [sent_options.get("columns") for sent_options in sent] == [columns]
+    assert [sent_options.get("enrichment") for sent_options in sent] == [
+        "default" if enriched else None
+    ]
     # Sent only when true, as apis records it in a rendering only then.
     assert [sent_options.get("without_party_totals") for sent_options in sent] == [
         True if cut else None
     ]
-    assert registered == sent
+    # The stub's coverage counts no typed role, so the enrichment resolves to no columns.
+    assert registered == [
+        {key: value for key, value in options.items() if key != "enrichment"} for options in sent
+    ]
 
 
 class _FlowMint:
@@ -5781,7 +5635,7 @@ class _FlowMint:
             }
         response["artifacts"][0] |= {
             "artifact_digest": _digest(self.artifacts[cut]),
-            "rendering": options,
+            "rendering": _apis_rendering(options, response["coverage"]["dimensions"]),
         }
         return httpx2.Response(200, json=response)
 
@@ -5862,6 +5716,45 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
             in text_of(result)
         )
     assert "Left out of the frame" not in text_of(with_totals)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [_FLOW_OPEN_PROVIDER, {"entities": {}}],
+    ids=["open-provider", "no-bound-or-open-role"],
+)
+async def test_a_typed_flow_frame_is_named_by_the_enrichment_of_its_own_roles(
+    monkeypatch: pytest.MonkeyPatch, identity: dict[str, Any]
+) -> None:
+    """The frame's role columns, not the identity, choose its columns, so a flow spec that
+    binds and opens no role gets its parties' types and kinds, and a spec naming a flow
+    axis keeps the pair it was named by when data-mcp listed those columns itself."""
+    monkeypatch.undo()  # the real `materialise_and_register`
+    stored = _stored_definition(**identity)
+    upstream = _FlowMint(spec_id=stored.spec_id)
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+
+    result = await _call_get_data(
+        upstream.handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert result.structured_content is not None
+    listed = ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]
+    named = FrameRef.model_validate(result.structured_content["frame_ref"])
+    assert named == frame_ref_for(
+        spec_id=stored.spec_id, content_version=upstream.content_version, columns=tuple(listed)
+    )
+    record = await frame_store.get_mint_record(named)
+    assert record is not None
+    assert record.options == {
+        "format": "parquet",
+        "bundle": False,
+        "layout": "frame",
+        "columns": sorted(listed),
+    }
 
 
 # `GET /api/datasets/{id}/options` as apis answered it for the DAC2a spec "official
@@ -5951,7 +5844,7 @@ class _RegistryFlowMint:
             }
         response["artifacts"][0] |= {
             "artifact_digest": _digest(self.artifacts[cut]),
-            "rendering": body["options"],
+            "rendering": _apis_rendering(body["options"], response["coverage"]["dimensions"]),
         }
         return httpx2.Response(200, json=response)
 
@@ -5963,12 +5856,15 @@ class _RegistryFlowMint:
 @pytest.mark.parametrize(
     ("argument", "columns", "totals_served"),
     [
-        ("place_types", ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS], True),
-        ("without_party_totals", list(KIND_COLUMNS), False),
+        ("place_types", ("default", None), True),
+        ("without_party_totals", (None, list(KIND_COLUMNS)), False),
     ],
 )
 async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
-    monkeypatch: pytest.MonkeyPatch, argument: str, columns: list[str], totals_served: bool
+    monkeypatch: pytest.MonkeyPatch,
+    argument: str,
+    columns: tuple[str | None, list[str] | None],
+    totals_served: bool,
 ) -> None:
     monkeypatch.undo()  # the real `materialise_and_register`
     upstream = _RegistryFlowMint()
@@ -5986,7 +5882,8 @@ async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
     # The registry is read first, the mint asks for kinds with the definition beside it, and
     # the definition is kept for the next call.
     assert [
-        (path, body and body["options"].get("columns")) for path, body in upstream.requests
+        (path, body and (body["options"].get("enrichment"), body["options"].get("columns")))
+        for path, body in upstream.requests
     ] == [
         (f"/api/datasets/{_REGISTRY_SPEC_ID}/options", None),
         ("/api/datasets", columns),
@@ -6008,12 +5905,12 @@ async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
 @pytest.mark.parametrize(
     ("argument", "columns"),
     [
-        ("place_types", ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]),
-        ("without_party_totals", list(KIND_COLUMNS)),
+        ("place_types", ("default", None)),
+        ("without_party_totals", (None, list(KIND_COLUMNS))),
     ],
 )
 async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_and_no_sidecar(
-    monkeypatch: pytest.MonkeyPatch, argument: str, columns: list[str]
+    monkeypatch: pytest.MonkeyPatch, argument: str, columns: tuple[str | None, list[str] | None]
 ) -> None:
     # The registry answers the definition under its own id, which the requested id is not,
     # so the mint cannot carry it. Its flow sides still choose the columns.
@@ -6030,18 +5927,23 @@ async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_
     assert result.is_error is False, result.structured_content
     mint = upstream.requests[1][1]
     assert mint is not None
-    assert mint["options"]["columns"] == columns
+    assert (mint["options"].get("enrichment"), mint["options"].get("columns")) == columns
     assert "definition" not in mint["input"]
     # Only the manifest's own definition is kept, as for any re-mint under another id.
     assert [put.spec_id for put in definitions.put_calls] == [_REGISTRY_SPEC_ID]
 
 
-@pytest.mark.parametrize("argument", ["place_types", "without_party_totals"])
+@pytest.mark.parametrize(
+    ("argument", "refused"),
+    [("place_types", False), ("without_party_totals", True)],
+)
 async def test_a_flow_frame_that_cannot_carry_the_asked_kinds_is_refused(
-    monkeypatch: pytest.MonkeyPatch, argument: str
+    monkeypatch: pytest.MonkeyPatch, argument: str, refused: bool
 ) -> None:
-    # The registry reads the spec as a place spec, and apis then serves a flow manifest
-    # for the mint without kinds: that frame would carry every group total.
+    # The registry reads the spec as a place spec, and apis then serves a flow manifest.
+    # The cut alone is sent without kinds, so that frame would carry every group total.
+    # `place_types` asks apis for the enrichment of the frame's own roles, which adds the
+    # kinds whatever the identity says.
     monkeypatch.undo()  # the real `materialise_and_register`
     place = _stored_definition(entities={"recipient": ["country/KEN"]})
     upstream = _RegistryFlowMint(
@@ -6060,10 +5962,13 @@ async def test_a_flow_frame_that_cannot_carry_the_asked_kinds_is_refused(
         upstream.handler, _RecordingStore(), {"spec_id": place.spec_id, argument: True}
     )
 
-    assert result.is_error is True
+    assert result.is_error is refused
     assert result.structured_content is not None
-    assert result.structured_content["code"] == "upstream_error"
-    assert upstream.fetched == []
+    if refused:
+        assert result.structured_content["code"] == "upstream_error"
+        assert upstream.fetched == []
+    else:
+        assert "financingProvider_party_kind" in result.structured_content["role_keys"]
 
 
 async def test_a_registry_definition_the_store_cannot_keep_is_logged_and_the_call_goes_on(
