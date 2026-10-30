@@ -20,8 +20,11 @@ pair it resolved; the result names that pair. Any other bare id refuses
 A `spec_` pair `get_data` fetched with options, such as the type columns, is held under a
 pair of its own, which dfo-apis never stored. The mint record the frame store keeps beside
 that frame names the dataset version dfo-apis holds (`MintRecord.dataset`), and the tool
-exports that version (`common.materialisation.dataset_pair`). The result names the pair the caller passed and the
-version exported.
+exports that version (`_exported_pair`). The result names the pair the caller passed and
+the version exported. That version holds the frame's rows only when the mint selected
+columns or cut party totals. A `groupby` (a `breakdown` or a `stat_vars` sum) can keep the
+base version's pair, whose export holds the unsummed rows, so such a frame refuses before
+any call to dfo-apis.
 
 dfo-apis answers `snapshot_not_found`, `artifact_expired` or `spec_not_found` for a frame
 it cannot export, and the tool refuses `frame_unavailable`. It never exports
@@ -33,7 +36,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Literal, NotRequired, TypedDict
 
-from common.materialisation import dataset_pair
+from common.materialisation import FrameRef, get_store
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
@@ -54,6 +57,12 @@ _PREPARE_ROUTE = f"{DATASETS_PREFIX}/exports"
 _PREPARE_DEADLINE_S = EXTERNAL_CALL_LIMIT_S - EXTERNAL_CALL_MARGIN_S
 
 _FORMAT_NAMES = {"csv": "CSV", "xlsx": "Excel (xlsx)", "parquet": "Parquet"}
+
+# The mint options whose frame holds its dataset version's rows: the rendering keys,
+# the columns selected, and the party-total cut, which mints a version of its own.
+_ROW_PRESERVING_OPTIONS = frozenset(
+    {"format", "bundle", "layout", "columns", "without_party_totals"}
+)
 
 _DERIVED_PREFIX = "ops_"
 _FETCHED_PREFIX = "spec_"
@@ -110,6 +119,42 @@ def _size(n: int) -> str:
 def _licence_line(licence: ExportLicence) -> str:
     terms = licence.licence or "licence not stated"
     return f"- {licence.label}: {terms}{f' ({licence.url})' if licence.url else ''}"
+
+
+async def _exported_pair(spec_id: str, content_version: str) -> tuple[str, str] | ToolRefusal:
+    """The pair dfo-apis exports for the frame `{spec_id, content_version}`, or the refusal
+    for a frame whose rows no stored version holds.
+
+    A `spec_` pair with a mint record maps to the record's dataset pair
+    (`MintRecord.dataset`) when its options preserve the version's rows
+    (`_ROW_PRESERVING_OPTIONS`), and refuses otherwise. Any other pair is exported as
+    given: an `ops_` pair, a pair with no record, and a value that is not a pair the store
+    could hold. A lookup that fails is logged and the pair exported as given, which
+    dfo-apis refuses as `frame_unavailable` when it never stored the pair.
+    """
+    if not spec_id.startswith(_FETCHED_PREFIX):
+        return spec_id, content_version
+    try:
+        ref = FrameRef(spec_id=spec_id, content_version=content_version)
+    except ValidationError:
+        return spec_id, content_version
+    try:
+        record = await get_store().get_mint_record(ref)
+    except Exception:
+        # Broad on purpose: the store's failure modes belong to its backend (the storage
+        # client, its auth and its transport), and the lookup only ever improves a call.
+        logger.warning(
+            "mint record of %s/%s unreadable; sending the pair as given",
+            spec_id,
+            content_version,
+            exc_info=True,
+        )
+        return spec_id, content_version
+    if record is None:
+        return spec_id, content_version
+    if set(record.options) - _ROW_PRESERVING_OPTIONS:
+        return ToolRefusal.summed_frame_not_exportable(spec_id=spec_id)
+    return record.dataset.spec_id, record.dataset.content_version
 
 
 def _render_digest(facts: ExportFacts, *, url: str, frame_ref: dict[str, str]) -> str:
@@ -217,8 +262,10 @@ async def export_data(
             ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=spec_id)
         )
     if content_version:
-        stored_spec_id, stored_version = await dataset_pair(spec_id, content_version, logger=logger)
-        frame = {"spec_id": stored_spec_id, "content_version": stored_version}
+        exported = await _exported_pair(spec_id, content_version)
+        if isinstance(exported, ToolRefusal):
+            return to_tool_result(exported)
+        frame = {"spec_id": exported[0], "content_version": exported[1]}
     else:
         frame = {"spec_id": spec_id}
     client = get_client()

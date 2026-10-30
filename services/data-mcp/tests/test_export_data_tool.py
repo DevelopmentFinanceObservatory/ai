@@ -375,7 +375,12 @@ async def test_a_frame_fetched_with_options_exports_the_dataset_version_its_mint
         MintRecord(
             frame=FrameRef(**held),
             dataset=FrameRef(**FETCHED),
-            options={"columns": ["observationAbout_type"]},
+            options={
+                "format": "parquet",
+                "bundle": False,
+                "layout": "frame",
+                "columns": ["observationAbout_type"],
+            },
         )
     )
     set_store(store)
@@ -395,3 +400,36 @@ async def test_a_frame_fetched_with_options_exports_the_dataset_version_its_mint
         f"Exported version: {FETCHED['spec_id']} at content_version {FETCHED['content_version']}"
         in digest
     )
+
+
+@pytest.mark.parametrize(
+    "groupby",
+    [{"by": ["sector_level1"]}, {"by": ["stat_var"]}],
+    ids=["breakdown", "stat-vars-sum"],
+)
+async def test_a_summed_frame_held_under_its_base_pair_refuses_without_a_prepare(
+    groupby: dict[str, Any],
+) -> None:
+    """A groupby that keeps the version names the base pair as its dataset; exporting that
+    version would hand over the unsummed rows."""
+    store = InMemoryMaterialisationStore()
+    await store.put_mint_record(
+        MintRecord(
+            frame=FrameRef(**FETCHED),
+            dataset=FrameRef(**FETCHED),
+            options={"format": "parquet", "bundle": False, "layout": "frame", "groupby": groupby},
+        )
+    )
+    set_store(store)
+    requests: list[httpx2.Request] = []
+
+    result = await _call(_door(requests), {"frame_ref": FETCHED})
+
+    envelope = result.structured_content
+    assert envelope is not None
+    assert (envelope["code"], envelope["retry_mode"], envelope["fix"]) == (
+        "capability_unavailable",
+        "do_not_retry",
+        {"next_step": "get_data"},
+    )
+    assert requests == []

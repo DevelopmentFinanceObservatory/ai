@@ -1131,6 +1131,20 @@ class ToolRefusal:
         )
 
     @classmethod
+    def summed_frame_not_exportable(cls, *, spec_id: str) -> Self:
+        """A `get_data` frame with a `breakdown` or a `stat_vars` sum, whose rows no stored
+        dataset version holds, so the export route cannot make its file."""
+        return cls(
+            code=ToolErrorCode.CAPABILITY_UNAVAILABLE,
+            message=(
+                f"A summed or broken-down get_data frame ({spec_id}) can't be exported yet. "
+                'Call get_data without breakdown and stat_vars "sum", run aggregate (or the '
+                "verb that makes the same frame) and export the ops_ frame it returns."
+            ),
+            fix={"next_step": "get_data"},
+        )
+
+    @classmethod
     def licence_not_redistributable(cls, *, detail: str | None) -> Self:
         """A source of the frame is listed as one whose licence forbids redistribution."""
         return cls(

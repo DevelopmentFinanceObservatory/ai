@@ -1125,9 +1125,9 @@ def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) ->
     """`manifest` listing only the artifact whose `rendering` equals `options`, and the
     statistics artifact.
 
-    A manifest lists every rendering apis stores under its pair, so other callers'
-    groupby sums and column selections sit beside the requested one, in no set order.
-    The resource links and the harness's freshness date
+    apis answers a mint with one data rendering, the one it resolved for the request,
+    beside the statistics, so the narrowed list holds the same artifacts unless the
+    rendering apis resolved differs from `options`. The resource links and the harness's freshness date
     (`harness.provenance.data_artifact`) read the narrowed list, and so does the frame
     fetch of a mint with columns or a groupby. A manifest without the requested
     rendering keeps only its statistics, and `materialise_and_register` refuses such a
