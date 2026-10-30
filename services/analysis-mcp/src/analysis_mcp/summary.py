@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
+from common.materialisation import FrameRef
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, unit_cell_from_json
 from pydantic import BaseModel, ConfigDict, Field, PlainValidator, create_model, model_validator
 
@@ -431,11 +432,50 @@ _CALL_BY_VERB: Mapping[str, type[_Call]] = {
 }
 
 
+class ResolvedPeriod(BaseModel):
+    """One relative period of a computed recipe and the literal it was filled
+    with, as the answer's `resolved_periods` lists it."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    offset: int = Field(le=0)
+    period: str
+
+
+class RecomputedInput(BaseModel):
+    """A derived input the runner computed again under the call's latest year:
+    its pair, its top verb (`None` when its recipe names none), and the latest
+    year it took alone."""
+
+    model_config = ConfigDict(frozen=True)
+
+    spec_id: str
+    content_version: str
+    verb: str | None
+    latest: str
+
+
+class Rolling(BaseModel):
+    """The latest year a call's relative periods were filled from: `latest`,
+    each relative period with its literal (`periods`, by offset), the derived
+    inputs computed again under `latest` (`recomputed`), and those whose own
+    latest year could not be read (`unconfirmed`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    latest: str
+    periods: tuple[ResolvedPeriod, ...]
+    recomputed: tuple[RecomputedInput, ...] = ()
+    unconfirmed: tuple[FrameRef, ...] = ()
+
+
 class VerbSummary(BaseModel):
     """A verb call's summary, from which its digest and its `VerbResult` are built.
 
     `result` is the verb's `*Facts`. `derived` is the derived marker's detail
     (`frame_ref_resolution.DerivedMarker`), `None` when the result carries none.
+    `rolling` is the latest year the call's relative periods were filled from,
+    which the answer states beside the summary, `None` for a call with none.
     """
 
     model_config = ConfigDict(extra="ignore", frozen=True, arbitrary_types_allowed=True)
@@ -456,6 +496,7 @@ class VerbSummary(BaseModel):
     execution_identity: ExecutionIdentity
     derived: dict[str, Any] | None = None
     result: Any
+    rolling: Rolling | None = None
 
     @classmethod
     def parse(cls, summary: Mapping[str, Any]) -> VerbSummary:

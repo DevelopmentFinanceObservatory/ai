@@ -26,6 +26,12 @@ RESOLVED_PAYLOAD_META_KEY = "org.one.dfo/resolved_payload"
 # page merges them into the view's state (`theme.renderer_html`).
 VIEW_STATE_META_KEY = "org.one.dfo/view_state"
 
+# The key under which a describe_frame view or a create's reply names the
+# version its frame_ref asked for and the one built in its place, when the
+# platform no longer holds the one asked for and the call set
+# `rebuild_lost_frames`.
+FRAME_NOTE_KEY = "frame_note"
+
 
 class Caller(StrEnum):
     """Who is calling, determined by transport, never by a client claim."""
@@ -101,6 +107,11 @@ class WriteReply:
     # a create result alone. `server.py` keeps it out of `_meta` and out of
     # the Prefab shell. `None` on a revise.
     write_token: str | None = None
+    # Creates only: the sentence naming the version the intent's frame_ref
+    # asked for and the one built in its place, when the platform no longer
+    # held the one asked for. Model vocabulary, under
+    # `FRAME_NOTE_KEY`. `None` otherwise.
+    frame_note: str | None = None
 
 
 class Assembler(Protocol):
@@ -111,8 +122,16 @@ class Assembler(Protocol):
         *,
         intent: Mapping[str, Any],
         caller: Caller,
+        rebuild_lost_frames: bool = False,
     ) -> WriteReply | Refusal:
-        """Resolve a complete intent against its frame and mint revision 1."""
+        """Resolve a complete intent against its frame and mint revision 1.
+
+        With `rebuild_lost_frames`, a frame_ref the platform no longer holds is
+        built again, a `spec_` frame at its newest version when that read holds
+        its rows and an `ops_` frame from its recipe on current data, and the
+        reply names both pairs under `FRAME_NOTE_KEY`. A `spec_` frame it cannot
+        build refuses `rendering_not_recorded`.
+        """
         ...
 
     async def revise_component(
@@ -136,12 +155,18 @@ class Assembler(Protocol):
         frame_ref: Mapping[str, Any],
         dimension: str | None = None,
         query: str | None = None,
+        rebuild_lost_frames: bool = False,
     ) -> Mapping[str, Any] | Refusal:
         """What the frame holds: dimensions, values, coverage.
 
         Reads `frame_ref["spec_id"]` and `frame_ref["content_version"]` to
-        address the platform request. `dimension` narrows the view to one
-        dimension's values. `query` filters those values.
+        address the platform request. A `spec_` id with no content_version
+        reads its newest version, which the view names. With
+        `rebuild_lost_frames`, a pair the platform no longer holds is built
+        again as `create_component` builds it, and the view names both
+        pairs under `FRAME_NOTE_KEY`.
+        `dimension` narrows the view to one dimension's values. `query`
+        filters those values.
         """
         ...
 

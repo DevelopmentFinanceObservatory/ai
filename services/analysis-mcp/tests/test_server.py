@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 
@@ -29,9 +30,12 @@ from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
 from analysis_mcp.rolling_tool import RESOLVE_ANCHOR_OUTPUT_SCHEMA, RESOLVE_ANCHOR_VERSION
 from analysis_mcp.server import _build_store, _lifespan, _with_internal_error_backstop, mcp
 from analysis_mcp.settings import Settings
+from analysis_mcp.verbs import FOLLOWS_TREE
 from common import refusal as refusal_module
+from common.declaration import declared_tool
 from common.materialisation import InMemoryMaterialisationStore, get_store, set_store
 from fastmcp import Client, FastMCP
+from fastmcp.tools import Tool
 
 _ENV_VARS = ("PORT", "MODEL_NAME")
 
@@ -237,20 +241,18 @@ async def test_a_refusal_still_returns_its_own_payload(
     assert result.structured_content["code"] == "role_ambiguous"
 
 
-async def test_entity_parameter_schema_allows_object_or_null() -> None:
+async def test_entity_parameter_schema_declares_an_optional_object() -> None:
     """`compare`'s `left_entity`/`right_entity` and `share_of`'s
     `numerator_entity`/`denominator_entity` are `dict[str, str] | None = None`
-    at the tool boundary, not `dict[str, str] = {}` -- pins the schema shape a
-    real MCP client receives off the registered `server.mcp` tools, rather
-    than a reconstruction or a stand-in tool defined only in this test.
+    at the tool boundary, not `dict[str, str] = {}`, and declared as an
+    optional object with no null branch (`common.declaration`). The test pins
+    the schema shape a real MCP client receives off the registered
+    `server.mcp` tools, rather than a reconstruction or a stand-in tool
+    defined only in this test.
     """
     async with Client(mcp) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
-    expected_any_of = [
-        {"type": "object", "additionalProperties": {"type": "string"}},
-        {"type": "null"},
-    ]
     for tool_name, params in (
         ("compare", ("left_entity", "right_entity")),
         ("share_of", ("numerator_entity", "denominator_entity")),
@@ -258,8 +260,9 @@ async def test_entity_parameter_schema_allows_object_or_null() -> None:
         schema = tools[tool_name].input_schema
         for param in params:
             prop = schema["properties"][param]
-            assert prop["anyOf"] == expected_any_of
-            assert prop["default"] is None
+            assert (prop["type"], prop["additionalProperties"]) == ("object", {"type": "string"})
+            assert "anyOf" not in prop
+            assert "default" not in prop
             assert param not in schema.get("required", [])
 
 
@@ -374,15 +377,29 @@ async def test_every_registered_tool_keeps_its_in_process_twins_schema_and_descr
     docstring of the in-process functions, so a caller sees the same tools."""
     twins = FastMCP(name="in-process")
     for name, fn in _IN_PROCESS_TWINS.items():
-        twins.tool(fn, name=name)
+        twins.add_tool(declared_tool(Tool.from_function(fn, name=name)))
     async with Client(twins) as twin_client, Client(mcp) as client:
         expected = {tool.name: tool for tool in await twin_client.list_tools()}
         registered = {tool.name: tool for tool in await client.list_tools()}
 
     assert set(registered) == set(expected)
+    leveled = set()
+    rebuilding = set()
     for name, tool in registered.items():
-        assert tool.input_schema == expected[name].input_schema, name
+        schema = copy.deepcopy(tool.input_schema)
+        # Each verb adds the one argument its runner request reads (`verbs._on_runner`).
+        if name != "resolve_anchor":
+            assert schema["properties"].pop(FOLLOWS_TREE)["type"] == "boolean", name
+        if schema["properties"].pop("place_level", None) is not None:
+            leveled.add(name)
+        if schema["properties"].pop("rebuild_lost_frames", None) is not None:
+            rebuilding.add(name)
+        assert schema == expected[name].input_schema, name
         assert tool.description == expected[name].description, name
+    # `place_level` and `rebuild_lost_frames` are the registered tools' own: one
+    # builds a runner filter step, the other rebuilds a frame the runner lost.
+    assert leveled == {"aggregate", "rank", "share_of"}
+    assert rebuilding == set(_IN_PROCESS_TWINS) - {"resolve_anchor"}
 
 
 @pytest.mark.parametrize(("verb_fn", "verb_name"), [(aggregate, "aggregate"), (compare, "compare")])

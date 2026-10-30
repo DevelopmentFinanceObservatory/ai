@@ -26,13 +26,28 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
 from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
-from common.materialisation import FrameRef, get_store
+from common.derived_replay import (
+    DEFAULT_RETRY_AFTER_S,
+    ReplayBusy,
+    ReplayFailed,
+    ReplayPending,
+    replay_derived,
+)
+from common.echoed_text import truncate_value
+from common.materialisation import (
+    FrameRef,
+    FrameRendering,
+    RecordUnread,
+    dataset_pair,
+    frame_rendering,
+    record_bare_read,
+)
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
 from pydantic import ValidationError
@@ -40,6 +55,7 @@ from pydantic import ValidationError
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody, PublishBodyNotBuildable, publish_body_for
 from presentation_mcp.platform_contract import (
+    FRAME_NOTE_KEY,
     Caller,
     NormalFormConflict,
     Refusal,
@@ -54,6 +70,9 @@ tracer = trace.get_tracer(__name__)
 _COMPONENTS_ROUTE = "/api/presentation/components"
 _COMPONENT_ROUTE = "/api/presentation/components/{component_id}"
 _FRAME_ROUTE = "/api/presentation/frames/{spec_id}/{content_version}"
+# The newest version of a `spec_` frame, with its `spec_id` and
+# `content_version` beside the pair route's body.
+_SPEC_FRAME_ROUTE = "/api/presentation/frames/{spec_id}"
 _RELEASE_ROUTE = "/api/presentation/release"
 # apis' own `datasets_api` surface, not `presentation_api`. See
 # `_ensure_published_pair`'s own docstring for why this client calls it.
@@ -280,12 +299,146 @@ def _row_budget_refusal(exc: RowBudgetExhausted) -> Refusal:
     )
 
 
-def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Refusal:
+def _frame_ref_incomplete(spec_id: str) -> Refusal:
+    """The refusal for a `frame_ref` that names `spec_id` without its
+    `content_version` where `spec_id` is not a `spec_` id. The platform
+    resolves only a `spec_` id to its newest version."""
+    return Refusal(
+        error="frame_ref_incomplete",
+        retry=RetryMode.CORRECT_AND_RETRY,
+        detail=(
+            f"frame_ref names {truncate_value(spec_id)} without its content_version. Only a "
+            "spec_ id can be passed alone. Pass the frame_ref the call that made this frame "
+            "returned."
+        ),
+        fix=(
+            "Pass frame_ref as the spec_id and content_version pair the call that made "
+            "the frame returned."
+        ),
+        pointer="/frame_ref/content_version",
+    )
+
+
+def _resolves_alone(spec_id: str) -> bool:
+    """Whether the platform resolves `spec_id` with no `content_version`: a
+    `spec_` id names a fetch, and its newest version is the one drawn."""
+    return spec_id.startswith("spec_")
+
+
+# The `frame_unavailable` causes of a frame apis does not hold, which a rebuild can
+# stand in for. dfo-apis names every other cause for a frame it refuses to serve.
+_LOST_CAUSES = frozenset({"unknown", "expired", "ops_unsupported"})
+
+
+def _frame_lost(exc: PlatformError) -> bool:
+    """Whether the platform refused a pair because it no longer holds it. That is a
+    404 `frame_unavailable` whose `cause.code` is in `_LOST_CAUSES`, whatever its
+    `retryable` flag, since apis marks an expired frame retryable. Any other 404
+    stays the platform's refusal, since a revoked, quarantined or digest-mismatched
+    frame must not be read again under a newer version. A 503 `frame_unavailable` (a failed
+    read, a recipe still pending or unreadable) passes back as the retryable refusal
+    it is. With
+    `rebuild_lost_frames`, the frame is then built again as the analysis verbs'
+    rebuild builds it, a `spec_` frame read at its newest version when that read
+    holds its rows (`_bare_read_refusal`) and an `ops_` frame computed again from its
+    recipe (`common.derived_replay`)."""
+    return (
+        exc.code == "frame_unavailable"
+        and exc.status == httpx2.codes.NOT_FOUND
+        and exc.cause_code in _LOST_CAUSES
+    )
+
+
+# How a lost frame was built again, by its id's kind, as the frame note says.
+_FETCHED_AGAIN = "fetched again at its newest version"
+_COMPUTED_AGAIN = "computed again from its recipe on current data"
+
+
+def _rebuilt_note(spec_id: str, asked: str, *, how: str, read: tuple[object, object]) -> str:
+    """The sentence naming the frame a frame_ref asked for and the pair built in its
+    place, `read`, when the platform named it. A replay can mint a new `ops_` id, so
+    the version alone would name a pair no store holds."""
+    lead = f"The frame {spec_id}, {asked} was no longer held, so it was {how}"
+    read_spec_id, version = read
+    if isinstance(read_spec_id, str) and isinstance(version, str):
+        return f"{lead}: {read_spec_id}, {version} in place of {asked}."
+    return f"{lead}."
+
+
+def _rendering_not_recorded(spec_id: str, asked: str) -> Refusal:
+    """The refusal for a lost `spec_` frame whose rows the platform's newest read of
+    `spec_id` is not known to hold. That read has no rendering of its own."""
+    return Refusal(
+        error="rendering_not_recorded",
+        retry=RetryMode.CORRECT_AND_RETRY,
+        detail=(
+            f"The frame {spec_id}, {asked} is no longer held, and its newest version cannot "
+            "be read with the same rows: it was summed or cut, or no record states how it "
+            "was fetched."
+        ),
+        fix="Call get_data for the same data and pass the frame_ref it returns.",
+    )
+
+
+def _replay_waits(spec_id: str, asked: str, waiting: ReplayPending | ReplayBusy) -> Refusal:
+    """The retryable refusal for a lost `ops_` frame the runner cannot compute
+    again yet."""
+    wait = waiting.retry_after_s
+    why = (
+        f"the analysis service is busy: {waiting.detail}"
+        if isinstance(waiting, ReplayBusy)
+        else "the data it reads is still being prepared upstream"
+    )
+    return Refusal(
+        error="transient_unavailable",
+        retry=RetryMode.RETRY_AFTER_DELAY,
+        detail=(
+            f"The frame {spec_id}, {asked} is no longer held and cannot be computed "
+            f"again yet: {why}. Retry the same call after {wait:.1f}s."
+        ),
+        retry_after_s=wait,
+    )
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Rebuild:
+    """A create's intent with its lost frame_ref built again, with `how` the frame
+    `spec_id`, `asked` was built and the pair `read` in its place (`None` when the
+    create's reply names it)."""
+
+    intent: Mapping[str, Any]
+    spec_id: str
+    asked: str
+    how: str
+    read: tuple[str, str] | None
+
+
+def _input_version(envelope: Mapping[str, Any] | None, spec_id: str) -> object:
+    """The content_version of `spec_id` among the envelope's provenance
+    inputs, `None` when no input names it."""
+    provenance = envelope.get("provenance") if isinstance(envelope, Mapping) else None
+    inputs = provenance.get("inputs") if isinstance(provenance, Mapping) else None
+    for frame in inputs if isinstance(inputs, list) else ():
+        if isinstance(frame, Mapping) and frame.get("spec_id") == spec_id:
+            return frame.get("content_version")
+    return None
+
+
+async def _record_drawn_pair(spec_id: str, reply: WriteReply) -> None:
+    """Write the mint record of the pair a create resolved the bare `spec_id` to, which
+    the reply's provenance names (`common.materialisation.record_bare_read`)."""
+    version = _input_version(reply.resolved_payload, spec_id)
+    if isinstance(version, str):
+        await record_bare_read(spec_id, version, logger=logger)
+
+
+def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str | None] | Refusal:
     """Return valid frame path segments, or a local refusal before routing.
 
     `spec_id` and `content_version` are interpolated into `_FRAME_ROUTE`, so
     accepting route syntax in either field could select a different platform
-    resource after URL normalization.
+    resource after URL normalization. `content_version` is `None` for a
+    `spec_` id passed alone, which `_SPEC_FRAME_ROUTE` resolves.
     """
     spec_id = frame_ref.get("spec_id")
     content_version = frame_ref.get("content_version")
@@ -296,6 +449,8 @@ def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Ref
             detail="frame_ref.spec_id must be a valid id a previous frame reference returned.",
             pointer="/frame_ref/spec_id",
         )
+    if content_version is None:
+        return (spec_id, None) if _resolves_alone(spec_id) else _frame_ref_incomplete(spec_id)
     if not isinstance(content_version, str) or not _CONTENT_VERSION_PATTERN.fullmatch(
         content_version
     ):
@@ -328,6 +483,13 @@ def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
     if not isinstance(parsed.get("retryable"), bool):
         return None
     return parsed
+
+
+def _cause_code(problem: Mapping[str, Any]) -> str | None:
+    """The `cause.code` of the problem document `problem`, `None` without one."""
+    cause = problem.get("cause")
+    code = cause.get("code") if isinstance(cause, Mapping) else None
+    return code if isinstance(code, str) else None
 
 
 def _render_alternatives(alternatives: Sequence[Mapping[str, Any]]) -> str:
@@ -461,6 +623,7 @@ class PlatformAssembler:
         *,
         intent: Mapping[str, Any],
         caller: Caller,
+        rebuild_lost_frames: bool = False,
     ) -> WriteReply | Refusal:
         """Create a component, retrying transport failures and retryable 5xx replies.
 
@@ -474,28 +637,183 @@ class PlatformAssembler:
 
         `caller` picks the headers that name who the card counts against
         (`_card_write_headers`).
+
+        With `rebuild_lost_frames`, a frame_ref the platform no longer holds
+        is built again (`_rebuilt_intent`), and the reply's `frame_note` names
+        both versions. Without it, the platform's `frame_unavailable` is the
+        reply.
         """
         write_token = _new_write_token()
+        # A create's intent is complete. The platform resolves a `spec_` id
+        # with no content_version to its newest version and stores that pair,
+        # so only another id alone is refused. `frame_ref` is create-only, so
+        # a revise's patch naming one goes to the platform, which refuses it.
+        frame_ref = intent.get("frame_ref")
+        if (
+            isinstance(frame_ref, Mapping)
+            and isinstance(spec_id := frame_ref.get("spec_id"), str)
+            and frame_ref.get("content_version") is None
+            and not _resolves_alone(spec_id)
+        ):
+            return _frame_ref_incomplete(spec_id)
         # Publish before create: `create_component` never validates
-        # `intent["frame_ref"]` locally at all (see `_presentable`'s own
+        # `intent["frame_ref"]` locally beyond that (see `_presentable`'s own
         # docstring), so this is the only chance to publish an analysis-mcp
         # result before the platform's own `ops_unsupported` refusal would
         # otherwise answer for it.
         presentable = await self._presentable(intent)
         if isinstance(presentable, Refusal):
             return presentable
-        intent = presentable
         try:
-            response = await self.request(
-                "POST",
-                _COMPONENTS_ROUTE,
-                route=_COMPONENTS_ROUTE,
-                json={"intent": dict(intent), "write_token": write_token},
-                headers=self._card_write_headers(caller),
+            response = await self._post_create(presentable, write_token=write_token, caller=caller)
+        except PlatformError as exc:
+            rebuild = await self._rebuilt_intent(intent, exc) if rebuild_lost_frames else None
+            if rebuild is None:
+                return self._refusal(exc)
+            if isinstance(rebuild, Refusal):
+                return rebuild
+            # The refused create stored nothing, so the same write token keys this one.
+            return await self._create_rebuilt(rebuild, write_token=write_token, caller=caller)
+        reply = self._write_reply(response.json())
+        if (
+            isinstance(frame_ref, Mapping)
+            and isinstance(bare_id := frame_ref.get("spec_id"), str)
+            and frame_ref.get("content_version") is None
+        ):
+            await _record_drawn_pair(bare_id, reply)
+        return reply
+
+    async def _create_rebuilt(
+        self, rebuild: _Rebuild, *, write_token: str, caller: Caller
+    ) -> WriteReply | Refusal:
+        """Create from `rebuild.intent`, naming both versions in `frame_note`."""
+        try:
+            response = await self._post_create(
+                rebuild.intent, write_token=write_token, caller=caller
             )
         except PlatformError as exc:
             return self._refusal(exc)
-        return self._write_reply(response.json())
+        reply = self._write_reply(response.json())
+        if rebuild.read is None:
+            await _record_drawn_pair(rebuild.spec_id, reply)
+        read = rebuild.read or (
+            rebuild.spec_id,
+            _input_version(reply.resolved_payload, rebuild.spec_id),
+        )
+        note = _rebuilt_note(rebuild.spec_id, rebuild.asked, how=rebuild.how, read=read)
+        return replace(reply, frame_note=note)
+
+    async def _rebuilt_intent(
+        self, intent: Mapping[str, Any], lost: PlatformError
+    ) -> _Rebuild | Refusal | None:
+        """`intent` with the frame_ref the platform refused as `lost` built again,
+        the refusal of a rebuild that could not, or `None` when the refusal is no
+        lost frame. A `spec_` frame_ref loses its content_version, which the
+        platform reads as the Spec's newest version, when that read holds its rows
+        (`_bare_read_refusal`). An `ops_` frame_ref names the pair its replay
+        computed."""
+        frame_ref = intent.get("frame_ref")
+        if not (
+            _frame_lost(lost)
+            and isinstance(frame_ref, Mapping)
+            and isinstance(spec_id := frame_ref.get("spec_id"), str)
+            and isinstance(asked := frame_ref.get("content_version"), str)
+        ):
+            return None
+        if _resolves_alone(spec_id):
+            refusal = await self._bare_read_refusal(spec_id, asked, lost)
+            if refusal is not None:
+                return refusal
+            newest = {key: value for key, value in frame_ref.items() if key != "content_version"}
+            return _Rebuild(
+                intent={**intent, "frame_ref": newest},
+                spec_id=spec_id,
+                asked=asked,
+                how=_FETCHED_AGAIN,
+                read=None,
+            )
+        replayed = await self._replayed(spec_id, asked, lost)
+        if isinstance(replayed, Refusal):
+            return replayed
+        return _Rebuild(
+            intent={**intent, "frame_ref": {**frame_ref, **replayed.model_dump()}},
+            spec_id=spec_id,
+            asked=asked,
+            how=_COMPUTED_AGAIN,
+            read=(replayed.spec_id, replayed.content_version),
+        )
+
+    async def _bare_read_refusal(
+        self, spec_id: str, asked: str, lost: PlatformError
+    ) -> Refusal | None:
+        """The refusal for a lost `spec_` frame a read of `spec_id` alone would not stand
+        for, `None` when it would. No route reads a Spec in a named rendering, and an
+        analysis tree cannot be a Spec root alone, so a bare read holds the frame's rows
+        only when its mint record states the default rows. A pair that is no frame's
+        refuses as `lost`."""
+        try:
+            ref = FrameRef(spec_id=spec_id, content_version=asked)
+        except ValidationError:
+            return self._refusal(lost)
+        match await frame_rendering(ref, logger=logger):
+            case FrameRendering() as known if known.default_rows:
+                return None
+            case RecordUnread():
+                return Refusal(
+                    error="transient_unavailable",
+                    retry=RetryMode.RETRY_AFTER_DELAY,
+                    detail=(
+                        f"The record of the frame {spec_id}, {asked} could not be read just "
+                        f"now. Retry the same call after {DEFAULT_RETRY_AFTER_S:.1f}s."
+                    ),
+                    retry_after_s=DEFAULT_RETRY_AFTER_S,
+                )
+            case _:
+                return _rendering_not_recorded(spec_id, asked)
+
+    async def _replayed(self, spec_id: str, asked: str, lost: PlatformError) -> FrameRef | Refusal:
+        """The pair the runner computed the lost derived frame `spec_id`, `asked`
+        again under, or the retryable refusal of a replay that must wait. A
+        replay that fails, or a pair that is no frame's, refuses as `lost`."""
+        try:
+            ref = FrameRef(spec_id=spec_id, content_version=asked)
+        except ValidationError:
+            return self._refusal(lost)
+        replayed = await replay_derived(ref, self._post_analysis, logger=logger)
+        match replayed:
+            case ReplayPending() | ReplayBusy():
+                return _replay_waits(spec_id, asked, replayed)
+            case ReplayFailed():
+                return self._refusal(lost)
+        return replayed
+
+    async def _post_analysis(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | Refusal:
+        """POST `body` to apis' analysis `path` once, for `common.derived_replay`.
+        Returns the response whatever its status, or `transient_unavailable` for a
+        call that got none. It names the caller as an external create does
+        (`_card_write_headers`), since only a public call replays, and waits as
+        long as a whole presentation call may."""
+        try:
+            headers = dict(await self._auth()) if self._auth else {}
+        except ApisAuthError as exc:
+            return self._refusal(PlatformTransportError(detail=f"no dfo-apis ID token: {exc}"))
+        headers.update(self._card_write_headers(Caller.EXTERNAL))
+        timeout = self._attempt_timeout(max(self._retry_budget_s, self._read_timeout_s))
+        try:
+            return await self._client.post(path, json=dict(body), headers=headers, timeout=timeout)
+        except httpx2.TransportError as exc:
+            return self._refusal(PlatformTransportError(detail=str(exc)))
+
+    async def _post_create(
+        self, intent: Mapping[str, Any], *, write_token: str, caller: Caller
+    ) -> httpx2.Response:
+        return await self.request(
+            "POST",
+            _COMPONENTS_ROUTE,
+            route=_COMPONENTS_ROUTE,
+            json={"intent": dict(intent), "write_token": write_token},
+            headers=self._card_write_headers(caller),
+        )
 
     async def revise_component(
         self,
@@ -557,25 +875,88 @@ class PlatformAssembler:
         frame_ref: Mapping[str, Any],
         dimension: str | None = None,
         query: str | None = None,
+        rebuild_lost_frames: bool = False,
     ) -> Mapping[str, Any] | Refusal:
         frame_ref_or_refusal = _frame_ref_or_refusal(frame_ref)
         if isinstance(frame_ref_or_refusal, Refusal):
             return frame_ref_or_refusal
-        spec_id, content_version = await self._platform_pair(*frame_ref_or_refusal)
-        publish_refusal = await self._ensure_published_pair(spec_id, content_version)
-        if publish_refusal is not None:
-            return publish_refusal
-        path = _FRAME_ROUTE.format(spec_id=spec_id, content_version=content_version)
+        spec_id, content_version = frame_ref_or_refusal
         params = {
             k: v for k, v in {"dimension": dimension, "query": query}.items() if v is not None
-        }
+        } or None
+        if content_version is None:
+            return await self._newest_frame_view(spec_id, params=params)
+        platform_spec_id, platform_content_version = await self._platform_pair(
+            spec_id, content_version
+        )
+        publish_refusal = await self._ensure_published_pair(
+            platform_spec_id, platform_content_version
+        )
+        if publish_refusal is not None:
+            return publish_refusal
+        path = _FRAME_ROUTE.format(
+            spec_id=platform_spec_id, content_version=platform_content_version
+        )
         try:
-            response = await self.request(
-                "GET",
-                path,
-                route=_FRAME_ROUTE,
-                params=params or None,
-            )
+            response = await self.request("GET", path, route=_FRAME_ROUTE, params=params)
+        except PlatformError as exc:
+            if rebuild_lost_frames and _frame_lost(exc):
+                return await self._rebuilt_frame_view(spec_id, content_version, exc, params=params)
+            return self._refusal(exc)
+        return response.json()
+
+    async def _rebuilt_frame_view(
+        self,
+        spec_id: str,
+        asked: str,
+        lost: PlatformError,
+        *,
+        params: Mapping[str, str] | None,
+    ) -> Mapping[str, Any] | Refusal:
+        """The view of the frame `spec_id`, `asked`, which the platform refused as
+        `lost`, built again, with both pairs under `FRAME_NOTE_KEY`. A `spec_`
+        frame is read at its newest version when that read holds its rows
+        (`_bare_read_refusal`), an `ops_` frame at the pair its replay computed."""
+        if _resolves_alone(spec_id):
+            refusal = await self._bare_read_refusal(spec_id, asked, lost)
+            if refusal is not None:
+                return refusal
+            view = await self._newest_frame_view(spec_id, params=params)
+            if isinstance(view, Refusal):
+                return view
+            how = _FETCHED_AGAIN
+            read = (view.get("spec_id"), view.get("content_version"))
+        else:
+            replayed = await self._replayed(spec_id, asked, lost)
+            if isinstance(replayed, Refusal):
+                return replayed
+            path = _FRAME_ROUTE.format(**replayed.model_dump())
+            view = await self._frame_view(path, route=_FRAME_ROUTE, params=params)
+            if isinstance(view, Refusal):
+                return view
+            how = _COMPUTED_AGAIN
+            read = (replayed.spec_id, replayed.content_version)
+        note = _rebuilt_note(spec_id, asked, how=how, read=read)
+        return {**view, FRAME_NOTE_KEY: note}
+
+    async def _newest_frame_view(
+        self, spec_id: str, *, params: Mapping[str, str] | None
+    ) -> Mapping[str, Any] | Refusal:
+        """The view of `spec_id` at its newest version, which apis resolves and
+        names in the body. The pair it names gets a mint record
+        (`common.materialisation.record_bare_read`), so a later call can name it."""
+        path = _SPEC_FRAME_ROUTE.format(spec_id=spec_id)
+        view = await self._frame_view(path, route=_SPEC_FRAME_ROUTE, params=params)
+        match view:
+            case {"spec_id": str(read_id), "content_version": str(version)}:
+                await record_bare_read(read_id, version, logger=logger)
+        return view
+
+    async def _frame_view(
+        self, path: str, *, route: str, params: Mapping[str, str] | None
+    ) -> Mapping[str, Any] | Refusal:
+        try:
+            response = await self.request("GET", path, route=route, params=params)
         except PlatformError as exc:
             return self._refusal(exc)
         return response.json()
@@ -730,49 +1111,14 @@ class PlatformAssembler:
         }
 
     async def _platform_pair(self, spec_id: str, content_version: str) -> tuple[str, str]:
-        """The pair apis holds for the frame `{spec_id, content_version}`.
+        """The pair apis holds for the frame `{spec_id, content_version}`
+        (`common.materialisation.dataset_pair`).
 
-        `get_data` reports the pair its frame is held under in the shared
-        store. A fetch with `place_types`, other `columns`, a `stat_vars` sum or
-        a `breakdown` is held under a pair of its own, which apis never
-        stored, so the platform refuses it as `frame_unavailable`. The mint
-        record the store keeps beside that frame names the pair apis does
-        hold (`MintRecord.dataset`): the rendering's own dataset version, or
-        the summed version apis mints for a collapse. That pair is
-        returned when it differs from the one given, and the platform draws
-        the dataset version's canonical frame.
-
-        Any other pair is returned as given: an `ops_` pair, a `spec_` pair
-        equal to its dataset pair, a `spec_` pair with no mint record, and a
-        value that is not a pair the store could hold. The record is written
-        best effort, so a derived pair whose write was given up still refuses
-        `frame_unavailable` until `get_data` is called for it again. A lookup
-        that fails for any reason is logged and the pair returned as given, so
-        a derived pair then refuses `frame_unavailable` as it does with no
-        record.
+        A pair apis never stored, whose lookup failed or found no record, goes to the
+        platform as given, which refuses it `frame_unavailable`. `get_frame_view` and
+        `create_component` with `rebuild_lost_frames` then build it again.
         """
-        if not spec_id.startswith("spec_"):
-            return spec_id, content_version
-        try:
-            ref = FrameRef(spec_id=spec_id, content_version=content_version)
-        except ValidationError:
-            return spec_id, content_version
-        try:
-            record = await get_store().get_mint_record(ref)
-        except Exception:
-            # Broad on purpose: the store's failure modes belong to its backend
-            # (the storage client, its auth and its transport), which this module
-            # does not name, and the lookup only ever improves a call.
-            logger.warning(
-                "mint record of %s/%s unreadable; sending the pair as given",
-                spec_id,
-                content_version,
-                exc_info=True,
-            )
-            return spec_id, content_version
-        if record is None or record.frame == record.dataset:
-            return spec_id, content_version
-        return record.dataset.spec_id, record.dataset.content_version
+        return await dataset_pair(spec_id, content_version, logger=logger)
 
     async def _ensure_published_pair(self, spec_id: str, content_version: str) -> Refusal | None:
         """Ensure `{spec_id, content_version}` is published to apis'
@@ -1152,6 +1498,7 @@ class PlatformAssembler:
             constraint_id=problem.get("constraint_id"),
             truncated=bool(problem.get("truncated", False)),
             trace_id=problem.get("trace_id"),
+            cause_code=_cause_code(problem),
         )
 
     def _should_retry(self, error: PlatformError) -> bool:

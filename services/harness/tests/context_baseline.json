@@ -49,7 +49,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 186638,
+      "total_chars": 186633,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 40967,
       "declarations": [
@@ -75,7 +75,7 @@
         }
       ],
       "contents": {
-        "total_chars": 120263,
+        "total_chars": 120258,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
@@ -85,7 +85,7 @@
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
-            "chars": 32676
+            "chars": 32671
           },
           {
             "bucket": "functionCall:get_skill",
@@ -104,7 +104,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 187958,
+      "total_chars": 187953,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 40967,
       "declarations": [
@@ -130,7 +130,7 @@
         }
       ],
       "contents": {
-        "total_chars": 120737,
+        "total_chars": 120732,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
@@ -140,7 +140,7 @@
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
-            "chars": 32676
+            "chars": 32671
           },
           {
             "bucket": "functionResponse:propose_plan",
@@ -214,7 +214,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 104767,
+      "total_chars": 104762,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 40967,
       "declarations": [
@@ -240,12 +240,12 @@
         }
       ],
       "contents": {
-        "total_chars": 40348,
+        "total_chars": 40343,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
-            "chars": 32676
+            "chars": 32671
           },
           {
             "bucket": "text(seam-brief)",
@@ -269,7 +269,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 106628,
+      "total_chars": 106623,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 40967,
       "declarations": [
@@ -295,12 +295,12 @@
         }
       ],
       "contents": {
-        "total_chars": 41363,
+        "total_chars": 41358,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
             "count": 1,
-            "chars": 32676
+            "chars": 32671
           },
           {
             "bucket": "text(seam-brief)",

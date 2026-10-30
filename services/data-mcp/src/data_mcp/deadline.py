@@ -159,6 +159,7 @@ EXTERNAL_CALL_BUDGET = CallBudget(
 _call_budget: ContextVar[CallBudget] = ContextVar(
     "get_data_call_budget", default=DIRECT_CALL_BUDGET
 )
+_call_deadline: ContextVar[CallDeadline | None] = ContextVar("call_deadline", default=None)
 
 
 def current_call_budget() -> CallBudget:
@@ -167,9 +168,16 @@ def current_call_budget() -> CallBudget:
     return _call_budget.get()
 
 
+def current_call_deadline() -> CallDeadline | None:
+    """The deadline of the call running now, started when `use_call_budget` opened under
+    a budget with a `deadline_s`, else `None`."""
+    return _call_deadline.get()
+
+
 @contextmanager
 def use_call_budget(budget: CallBudget) -> Iterator[None]:
-    """Run `get_data` calls made inside the block under `budget`.
+    """Run `get_data` calls made inside the block under `budget`, and start the call's
+    deadline when `budget` states one (`current_call_deadline`).
 
     The entry point a call came through sets it: the combined server wraps each
     tool call in `use_call_budget(EXTERNAL_CALL_BUDGET)`. A test that drives a
@@ -177,7 +185,10 @@ def use_call_budget(budget: CallBudget) -> Iterator[None]:
     the server's tasks copy the context when the client connects.
     """
     token = _call_budget.set(budget)
+    deadline = None if budget.deadline_s is None else CallDeadline.after(budget.deadline_s)
+    deadline_token = _call_deadline.set(deadline)
     try:
         yield
     finally:
+        _call_deadline.reset(deadline_token)
         _call_budget.reset(token)

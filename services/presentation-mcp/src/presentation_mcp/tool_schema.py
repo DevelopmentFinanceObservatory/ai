@@ -6,6 +6,9 @@ look like, not this service. What is built here is assembly, not derivation:
 each member's own `$defs`, `$schema`, and `$id` are stripped, the six member
 schemas become the branches of one `anyOf`, and only the `$defs` entries a
 branch actually references by `$ref` are kept alongside it.
+
+`server.py` publishes `declared_schema` (`common.declaration`) of each
+assembled schema, so any release document gets the same treatment.
 """
 
 from __future__ import annotations
@@ -55,6 +58,21 @@ _FRAME_REF_DESCRIPTION = (
     "whichever caller minted it. A frame_ref whose spec_id starts with ops_ "
     "and whose content_version starts with ocv_ names an Analysis Toolkit "
     "result, and is presentable like any other frame_ref."
+)
+
+# Added to `_FRAME_REF_DESCRIPTION` on each intent member's frame_ref and on
+# describe_frame's, whose content_version is optional.
+_BARE_SPEC_ID_SENTENCE = "Leave content_version out to pass a spec_id and have the server fetch it."
+
+# Whether a frame the platform no longer holds is built again
+# (`client.PlatformAssembler`). The public server forces it on
+# (`server.PUBLIC_SHAPES`). The harness leaves it unset, so a lost frame reaches
+# it as `frame_unavailable`, which its own replay answers. analysis-mcp's verbs
+# take the same argument.
+REBUILD_LOST_FRAMES = "rebuild_lost_frames"
+_REBUILD_LOST_FRAMES_DESCRIPTION = (
+    "True rebuilds a lost frame: spec_ at its newest version, ops_ from its recipe. "
+    "A summed, cut or unrecorded spec_ frame refuses."
 )
 
 _DESCRIBE_COMPONENT_ID_DESCRIPTION = (
@@ -157,7 +175,8 @@ def write_component_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
     if "frame_ref" in reachable_defs:
         reachable_defs["frame_ref"] = {
             **reachable_defs["frame_ref"],
-            "description": _FRAME_REF_DESCRIPTION,
+            "description": f"{_FRAME_REF_DESCRIPTION} {_BARE_SPEC_ID_SENTENCE}",
+            "required": ["spec_id"],
         }
     return {
         "type": "object",
@@ -183,6 +202,11 @@ def write_component_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
                 "default": "auto",
                 "description": _INCLUDE_PROJECTION_DESCRIPTION,
             },
+            REBUILD_LOST_FRAMES: {
+                "type": "boolean",
+                "default": False,
+                "description": f"{_REBUILD_LOST_FRAMES_DESCRIPTION} An edit ignores it.",
+            },
         },
         "required": ["intent"],
         "additionalProperties": False,
@@ -193,8 +217,8 @@ def write_component_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
 def describe_frame_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
     """The advertised `inputSchema` for `describe_frame`.
 
-    `frame_ref` is lifted verbatim from the shared `$defs`: a frame reference
-    is always complete, there is no tolerant form of one.
+    `frame_ref` is lifted from the shared `$defs` with only `spec_id`
+    required, since a `spec_` id alone reads the frame's newest version.
 
     Args:
         release: The platform's release document, carrying
@@ -211,7 +235,8 @@ def describe_frame_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
             "pattern": _CONTENT_VERSION_PATTERN,
         },
     }
-    frame_ref["description"] = _FRAME_REF_DESCRIPTION
+    frame_ref["description"] = f"{_FRAME_REF_DESCRIPTION} {_BARE_SPEC_ID_SENTENCE}"
+    frame_ref["required"] = ["spec_id"]
     return {
         "type": "object",
         "properties": {
@@ -223,6 +248,11 @@ def describe_frame_schema(*, release: Mapping[str, Any]) -> dict[str, Any]:
             "query": {
                 "type": "string",
                 "description": "Keep only dimension values containing this text.",
+            },
+            REBUILD_LOST_FRAMES: {
+                "type": "boolean",
+                "default": False,
+                "description": _REBUILD_LOST_FRAMES_DESCRIPTION,
             },
         },
         "required": ["frame_ref"],

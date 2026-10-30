@@ -55,6 +55,7 @@ async def test_the_real_surface_covers_retrieval_and_the_analysis_verbs() -> Non
         "catalogue_counts",
         "compare",
         "describe",
+        "export_data",
         "filter",
         "get_data",
         "get_skill",

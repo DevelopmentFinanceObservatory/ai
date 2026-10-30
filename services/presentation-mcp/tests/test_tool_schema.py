@@ -129,6 +129,7 @@ def test_write_component_schema_top_level_shape() -> None:
         "component_id",
         "write_token",
         "include_projection",
+        "rebuild_lost_frames",
     }
     assert schema["additionalProperties"] is False
 
@@ -162,11 +163,11 @@ def test_defs_mismatch_raises_instead_of_picking_one() -> None:
         write_component_schema(release=rigged)
 
 
-def test_describe_frame_schema_lifts_frame_ref_with_its_required_list() -> None:
+def test_describe_frame_schema_lifts_frame_ref_with_only_spec_id_required() -> None:
     schema = describe_frame_schema(release=RELEASE)
 
     frame_ref = schema["properties"]["frame_ref"]
-    assert frame_ref["required"] == ["spec_id", "content_version"]
+    assert frame_ref["required"] == ["spec_id"]
     assert schema["required"] == ["frame_ref"]
 
 
@@ -175,8 +176,9 @@ def test_describe_frame_schema_frame_ref_matches_the_shared_def_besides_local_id
 
     frame_ref = dict(schema["properties"]["frame_ref"])
     shared = dict(MEMBERS["line_chart"]["$defs"]["frame_ref"])
-    frame_ref.pop("description")
-    shared.pop("description")
+    for ref in (frame_ref, shared):
+        ref.pop("description")
+        ref.pop("required")
     frame_ref["properties"] = {
         name: {key: value for key, value in property_schema.items() if key != "pattern"}
         for name, property_schema in frame_ref["properties"].items()

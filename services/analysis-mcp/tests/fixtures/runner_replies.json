@@ -176,6 +176,189 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"rolling\":\"tree\",\"tree\":{\"arguments\":{\"left_entity\":{},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"ocv_6cc0a5dca5a70333419a604070d3c5d1\",\"spec_id\":\"ops_2719a7dd1ebc0c15567f9fb24ff4c75c\"},\"other\":{\"content_version\":\"ocv_96323a4f0dfaf26d903a6f0a3ecc4a99\",\"spec_id\":\"ops_a5234dfadca6deb24f4d31c07140e0e6\"}},\"verb\":\"compare\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: growth, then growth, then compare.",
+            "spec": {
+              "spec_id": "ops_be33f235adf3dcd9b4d4f62b5e69e6b8",
+              "recipe": {
+                "normal_form_hash": "rnf_30f5ea0808ab1ea2a73e0cc07e10cb6d",
+                "replay_key": "rpk_d2fe17c08acbb4706c1492a109f794ed"
+              }
+            },
+            "content_version": "ocv_f77dc4cedc0dcb613086c20b70daf45b",
+            "output_digest": "out_5418bfa18ede42cef8af28384fc3475a",
+            "roots": [
+              {
+                "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6",
+                "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              },
+              {
+                "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d",
+                "content_version": "cv_96d6efc2c8851bce26501fe3a365c94d",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [
+              {
+                "anchor": "latest",
+                "offset": -9,
+                "rule": "half1",
+                "period": "2015"
+              },
+              {
+                "anchor": "latest",
+                "offset": 0,
+                "rule": "half1",
+                "period": "2024"
+              }
+            ],
+            "artifact": {
+              "digest": "sha256:be7749b155c1e3c40c39c32cd3be3e6890ebe1fe3df5290646e5577393d3baa5",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_1508873fda200087018d8b65c9da4fc2",
+      "output_digest": "out_5418bfa18ede42cef8af28384fc3475a",
+      "summary": {
+        "verb": "compare",
+        "spec_id": "ops_be33f235adf3dcd9b4d4f62b5e69e6b8",
+        "content_version": "ocv_f77dc4cedc0dcb613086c20b70daf45b",
+        "frame_content_version": "cv_1508873fda200087018d8b65c9da4fc2",
+        "rows": 1,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2015",
+          "end": "2024",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "left_entity": {},
+          "left_unit": null,
+          "right_entity": {},
+          "right_frame_ref": {
+            "content_version": "ocv_ee03dd2cb4b5758045b1faea53327462",
+            "spec_id": "ops_6065d633550678b39a6bb1b76c2da68c"
+          },
+          "right_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true,
+          "inherited_stat_var": true
+        },
+        "result": {
+          "stat_var": "dcid:ops_be33f235adf3dcd9b4d4f62b5e69e6b8",
+          "left_stat_vars": [
+            "dcid:ODA"
+          ],
+          "right_stat_vars": [
+            "dcid:GDP"
+          ],
+          "left_entities": {},
+          "right_entities": {},
+          "left_resolved_unit": null,
+          "right_resolved_unit": null,
+          "left_facet_selections": [],
+          "right_facet_selections": [],
+          "warnings": [],
+          "left_periods": [
+            "2015/2024"
+          ],
+          "right_periods": [
+            "2015/2024"
+          ],
+          "intersected_periods": [
+            "2015/2024"
+          ],
+          "left_coverage_fraction": 1.0,
+          "right_coverage_fraction": 1.0,
+          "period_comparisons": [
+            {
+              "time_period": "2015/2024",
+              "left_value": 0.6,
+              "right_value": 0.6,
+              "delta": 0.0
+            }
+          ],
+          "exclusions": {
+            "records": []
+          }
+        },
+        "sides": {
+          "data": "right",
+          "other": "left"
+        }
+      },
+      "rows": 1,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2015",
+        "end": "2024",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -9,
+          "rule": "half1",
+          "period": "2015"
+        },
+        {
+          "anchor": "latest",
+          "offset": 0,
+          "rule": "half1",
+          "period": "2024"
+        }
+      ]
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"mean\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"donor\"],\"unit\":{\"denominator\":\"dcid:SquareKilometer\",\"numerator\":{\"base_year\":2020,\"currency\":\"EUR\",\"prices\":\"constant\"}}},\"inputs\":{\"data\":{\"content_version\":\"cv_13cac95fb89c8b23dbf0823982d217d2\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_13cac95fb89c8b23dbf0823982d217d2\"}},\"verb\":\"rank\"}}": {
     "status": 200,
     "body": {
@@ -1850,6 +2033,621 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"],\"window_end\":{\"anchor\":\"latest\",\"offset\":0},\"window_start\":{\"anchor\":\"latest\",\"offset\":-1}},\"inputs\":{\"data\":{\"arguments\":{\"predicates\":[{\"column\":\"observationAbout_type\",\"kind\":\"place_level\",\"level\":\"Country\",\"strict\":false}]},\"inputs\":{\"data\":{\"content_version\":\"cv_d40ef3794003dee1416356d2ede47d90\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_d40ef3794003dee1416356d2ede47d90\"}},\"verb\":\"filter\"}},\"verb\":\"rank\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then rank.",
+            "spec": {
+              "spec_id": "ops_05ffd324417e7a41ceecf5ce8bd1cd3e",
+              "recipe": {
+                "normal_form_hash": "rnf_3a36f0a01a8ec85de470bf9d059057d1",
+                "replay_key": "rpk_e35f01a6be8235d185be42e864c39c7c"
+              }
+            },
+            "content_version": "ocv_d04d1fe8e6a9ee6f2fa65a07961551af",
+            "output_digest": "out_8827f8b14064a3e977ffe7cfb9951b76",
+            "roots": [
+              {
+                "spec_id": "spec_d40ef3794003dee1416356d2ede47d90",
+                "content_version": "cv_d40ef3794003dee1416356d2ede47d90",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [
+              {
+                "anchor": "latest",
+                "offset": -1,
+                "rule": "half1",
+                "period": "2023"
+              },
+              {
+                "anchor": "latest",
+                "offset": 0,
+                "rule": "half1",
+                "period": "2024"
+              }
+            ],
+            "artifact": {
+              "digest": "sha256:97ff68cc6aa162dc41ce2257ffe5ca2a2cfed82434a606b195004a5733b0086c",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_03a6ef462ba37f5611b35fea13f7b5ce",
+      "output_digest": "out_8827f8b14064a3e977ffe7cfb9951b76",
+      "summary": {
+        "verb": "rank",
+        "spec_id": "ops_05ffd324417e7a41ceecf5ce8bd1cd3e",
+        "content_version": "ocv_d04d1fe8e6a9ee6f2fa65a07961551af",
+        "frame_content_version": "cv_03a6ef462ba37f5611b35fea13f7b5ce",
+        "rows": 1,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "outside_window",
+            "rows": 5,
+            "entities": {
+              "observationAbout": [
+                "country/KEN"
+              ],
+              "observationAbout_type": [
+                "Country"
+              ]
+            },
+            "entities_truncated": false,
+            "side": null
+          }
+        ],
+        "time": {
+          "kind": "interval",
+          "start": "2023",
+          "end": "2024",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "ascending": false,
+          "per_period": false,
+          "rank_by": [
+            "observationAbout"
+          ],
+          "rolling": {
+            "population": [
+              {
+                "bindings": {},
+                "levels": {
+                  "observationAbout_type": "Country"
+                },
+                "spec_id": "spec_d40ef3794003dee1416356d2ede47d90"
+              }
+            ],
+            "window_end": {
+              "anchor": "latest",
+              "offset": 0,
+              "rule": "half1"
+            },
+            "window_start": {
+              "anchor": "latest",
+              "offset": -1,
+              "rule": "half1"
+            }
+          },
+          "unit": null,
+          "window_end": "2024",
+          "window_start": "2023"
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "aggregation": "sum",
+          "window_start": "2023",
+          "window_end": "2024",
+          "periods_in_window": [
+            "2023",
+            "2024"
+          ],
+          "expected_cell_count": 2,
+          "present_cell_count": 2,
+          "overall_coverage_fraction": 1.0,
+          "entity_ranks": [
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/KEN"
+                ]
+              ],
+              "value": 47.0,
+              "rank": 1,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2023/2024",
+              "period_count": 2
+            }
+          ],
+          "per_period": false,
+          "limit": null,
+          "exclusions": {
+            "records": [
+              {
+                "reason": "outside_window",
+                "row_count": 5,
+                "entities": {
+                  "observationAbout": [
+                    "country/KEN"
+                  ],
+                  "observationAbout_type": [
+                    "Country"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": null,
+                "parties": null
+              }
+            ]
+          },
+          "window_period_count": 2,
+          "private_parties": []
+        }
+      },
+      "rows": 1,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "outside_window",
+          "rows": 5,
+          "entities": {
+            "observationAbout": [
+              "country/KEN"
+            ],
+            "observationAbout_type": [
+              "Country"
+            ]
+          },
+          "entities_truncated": false,
+          "side": null
+        }
+      ],
+      "time": {
+        "kind": "interval",
+        "start": "2023",
+        "end": "2024",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -1,
+          "rule": "half1",
+          "period": "2023"
+        },
+        {
+          "anchor": "latest",
+          "offset": 0,
+          "rule": "half1",
+          "period": "2024"
+        }
+      ]
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"]},\"inputs\":{\"data\":{\"arguments\":{\"predicates\":[{\"column\":\"observationAbout_type\",\"kind\":\"place_level\",\"level\":\"Country\",\"strict\":false}]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"filter\"}},\"verb\":\"rank\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then rank.",
+            "spec": {
+              "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
+              "recipe": {
+                "normal_form_hash": "rnf_c235748958633def5b6db01d31d5ecab",
+                "replay_key": "rpk_363e3b160604e1946059cd8191051f9d"
+              }
+            },
+            "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+            "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:79be14b7fc62bd8ba5e68a1abe4fe7c202558714d47d0e2f315da3ebcc2bdadd",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_7a4c04b93b448cf353f53c9462a80780",
+      "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
+      "summary": {
+        "verb": "rank",
+        "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
+        "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+        "frame_content_version": "cv_7a4c04b93b448cf353f53c9462a80780",
+        "rows": 3,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2022",
+          "end": "2023",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "ascending": false,
+          "per_period": false,
+          "rank_by": [
+            "observationAbout"
+          ],
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "aggregation": "sum",
+          "window_start": null,
+          "window_end": null,
+          "periods_in_window": [
+            "2022",
+            "2023"
+          ],
+          "expected_cell_count": 6,
+          "present_cell_count": 6,
+          "overall_coverage_fraction": 1.0,
+          "entity_ranks": [
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ],
+              "value": 55.0,
+              "rank": 1,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2022/2023",
+              "period_count": 2
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ],
+              "value": 37.0,
+              "rank": 2,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2022/2023",
+              "period_count": 2
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ],
+              "value": 1.6,
+              "rank": 3,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2022/2023",
+              "period_count": 2
+            }
+          ],
+          "per_period": false,
+          "limit": null,
+          "exclusions": {
+            "records": []
+          },
+          "window_period_count": 2,
+          "private_parties": []
+        }
+      },
+      "rows": 3,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2022",
+        "end": "2023",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"rank\"}}": {
+    "status": 422,
+    "body": {
+      "type": "/codes/place_levels_mixed",
+      "title": "Place Levels Mixed",
+      "status": 422,
+      "detail": "This frame's places share no level a filter can keep: 'observationAbout_type' holds Country, Place, and no one of AdministrativeArea1, AdministrativeArea2, City, Continent, Country, EurostatNUTS1, EurostatNUTS2, EurostatNUTS3 is among every place's types. A frame that names no place holds the world, regions, World Bank groups, countries and their subdivisions side by side, and ranking or summing them together counts a place beside the places inside it. Filter the frame first with a place_level predicate on 'observationAbout_type' naming one of those levels, such as Country, then retry with that result's frame_ref. A type outside those levels, such as Place or ProvisionalNode, names no level, and no place_level filter keeps the places that carry it alone.",
+      "code": "place_levels_mixed",
+      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
+      "capability_version": "dset_9ab17ec0e311a676",
+      "retryable": false,
+      "retry_mode": "correct_and_retry",
+      "fix": {
+        "column": "observationAbout_type",
+        "types": [
+          "Country",
+          "Place"
+        ]
+      }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"]},\"inputs\":{\"data\":{\"content_version\":\"ocv_e15e14e168f63aff3d560bc34eb2351a\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"rank\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then rank.",
+            "spec": {
+              "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
+              "recipe": {
+                "normal_form_hash": "rnf_c235748958633def5b6db01d31d5ecab",
+                "replay_key": "rpk_363e3b160604e1946059cd8191051f9d"
+              }
+            },
+            "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+            "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:79be14b7fc62bd8ba5e68a1abe4fe7c202558714d47d0e2f315da3ebcc2bdadd",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_7a4c04b93b448cf353f53c9462a80780",
+      "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
+      "summary": {
+        "verb": "rank",
+        "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
+        "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+        "frame_content_version": "cv_7a4c04b93b448cf353f53c9462a80780",
+        "rows": 3,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2022",
+          "end": "2023",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "ascending": false,
+          "per_period": false,
+          "rank_by": [
+            "observationAbout"
+          ],
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "aggregation": "sum",
+          "window_start": null,
+          "window_end": null,
+          "periods_in_window": [
+            "2022",
+            "2023"
+          ],
+          "expected_cell_count": 6,
+          "present_cell_count": 6,
+          "overall_coverage_fraction": 1.0,
+          "entity_ranks": [
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ],
+              "value": 55.0,
+              "rank": 1,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2022/2023",
+              "period_count": 2
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ],
+              "value": 37.0,
+              "rank": 2,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2022/2023",
+              "period_count": 2
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ],
+              "value": 1.6,
+              "rank": 3,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2022/2023",
+              "period_count": 2
+            }
+          ],
+          "per_period": false,
+          "limit": null,
+          "exclusions": {
+            "records": []
+          },
+          "window_period_count": 2,
+          "private_parties": []
+        }
+      },
+      "rows": 3,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2022",
+        "end": "2023",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"reporter\"],\"window_end\":\"2023\",\"window_start\":\"2021\"},\"inputs\":{\"data\":{\"content_version\":\"cv_fdf343db22646eac2d6e30d8cac9a5f9\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_fdf343db22646eac2d6e30d8cac9a5f9\"}},\"verb\":\"rank\"}}": {
     "status": 200,
     "body": {
@@ -3120,6 +3918,534 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"observationAbout\",\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: aggregate.",
+            "spec": {
+              "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+              "recipe": {
+                "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
+                "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196"
+              }
+            },
+            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+            "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:3a30cabf83ad7a2a92c5fd8dbc9c9b5f4e4e6b056a8397659f976eddcc024fd8",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+      "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+        "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+        "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+        "rows": 8,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [
+            "observationAbout",
+            "time_period"
+          ],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 8,
+          "present_cell_count": 8,
+          "group_summaries": [
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 105.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 106.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 18.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 19.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 0.3,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 1.3,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 27.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 28.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2022",
+            "2023"
+          ],
+          "period_label": null,
+          "entity_count": 4,
+          "period_entities": [
+            [
+              "2022",
+              4
+            ],
+            [
+              "2023",
+              4
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 8,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"observationAbout\",\"time_period\"]},\"inputs\":{\"data\":{\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: aggregate.",
+            "spec": {
+              "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+              "recipe": {
+                "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
+                "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196"
+              }
+            },
+            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+            "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:3a30cabf83ad7a2a92c5fd8dbc9c9b5f4e4e6b056a8397659f976eddcc024fd8",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+      "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+        "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+        "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
+        "rows": 8,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [
+            "observationAbout",
+            "time_period"
+          ],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 8,
+          "present_cell_count": 8,
+          "group_summaries": [
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 105.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 106.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 18.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 19.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 0.3,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 1.3,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 27.0,
+              "row_count": 1,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 28.0,
+              "row_count": 1,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2022",
+            "2023"
+          ],
+          "period_label": null,
+          "entity_count": 4,
+          "period_entities": [
+            [
+              "2022",
+              4
+            ],
+            [
+              "2023",
+              4
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 8,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"reporter\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_fdf343db22646eac2d6e30d8cac9a5f9\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_fdf343db22646eac2d6e30d8cac9a5f9\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
@@ -3315,6 +4641,322 @@
         "contiguous": true,
         "absent": [],
         "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"arguments\":{\"predicates\":[{\"column\":\"observationAbout_type\",\"kind\":\"place_level\",\"level\":\"Country\",\"strict\":false}]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"filter\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then aggregate.",
+            "spec": {
+              "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
+              "recipe": {
+                "normal_form_hash": "rnf_bafa06d7ba4676ae5d3883dae8d77f3a",
+                "replay_key": "rpk_b2e0b2a5915c8c95cbca6a194adf2305"
+              }
+            },
+            "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+            "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:b16791e7820ae463fd78fe709a4c382268c86d5475f6f1b7c8e620319102d900",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_2a27b95ea76d93558667c1a9d845e642",
+      "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
+        "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+        "frame_content_version": "cv_2a27b95ea76d93558667c1a9d845e642",
+        "rows": 2,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [
+            "time_period"
+          ],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 2,
+          "present_cell_count": 2,
+          "group_summaries": [
+            {
+              "group_key": [
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 45.3,
+              "row_count": 3,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 48.3,
+              "row_count": 3,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2022",
+            "2023"
+          ],
+          "period_label": null,
+          "entity_count": null,
+          "period_entities": [
+            [
+              "2022",
+              3
+            ],
+            [
+              "2023",
+              3
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 2,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"aggregate\"}}": {
+    "status": 422,
+    "body": {
+      "type": "/codes/place_levels_mixed",
+      "title": "Place Levels Mixed",
+      "status": 422,
+      "detail": "This frame's places share no level a filter can keep: 'observationAbout_type' holds Country, Place, and no one of AdministrativeArea1, AdministrativeArea2, City, Continent, Country, EurostatNUTS1, EurostatNUTS2, EurostatNUTS3 is among every place's types. A frame that names no place holds the world, regions, World Bank groups, countries and their subdivisions side by side, and ranking or summing them together counts a place beside the places inside it. Filter the frame first with a place_level predicate on 'observationAbout_type' naming one of those levels, such as Country, then retry with that result's frame_ref. A type outside those levels, such as Place or ProvisionalNode, names no level, and no place_level filter keeps the places that carry it alone.",
+      "code": "place_levels_mixed",
+      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
+      "capability_version": "dset_9ab17ec0e311a676",
+      "retryable": false,
+      "retry_mode": "correct_and_retry",
+      "fix": {
+        "column": "observationAbout_type",
+        "types": [
+          "Country",
+          "Place"
+        ]
+      }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"ocv_e15e14e168f63aff3d560bc34eb2351a\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then aggregate.",
+            "spec": {
+              "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
+              "recipe": {
+                "normal_form_hash": "rnf_bafa06d7ba4676ae5d3883dae8d77f3a",
+                "replay_key": "rpk_b2e0b2a5915c8c95cbca6a194adf2305"
+              }
+            },
+            "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+            "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:b16791e7820ae463fd78fe709a4c382268c86d5475f6f1b7c8e620319102d900",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_2a27b95ea76d93558667c1a9d845e642",
+      "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
+        "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+        "frame_content_version": "cv_2a27b95ea76d93558667c1a9d845e642",
+        "rows": 2,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [
+            "time_period"
+          ],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 2,
+          "present_cell_count": 2,
+          "group_summaries": [
+            {
+              "group_key": [
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 45.3,
+              "row_count": 3,
+              "time_period_min": "2022",
+              "time_period_max": "2022",
+              "value_period": null
+            },
+            {
+              "group_key": [
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 48.3,
+              "row_count": 3,
+              "time_period_min": "2023",
+              "time_period_max": "2023",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2022",
+            "2023"
+          ],
+          "period_label": null,
+          "entity_count": null,
+          "period_entities": [
+            [
+              "2022",
+              3
+            ],
+            [
+              "2023",
+              3
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 2,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
       },
       "execution_identity": {
         "engine_version": "0.9.0",
@@ -4682,6 +6324,380 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"change\":\"relative\",\"entity_by\":[\"observationAbout\"],\"window_end\":\"2023\",\"window_start\":\"2022\"},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"growth\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: growth.",
+            "spec": {
+              "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+              "recipe": {
+                "normal_form_hash": "rnf_817803369a3c149a24ba3d98c0beb98c",
+                "replay_key": "rpk_faebd304310e37f4f2faa0f99229d559"
+              }
+            },
+            "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+            "output_digest": "out_14e187c83c8b8df90c9160d83af40678",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:d03a5d61968dd6fdea3196d886ff4daed163e6ceadea838f1b39ce682fbbb4c6",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_e74e558e99cc1f0e6f485afa18678f47",
+      "output_digest": "out_14e187c83c8b8df90c9160d83af40678",
+      "summary": {
+        "verb": "growth",
+        "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+        "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+        "frame_content_version": "cv_e74e558e99cc1f0e6f485afa18678f47",
+        "rows": 4,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2022",
+          "end": "2023",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "change": "relative",
+          "entity_by": [
+            "observationAbout"
+          ],
+          "unit": null,
+          "window_end": "2023",
+          "window_start": "2022"
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true,
+          "inherited_stat_var": true
+        },
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "window_start": "2022",
+          "window_end": "2023",
+          "entity_growths": [
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ]
+              ],
+              "value_start": 105.0,
+              "value_end": 106.0,
+              "growth_rate": 0.009523809523809525,
+              "realised_coverage_fraction": 1.0
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ],
+              "value_start": 18.0,
+              "value_end": 19.0,
+              "growth_rate": 0.05555555555555555,
+              "realised_coverage_fraction": 1.0
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ],
+              "value_start": 0.3,
+              "value_end": 1.3,
+              "growth_rate": 3.3333333333333335,
+              "realised_coverage_fraction": 1.0
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ],
+              "value_start": 27.0,
+              "value_end": 28.0,
+              "growth_rate": 0.037037037037037035,
+              "realised_coverage_fraction": 1.0
+            }
+          ],
+          "observed_periods": [
+            "2022",
+            "2023"
+          ],
+          "change": "relative",
+          "exclusions": {
+            "records": []
+          },
+          "entities_left_out": {}
+        }
+      },
+      "rows": 4,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2022",
+        "end": "2023",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"change\":\"relative\",\"entity_by\":[\"observationAbout\"],\"window_end\":\"2023\",\"window_start\":\"2022\"},\"inputs\":{\"data\":{\"content_version\":\"cv_72ed3e117dc140e357377ee2717c90c6\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"growth\"}}": {
+    "status": 404,
+    "body": {
+      "type": "/codes/snapshot_not_found",
+      "title": "Snapshot Not Found",
+      "status": 404,
+      "detail": "the frame spec_6c09c7172ee773753e041cd711e3de27, cv_72ed3e117dc140e357377ee2717c90c6 cannot be read: not held. Run the analysis with latest=True to read its dataset's current version",
+      "code": "snapshot_not_found",
+      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
+      "capability_version": "dset_9ab17ec0e311a676",
+      "retryable": false,
+      "retry_mode": "correct_and_retry",
+      "fix": {
+        "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+        "content_version": "cv_72ed3e117dc140e357377ee2717c90c6",
+        "latest": true
+      }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"change\":\"relative\",\"entity_by\":[\"observationAbout\"],\"window_end\":\"2023\",\"window_start\":\"2022\"},\"inputs\":{\"data\":{\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"growth\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: growth.",
+            "spec": {
+              "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+              "recipe": {
+                "normal_form_hash": "rnf_817803369a3c149a24ba3d98c0beb98c",
+                "replay_key": "rpk_faebd304310e37f4f2faa0f99229d559"
+              }
+            },
+            "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+            "output_digest": "out_14e187c83c8b8df90c9160d83af40678",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:d03a5d61968dd6fdea3196d886ff4daed163e6ceadea838f1b39ce682fbbb4c6",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_e74e558e99cc1f0e6f485afa18678f47",
+      "output_digest": "out_14e187c83c8b8df90c9160d83af40678",
+      "summary": {
+        "verb": "growth",
+        "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+        "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+        "frame_content_version": "cv_e74e558e99cc1f0e6f485afa18678f47",
+        "rows": 4,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2022",
+          "end": "2023",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "change": "relative",
+          "entity_by": [
+            "observationAbout"
+          ],
+          "unit": null,
+          "window_end": "2023",
+          "window_start": "2022"
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true,
+          "inherited_stat_var": true
+        },
+        "result": {
+          "resolved_unit": "USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "window_start": "2022",
+          "window_end": "2023",
+          "entity_growths": [
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "Earth"
+                ]
+              ],
+              "value_start": 105.0,
+              "value_end": 106.0,
+              "growth_rate": 0.009523809523809525,
+              "realised_coverage_fraction": 1.0
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ],
+              "value_start": 18.0,
+              "value_end": 19.0,
+              "growth_rate": 0.05555555555555555,
+              "realised_coverage_fraction": 1.0
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ],
+              "value_start": 0.3,
+              "value_end": 1.3,
+              "growth_rate": 3.3333333333333335,
+              "realised_coverage_fraction": 1.0
+            },
+            {
+              "entity_key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ],
+              "value_start": 27.0,
+              "value_end": 28.0,
+              "growth_rate": 0.037037037037037035,
+              "realised_coverage_fraction": 1.0
+            }
+          ],
+          "observed_periods": [
+            "2022",
+            "2023"
+          ],
+          "change": "relative",
+          "exclusions": {
+            "records": []
+          },
+          "entities_left_out": {}
+        }
+      },
+      "rows": 4,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2022",
+        "end": "2023",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"window_end\":\"2020\",\"window_start\":\"2017\"},\"inputs\":{\"data\":{\"content_version\":\"cv_6929bac734227b316ed99b66b65ffbfc\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_6929bac734227b316ed99b66b65ffbfc\"}},\"verb\":\"growth\"}}": {
     "status": 200,
     "body": {
@@ -5141,6 +7157,440 @@
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"change\":\"relative\",\"entity_by\":[],\"window_end\":{\"anchor\":\"latest\",\"offset\":0},\"window_start\":{\"anchor\":\"latest\",\"offset\":-9}},\"inputs\":{\"data\":{\"content_version\":\"cv_5bf676aa9f0e28481a901cf10af9c4b6\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_5bf676aa9f0e28481a901cf10af9c4b6\"}},\"verb\":\"growth\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: growth.",
+            "spec": {
+              "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
+              "recipe": {
+                "normal_form_hash": "rnf_9fc7f81730987a1f386c7d1e94af4b8f",
+                "replay_key": "rpk_e0d8c95bf1e6d9f605cf2f666498f618"
+              }
+            },
+            "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99",
+            "output_digest": "out_78e40bbfc51588bce92f4aa150bc5f19",
+            "roots": [
+              {
+                "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6",
+                "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [
+              {
+                "anchor": "latest",
+                "offset": -9,
+                "rule": "half1",
+                "period": "2015"
+              },
+              {
+                "anchor": "latest",
+                "offset": 0,
+                "rule": "half1",
+                "period": "2024"
+              }
+            ],
+            "artifact": {
+              "digest": "sha256:b0761b2e845c3b85052376d12ebf23d6e0f80f813d818b5a885cecfd3e147b17",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_815df3e699e8b84e7e2a26af3690ad18",
+      "output_digest": "out_78e40bbfc51588bce92f4aa150bc5f19",
+      "summary": {
+        "verb": "growth",
+        "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
+        "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99",
+        "frame_content_version": "cv_815df3e699e8b84e7e2a26af3690ad18",
+        "rows": 1,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "outside_window",
+            "rows": 5,
+            "entities": {
+              "observationAbout": [
+                "dcid:country/KEN"
+              ]
+            },
+            "entities_truncated": false,
+            "side": null
+          }
+        ],
+        "time": {
+          "kind": "interval",
+          "start": "2015",
+          "end": "2024",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "change": "relative",
+          "entity_by": [],
+          "rolling": {
+            "population": [
+              {
+                "bindings": {},
+                "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6"
+              }
+            ],
+            "window_end": {
+              "anchor": "latest",
+              "offset": 0,
+              "rule": "half1"
+            },
+            "window_start": {
+              "anchor": "latest",
+              "offset": -9,
+              "rule": "half1"
+            }
+          },
+          "unit": null,
+          "window_end": "2024",
+          "window_start": "2015"
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true,
+          "inherited_stat_var": true
+        },
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "window_start": "2015",
+          "window_end": "2024",
+          "entity_growths": [
+            {
+              "entity_key": [],
+              "value_start": 15.0,
+              "value_end": 24.0,
+              "growth_rate": 0.6,
+              "realised_coverage_fraction": 1.0
+            }
+          ],
+          "observed_periods": [
+            "2015",
+            "2016",
+            "2017",
+            "2018",
+            "2019",
+            "2020",
+            "2021",
+            "2022",
+            "2023",
+            "2024"
+          ],
+          "change": "relative",
+          "exclusions": {
+            "records": [
+              {
+                "reason": "outside_window",
+                "row_count": 5,
+                "entities": {
+                  "observationAbout": [
+                    "dcid:country/KEN"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": null,
+                "parties": null
+              }
+            ]
+          },
+          "entities_left_out": {}
+        }
+      },
+      "rows": 1,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "outside_window",
+          "rows": 5,
+          "entities": {
+            "observationAbout": [
+              "dcid:country/KEN"
+            ]
+          },
+          "entities_truncated": false,
+          "side": null
+        }
+      ],
+      "time": {
+        "kind": "interval",
+        "start": "2015",
+        "end": "2024",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -9,
+          "rule": "half1",
+          "period": "2015"
+        },
+        {
+          "anchor": "latest",
+          "offset": 0,
+          "rule": "half1",
+          "period": "2024"
+        }
+      ]
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"change\":\"relative\",\"entity_by\":[],\"window_end\":{\"anchor\":\"latest\",\"offset\":0},\"window_start\":{\"anchor\":\"latest\",\"offset\":-9}},\"inputs\":{\"data\":{\"content_version\":\"cv_96d6efc2c8851bce26501fe3a365c94d\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_96d6efc2c8851bce26501fe3a365c94d\"}},\"verb\":\"growth\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: growth.",
+            "spec": {
+              "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
+              "recipe": {
+                "normal_form_hash": "rnf_c82ef428fdfe0dffb1952b678d22e1ae",
+                "replay_key": "rpk_a1010d283c6a9a676e3ece8f2464236b"
+              }
+            },
+            "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1",
+            "output_digest": "out_5db56b803f06b262e5b07247fcf8f1e7",
+            "roots": [
+              {
+                "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d",
+                "content_version": "cv_96d6efc2c8851bce26501fe3a365c94d",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [
+              {
+                "anchor": "latest",
+                "offset": -9,
+                "rule": "half1",
+                "period": "2016"
+              },
+              {
+                "anchor": "latest",
+                "offset": 0,
+                "rule": "half1",
+                "period": "2025"
+              }
+            ],
+            "artifact": {
+              "digest": "sha256:52669b97ba23c497818a7261b332660a273138b3970f4c41a4487c13e891b56e",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_baa21b117cd703fcb0641de2ad038af5",
+      "output_digest": "out_5db56b803f06b262e5b07247fcf8f1e7",
+      "summary": {
+        "verb": "growth",
+        "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
+        "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1",
+        "frame_content_version": "cv_baa21b117cd703fcb0641de2ad038af5",
+        "rows": 1,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "outside_window",
+            "rows": 6,
+            "entities": {
+              "observationAbout": [
+                "dcid:country/KEN"
+              ]
+            },
+            "entities_truncated": false,
+            "side": null
+          }
+        ],
+        "time": {
+          "kind": "interval",
+          "start": "2016",
+          "end": "2025",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "change": "relative",
+          "entity_by": [],
+          "rolling": {
+            "population": [
+              {
+                "bindings": {},
+                "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d"
+              }
+            ],
+            "window_end": {
+              "anchor": "latest",
+              "offset": 0,
+              "rule": "half1"
+            },
+            "window_start": {
+              "anchor": "latest",
+              "offset": -9,
+              "rule": "half1"
+            }
+          },
+          "unit": null,
+          "window_end": "2025",
+          "window_start": "2016"
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true,
+          "inherited_stat_var": true
+        },
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "window_start": "2016",
+          "window_end": "2025",
+          "entity_growths": [
+            {
+              "entity_key": [],
+              "value_start": 16.0,
+              "value_end": 25.0,
+              "growth_rate": 0.5625,
+              "realised_coverage_fraction": 1.0
+            }
+          ],
+          "observed_periods": [
+            "2016",
+            "2017",
+            "2018",
+            "2019",
+            "2020",
+            "2021",
+            "2022",
+            "2023",
+            "2024",
+            "2025"
+          ],
+          "change": "relative",
+          "exclusions": {
+            "records": [
+              {
+                "reason": "outside_window",
+                "row_count": 6,
+                "entities": {
+                  "observationAbout": [
+                    "dcid:country/KEN"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": null,
+                "parties": null
+              }
+            ]
+          },
+          "entities_left_out": {}
+        }
+      },
+      "rows": 1,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "outside_window",
+          "rows": 6,
+          "entities": {
+            "observationAbout": [
+              "dcid:country/KEN"
+            ]
+          },
+          "entities_truncated": false,
+          "side": null
+        }
+      ],
+      "time": {
+        "kind": "interval",
+        "start": "2016",
+        "end": "2025",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -9,
+          "rule": "half1",
+          "period": "2016"
+        },
+        {
+          "anchor": "latest",
+          "offset": 0,
+          "rule": "half1",
+          "period": "2025"
+        }
+      ]
     },
     "retry_after": null
   },
@@ -7655,6 +10105,476 @@
         },
         "side": "denominator"
       }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[\"observationAbout\"],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"arguments\":{\"predicates\":[{\"column\":\"observationAbout_type\",\"kind\":\"place_level\",\"level\":\"Country\",\"strict\":false}]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"filter\"}},\"verb\":\"share_of\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then share_of.",
+            "spec": {
+              "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
+              "recipe": {
+                "normal_form_hash": "rnf_4d736288017a5d097b836e559b1d4a9f",
+                "replay_key": "rpk_b8243ee28a5c8af03d8989dbab56a09b"
+              }
+            },
+            "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
+            "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:6f0079aca7b90790fdbf4299e03cad63de0aca22e68c6168315facf8d0d80704",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+      "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
+      "summary": {
+        "verb": "share_of",
+        "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
+        "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
+        "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+        "rows": 6,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "denominator_by": {},
+          "denominator_entity": {},
+          "denominator_frame_ref": null,
+          "denominator_unit": null,
+          "numerator_by": [
+            "observationAbout"
+          ],
+          "numerator_entity": {},
+          "numerator_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true
+        },
+        "result": {
+          "stat_var": "dcid:ops_986cf557b9e21b8e69ca8bc560e4060c",
+          "numerator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+          "denominator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+          "numerator_resolved_unit": "USDollar",
+          "denominator_resolved_unit": "USDollar",
+          "numerator_facet_selections": [],
+          "denominator_facet_selections": [],
+          "warnings": [],
+          "numerator_periods": [
+            "2022",
+            "2023"
+          ],
+          "denominator_periods": [
+            "2022",
+            "2023"
+          ],
+          "matched_periods": [
+            "2022",
+            "2023"
+          ],
+          "numerator_coverage_fraction": 1.0,
+          "denominator_coverage_fraction": 1.0,
+          "period_shares": [
+            {
+              "time_period": "2022",
+              "numerator_value": 18.0,
+              "denominator_value": 45.3,
+              "percent": 39.735099337748345,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2023",
+              "numerator_value": 19.0,
+              "denominator_value": 48.3,
+              "percent": 39.33747412008282,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2022",
+              "numerator_value": 0.3,
+              "denominator_value": 45.3,
+              "percent": 0.6622516556291391,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2023",
+              "numerator_value": 1.3,
+              "denominator_value": 48.3,
+              "percent": 2.691511387163561,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2022",
+              "numerator_value": 27.0,
+              "denominator_value": 45.3,
+              "percent": 59.60264900662252,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ]
+            },
+            {
+              "time_period": "2023",
+              "numerator_value": 28.0,
+              "denominator_value": 48.3,
+              "percent": 57.971014492753625,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ]
+            }
+          ],
+          "unmatched_keys": [],
+          "keys_without_shared_period": [],
+          "numerator_only_periods": [],
+          "denominator_only_periods": [],
+          "coverage": {
+            "entities": 3,
+            "entities_with_fewer_periods": 0,
+            "periods": 2,
+            "period_entities": [
+              [
+                "2022",
+                3
+              ],
+              [
+                "2023",
+                3
+              ]
+            ]
+          },
+          "exclusions": {
+            "records": []
+          },
+          "numerator_pooled": [],
+          "denominator_pooled": []
+        }
+      },
+      "rows": 6,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[\"observationAbout\"],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"share_of\"}}": {
+    "status": 422,
+    "body": {
+      "type": "/codes/place_levels_mixed",
+      "title": "Place Levels Mixed",
+      "status": 422,
+      "detail": "This frame's places share no level a filter can keep: 'observationAbout_type' holds Country, Place, and no one of AdministrativeArea1, AdministrativeArea2, City, Continent, Country, EurostatNUTS1, EurostatNUTS2, EurostatNUTS3 is among every place's types. A frame that names no place holds the world, regions, World Bank groups, countries and their subdivisions side by side, and ranking or summing them together counts a place beside the places inside it. Filter the frame first with a place_level predicate on 'observationAbout_type' naming one of those levels, such as Country, then retry with that result's frame_ref. A type outside those levels, such as Place or ProvisionalNode, names no level, and no place_level filter keeps the places that carry it alone.",
+      "code": "place_levels_mixed",
+      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
+      "capability_version": "dset_9ab17ec0e311a676",
+      "retryable": false,
+      "retry_mode": "correct_and_retry",
+      "fix": {
+        "column": "observationAbout_type",
+        "types": [
+          "Country",
+          "Place"
+        ]
+      }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[\"observationAbout\"],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"ocv_e15e14e168f63aff3d560bc34eb2351a\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"share_of\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter, then share_of.",
+            "spec": {
+              "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
+              "recipe": {
+                "normal_form_hash": "rnf_4d736288017a5d097b836e559b1d4a9f",
+                "replay_key": "rpk_b8243ee28a5c8af03d8989dbab56a09b"
+              }
+            },
+            "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
+            "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:6f0079aca7b90790fdbf4299e03cad63de0aca22e68c6168315facf8d0d80704",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+      "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
+      "summary": {
+        "verb": "share_of",
+        "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
+        "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
+        "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+        "rows": 6,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "denominator_by": {},
+          "denominator_entity": {},
+          "denominator_frame_ref": null,
+          "denominator_unit": null,
+          "numerator_by": [
+            "observationAbout"
+          ],
+          "numerator_entity": {},
+          "numerator_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true
+        },
+        "result": {
+          "stat_var": "dcid:ops_986cf557b9e21b8e69ca8bc560e4060c",
+          "numerator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+          "denominator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+          "numerator_resolved_unit": "USDollar",
+          "denominator_resolved_unit": "USDollar",
+          "numerator_facet_selections": [],
+          "denominator_facet_selections": [],
+          "warnings": [],
+          "numerator_periods": [
+            "2022",
+            "2023"
+          ],
+          "denominator_periods": [
+            "2022",
+            "2023"
+          ],
+          "matched_periods": [
+            "2022",
+            "2023"
+          ],
+          "numerator_coverage_fraction": 1.0,
+          "denominator_coverage_fraction": 1.0,
+          "period_shares": [
+            {
+              "time_period": "2022",
+              "numerator_value": 18.0,
+              "denominator_value": 45.3,
+              "percent": 39.735099337748345,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2023",
+              "numerator_value": 19.0,
+              "denominator_value": 48.3,
+              "percent": 39.33747412008282,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2022",
+              "numerator_value": 0.3,
+              "denominator_value": 45.3,
+              "percent": 0.6622516556291391,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2023",
+              "numerator_value": 1.3,
+              "denominator_value": 48.3,
+              "percent": 2.691511387163561,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ]
+              ]
+            },
+            {
+              "time_period": "2022",
+              "numerator_value": 27.0,
+              "denominator_value": 45.3,
+              "percent": 59.60264900662252,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ]
+            },
+            {
+              "time_period": "2023",
+              "numerator_value": 28.0,
+              "denominator_value": 48.3,
+              "percent": 57.971014492753625,
+              "key": [
+                [
+                  "observationAbout",
+                  "country/USA"
+                ]
+              ]
+            }
+          ],
+          "unmatched_keys": [],
+          "keys_without_shared_period": [],
+          "numerator_only_periods": [],
+          "denominator_only_periods": [],
+          "coverage": {
+            "entities": 3,
+            "entities_with_fewer_periods": 0,
+            "periods": 2,
+            "period_entities": [
+              [
+                "2022",
+                3
+              ],
+              [
+                "2023",
+                3
+              ]
+            ]
+          },
+          "exclusions": {
+            "records": []
+          },
+          "numerator_pooled": [],
+          "denominator_pooled": []
+        }
+      },
+      "rows": 6,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
     },
     "retry_after": null
   },
@@ -13100,6 +16020,523 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[{\"column\":\"observationAbout_type\",\"kind\":\"place_level\",\"level\":\"Country\",\"strict\":false}]},\"inputs\":{\"data\":{\"content_version\":\"cv_6c09c7172ee773753e041cd711e3de27\",\"rendering\":{\"columns\":[\"observationAbout_type\"],\"without_party_totals\":false},\"spec_id\":\"spec_6c09c7172ee773753e041cd711e3de27\"}},\"verb\":\"filter\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter.",
+            "spec": {
+              "spec_id": "ops_e2c8673818dca190708f4e846c319fbf",
+              "recipe": {
+                "normal_form_hash": "rnf_4c6e775af77518863c2791fe2b70151b",
+                "replay_key": "rpk_ad2524116bec2b9cdad47923f5efa496"
+              }
+            },
+            "content_version": "ocv_e15e14e168f63aff3d560bc34eb2351a",
+            "output_digest": "out_faead739bc3315522276ff7b13366974",
+            "roots": [
+              {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:c4dbd75daa853a46113e97a3f9cd68830fc447099f0320610efc016567c62355",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_e0ffa388ddf7e41d254bccdeac5b7d2c",
+      "output_digest": "out_faead739bc3315522276ff7b13366974",
+      "summary": {
+        "verb": "filter",
+        "spec_id": "ops_e2c8673818dca190708f4e846c319fbf",
+        "content_version": "ocv_e15e14e168f63aff3d560bc34eb2351a",
+        "frame_content_version": "cv_e0ffa388ddf7e41d254bccdeac5b7d2c",
+        "rows": 6,
+        "role_keys": [
+          "observationAbout",
+          "observationAbout_type"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "predicate",
+            "rows": 2,
+            "entities": {
+              "observationAbout": [
+                "Earth"
+              ],
+              "observationAbout_type": [
+                "Place"
+              ]
+            },
+            "entities_truncated": false,
+            "side": null
+          }
+        ],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "predicates": [
+            {
+              "column": "observationAbout_type",
+              "kind": "place_level",
+              "level": "Country"
+            }
+          ]
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "total_row_count": 8,
+          "kept_row_count": 6,
+          "dropped_row_count": 2,
+          "kept_row_summaries": [
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                ],
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "observationAbout_type",
+                  "Country"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 18.0,
+              "unit": "USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                ],
+                [
+                  "observationAbout",
+                  "country/CHN"
+                ],
+                [
+                  "observationAbout_type",
+                  "Country"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 19.0,
+              "unit": "USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                ],
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "observationAbout_type",
+                  "Country"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 0.3,
+              "unit": "USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                ],
+                [
+                  "observationAbout",
+                  "country/FIN"
+                ],
+                [
+                  "observationAbout_type",
+                  "Country"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 1.3,
+              "unit": "USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                ],
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "observationAbout_type",
+                  "Country"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 27.0,
+              "unit": "USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                ],
+                [
+                  "observationAbout",
+                  "country/USA"
+                ],
+                [
+                  "observationAbout_type",
+                  "Country"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 28.0,
+              "unit": "USDollar"
+            }
+          ],
+          "exclusions": {
+            "records": [
+              {
+                "reason": "predicate",
+                "row_count": 2,
+                "entities": {
+                  "observationAbout": [
+                    "Earth"
+                  ],
+                  "observationAbout_type": [
+                    "Place"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": null,
+                "parties": null
+              }
+            ]
+          },
+          "units": [
+            "USDollar"
+          ]
+        }
+      },
+      "rows": 6,
+      "role_keys": [
+        "observationAbout",
+        "observationAbout_type"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "predicate",
+          "rows": 2,
+          "entities": {
+            "observationAbout": [
+              "Earth"
+            ],
+            "observationAbout_type": [
+              "Place"
+            ]
+          },
+          "entities_truncated": false,
+          "side": null
+        }
+      ],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[{\"column\":\"time_period\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"value\":{\"anchor\":\"latest\",\"offset\":-2}}]},\"inputs\":{\"data\":{\"content_version\":\"cv_5bf676aa9f0e28481a901cf10af9c4b6\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_5bf676aa9f0e28481a901cf10af9c4b6\"}},\"verb\":\"filter\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter.",
+            "spec": {
+              "spec_id": "ops_efa70f8a3b60aed92d95ff0d8af2f0e2",
+              "recipe": {
+                "normal_form_hash": "rnf_6bae5be163e7656c0012e8b2ea4e4160",
+                "replay_key": "rpk_c263d47eb5012d4caf75bc5aaaad393a"
+              }
+            },
+            "content_version": "ocv_ab56b091d0c86075845cf2f263812d98",
+            "output_digest": "out_526706a69e6fa02f2d272094e7a693a1",
+            "roots": [
+              {
+                "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6",
+                "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [
+              {
+                "anchor": "latest",
+                "offset": -2,
+                "rule": "half1",
+                "period": "2022"
+              }
+            ],
+            "artifact": {
+              "digest": "sha256:e8aed95c4d9eaeb61a7287ac546555022f564745437ca1cdfefcfb960cfe22ca",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_d4f7e8b249f0cb8122d241bfc5db0dd4",
+      "output_digest": "out_526706a69e6fa02f2d272094e7a693a1",
+      "summary": {
+        "verb": "filter",
+        "spec_id": "ops_efa70f8a3b60aed92d95ff0d8af2f0e2",
+        "content_version": "ocv_ab56b091d0c86075845cf2f263812d98",
+        "frame_content_version": "cv_d4f7e8b249f0cb8122d241bfc5db0dd4",
+        "rows": 3,
+        "role_keys": [
+          "observationAbout"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "predicate",
+            "rows": 12,
+            "entities": {
+              "observationAbout": [
+                "dcid:country/KEN"
+              ]
+            },
+            "entities_truncated": false,
+            "side": null
+          }
+        ],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "predicates": [
+            {
+              "column": "time_period",
+              "kind": "ordered_threshold",
+              "op": "gte",
+              "rolling": {
+                "anchor": "latest",
+                "offset": -2,
+                "rule": "half1"
+              },
+              "value": "2022"
+            }
+          ],
+          "rolling": {
+            "population": [
+              {
+                "bindings": {},
+                "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6"
+              }
+            ]
+          }
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "total_row_count": 15,
+          "kept_row_count": 3,
+          "dropped_row_count": 12,
+          "kept_row_summaries": [
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:ODA"
+                ],
+                [
+                  "observationAbout",
+                  "dcid:country/KEN"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 22.0,
+              "unit": "dcid:USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:ODA"
+                ],
+                [
+                  "observationAbout",
+                  "dcid:country/KEN"
+                ],
+                [
+                  "time_period",
+                  "2023"
+                ]
+              ],
+              "value": 23.0,
+              "unit": "dcid:USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:ODA"
+                ],
+                [
+                  "observationAbout",
+                  "dcid:country/KEN"
+                ],
+                [
+                  "time_period",
+                  "2024"
+                ]
+              ],
+              "value": 24.0,
+              "unit": "dcid:USDollar"
+            }
+          ],
+          "exclusions": {
+            "records": [
+              {
+                "reason": "predicate",
+                "row_count": 12,
+                "entities": {
+                  "observationAbout": [
+                    "dcid:country/KEN"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": null,
+                "parties": null
+              }
+            ]
+          },
+          "units": [
+            "dcid:USDollar"
+          ]
+        }
+      },
+      "rows": 3,
+      "role_keys": [
+        "observationAbout"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "predicate",
+          "rows": 12,
+          "entities": {
+            "observationAbout": [
+              "dcid:country/KEN"
+            ]
+          },
+          "entities_truncated": false,
+          "side": null
+        }
+      ],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -2,
+          "rule": "half1",
+          "period": "2022"
+        }
+      ]
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"value\":20}]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"reporter\",\"time_period\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"filter\"}}": {
     "status": 200,
     "body": {
@@ -13500,6 +16937,425 @@
           "content_version": "cv_6929bac734227b316ed99b66b65ffbfc"
         }
       ]
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_2719a7dd1ebc0c15567f9fb24ff4c75c/ocv_6cc0a5dca5a70333419a604070d3c5d1?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
+      "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_c82ef428fdfe0dffb1952b678d22e1ae",
+        "replay_key": "rpk_a1010d283c6a9a676e3ece8f2464236b",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
+            "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_96d6efc2c8851bce26501fe3a365c94d",
+              "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "change": "relative",
+              "entity_by": [],
+              "rolling": {
+                "population": [
+                  {
+                    "bindings": {},
+                    "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d"
+                  }
+                ],
+                "window_end": {
+                  "anchor": "latest",
+                  "offset": 0,
+                  "rule": "half1"
+                },
+                "window_start": {
+                  "anchor": "latest",
+                  "offset": -9,
+                  "rule": "half1"
+                }
+              },
+              "unit": null,
+              "window_end": "2025",
+              "window_start": "2016"
+            },
+            "verb": "growth"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d",
+                "content_version": "cv_96d6efc2c8851bce26501fe3a365c94d"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d",
+              "content_version": "cv_96d6efc2c8851bce26501fe3a365c94d"
+            },
+            "dataset": {
+              "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d",
+              "content_version": "cv_96d6efc2c8851bce26501fe3a365c94d"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame"
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_96d6efc2c8851bce26501fe3a365c94d",
+          "content_version": "cv_96d6efc2c8851bce26501fe3a365c94d",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -9,
+          "rule": "half1",
+          "period": "2016"
+        },
+        {
+          "anchor": "latest",
+          "offset": 0,
+          "rule": "half1",
+          "period": "2025"
+        }
+      ],
+      "anchor": {
+        "period": "2025",
+        "rule": "half1",
+        "left_out": []
+      },
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_3ba66c5a3a5d27e37d4882343feaac0d/ocv_d2bf532ce770acf5cfb69cd6390eea9d?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+      "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
+        "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
+            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2",
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "aggregation": "sum",
+              "group_by": [
+                "observationAbout",
+                "time_period"
+              ],
+              "unit": null
+            },
+            "verb": "aggregate"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+            },
+            "dataset": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6c09c7172ee773753e041cd711e3de27"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "columns": [
+                "observationAbout_type"
+              ]
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+          "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_a5234dfadca6deb24f4d31c07140e0e6/ocv_96323a4f0dfaf26d903a6f0a3ecc4a99?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
+      "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_9fc7f81730987a1f386c7d1e94af4b8f",
+        "replay_key": "rpk_e0d8c95bf1e6d9f605cf2f666498f618",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
+            "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6",
+              "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "change": "relative",
+              "entity_by": [],
+              "rolling": {
+                "population": [
+                  {
+                    "bindings": {},
+                    "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6"
+                  }
+                ],
+                "window_end": {
+                  "anchor": "latest",
+                  "offset": 0,
+                  "rule": "half1"
+                },
+                "window_start": {
+                  "anchor": "latest",
+                  "offset": -9,
+                  "rule": "half1"
+                }
+              },
+              "unit": null,
+              "window_end": "2024",
+              "window_start": "2015"
+            },
+            "verb": "growth"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6",
+                "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6",
+              "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6"
+            },
+            "dataset": {
+              "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6",
+              "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame"
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_5bf676aa9f0e28481a901cf10af9c4b6",
+          "content_version": "cv_5bf676aa9f0e28481a901cf10af9c4b6",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [
+        {
+          "anchor": "latest",
+          "offset": -9,
+          "rule": "half1",
+          "period": "2015"
+        },
+        {
+          "anchor": "latest",
+          "offset": 0,
+          "rule": "half1",
+          "period": "2024"
+        }
+      ],
+      "anchor": {
+        "period": "2024",
+        "rule": "half1",
+        "left_out": []
+      },
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_b668a43f8241b425eb6deb75144c4075/ocv_284bd476345408f12b05c5d670ad8df7?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+      "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_817803369a3c149a24ba3d98c0beb98c",
+        "replay_key": "rpk_faebd304310e37f4f2faa0f99229d559",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
+            "content_version": "ocv_284bd476345408f12b05c5d670ad8df7"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2",
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "change": "relative",
+              "entity_by": [
+                "observationAbout"
+              ],
+              "unit": null,
+              "window_end": "2023",
+              "window_start": "2022"
+            },
+            "verb": "growth"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+                "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6b38b35b8c9d4cf8c892aa4e6b3ddce2"
+            },
+            "dataset": {
+              "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+              "content_version": "cv_6c09c7172ee773753e041cd711e3de27"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "columns": [
+                "observationAbout_type"
+              ]
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_6c09c7172ee773753e041cd711e3de27",
+          "content_version": "cv_6c09c7172ee773753e041cd711e3de27",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
     },
     "retry_after": null
   }

@@ -371,9 +371,12 @@ async def test_the_advertised_limit_bounds_match_the_op_spec() -> None:
     async with Client(server_module.mcp) as client:
         tools = await client.list_tools()
     (rank_tool,) = [tool for tool in tools if tool.name == "rank"]
-    limit_schema = rank_tool.inputSchema["properties"]["limit"]
-    (bounded,) = [branch for branch in limit_schema["anyOf"] if branch.get("type") == "integer"]
-    assert (bounded["minimum"], bounded["maximum"]) == (1, MAX_RANK_LIMIT)
+    limit_schema = rank_tool.input_schema["properties"]["limit"]
+    assert (limit_schema["type"], limit_schema["minimum"], limit_schema["maximum"]) == (
+        "integer",
+        1,
+        MAX_RANK_LIMIT,
+    )
 
 
 async def test_limit_moves_the_op_spec_hash_and_the_content_version(seeded) -> None:

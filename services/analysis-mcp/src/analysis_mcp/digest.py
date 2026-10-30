@@ -33,12 +33,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from common.echoed_text import truncate_value
 from common.time_grain import span_label
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import UnitCell
 
 from analysis_mcp.artifact import Exclusion, Interval, Time
-from analysis_mcp.disambiguation import truncate_value
 from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.summary import (
     LIST_CAP,
@@ -60,6 +60,8 @@ from analysis_mcp.summary import (
     PooledParties,
     QuotientOfFacts,
     RankFacts,
+    RecomputedInput,
+    Rolling,
     ShareOfFacts,
     SumOfFacts,
     VerbSummary,
@@ -819,15 +821,16 @@ def render_sum_of_digest(
     derived: Mapping[str, object] | None = None,
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
+    heading: str = "sum_of",
 ) -> str:
     """Render `result` (the facts of `analysis_mcp.engine.sum_of.run_sum_of`) into
-    the digest text a successful `sum_of` tool call returns. Each period one
-    side alone reports, which the sum leaves out, is named with that side
-    and its value there, straight after the label, so a reader keeping only
+    the digest text a successful `sum_of` tool call returns, opening with `heading`.
+    Each period one side alone reports, which the sum leaves out, is named with that
+    side and its value there, straight after the label, so a reader keeping only
     the digest's start still has it. The coverage line states the summed
     span and each side's offered span and coverage."""
     header = (
-        f"sum_of: {len(result.intersected_periods)} period(s) both sides report "
+        f"{heading}: {len(result.intersected_periods)} period(s) both sides report "
         f"(left offered {len(result.left_periods)}, right offered {len(result.right_periods)})"
     )
     label_line = (
@@ -1269,9 +1272,11 @@ def render_quotient_of_digest(
     derived: Mapping[str, object] | None = None,
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
+    heading: str = "quotient_of",
 ) -> str:
     """Render `result` (the facts of `analysis_mcp.engine.quotient_of.run_quotient_of`)
-    into the digest text a successful `quotient_of` tool call returns.
+    into the digest text a successful `quotient_of` tool call returns, opening with
+    `heading`.
 
     Every quotient is a plain number in the composed unit, which the header
     and the quotients' heading both name. What the result leaves out comes
@@ -1289,7 +1294,7 @@ def render_quotient_of_digest(
         if any(keys)
         else f"{len(quotients)} matched period(s)"
     )
-    header = f"quotient_of: {counted}, in {unit_text}"
+    header = f"{heading}: {counted}, in {unit_text}"
     label_line = (
         f"stat_var {result.stat_var}: "
         f"{_side_text(result.numerator_stat_var, result.numerator_resolved_unit)} divided by "
@@ -1455,10 +1460,52 @@ def render_filter_digest(
     return "\n\n".join(sections)
 
 
-def render_summary_digest(summary: VerbSummary) -> str:
+def _relative_name(offset: int) -> str:
+    return "latest" if offset == 0 else f"latest{offset}"
+
+
+def _recomputed_name(recomputed: RecomputedInput) -> str:
+    pair = f"{recomputed.spec_id}, {recomputed.content_version}"
+    named = pair if recomputed.verb is None else f"{recomputed.verb} {pair}"
+    return f"{named} (alone, latest {recomputed.latest})"
+
+
+def _rolling_section(rolling: Rolling) -> str:
+    """The latest year a call's relative periods were filled from, each period's
+    literal, each derived input computed again under that year, and each whose own
+    year could not be read."""
+    periods = ", ".join(
+        f"{_relative_name(period.offset)} is {period.period}" for period in rolling.periods
+    )
+    text = (
+        f"Rolling: the latest year is {rolling.latest}, the newest year at least half of "
+        f"the series counted hold; {periods}."
+    )
+    if rolling.recomputed:
+        inputs = "; ".join(_recomputed_name(recomputed) for recomputed in rolling.recomputed)
+        text += (
+            f" This call computed its rolling inputs again under the latest year "
+            f"{rolling.latest}, so their values here can differ from their own results: "
+            f"{inputs}."
+        )
+    if rolling.unconfirmed:
+        inputs = "; ".join(
+            f"{frame.spec_id}, {frame.content_version}" for frame in rolling.unconfirmed
+        )
+        text += (
+            f" The latest year of each of these inputs could not be confirmed, so its values "
+            f"here can differ from its own result: {inputs}."
+        )
+    return text
+
+
+def render_summary_digest(summary: VerbSummary, *, heading: str | None = None) -> str:
     """The digest of a verb call the runner `summary` states, rendered by its
     verb's `render_*_digest` from the summary's facts, canonical parameters,
-    identity, derived marker, exclusions and time."""
+    identity, derived marker, exclusions and time, with the latest year its
+    relative periods were filled from (`_rolling_section`) before the identity.
+    `heading`, when given, opens a `sum_of` or `quotient_of` digest in the verb's
+    place."""
     parameters = summary.parameters
     result = summary.result
     render: Callable[..., str]
@@ -1487,15 +1534,17 @@ def render_summary_digest(summary: VerbSummary) -> str:
             render = render_compare_digest
         case SumOfFacts():
             render = render_sum_of_digest
+            own = {} if heading is None else {"heading": heading}
         case ShareOfFacts():
             render = render_share_of_digest
         case QuotientOfFacts():
             render = render_quotient_of_digest
+            own = {} if heading is None else {"heading": heading}
         case JoinFacts():
             render = render_join_digest
         case _:
             raise TypeError(f"no digest renders a {type(result).__name__}")
-    return render(
+    digest = render(
         result=result,
         **own,
         op_spec_hash=summary.spec_id,
@@ -1505,3 +1554,8 @@ def render_summary_digest(summary: VerbSummary) -> str:
         exclusions=summary.exclusions,
         time=summary.time,
     )
+    if summary.rolling is None:
+        return digest
+    # Before the identity block, the one section every digest ends with.
+    head, _, identity = digest.rpartition("\n\n")
+    return "\n\n".join([head, _rolling_section(summary.rolling), identity])

@@ -532,11 +532,13 @@ def _call_deadline(budget_s: float) -> CallDeadline:
 async def resolve_and_register(
     wire: Mapping[str, Any],
     *,
+    tool: str = "search",
     budget_s: float = SEARCH_CALL_BUDGET_S,
     read_timeout_s: float | None = None,
 ) -> dict[str, Any] | ToolResult:
     """POST `wire` to the Search API's resolve route and register every definition its envelope carries.
 
+    `tool` is the calling tool, which an upstream refusal names.
     `budget_s` bounds the call, retries included (`_call_deadline`).
     `read_timeout_s` overrides the client's read timeout
     for each attempt (`Settings.upstream_read_timeout_s` when `None`).
@@ -556,7 +558,7 @@ async def resolve_and_register(
             deadline=_call_deadline(budget_s),
         )
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool=tool))
     try:
         envelope = response.json()
     except ValueError as exc:
@@ -635,7 +637,7 @@ async def search(
     explicitly asks to break down that side. Search lists "official donors"
     member by member only where the dataset holds no private donors, and
     otherwise refuses `entity_role_not_admitted`: open the donor side, read it
-    with get_data and `place_types` set, and keep the rows whose
+    with get_data and its party columns, and keep the rows whose
     `financingProvider_party_kind` is `party` and
     `financingProvider_party_class` is `official`.
     "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
@@ -713,6 +715,7 @@ async def search(
     if not parts and raw_query is None:
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="search",
                 pointer="/raw_query",
                 detail="search needs `parts`, or `raw_query` for Search to read as text",
             )
@@ -727,6 +730,7 @@ async def search(
     except ValidationError as exc:
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="search",
                 pointer=f"/_meta/{SEARCH_CONTEXT_META_KEY}",
                 detail=f"the search context is not a SearchContext: {exc}",
             )

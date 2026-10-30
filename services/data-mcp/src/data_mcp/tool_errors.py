@@ -2,7 +2,7 @@
 
 `ToolRefusal` is the stable code/retry-mode/fix/message contract a tool
 returns via `to_tool_result` instead of letting a raw `UpstreamError`
-propagate. Twenty codes span four retry modes (`RetryMode`), most with a
+propagate. Twenty-six codes span four retry modes (`RetryMode`), most with a
 typed factory whose `fix` payload is the machine-readable detail a calling
 model needs to correct and retry, wait, refresh, or give up.
 
@@ -45,6 +45,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Literal, Self, cast
 
+from common.echoed_text import truncate_value
 from common.refusal import refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from fastmcp.tools import ToolResult
@@ -64,7 +65,7 @@ class RetryMode(StrEnum):
 
 
 class ToolErrorCode(StrEnum):
-    """The twenty refusal codes, each mapped to exactly one `RetryMode`."""
+    """The refusal codes, each mapped to exactly one `RetryMode`."""
 
     FACET_NOT_AVAILABLE = "facet_not_available"
     DEFAULT_FACET_UNDEFINED = "default_facet_undefined"
@@ -86,6 +87,12 @@ class ToolErrorCode(StrEnum):
     ROLLUP_NOT_SUMMABLE = "rollup_not_summable"
     OPEN_ROLE_UNAVAILABLE = "open_role_unavailable"
     MEMBER_NOT_RESOLVABLE = "member_not_resolvable"
+    FRAME_REF_INCOMPLETE = "frame_ref_incomplete"
+    ALLOWANCE_EXHAUSTED = "allowance_exhausted"
+    PROVENANCE_UNAVAILABLE = "provenance_unavailable"
+    LICENCE_NOT_REDISTRIBUTABLE = "licence_not_redistributable"
+    FRAME_UNAVAILABLE = "frame_unavailable"
+    RENDERING_NOT_RECORDED = "rendering_not_recorded"
 
 
 # Locked table: two upstream `retryable: false` codes land on different modes
@@ -113,11 +120,36 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.ROLLUP_NOT_SUMMABLE: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.OPEN_ROLE_UNAVAILABLE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.MEMBER_NOT_RESOLVABLE: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.FRAME_REF_INCOMPLETE: RetryMode.CORRECT_AND_RETRY,
+    # The allowance resets at the next UTC midnight and `retry_after_s` names when,
+    # but a model should not hold the conversation open that long.
+    ToolErrorCode.ALLOWANCE_EXHAUSTED: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.PROVENANCE_UNAVAILABLE: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.LICENCE_NOT_REDISTRIBUTABLE: RetryMode.DO_NOT_RETRY,
+    # Every server gives this code this mode. The receiver fetches the frame again,
+    # then retries with the frame_ref that fetch returns.
+    ToolErrorCode.FRAME_UNAVAILABLE: RetryMode.REFRESH_THEN_RETRY,
+    ToolErrorCode.RENDERING_NOT_RECORDED: RetryMode.CORRECT_AND_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
     # A plain `raise` rather than `assert` — `python -O` strips asserts, and
     # this import-time guard should hold even under `-O`.
     raise AssertionError("every ToolErrorCode needs exactly one _RETRY_MODE_BY_CODE entry")
+
+# The arguments each tool's public schema accepts, which a `request_invalid`
+# refusal's `fix.accepted` lists. `get_data`'s `place_types` is the harness's
+# and the public schema hides it (`server.PUBLIC_SHAPES`).
+TOOL_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
+    "search": ("parts", "raw_query"),
+    "get_data": ("spec_id", "scope", "stat_vars", "without_party_totals", "breakdown"),
+    "describe": ("ids",),
+    "get_skill": ("skill_id", "path", "offset", "digest"),
+    "get_skill_file": ("skill_id", "path", "offset", "digest"),
+    "sources": ("ref",),
+    "export_data": ("frame_ref", "format", "bundle"),
+    "resolve_definition": ("spec_id", "identity", "entity_groups", "scope_entries"),
+    "catalogue_counts": (),
+}
 
 # Five keeps `entity_ambiguous` payloads bounded without starving the model
 # of real choices.
@@ -657,19 +689,18 @@ class ToolRefusal:
     def request_invalid(
         cls,
         *,
+        tool: str,
         pointer: str | None,
         detail: str | None,
         role: str | None = None,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # `pointer` is a JSON Pointer into the posted request body, naming the
-        # argument at fault; it isn't among the six fields `UpstreamError`
-        # names directly, so it arrives through `exc.extensions`. `role` is
-        # `invalid_role_ref`/`role_incompatible`'s own addition (`mint.py`):
-        # both name the offending scope role structurally, in `ProblemIssue.
-        # axis`, so a caller can act on it directly rather than parsing it
-        # back out of `pointer`'s trailing path segment.
+        # `pointer` is a JSON Pointer into `tool`'s arguments, naming the one at
+        # fault. `role` is `invalid_role_ref`/`role_incompatible`'s own addition
+        # (`mint.py`), which the message names. `fix` takes the shape of the
+        # combined server's validation refusal: the tool, one `field: problem`
+        # line, and the arguments the tool accepts (`TOOL_ARGUMENTS`).
         if pointer and role:
             message = (
                 f"The request was invalid at {pointer} (role {role!r}): {detail}. "
@@ -681,15 +712,36 @@ class ToolRefusal:
             )
         else:
             message = f"The request was invalid: {detail}. Correct the argument and retry."
-        fix: dict[str, Any] = {"pointer": pointer, "detail": detail}
-        if role is not None:
-            fix["role"] = role
+        field = ".".join(pointer.strip("/").split("/")) if pointer else None
         return cls(
             code=ToolErrorCode.REQUEST_INVALID,
             message=message,
-            fix=fix,
+            fix={
+                "tool": tool,
+                "problems": [f"{field}: {detail}" if field else str(detail)],
+                "accepted": list(TOOL_ARGUMENTS[tool]),
+            },
             trace_id=trace_id,
             capability_version=capability_version,
+        )
+
+    @classmethod
+    def spec_not_registered(
+        cls, *, tool: str, spec_id: str, upstream_code: str | None, detail: str | None
+    ) -> Self:
+        """dfo-apis refused to register the definition of `spec_id`, which `tool` was
+        passed alone (`definition_registration`). Its message names `tool`, whose
+        caller never asked for a registration. The same id reaches the same refusal, so
+        it names no delay."""
+        return cls(
+            code=ToolErrorCode.UPSTREAM_ERROR,
+            message=(
+                f"{tool} cannot read {spec_id}: the platform refused its definition "
+                f"({upstream_code or 'unclassified'}): {detail}. This spec_id cannot be read, "
+                "and repeating the call reaches the same refusal."
+            ),
+            fix={"tool": tool, "problems": [f"{spec_id}: {detail}"]},
+            upstream_code=upstream_code,
         )
 
     @classmethod
@@ -1031,6 +1083,128 @@ class ToolRefusal:
         )
 
     @classmethod
+    def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
+        """The frame argument `argument` names `spec_id` with no `content_version`.
+        The caller's `spec_id` is echoed capped (`echoed_text.truncate_value`)."""
+        return cls(
+            code=ToolErrorCode.FRAME_REF_INCOMPLETE,
+            message=(
+                f"{argument} names spec_id {truncate_value(spec_id)!r} without its "
+                "content_version. Pass the full {spec_id, content_version} pair from the "
+                "get_data or verb result that made the frame."
+            ),
+            fix={"argument": argument},
+        )
+
+    @classmethod
+    def export_over_ceiling(cls, *, export_format: str, count: int | None, cap: int | None) -> Self:
+        """A CSV or xlsx export of a frame with more rows than either holds. Parquet has no
+        row ceiling, so `fix` names it."""
+        size = f" ({count:,} rows; at most {cap:,})" if count is not None and cap else ""
+        return cls(
+            code=ToolErrorCode.OVER_CEILING,
+            message=(
+                f"This frame has too many rows for {export_format}{size}. "
+                'Call export_data again with format="parquet".'
+            ),
+            fix={"format": "parquet"},
+        )
+
+    @classmethod
+    def allowance_exhausted(cls, *, retry_after_s: float | None, detail: str | None) -> Self:
+        """The caller has spent today's allowance of new exported files."""
+        return cls(
+            code=ToolErrorCode.ALLOWANCE_EXHAUSTED,
+            message=(
+                "This client has used today's allowance of new exported files"
+                f"{f': {detail}' if detail else ''}. It resets at the next UTC midnight; "
+                "files exported earlier keep their links."
+            ),
+            fix={},
+            retry_after_s=retry_after_s,
+        )
+
+    @classmethod
+    def provenance_unavailable(cls, *, spec_id: str) -> Self:
+        """A derived frame stored without a recipe, so its sources cannot be named. The
+        caller's `spec_id` is echoed capped (`echoed_text.truncate_value`)."""
+        return cls(
+            code=ToolErrorCode.PROVENANCE_UNAVAILABLE,
+            message=(
+                f"{truncate_value(spec_id)!r} was stored without the record of how it was "
+                "made, so its "
+                "sources and their licences cannot be named, and it cannot be exported."
+            ),
+            fix={},
+        )
+
+    @classmethod
+    def frame_unavailable(cls, *, spec_id: str, upstream_code: str) -> Self:
+        """dfo-apis cannot find or read back the frame `spec_id` names (`upstream_code`).
+        A fetched frame comes back from `get_data` and a derived one from the verb calls
+        that made it. The caller's `spec_id` is echoed capped
+        (`echoed_text.truncate_value`)."""
+        fix: dict[str, Any] = {"next_step": "get_data"} if spec_id.startswith("spec_") else {}
+        return cls(
+            code=ToolErrorCode.FRAME_UNAVAILABLE,
+            message=(
+                f"The platform no longer holds the frame {truncate_value(spec_id)!r}. Call "
+                "get_data with the spec_id (spec_...) to register it again and pass the "
+                "frame_ref it returns; "
+                "for an ops_ result, repeat the verb calls that made it."
+            ),
+            fix=fix,
+            upstream_code=upstream_code,
+        )
+
+    @classmethod
+    def summed_frame_not_exportable(cls, *, spec_id: str) -> Self:
+        """A `get_data` frame with a `breakdown` or a `stat_vars` sum, whose rows no stored
+        dataset version holds, so the export route cannot make its file."""
+        return cls(
+            code=ToolErrorCode.CAPABILITY_UNAVAILABLE,
+            message=(
+                f"A summed or broken-down get_data frame ({spec_id}) can't be exported yet. "
+                'Call get_data without breakdown and stat_vars "sum", run aggregate (or the '
+                "verb that makes the same frame) and export the ops_ frame it returns."
+            ),
+            fix={"next_step": "get_data"},
+        )
+
+    @classmethod
+    def rendering_not_recorded(
+        cls, *, spec_id: str, content_version: str, options: Sequence[str]
+    ) -> Self:
+        """No mint record states the rendering of the frame, so no stored version is known
+        to hold its rows. `options` are those of a record no root is read with, empty when
+        no readable record is held."""
+        return cls(
+            code=ToolErrorCode.RENDERING_NOT_RECORDED,
+            message=(
+                f"The frame {spec_id}, {content_version} was fetched with {', '.join(options)}, "
+                "which cannot be exported. Call get_data for the same data without those "
+                "options and pass that frame_ref."
+                if options
+                else f"No record states how the frame {spec_id}, {content_version} was "
+                "fetched, so a file of it might hold other rows. Call get_data for the same "
+                "data and pass that frame_ref."
+            ),
+            fix={"next_step": "get_data", "options": list(options)},
+        )
+
+    @classmethod
+    def licence_not_redistributable(cls, *, detail: str | None) -> Self:
+        """A source of the frame is listed as one whose licence forbids redistribution."""
+        return cls(
+            code=ToolErrorCode.LICENCE_NOT_REDISTRIBUTABLE,
+            message=(
+                "A source of this frame does not allow its data to be redistributed, so "
+                f"the frame cannot be exported{f': {detail}' if detail else ''}."
+            ),
+            fix={},
+        )
+
+    @classmethod
     def skill_not_found(
         cls,
         *,
@@ -1078,12 +1252,12 @@ class ToolRefusal:
 
     @classmethod
     def skill_file_changed(
-        cls, *, skill_id: str, path: str, digest: str, current_digest: str
+        cls, *, skill_id: str, path: str, digest: str, current_digest: str, tool: str
     ) -> Self:
         # A paging continuation whose `digest` is not the file's current one:
         # a replica rebuilt between pages, so the pages read so far belong to
-        # another version and the file restarts at offset 0.
-        restart = f'get_skill_file(skill_id="{skill_id}", path="{path}", offset=0)'
+        # another version and the file restarts at offset 0 through `tool`.
+        restart = f'{tool}(skill_id="{skill_id}", path="{path}", offset=0)'
         return cls(
             code=ToolErrorCode.UPSTREAM_VERSION_CHANGED,
             message=(
@@ -1294,12 +1468,46 @@ def _issue_axes(extensions: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _request_invalid_refusal(exc: UpstreamError) -> ToolRefusal:
+# apis' search and mint bodies wrap the tool's arguments under `input`, so an
+# upstream pointer such as `/input/scope/entities/donor` names the tool's own
+# `scope` argument once the prefix is taken off.
+_UPSTREAM_INPUT_POINTER_PREFIX = "/input/"
+
+# The `get_data` argument behind each mint option a caller can move. `stat_vars="sum"`
+# writes a fixed `groupby`, so only a `breakdown` can make one invalid. The other
+# options are values the tool writes itself and name no argument.
+_GET_DATA_OPTION_ARGUMENTS = {
+    "groupby": "breakdown",
+    "columns": "without_party_totals",
+    "without_party_totals": "without_party_totals",
+}
+
+
+def _argument_pointer(pointer: str, *, tool: str) -> str | None:
+    """Upstream `pointer` as a pointer into `tool`'s own arguments, or `None` when
+    it names none of them. The export body's `frame` is `export_data`'s `frame_ref`.
+    A mint's `options` are `get_data`'s arguments by other names, and its
+    `definition` sidecar is what the caller's `spec_id` stands for."""
+    if tool == "export_data" and (pointer == "/frame" or pointer.startswith("/frame/")):
+        return "/frame_ref" + pointer.removeprefix("/frame")
+    if tool == "get_data" and pointer.startswith("/options/"):
+        argument = _GET_DATA_OPTION_ARGUMENTS.get(pointer.split("/")[2])
+        return None if argument is None else f"/{argument}"
+    if not pointer.startswith(_UPSTREAM_INPUT_POINTER_PREFIX):
+        return pointer
+    rebased = "/" + pointer.removeprefix(_UPSTREAM_INPUT_POINTER_PREFIX)
+    if tool == "get_data" and (rebased == "/definition" or rebased.startswith("/definition/")):
+        return "/spec_id"
+    return rebased
+
+
+def _request_invalid_refusal(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     """`request_invalid` itself sets a top-level `pointer` with no `issues`.
     `invalid_role_ref`/`role_incompatible` set no top-level `pointer`,
     carrying the offending scope role instead in a single-entry `issues[]`
     (`mint.py`'s `InvalidRoleRef`/`RoleIncompatible` branches) — `role` stays
-    unset for the plain shape, which names no axis.
+    unset for the plain shape, which names no axis. The pointer is rebased onto
+    the tool's own arguments (`_argument_pointer`).
     """
     pointer = exc.extensions.get("pointer")
     role = None
@@ -1307,7 +1515,10 @@ def _request_invalid_refusal(exc: UpstreamError) -> ToolRefusal:
         issue = _first_issue(exc.extensions)
         pointer = issue.get("pointer")
         role = issue.get("axis")
+    if isinstance(pointer, str):
+        pointer = _argument_pointer(pointer, tool=tool)
     return ToolRefusal.request_invalid(
+        tool=tool,
         pointer=pointer,
         role=role,
         detail=exc.detail,
@@ -1316,7 +1527,7 @@ def _request_invalid_refusal(exc: UpstreamError) -> ToolRefusal:
     )
 
 
-def _definition_not_reproducible_refusal(exc: UpstreamError) -> ToolRefusal:
+def _definition_not_reproducible_refusal(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     """`DefinitionNotReproducible` (`mint_errors.py`) names the spec_id in
     `issues[].member` and each entity role the stored identity binds and the
     graph's current account of the StatVar no longer declares in an
@@ -1325,18 +1536,15 @@ def _definition_not_reproducible_refusal(exc: UpstreamError) -> ToolRefusal:
     the message points to the two moves `get_data` can make: rerun `search`
     for a fresh spec_id, or retry `get_data` with those roles left out of
     `scope.entities`. A body that names no role, such as a failed operation
-    with no stored refusal, offers only the `search` move.
+    with no stored refusal, offers only the `search` move. `fix` takes
+    `request_invalid`'s shape, with one problem per role, or one on `spec_id`
+    when the body names none.
     """
-    spec_id = _first_issue(exc.extensions).get("member")
     roles = list(dict.fromkeys(_issue_axes(exc.extensions)))
-    fix: dict[str, Any] = {}
-    if spec_id is not None:
-        fix["spec_id"] = spec_id
-    fix["upstream_code"] = "definition_not_reproducible"
-    fix["role_bound"] = True
-    if roles:
-        fix["roles"] = roles
-    fix["next_tool"] = "search"
+    problems = [
+        f"scope.entities.{role}: the source no longer declares this role" for role in roles
+    ] or ["spec_id: the stored definition binds an entity role the source no longer declares"]
+    fix = {"tool": tool, "problems": problems, "accepted": list(TOOL_ARGUMENTS[tool])}
     rerun = "Run search again without the role phrase and use the spec_id it returns."
     if roles:
         named = ", ".join(roles)
@@ -1454,7 +1662,9 @@ def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
     )
 
 
-def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusal | None:
+def _map_known_upstream_code(
+    code: str | None, exc: UpstreamError, *, tool: str
+) -> ToolRefusal | None:
     """Dispatch the upstream-exact codes to their typed factories.
 
     `code` is the refusal's own code (`refusal_code`). Several upstream codes
@@ -1520,9 +1730,9 @@ def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusa
             capability_version=exc.capability_version,
         ),
         ToolErrorCode.REQUEST_INVALID: lambda: (
-            _definition_not_reproducible_refusal(exc)
+            _definition_not_reproducible_refusal(exc, tool=tool)
             if code == "definition_not_reproducible"
-            else _request_invalid_refusal(exc)
+            else _request_invalid_refusal(exc, tool=tool)
         ),
         ToolErrorCode.SPEC_NOT_EXPORTABLE: lambda: ToolRefusal.spec_not_exportable(
             detail=exc.detail or "this spec resolves to no exportable member",
@@ -1585,8 +1795,9 @@ def refusal_code(exc: UpstreamError) -> str | None:
     return cause_code if isinstance(cause_code, str) and cause_code else exc.code
 
 
-def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
-    """Translate an apis service call failure into the tool-facing refusal grammar.
+def from_upstream_error(exc: UpstreamError, *, tool: str) -> ToolRefusal:
+    """Translate an apis service call failure of `tool` into the tool-facing
+    refusal grammar.
 
     The refusal's own code (`refusal_code`) picks the refusal: the problem's
     `code`, or for a failed operation (`operation_failed`) the code of the
@@ -1622,7 +1833,7 @@ def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
         exc.code == _OPERATION_FAILED_CODE and code in _FAILED_OPERATION_CAUSES_RETRIED_IN_PLACE
     )
     if not retried_in_place:
-        mapped = _map_known_upstream_code(code, exc)
+        mapped = _map_known_upstream_code(code, exc, tool=tool)
         if mapped is not None:
             return mapped
     # The refusal's code — the explicit `upstream_error` entry or any other,

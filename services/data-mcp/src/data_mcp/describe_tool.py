@@ -51,11 +51,14 @@ def _strip_dcid_prefix(ids: list[str]) -> list[str]:
 def _cap_and_grammar_refusal(ids: list[str]) -> ToolResult | None:
     if len(ids) == 0:
         return to_tool_result(
-            ToolRefusal.request_invalid(pointer="/ids", detail="at least one dcid per call")
+            ToolRefusal.request_invalid(
+                tool="describe", pointer="/ids", detail="at least one dcid per call"
+            )
         )
     if len(ids) > DESCRIBE_ID_CAP:
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="describe",
                 pointer="/ids",
                 detail=f"at most {DESCRIBE_ID_CAP} dcids per call, got {len(ids)}",
             )
@@ -64,6 +67,7 @@ def _cap_and_grammar_refusal(ids: list[str]) -> ToolResult | None:
         if not DCID_PATTERN.fullmatch(dcid):
             return to_tool_result(
                 ToolRefusal.request_invalid(
+                    tool="describe",
                     pointer=f"/ids/{index}",
                     detail=(
                         f"{dcid!r} is not a well-formed dcid; expected one or more "
@@ -77,6 +81,7 @@ def _cap_and_grammar_refusal(ids: list[str]) -> ToolResult | None:
         if any(segment in (".", "..") for segment in dcid.split("/")):
             return to_tool_result(
                 ToolRefusal.request_invalid(
+                    tool="describe",
                     pointer=f"/ids/{index}",
                     detail=(
                         f"{dcid!r} is not a well-formed dcid; a '/'-separated segment "
@@ -141,7 +146,7 @@ async def describe(
     try:
         outcomes = await node_lookup.describe_nodes(ids)
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="describe"))
     except (ValueError, KeyError, TypeError, ValidationError) as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(

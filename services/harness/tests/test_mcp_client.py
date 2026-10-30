@@ -48,6 +48,7 @@ from harness.mcp_client import (
     _call_tool,
     _manifest_summary,
     _McpTimeoutError,
+    _presentation_refusal_outcome,
     _refusal_outcome,
 )
 from harness.mcp_deadlines import McpTimeoutPolicy
@@ -57,7 +58,8 @@ from harness.tool_contracts import ResolverError, graph_envelope
 from harness.wire import FactSummary, usable_component
 from mcp import MCPError
 from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
-from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
+from presentation_mcp import server as presentation_server
+from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY, Refusal, RetryMode
 
 from .resolved_revision import resolved_revision
 from .test_turn_records import _manifest, _served_identity
@@ -310,28 +312,61 @@ async def test_the_executor_refuses_an_analysis_tool_as_unknown(
     }
 
 
-def test_a_platform_refusal_is_stamped_as_a_service_refusal_and_keeps_its_advice_text() -> None:
-    """The violated constraint id lives only in presentation-mcp's display-text
-    `fix`. It rides along as `advice`, while `fix` stays the mergeable mapping
-    (empty here), so nothing that merges mapping fixes sees a string."""
-    outcome = _refusal_outcome(
-        {
-            "error": "constraint_violation",
-            "retry": "correct_and_retry",
-            "detail": "the chart breaks a display rule",
-            "fix": "violates constraint 'comparable_units_required'",
-        }
+def _presentation_result(refusal: Refusal, *, tool: str = "write_component") -> SimpleNamespace:
+    """`refusal` as presentation-mcp's server answers it, in the shape the
+    executor's client reads."""
+    result = presentation_server._refusal_result(refusal, tool=tool)
+    return SimpleNamespace(
+        is_error=True,
+        structured_content=result.structured_content,
+        content=result.content,
+        meta=result.meta,
+    )
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        Refusal(
+            error="constraint_violation",
+            retry=RetryMode.CORRECT_AND_RETRY,
+            detail="the chart breaks a display rule",
+            fix="violates constraint 'comparable_units_required'",
+            pointer="/series/0",
+        ),
+        Refusal(
+            error="request_invalid",
+            retry=RetryMode.DO_NOT_RETRY,
+            detail="write_token must be the token this component's create returned.",
+            fix="Create a new component.",
+            pointer="/write_token",
+        ),
+    ],
+    ids=["constraint", "request-invalid"],
+)
+def test_a_platform_refusal_is_stamped_as_a_service_refusal_and_keeps_its_advice_text(
+    refusal: Refusal,
+) -> None:
+    """The violated constraint id lives only in presentation-mcp's display text,
+    which its envelope writes into the message. It rides along as `advice`
+    beside the platform's own detail, and `fix` holds only mergeable values,
+    none here, so nothing that merges mapping fixes sees a request_invalid's
+    arguments or a string."""
+    result = _presentation_result(refusal)
+
+    outcome = _presentation_refusal_outcome(
+        result.structured_content, result.meta, fallback_text=""
     )
 
     assert outcome == {
         "outcome": "refusal",
         "refusal": {
-            "code": "constraint_violation",
-            "retry_mode": "correct_and_retry",
+            "code": refusal.error,
+            "retry_mode": refusal.retry.value,
             "origin": "service",
             "fix": None,
-            "advice": "violates constraint 'comparable_units_required'",
-            "message": "the chart breaks a display rule",
+            "advice": refusal.fix,
+            "message": refusal.detail,
         },
     }
 
@@ -886,13 +921,13 @@ async def test_the_executor_relays_a_platform_write_refusal_as_a_service_refusal
 ) -> None:
     scripted_presentation_client(
         [
-            _tool_result(
-                {
-                    "error": "constraint_violation",
-                    "retry": "correct_and_retry",
-                    "detail": "the chart breaks a display rule",
-                    "fix": "violates constraint 'comparable_units_required'",
-                }
+            _presentation_result(
+                Refusal(
+                    error="constraint_violation",
+                    retry=RetryMode.CORRECT_AND_RETRY,
+                    detail="the chart breaks a display rule",
+                    fix="violates constraint 'comparable_units_required'",
+                )
             )
         ]
     )
@@ -1959,20 +1994,15 @@ def _data_refusal(retry_mode: str, *, retry_after_s: float | None = 2.0) -> Simp
 def _presentation_refusal(
     retry: str, *, code: str = "service_unavailable", fix: dict[str, Any] | None = None
 ) -> SimpleNamespace:
-    """A presentation-mcp refusal in its own `{error, retry, detail}` grammar."""
-    body: dict[str, Any] = {
-        "error": code,
-        "retry": retry,
-        "detail": "the frame row budget is full",
-        "retry_after_s": 2.0,
-    }
-    if fix is not None:
-        body["fix"] = fix
-    return SimpleNamespace(
-        is_error=True,
-        structured_content=body,
-        content=[],
-        meta=None,
+    """A presentation-mcp refusal as its server answers it."""
+    return _presentation_result(
+        Refusal(
+            error=code,
+            retry=RetryMode(retry),
+            detail="the frame row budget is full",
+            fix=fix,
+            retry_after_s=2.0,
+        )
     )
 
 

@@ -10,7 +10,6 @@ import pyarrow as pa
 import pytest
 from analysis_mcp.artifact import Exclusion, Interval
 from analysis_mcp.digest import _absent_clause, _format_number
-from analysis_mcp.disambiguation import escape_control_chars, truncate_value
 from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary, run_aggregate
 from analysis_mcp.engine.compare import CompareResult, PeriodComparison
 from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
@@ -20,6 +19,7 @@ from analysis_mcp.engine.quotient_of import PeriodQuotient, run_quotient_of
 from analysis_mcp.engine.rank import EntityRank, RankResult, run_rank
 from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult, run_share_of
 from analysis_mcp.execution_identity import ExecutionIdentity
+from common.echoed_text import escape_control_chars, truncate_value
 from dfo_frame_grammar import Frame
 from digest_corpus import matched_keys_of, quotient_of_result, share_of_result
 from digest_facts import (

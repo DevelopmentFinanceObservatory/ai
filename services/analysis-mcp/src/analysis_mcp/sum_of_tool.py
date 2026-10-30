@@ -42,7 +42,7 @@ from analysis_mcp.frame_ref_resolution import (
     read_derived_marker,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import PinnedUnit, SumOfOpSpec
+from analysis_mcp.op_spec import FrameRefArgument, PinnedUnit, SumOfOpSpec
 from analysis_mcp.steps import LeftOut, Step, build_step, left_out_from_exclusions, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
@@ -111,22 +111,24 @@ def _sum_or_refusal(
 @holds_input_rows
 async def sum_of(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The left side's {spec_id, content_version} pair, naming a materialised "
                 "frame or a prior verb result. Obtained from get_data's or a prior verb's "
-                "own digest -- never invented."
+                "own digest -- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],
     right_frame_ref: Annotated[
-        dict[str, str] | None,
+        FrameRefArgument | None,
         Field(
             default=None,
             description=(
                 "The right side's frame_ref pair. Omit to add two slices of the same "
-                "frame_ref, narrowed by left_entity/right_entity instead."
+                "frame_ref, narrowed by left_entity/right_entity instead. "
+                "A bare spec_id also works: the server fetches the data itself."
             ),
         ),
     ] = None,

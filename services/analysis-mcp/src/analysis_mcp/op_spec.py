@@ -22,7 +22,8 @@ predicates, closed to `OrderedThresholdPredicate`, `CategoryMatchPredicate` and
 `frame_ref` is `common.materialisation.FrameRef`: one pair type,
 `{spec_id, content_version}`, naming either a Datasets snapshot or a prior
 toolkit result -- see that model's own docstring for the two families it
-accepts.
+accepts. A tool declares each frame argument as `FrameRefArgument`, whose
+`content_version` is optional.
 
 A period can be stated as rolling. The op-spec keeps the literal period
 (`window_start`, `window_end`, a threshold's `value`), which is all an engine
@@ -33,6 +34,12 @@ overlay is hashed with the literals, so a rolling call and a fixed call over
 the same periods compute the same rows under different `ops_` ids. Nothing in
 this module reads a frame. Whoever builds the call resolves the latest period
 and writes the literals.
+
+A window bound or a `time_period` threshold may instead be a `RelativeYear`,
+`{anchor: "latest", offset: n}`, in place of the year. Such a call states no
+overlay: dfo-apis' runner takes the populations from the call's recipe tree,
+fills the year from its one latest year and stores the overlay with the
+recipe. Only the runner computes it.
 """
 
 from __future__ import annotations
@@ -111,6 +118,15 @@ class Verb(StrEnum):
     QUOTIENT_OF = "quotient_of"
 
 
+@with_config(ConfigDict(extra="forbid"))
+class FrameRefArgument(TypedDict):
+    """A frame argument as a tool declares it: `spec_id`, and `content_version`
+    when the caller holds it (`verbs.frame_ref_incomplete`)."""
+
+    spec_id: str
+    content_version: NotRequired[str]
+
+
 class RollingRef(BaseModel):
     """A period stated relative to the latest period of the data.
 
@@ -127,6 +143,36 @@ class RollingRef(BaseModel):
     anchor: Literal["latest"]
     offset: int = Field(strict=True, ge=MIN_ROLLING_OFFSET, le=0)
     rule: Literal["half1"]
+
+
+class RelativeYear(BaseModel):
+    """A year given as its distance from the latest year of the data: 0 for
+    the latest year itself, -9 for nine years before it. The runner resolves
+    it under `RollingRef`'s `half1` rule."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    anchor: Literal["latest"]
+    offset: int = Field(strict=True, ge=MIN_ROLLING_OFFSET, le=0)
+
+
+# Why a call stating a `RelativeYear` refuses off the runner.
+RELATIVE_YEAR_ON_RUNNER_ONLY = "a relative year is resolved by the analysis runner only"
+
+# A `RelativeYear` as a tool lists it.
+_RELATIVE_YEAR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "anchor": {"const": "latest"},
+        "offset": {"type": "integer", "maximum": 0},
+    },
+    "required": ["anchor", "offset"],
+    "additionalProperties": False,
+}
+ListedRelativeYear = Annotated[RelativeYear, WithJsonSchema(_RELATIVE_YEAR_SCHEMA)]
+Year = Annotated[str, Field(pattern=r"^[0-9]{4}$")]
+# A window bound: a calendar year, or one relative to the latest.
+WindowYear = Year | ListedRelativeYear
 
 
 class RootPopulation(BaseModel):
@@ -185,8 +231,8 @@ class RootPopulation(BaseModel):
 
 
 class PairingPopulation(BaseModel):
-    """The series a keyed verb (`share_of` or `quotient_of` with
-    `denominator_by`, `join` with `join_keys`) pairs key by key.
+    """The series a keyed verb (`share_of` with `denominator_by`, `join` with
+    `join_keys`) pairs key by key.
 
     `pair` holds the populations of the verb's two sides, left then right,
     each flat or pairing. `keys` maps each key column of the left side's frame
@@ -296,7 +342,10 @@ def _implied_anchor(literal: str, ref: RollingRef) -> str:
 
 
 def _check_window_rolling(
-    rolling: WindowRolling | None, *, window_start: str | None, window_end: str | None
+    rolling: WindowRolling | None,
+    *,
+    window_start: str | RelativeYear | None,
+    window_end: str | RelativeYear | None,
 ) -> None:
     """Refuse an overlay on a bound the op-spec does not state, and two rolling
     bounds whose literals are not the same latest period at their offsets:
@@ -312,12 +361,24 @@ def _check_window_rolling(
             continue
         if literal is None:
             raise ValueError(f"rolling.{name} is set, but {name} is not")
+        if isinstance(literal, RelativeYear):
+            raise ValueError(f"rolling.{name} is set, but {name} is already relative")
         anchors.add(_implied_anchor(literal, ref))
     if len(anchors) > 1:
         raise ValueError(
             "window_start and window_end disagree with their rolling offsets: "
             f"they imply the latest periods {sorted(anchors)}"
         )
+
+
+def _window_order(start: str | RelativeYear | None, end: str | RelativeYear | None) -> int | None:
+    """How many years `end` lies after `start`, `None` when that is unknown here:
+    a bound is unset, or one is a year and the other relative."""
+    if isinstance(start, RelativeYear) and isinstance(end, RelativeYear):
+        return end.offset - start.offset
+    if isinstance(start, str) and isinstance(end, str):
+        return int(end) - int(start)
+    return None
 
 
 class OrderedThresholdPredicate(BaseModel):
@@ -333,11 +394,7 @@ class OrderedThresholdPredicate(BaseModel):
     `time_period` must be a well-formed period string, checked here ahead
     of the engine; a string against any other column passes op-spec
     validation unchecked and reaches the engine's own type check instead.
-
-    `rolling` marks a `time_period` threshold as following the latest period:
-    `value` stays the literal period the comparison runs on. It sits on the
-    predicate because `analysis_mcp.identity` reorders predicates, so nothing
-    outside one could address it.
+    A `RelativeYear` is a `time_period` threshold the runner fills.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -345,15 +402,36 @@ class OrderedThresholdPredicate(BaseModel):
     kind: Literal["ordered_threshold"] = "ordered_threshold"
     column: str = Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)
     op: Literal["gt", "gte", "lt", "lte", "eq", "ne"]
-    value: float | Annotated[str, Field(max_length=_MAX_ORDERED_THRESHOLD_STRING_CHARS)]
-    rolling: Annotated[RollingRef | None, HASHED_WHEN_SET] = None
+    value: (
+        float
+        | Annotated[str, Field(max_length=_MAX_ORDERED_THRESHOLD_STRING_CHARS)]
+        | ListedRelativeYear
+    )
+    # On the predicate because `analysis_mcp.identity` reorders predicates, so
+    # nothing outside one could address it.
+    rolling: Annotated[
+        RollingRef | None,
+        HASHED_WHEN_SET,
+        Field(
+            description=(
+                "Marks a time_period threshold as following the latest period of the data, "
+                "{anchor: 'latest', offset: 0, rule: 'half1'}, with offset counting whole "
+                "periods back: value stays the literal period the comparison runs on."
+            )
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def _validate_value(self) -> OrderedThresholdPredicate:
         """A numeric operand must be finite. A string operand against
         `time_period` must be a well-formed period string; a string operand
         against any other column passes through unchecked here."""
-        if isinstance(self.value, str):
+        if isinstance(self.value, RelativeYear):
+            if self.column != TIME_PERIOD_COLUMN or self.rolling is not None:
+                raise ValueError(
+                    f"a relative year is a {TIME_PERIOD_COLUMN} threshold's value, with no rolling"
+                )
+        elif isinstance(self.value, str):
             if self.column == TIME_PERIOD_COLUMN:
                 validate_time_period(self.value)
         elif not math.isfinite(self.value):
@@ -412,8 +490,8 @@ class CategoryMatchPredicate(BaseModel):
 class PlaceLevelPredicate(BaseModel):
     """`column`, a place's type enrichment, names a place at `level`.
 
-    Reads a `{role}_type` column such as the `observationAbout_type` column a
-    `get_data(place_types=true)` frame carries (`Country`,
+    Reads a `{role}_type` column such as a frame's `observationAbout_type`
+    column (`Country`,
     `AdministrativeArea1,State`), by `common.place_type.levels_of`: a place sits
     at each of its types, except that one carrying a Eurostat NUTS type is not
     at `Country`. `level="Country"` keeps every country and territory and
@@ -614,11 +692,13 @@ class GrowthOpSpec(_OpSpecBase):
 
     `rolling` says which of the two years follow the latest period
     (`WindowRolling`). The years stay literal and keep the ordering rule.
+    A bound may instead be a `RelativeYear`, which the runner fills; two
+    relative bounds keep the ordering rule by their offsets.
     """
 
     verb: Literal[Verb.GROWTH] = Verb.GROWTH
-    window_start: str = Field(pattern=r"^[0-9]{4}$")
-    window_end: str = Field(pattern=r"^[0-9]{4}$")
+    window_start: WindowYear
+    window_end: WindowYear
     entity_by: tuple[
         Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)], ...
     ] = ()
@@ -628,7 +708,8 @@ class GrowthOpSpec(_OpSpecBase):
 
     @model_validator(mode="after")
     def _window_is_ordered(self) -> GrowthOpSpec:
-        if int(self.window_end) <= int(self.window_start):
+        order = _window_order(self.window_start, self.window_end)
+        if order is not None and order <= 0:
             raise ValueError("window_end must be a later year than window_start")
         return self
 
@@ -669,7 +750,8 @@ class RankOpSpec(_OpSpecBase):
     not the rank position.
 
     `rolling` says which of the window's years follow the latest period
-    (`WindowRolling`), and names only a bound that is set.
+    (`WindowRolling`), and names only a bound that is set. A bound may
+    instead be a `RelativeYear`, as on `GrowthOpSpec`.
     """
 
     verb: Literal[Verb.RANK] = Verb.RANK
@@ -677,8 +759,8 @@ class RankOpSpec(_OpSpecBase):
         Field(min_length=1)
     )
     aggregation: str | None = Field(default=None, max_length=_MAX_AGGREGATION_NAME_CHARS)
-    window_start: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
-    window_end: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
+    window_start: WindowYear | None = None
+    window_end: WindowYear | None = None
     unit: PinnedUnit | None = None
     ascending: bool = False
     per_period: bool = False
@@ -689,11 +771,8 @@ class RankOpSpec(_OpSpecBase):
     def _window_bounds_are_paired(self) -> RankOpSpec:
         if (self.window_start is None) != (self.window_end is None):
             raise ValueError("window_start and window_end must both be set, or both be None")
-        if (
-            self.window_start is not None
-            and self.window_end is not None
-            and int(self.window_end) < int(self.window_start)
-        ):
+        order = _window_order(self.window_start, self.window_end)
+        if order is not None and order < 0:
             raise ValueError("window_end must not be earlier than window_start")
         return self
 

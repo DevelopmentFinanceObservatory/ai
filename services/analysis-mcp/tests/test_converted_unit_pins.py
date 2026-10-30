@@ -296,18 +296,23 @@ async def test_a_converted_pin_absent_from_the_frame_refuses_with_pinnable_candi
 async def test_every_unit_pin_advertises_a_composed_unit_as_a_refusal_s_object() -> None:
     """Each pin's input schema states the converted object's members beside
     the ref string. A composed unit is copied from a refusal, so the schema
-    admits an object for it and spells out none of its members."""
+    admits an object for it and spells out none of its members. The sentence
+    saying so is declared once per tool (`common.declaration`)."""
     async with Client(server_module.mcp) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
     for verb, parameters in PIN_PARAMETERS.items():
+        composed_forms = []
         for parameter in parameters:
             forms = tools[verb].input_schema["properties"][parameter]["anyOf"]
             converted, composed = [form for form in forms if form["type"] == "object"]
             assert converted["required"] == ["currency", "prices"]
             assert converted["additionalProperties"] is False
-            assert composed.keys() == {"type", "description"}
-            assert "unit_heterogeneous" in composed["description"]
+            assert composed.keys() <= {"type", "description"}
+            composed_forms.append(composed)
+        assert any(
+            "unit_heterogeneous" in composed.get("description", "") for composed in composed_forms
+        ), verb
 
 
 async def test_a_malformed_composed_pin_is_refused_before_any_engine_runs(

@@ -10,6 +10,9 @@ whose digest is not the file's current one refuses `upstream_version_changed`
 and names the call that restarts at offset 0. A continuation without a digest
 refuses `request_invalid` before any read, since nothing would tie its page to
 the revision the earlier pages came from.
+
+`get_skill` with a `path` reads through `read_skill_file` too, so the two
+answer alike, each naming itself in the calls a page or refusal prints.
 """
 
 from __future__ import annotations
@@ -34,9 +37,10 @@ from data_mcp.skills_client import (
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
 
 
-def _digest_required(*, skill_id: str, path: str) -> ToolRefusal:
-    restart = f'get_skill_file(skill_id="{skill_id}", path="{path}", offset=0)'
+def _digest_required(*, tool: str, skill_id: str, path: str) -> ToolRefusal:
+    restart = f'{tool}(skill_id="{skill_id}", path="{path}", offset=0)'
     return ToolRefusal.request_invalid(
+        tool=tool,
         pointer="/digest",
         detail=(
             "a page past offset 0 needs the digest the previous page's closing line names; "
@@ -104,8 +108,17 @@ async def get_skill_file(
     Returns:
         One page of the file.
     """
+    return await read_skill_file(
+        tool="get_skill_file", skill_id=skill_id, path=path, offset=offset, digest=digest
+    )
+
+
+async def read_skill_file(
+    *, tool: str, skill_id: str, path: str, offset: int, digest: str | None
+) -> ToolResult:
+    """One page of a skill file, or the refusal for it, naming `tool` in every call it prints."""
     if offset > 0 and digest is None:
-        return to_tool_result(_digest_required(skill_id=skill_id, path=path))
+        return to_tool_result(_digest_required(tool=tool, skill_id=skill_id, path=path))
     if digest is not None and (malformed := check_digest(digest)) is not None:
         return to_tool_result(malformed)
     try:
@@ -115,7 +128,11 @@ async def get_skill_file(
     if digest is not None and digest != file.digest:
         return to_tool_result(
             ToolRefusal.skill_file_changed(
-                skill_id=skill_id, path=path, digest=digest, current_digest=file.digest
+                skill_id=skill_id,
+                path=path,
+                digest=digest,
+                current_digest=file.digest,
+                tool=tool,
             )
         )
     text = file.content_text
@@ -128,7 +145,12 @@ async def get_skill_file(
         rendered = with_closing_line(
             rendered,
             continuation_line(
-                skill_id=skill_id, path=path, page=page, length=len(text), digest=file.digest
+                skill_id=skill_id,
+                path=path,
+                page=page,
+                length=len(text),
+                digest=file.digest,
+                tool=tool,
             ),
         )
     return ToolResult(

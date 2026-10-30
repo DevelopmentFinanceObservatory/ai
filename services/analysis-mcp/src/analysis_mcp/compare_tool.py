@@ -20,13 +20,16 @@ registration-site wrapper is the backstop that turns it into an
 `internal_error` refusal instead of a raw traceback reaching the wire;
 this backstop complements the typed handling below rather than replacing it.
 
+`operation="sum"` hands the call to `sum_of_tool.sum_of`, so one listed tool
+serves both forms and each keeps its own op-spec, result and refusals.
+
 The stored step (`_compare_step`) counts the periods the comparison keeps
 and the periods one side alone reports, which it leaves out.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastmcp.tools import ToolResult
 from pydantic import Field
@@ -65,7 +68,7 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frames,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import CompareOpSpec, PinnedUnit, SumOfOpSpec
+from analysis_mcp.op_spec import CompareOpSpec, FrameRefArgument, PinnedUnit, SumOfOpSpec
 from analysis_mcp.settings import Settings
 from analysis_mcp.steps import LeftOut, Step, build_step, left_out_from_exclusions, shared_step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -256,25 +259,26 @@ async def resolve_slice_pair(
     return left, right, input_content_versions
 
 
-@holds_input_rows
 async def compare(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The left side's {spec_id, content_version} pair, naming a materialised "
                 "frame or a prior verb result. Obtained from get_data's or a prior verb's "
-                "own digest -- never invented."
+                "own digest -- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],
     right_frame_ref: Annotated[
-        dict[str, str] | None,
+        FrameRefArgument | None,
         Field(
             default=None,
             description=(
                 "The right side's frame_ref pair. Omit to compare two slices of the same "
-                "frame_ref, narrowed by left_entity/right_entity instead."
+                "frame_ref, narrowed by left_entity/right_entity instead. "
+                "A bare spec_id also works: the server fetches the data itself."
             ),
         ),
     ] = None,
@@ -315,16 +319,30 @@ async def compare(
             ),
         ),
     ] = None,
+    operation: Annotated[
+        Literal["difference", "sum"],
+        Field(
+            description=(
+                "difference (the default): right minus left at each period. sum: left plus "
+                "right at each period, as one series."
+            )
+        ),
+    ] = "difference",
 ) -> ToolResult:
-    """Compare a value between two slices over their intersected periods.
+    """Subtract or add two slices, period by period, over the periods both report.
 
     Each side is `frame_ref` (or `right_frame_ref`) narrowed by an `entity`
-    binding down to one row per `time_period`. The compared periods are the
-    intersection of what each side actually offers; an empty intersection
-    refuses (`comparison_periods_disjoint`), naming each side's own
-    available periods. `delta` is `right - left` at each intersected
-    period. The result is a variable of its own, right minus left. Use
-    `join` instead to combine two different variables for one entity.
+    binding down to one row per `time_period`. `operation` picks the form:
+    `difference` (the default) gives `delta`, `right - left`, at each period;
+    `sum` adds the two sides. A period only one side reports is left out,
+    never counted as zero; the digest names those periods and each side's
+    coverage. Periods with no overlap refuse (`comparison_periods_disjoint`),
+    naming each side's own available periods. A sum needs both sides in the
+    same unit (`cross_frame_unit_mismatch`, `cross_frame_unit_unbound`);
+    differing provenance or measurement method is a warning, and the result
+    leaves that facet unbound. The result is one series under its own
+    stat_var. Use `join` instead to set two different variables side by side
+    for one entity.
 
     Args:
         frame_ref: The left side's frame_ref.
@@ -333,13 +351,47 @@ async def compare(
         right_entity: Narrows the right side to one entity's series.
         left_unit: Pins the left side's unit.
         right_unit: Pins the right side's unit.
+        operation: `difference` subtracts, `sum` adds (`sum_of_tool.sum_of`).
 
     Returns:
-        A digest: each intersected period's two values and delta, both
-        sides' coverage, and the result's {spec_id, content_version} pair
+        A digest: each intersected period's two values and the delta or sum,
+        both sides' coverage, and the result's {spec_id, content_version} pair
         and identity fields. On refusal, a typed error with a
         machine-readable fix.
     """
+    if operation == "sum":
+        # `sum_of_tool` imports this module's slice-pair helpers.
+        from analysis_mcp.sum_of_tool import sum_of  # noqa: PLC0415
+
+        return await sum_of(
+            frame_ref=frame_ref,
+            right_frame_ref=right_frame_ref,
+            left_entity=left_entity,
+            right_entity=right_entity,
+            left_unit=left_unit,
+            right_unit=right_unit,
+        )
+    return await _difference(
+        frame_ref=frame_ref,
+        right_frame_ref=right_frame_ref,
+        left_entity=left_entity,
+        right_entity=right_entity,
+        left_unit=left_unit,
+        right_unit=right_unit,
+    )
+
+
+@holds_input_rows
+async def _difference(
+    *,
+    frame_ref: FrameRefArgument,
+    right_frame_ref: FrameRefArgument | None,
+    left_entity: dict[str, str] | None,
+    right_entity: dict[str, str] | None,
+    left_unit: PinnedUnit | None,
+    right_unit: PinnedUnit | None,
+) -> ToolResult:
+    """`compare`'s `difference` form."""
     op_spec = build_op_spec_or_refusal(
         lambda: CompareOpSpec(
             frame_ref=frame_ref,

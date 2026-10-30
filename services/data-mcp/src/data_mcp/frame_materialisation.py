@@ -45,6 +45,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import rfc8785
 from common.materialisation import (
+    DEFAULT_MINT_OPTIONS,
     FrameExpired,
     FrameIntegrityError,
     FrameRef,
@@ -60,7 +61,6 @@ from common.materialisation import (
 from common.place_type import (
     FLOW_ROLE_COLUMNS,
     PARTY_ROLES,
-    PLACE_ROLE,
     TYPED_ROLES,
     UNTYPED,
     enrichment_role,
@@ -116,6 +116,13 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# The mint option that asks apis to add the enrichment the version's own role columns take
+# (apis' `MintOptions.enrichment`). apis answers as a mint naming the columns it resolved to,
+# and the manifest's artifact lists them in its `rendering`, so a frame minted with it is
+# named by them (`resolved_options`).
+ENRICHMENT = "enrichment"
+DEFAULT_ENRICHMENT = "default"
+
 # The bare link GET has its own small retry budget (see `_fetch_artifact_bytes_uncapped`'s
 # docstring): this hop is idempotent, so a handful of quick retries costs little and buys
 # resilience against a transient GCS blip. `artifact_link` (the link lookup) is never
@@ -142,18 +149,6 @@ _MIN_FETCH_BUDGET_S = 5.0
 # Seconds of a caller's deadline the store write leaves unspent, for the caller's
 # rendering of its result.
 _AFTER_WRITE_RESERVE_S = 3.0
-
-# The `options` of a mint that sums nothing and selects no columns. Its frame is
-# read from the version's canonical frame (`CANONICAL_FRAME_RENDERING`), and the
-# requested rendering itself is never fetched. A mint cannot ask for the canonical
-# frame alone, since apis' `MintOptions.format` is `csv`, `xlsx` or `parquet`
-# and every mint renders one of them, so this asks for the cheapest: a bare parquet
-# file in the frame layout, written with no projection and no graph name read. A
-# mint with `columns` adds them to these options, and its frame is that rendering
-# (`_select_requested_artifact`).
-DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
-    {"format": "parquet", "bundle": False, "layout": "frame"}
-)
 
 # The `rendering` apis links every version's canonical frame under
 # (`datasets_api.render.CANONICAL_FRAME_RENDERING`). The snapshot route lists it,
@@ -195,18 +190,51 @@ _LEGACY_KIND_COLUMN = "kind"
 WITHOUT_PARTY_TOTALS = "without_party_totals"
 
 
-def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
-    """The `options.columns` `get_data(place_types=True)` asks apis for.
+# The coverage dimension apis counts a frame's years under, beside one per role column.
+_YEARS_DIMENSION = "years"
 
-    A spec whose identity names a flow axis, as an entity or an open role, asks for each
-    party's type and kind (`FLOW_ENRICHMENT_COLUMNS`); any other spec, and a call holding
-    no identity, for the places' types. A list that names only enrichment columns adds them
-    to every default column, so the decoded `stat_var_<code system>` columns stay beside them.
+
+def coverage_roles(manifest: Manifest) -> tuple[str, ...]:
+    """The role columns of the frame `manifest` names: its coverage dimensions, one per
+    role the frame declares, less the years."""
+    return tuple(
+        dimension.label
+        for dimension in manifest.coverage.dimensions
+        if dimension.label != _YEARS_DIMENSION
+    )
+
+
+def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mapping[str, Any]:
+    """`options` as the rendering apis minted for them. An `enrichment: "default"` request
+    is the `rendering` of the one data artifact the mint's manifest lists for it, which
+    names the columns apis resolved the enrichment to. That artifact's rendering, its
+    columns aside, is the request's, and its columns hold every requested one. A mint
+    response lists only the rendering it served and the series statistics. Any
+    other `options`, and a manifest listing no such artifact or more than one, are returned
+    as sent, so the frame read refuses for want of its rendering.
     """
+    if options.get(ENRICHMENT) != DEFAULT_ENRICHMENT:
+        return options
+    base = {key: value for key, value in options.items() if key not in (ENRICHMENT, "columns")}
+    requested = set(options.get("columns") or ())
+    served = [
+        artifact.rendering
+        for artifact in manifest.artifacts
+        if {key: value for key, value in artifact.rendering.items() if key != "columns"} == base
+        and isinstance(columns := artifact.rendering.get("columns", []), list)
+        and requested <= set(columns)
+    ]
+    if len(served) != 1:
+        return options
+    return dict(served[0])
+
+
+def names_flow_role(identity: Mapping[str, Any] | None) -> bool:
+    """Whether `identity` names a flow axis, as an entity or an open role, by its role word
+    (`origin`) or its column (`financingRecipient`). `without_party_totals` cuts the group
+    totals from the open party roles of such a spec."""
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
-    if roles & FLOW_ROLE_COLUMNS.keys():
-        return FLOW_ENRICHMENT_COLUMNS
-    return (type_column(PLACE_ROLE),)
+    return bool(roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES))
 
 
 def replayed_mint_options(
@@ -231,7 +259,7 @@ def replayed_mint_options(
     kind_tokens = {_LEGACY_KIND_COLUMN, *KIND_COLUMNS}
     if options.get(WITHOUT_PARTY_TOTALS) and columns and set(columns) <= kind_tokens:
         return {**options, "columns": list(KIND_COLUMNS)}
-    flow_root = place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
+    flow_root = names_flow_role(identity)
     flow_selection = any(
         column in kind_tokens or column in FLOW_ENRICHMENT_COLUMNS for column in columns
     )
@@ -319,7 +347,8 @@ async def materialise_and_register(
     so a frame stored without a record gains one the next time it is minted. A refusal writes none, and neither does a degraded outcome that saw no
     frame: the record states the frame's StatVar count, the store keeps the first
     record written under a pair, and one written without the count would stand for
-    good.
+    good. The one record written without a frame in view is a bare read's
+    (`common.materialisation.record_bare_read`), which holds no `groupby`.
 
     Called once per successful `get_data` mint, after the manifest itself has already
     validated. Checks the store first: a pair already held, read back under a row claim

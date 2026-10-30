@@ -10,6 +10,7 @@ so its three tools mount whatever listens on the platform's address.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib.metadata
 import json
@@ -19,24 +20,36 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, MutableMapping
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
-from itertools import pairwise
+from itertools import pairwise, product
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
 
 import httpx2
+import jsonschema
 import langfuse
 import pytest
+import tiktoken
 from analysis_mcp import server as analysis_server
 from analysis_mcp import tool_errors as analysis_tool_errors
 from analysis_mcp.fixtures import seed_fixture_store
+from analysis_mcp.runner_client import RunnerClient, runner_holder
+from analysis_mcp.verbs import FOLLOWS_TREE
 from common import auth as mcp_auth
 from common import refusal as refusal_module
 from common import telemetry
 from common.logging import configure_logging
+from common.materialisation import FrameRef, MintRecord
 from common.materialisation import get_store as get_frame_store
 from common.refusal import internal_error_message, refusal_meta
 from common.uri_redaction import UriRedactingExporter
-from data_mcp import artifact_resource, client_holder, get_data_tool, skills_resources
+from data_mcp import (
+    artifact_resource,
+    client_holder,
+    definition_registration,
+    get_data_tool,
+    skills_resources,
+)
 from data_mcp import server as data_server
 from data_mcp import tool_errors as data_tool_errors
 from data_mcp.client import UpstreamClient
@@ -47,11 +60,20 @@ from data_mcp.deadline import (
     EXTERNAL_CALL_LIMIT_S,
     CallBudget,
 )
-from data_mcp.definition_store import InMemoryDefinitionStore, set_store
+from data_mcp.definition_store import (
+    DefinitionStoreUnavailable,
+    InMemoryDefinitionStore,
+    StoredDefinition,
+    get_store,
+    set_store,
+)
+from data_mcp.definition_store.identity import canonicalize, spec_id_for
+from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.mint_ledger import MintLedger
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.skills_extension import SKILLS_EXTENSION_ID, SkillsGetParams, SkillsListParams
+from dfo_spec_kit.registry import REGISTRY
 from fastmcp import Client, FastMCP
 from fastmcp.apps import UI_EXTENSION_ID, UI_MIME_TYPE
 from fastmcp.client.transports import StreamableHttpTransport
@@ -84,7 +106,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode, format_trace_id
 from opentelemetry.util._once import Once
 from presentation_mcp import server as presentation_server
-from presentation_mcp.client import WRITE_TOKEN_HEADER
+from presentation_mcp.client import WRITE_TOKEN_HEADER, PlatformAssembler
 from presentation_mcp.platform_contract import (
     RESOLVED_PAYLOAD_META_KEY,
     VIEW_STATE_META_KEY,
@@ -94,7 +116,8 @@ from presentation_mcp.platform_contract import (
     WriteReply,
 )
 from presentation_mcp.projection import ROWLESS_NOTICE, UNKNOWN_HOST_ROWLESS_NOTICE
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import ValidationError as PydanticValidationError
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -108,6 +131,27 @@ DIRECT = (
     f"{PRESENTATION_MCP_MOUNT_PATH}/mcp",
 )
 PRESENTATION_TOOLS = ("write_component", "describe_frame", "describe_component")
+ROLLING_ARGUMENT_TOOLS = ("growth", "rank", "filter")
+# The public verbs, each listed without `rolling_follows_tree` and
+# `rebuild_lost_frames` and called with both on.
+PUBLIC_VERBS = ("aggregate", "compare", "growth", "rank", "share_of", "join", "filter")
+# The public list: what an outside client sees at `/mcp/`.
+PUBLIC_TOOLS = {
+    "search",
+    "get_data",
+    "describe",
+    "sources",
+    "get_skill",
+    "export_data",
+    "aggregate",
+    "compare",
+    "growth",
+    "rank",
+    "share_of",
+    "join",
+    "filter",
+    *PRESENTATION_TOOLS,
+}
 
 REVISIONS = pytest.mark.parametrize(
     ("mode", "revision"),
@@ -123,6 +167,9 @@ CONTRADICTORY_GET_DATA = {
     "breakdown": {"code_system": "crsPurpose", "level": 0},
 }
 UNHELD_FRAME = {"spec_id": "spec_" + "0" * 32, "content_version": "cv_" + "0" * 32}
+# A derived frame named without its content_version, which every verb refuses
+# before it reads the store or reaches apis.
+_BARE_OPS = "ops_" + "0" * 32
 
 
 @pytest.fixture(autouse=True)
@@ -185,8 +232,10 @@ class _StubPlatform:
     async def release(self) -> dict[str, Any]:
         return _RELEASE
 
-    async def create_component(self, *, intent: dict[str, Any], caller: Caller) -> WriteReply:
-        del intent, caller
+    async def create_component(
+        self, *, intent: dict[str, Any], caller: Caller, rebuild_lost_frames: bool = False
+    ) -> WriteReply:
+        del intent, caller, rebuild_lost_frames
         return WriteReply(
             component_id="cmp_1",
             revision=1,
@@ -262,7 +311,17 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     assert {"search", "get_data", "aggregate", *PRESENTATION_TOOLS} <= _described(
         combined_tools
     ).keys()
-    assert _described(combined_tools) == _described(direct_tools)
+    # `get_data` is listed without `place_types`, `get_skill` without `names_get_skill`,
+    # every verb, `write_component` and
+    # `describe_frame` without `rebuild_lost_frames`, every verb without
+    # `rolling_follows_tree`, and `growth`, `rank` and `filter` without the
+    # harness's rolling arguments
+    # (`test_the_public_get_data_lists_the_type_columns_in_place_of_place_types`,
+    # `test_the_public_list_leaves_out_the_harness_rolling_arguments`).
+    combined_described, direct_described = _described(combined_tools), _described(direct_tools)
+    assert [
+        name for name in combined_described if combined_described[name] != direct_described[name]
+    ] == ["get_data", "get_skill", *PUBLIC_VERBS, "write_component", "describe_frame"]
     assert any(tool.output_schema is not None for tool in direct_tools)
     assert [tool.output_schema for tool in combined_tools] == [None] * len(combined_tools)
     assert combined_templates == direct_templates
@@ -301,7 +360,7 @@ async def test_the_combined_server_refuses_as_the_direct_mounts_do(
     app = create_app(settings=Settings(mcp_api_token=TOKEN))
     calls = (
         (DIRECT[0], "get_data", CONTRADICTORY_GET_DATA),
-        (DIRECT[1], "aggregate", {"frame_ref": UNHELD_FRAME, "aggregation": "sum"}),
+        (DIRECT[1], "aggregate", {"frame_ref": {"spec_id": _BARE_OPS}, "aggregation": "sum"}),
     )
 
     async with running_lifespan(app):
@@ -465,8 +524,16 @@ async def test_every_listed_tool_has_a_title_and_explicit_annotations(
         assert tool.annotations is not None, tool.name
         for hint in ("read_only_hint", "destructive_hint", "open_world_hint"):
             assert isinstance(getattr(tool.annotations, hint), bool), (tool.name, hint)
-    assert {t.name for t in tools if t.annotations.read_only_hint is False} == {"write_component"}
+    assert {t.name for t in tools if t.annotations.read_only_hint is False} == {
+        "write_component",
+        "export_data",
+    }
     assert {t.name for t in tools if t.annotations.open_world_hint} == {"write_component"}
+    (export_data,) = [t for t in tools if t.name == "export_data"]
+    assert (export_data.annotations.destructive_hint, export_data.annotations.idempotent_hint) == (
+        False,
+        True,
+    )
 
 
 @REVISIONS
@@ -705,7 +772,7 @@ async def test_the_rate_limit_counts_tool_calls_alone(
         admitted = await client.call_tool("aggregate", arguments, raise_on_error=False)
         refused = await client.call_tool("aggregate", arguments, raise_on_error=False)
 
-    assert _envelope(admitted)["code"] == "frame_not_held"
+    assert _envelope(admitted)["code"] == "rendering_not_recorded"
     assert _envelope(refused)["code"] == "rate_limited"
 
 
@@ -798,7 +865,729 @@ async def test_arguments_that_fail_the_input_schema_refuse_in_the_envelope(
     envelope = _envelope(combined)
     assert (envelope["code"], envelope["retry_mode"]) == ("request_invalid", "correct_and_retry")
     assert envelope["fix"]["tool"] == "aggregate"
-    assert "aggregation" in envelope["fix"]["detail"]
+    assert [problem.split(":")[0] for problem in envelope["fix"]["problems"]] == ["aggregation"]
+    aggregate = await analysis_server.mcp.get_tool("aggregate")
+    assert aggregate is not None
+    hidden = analysis_server.PUBLIC_SHAPES["aggregate"].hidden
+    assert envelope["fix"]["accepted"] == [
+        name for name in aggregate.parameters["properties"] if name not in hidden
+    ]
+
+
+@REVISIONS
+async def test_an_operation_outside_the_enum_names_the_values_it_takes(
+    mode: str,
+    revision: str,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+) -> None:
+    """`accepted` is the listed schema's: `growth` without `rolling` and `anchor_key`."""
+    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+
+    async with (
+        running_lifespan(app),
+        Client(mounted_mcp_transport(app, COMBINED, token=TOKEN), mode=mode) as client,
+    ):
+        assert client.protocol_version == revision
+        compare = await client.call_tool(
+            "compare", {"frame_ref": UNHELD_FRAME, "operation": "product"}, raise_on_error=False
+        )
+        growth = await client.call_tool(
+            "growth", {"frame_ref": UNHELD_FRAME, "window_start": "2020"}, raise_on_error=False
+        )
+        long_operation = await client.call_tool(
+            "compare", {"frame_ref": UNHELD_FRAME, "operation": "x" * 5000}, raise_on_error=False
+        )
+        long_name = await client.call_tool("x" * 5000, {}, raise_on_error=False)
+        listed = {tool.name: tool for tool in await client.list_tools()}
+
+    assert _envelope(compare)["code"] == "request_invalid"
+    assert _envelope(compare)["fix"]["problems"] == [
+        "operation: must be one of difference, sum, not 'product'"
+    ]
+    assert "...(truncated)" in long_operation.content[0].text
+    assert "...(truncated)" in long_name.content[0].text
+    assert _envelope(growth)["fix"]["accepted"] == list(listed["growth"].input_schema["properties"])
+    assert not {"rolling", "anchor_key"} & set(_envelope(growth)["fix"]["accepted"])
+
+
+@REVISIONS
+@pytest.mark.parametrize(
+    ("name", "fix"),
+    [
+        ("sum_of", {"tool": "compare", "operation": "sum"}),
+        ("quotient_of", {"tool": "share_of", "operation": "quotient"}),
+        ("get_skill_file", {"tool": "get_skill", "argument": "path"}),
+    ],
+)
+async def test_a_merged_name_refuses_naming_the_listed_call(
+    mode: str,
+    revision: str,
+    name: str,
+    fix: dict[str, str],
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+) -> None:
+    """A client holding a list from before the merge recovers in one call."""
+    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+
+    async with (
+        running_lifespan(app),
+        Client(mounted_mcp_transport(app, COMBINED, token=TOKEN), mode=mode) as client,
+    ):
+        assert client.protocol_version == revision
+        result = await client.call_tool(name, {"frame_ref": UNHELD_FRAME}, raise_on_error=False)
+
+    assert result.is_error is True
+    assert _envelope(result) == {
+        "code": "tool_not_found",
+        "retry_mode": "correct_and_retry",
+        "fix": fix,
+    }
+    assert result.content[0].text.startswith(f"No tool is named {name!r}. Call {fix['tool']} ")
+
+
+# presentation-mcp's recorded release document, whose `write_component` schema is the
+# size the deployed one is.
+_RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
+    "presentation-mcp/tests/fixtures/release.json"
+)
+
+# The most o200k tokens the public tool list may cost as a client hands it to its
+# model (the compact JSON of each tool's name, description and input schema). Every
+# client pays it on every turn. The bound is the measured count, 18,018, rounded up
+# to the next 500. The list must stay within 20,000. Lower the bound as it shrinks.
+_PUBLIC_LIST_TOKEN_BOUND = 18_500
+
+
+async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
+    """The combined server's `tools/list`, presentation-mcp's tools assembled from
+    `_RECORDED_RELEASE`."""
+    release = json.loads(_RECORDED_RELEASE.read_text())
+
+    class _RecordedPlatform(_StubPlatform):
+        @override
+        async def release(self) -> dict[str, Any]:
+            return release
+
+    monkeypatch.setattr(presentation_server, "PlatformAssembler", _RecordedPlatform)
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        return await client.list_tools()
+
+
+async def test_the_public_list_stays_within_its_token_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoding = tiktoken.get_encoding("o200k_base")
+    counted = {
+        tool.name: len(
+            encoding.encode(
+                json.dumps(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "inputSchema": tool.input_schema,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        )
+        for tool in await _public_list(monkeypatch)
+    }
+
+    assert sum(counted.values()) <= _PUBLIC_LIST_TOKEN_BOUND, counted
+
+
+def _schema_faults(node: object, path: str = "") -> Iterator[str]:
+    """Where `node`, a JSON schema, holds what a client's model reads as noise or
+    drops: a `$comment`, `$ref` or `$defs`, an empty `required`, or an `anyOf` with
+    a null branch beside a `default` of null, where null says what omission says."""
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            yield from _schema_faults(item, f"{path}[{index}]")
+        return
+    if not isinstance(node, dict):
+        return
+    for key in ("$comment", "$ref", "$defs"):
+        if key in node:
+            yield f"{path}/{key}"
+    if node.get("required") == []:
+        yield f"{path}/required"
+    branches = node.get("anyOf")
+    if (
+        isinstance(branches, list)
+        and {"type": "null"} in branches
+        and "default" in node
+        and node["default"] is None
+    ):
+        yield f"{path}/anyOf"
+    for key, value in node.items():
+        yield from _schema_faults(value, f"{path}/{key}")
+
+
+async def test_no_public_schema_holds_noise_or_a_redundant_null_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    faults = {
+        tool.name: faults
+        for tool in await _public_list(monkeypatch)
+        if (faults := list(_schema_faults(tool.input_schema)))
+    }
+
+    assert faults == {}
+
+
+async def test_the_public_write_component_takes_a_patch_that_clears_a_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = {tool.name: tool for tool in await _public_list(monkeypatch)}
+
+    jsonschema.validate(
+        {"intent": {"title": None}, "component_id": "cmp_existing", "write_token": "cmw_existing"},
+        tools["write_component"].input_schema,
+    )
+
+
+# The harness's tools and arguments, and the tools the merged ones replaced, none of
+# which an outside client can use.
+_HARNESS_NAMES = re.compile(
+    r"\b(place_types|rolling|anchor_key|resolve_anchor|sum_of|quotient_of|get_skill_file)\b"
+)
+
+
+async def test_no_public_description_or_schema_names_a_harness_tool_or_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    named = {
+        tool.name: sorted(set(found))
+        for tool in await _public_list(monkeypatch)
+        if (
+            found := _HARNESS_NAMES.findall(
+                json.dumps([tool.description, tool.input_schema, tool.title])
+            )
+        )
+    }
+
+    assert named == {}
+
+
+class _ForwardedArguments(Middleware):
+    """The innermost middleware. It records each call's arguments as the parent
+    forwards them to a child, and answers without running the tool."""
+
+    def __init__(self) -> None:
+        self.arguments: list[dict[str, Any]] = []
+
+    @override
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        self.arguments.append(dict(context.message.arguments or {}))
+        return ToolResult(content="recorded")
+
+
+@pytest.mark.parametrize("sent", [{"place_types": False}, {}], ids=["false", "absent"])
+async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str, bool]) -> None:
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+    forwarded = _ForwardedArguments()
+    combined.add_middleware(forwarded)
+    arguments = {"spec_id": "spec_" + "0" * 32, **sent}
+
+    async with Client(combined) as client:
+        await client.call_tool("get_skill", {"skill_id": "oda"})
+        await client.call_tool("get_data", arguments)
+        await client.call_tool("aggregate", {"frame_ref": UNHELD_FRAME, "aggregation": "sum"})
+
+    assert forwarded.arguments == [
+        {"skill_id": "oda", NAMES_GET_SKILL: True},
+        {**arguments, "place_types": True},
+        {
+            "frame_ref": UNHELD_FRAME,
+            "aggregation": "sum",
+            FOLLOWS_TREE: True,
+            "rebuild_lost_frames": True,
+        },
+    ]
+
+
+_GROWTH = {"frame_ref": UNHELD_FRAME, "window_start": "2015"}
+
+
+@pytest.mark.parametrize(
+    ("sent", "forwarded_as", "refused"),
+    [
+        (
+            {**_GROWTH, "rebuild_lost_frames": False},
+            {**_GROWTH, FOLLOWS_TREE: True, "rebuild_lost_frames": True},
+            None,
+        ),
+        ({**_GROWTH, "rolling": {"x": 1}}, None, "rolling"),
+    ],
+    ids=["forced", "hidden"],
+)
+async def test_a_public_call_refuses_a_hidden_argument_and_overwrites_a_forced_one(
+    sent: dict[str, Any], forwarded_as: dict[str, Any] | None, refused: str | None
+) -> None:
+    """A forced argument is accepted with the forced value written over it. A hidden
+    one the public form does not force is refused as unknown before the child's
+    schema reads it, and the call never runs."""
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+    forwarded = _ForwardedArguments()
+    combined.add_middleware(forwarded)
+
+    async with Client(combined) as client:
+        listed = {listed.name: listed for listed in await client.list_tools()}
+        result = await client.call_tool("growth", sent, raise_on_error=False)
+
+    if refused is None:
+        assert result.is_error is False
+        assert forwarded.arguments == [forwarded_as]
+        return
+    envelope = _envelope(result)
+    assert (envelope["code"], envelope["retry_mode"]) == ("request_invalid", "correct_and_retry")
+    assert envelope["fix"] == {
+        "tool": "growth",
+        "problems": [f"{refused}: Unexpected keyword argument"],
+        "accepted": list(listed["growth"].input_schema["properties"]),
+    }
+    assert forwarded.arguments == []
+
+
+_LOST_SPEC = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "d" * 32}
+_BARE_UNSTORED = "spec_" + "e" * 32
+_LOST_OPS = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "d" * 32}
+
+
+def test_a_validation_message_quoting_the_caller_is_capped() -> None:
+    class Sent(BaseModel):
+        frame: str
+
+        @field_validator("frame")
+        @classmethod
+        def refused(cls, value: str) -> str:
+            raise ValueError(value)
+
+    with pytest.raises(PydanticValidationError) as caught:
+        Sent(frame="x" * 5000)
+    raised = combined_mcp.ValidationError("refused")
+    raised.__cause__ = caught.value
+
+    (problem,) = combined_mcp._problems(raised, {})
+
+    assert len(problem) < 300
+
+
+def _rebuilt_pair(lost: dict[str, str]) -> dict[str, str]:
+    """The pair `_losing_platform` builds `lost` again as."""
+    return {**lost, "content_version": lost["content_version"][:-32] + "9" * 32}
+
+
+def _losing_platform(
+    requests: list[httpx2.Request], lost: dict[str, str], *, status: int, retryable: bool
+) -> Callable[..., PlatformAssembler]:
+    """A factory for `presentation_mcp.server.PlatformAssembler` over a platform that
+    serves `_RELEASE`, refuses `lost` as `frame_unavailable` with `status` and
+    `retryable`, and holds `_rebuilt_pair` of it. That is the Spec's newest version,
+    read or drawn when the spec_id comes alone, or the pair the analysis runner's
+    replay computes. `requests` records every call but the release."""
+    refused = httpx2.Response(
+        status,
+        json={
+            "code": "frame_unavailable",
+            "retryable": retryable,
+            "detail": "gone",
+            "cause": {"code": "expired" if retryable else "unknown"},
+        },
+    )
+    rebuilt = _rebuilt_pair(lost)
+    envelope = resolved_revision("line_chart", component_id="cmp_1", revision=1)
+    envelope = {**envelope, "provenance": {**envelope["provenance"], "inputs": [rebuilt]}}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/presentation/release":
+            return httpx2.Response(200, json=_RELEASE)
+        requests.append(request)
+        if request.method == "GET":
+            if request.url.path.endswith(lost["content_version"]):
+                return refused
+            return httpx2.Response(200, json={**rebuilt, "dimensions": {}})
+        if request.url.path == "/api/datasets/analysis":
+            member = {
+                "spec": {"spec_id": rebuilt["spec_id"]},
+                "content_version": rebuilt["content_version"],
+            }
+            return httpx2.Response(200, json={"ref": {"members": [member]}})
+        if json.loads(request.content)["intent"]["frame_ref"] == lost:
+            return refused
+        body = {
+            "component_id": "cmp_1",
+            "revision": 1,
+            "fact_summary": {},
+            "resolved_payload": envelope,
+            "write_token": "cmw_stub1",
+        }
+        return httpx2.Response(201, json=body)
+
+    def factory(*, settings: Any, auth: Any = None) -> PlatformAssembler:
+        return PlatformAssembler(
+            settings=settings, auth=auth, transport=httpx2.MockTransport(handler)
+        )
+
+    return factory
+
+
+def _lost_frame_arguments(name: str, lost: dict[str, str]) -> dict[str, Any]:
+    if name == "describe_frame":
+        return {"frame_ref": lost}
+    return {"intent": {**LINE_CHART_INTENT, "frame_ref": lost}}
+
+
+_SEARCHED_IDENTITY: dict[str, Any] = {"dataset": "DAC1", "fixed": {"measure": "ODA"}}
+_SEARCHED_SPEC = spec_id_for(canonicalize(_SEARCHED_IDENTITY))
+_BARE_CALLS: dict[str, tuple[dict[str, Any], str]] = {
+    "aggregate": (
+        {"frame_ref": {"spec_id": _SEARCHED_SPEC}, "aggregation": "sum"},
+        "/api/datasets/analysis",
+    ),
+    "describe_frame": ({"frame_ref": {"spec_id": _SEARCHED_SPEC}}, "/api/presentation/frames"),
+    "write_component": (
+        {"intent": {**LINE_CHART_INTENT, "frame_ref": {"spec_id": _SEARCHED_SPEC}}},
+        "/api/presentation/components",
+    ),
+    "export_data": ({"frame_ref": {"spec_id": _SEARCHED_SPEC}}, "/api/datasets/exports"),
+}
+
+
+async def _no_token() -> dict[str, str]:
+    return {}
+
+
+@asynccontextmanager
+async def _bare_call_client(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[Client]:
+    """A client of the combined server whose three upstream clients answer through
+    `handler`, with the release answered, and `_SEARCHED_SPEC` as `search` stores it."""
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/presentation/release":
+            return httpx2.Response(200, json=_RELEASE)
+        return handler(request)
+
+    definition_registration._registered.clear()
+    transport = httpx2.MockTransport(answer)
+    monkeypatch.setattr(
+        presentation_server,
+        "PlatformAssembler",
+        lambda *, settings, auth=None: PlatformAssembler(
+            settings=settings, auth=auth, transport=transport
+        ),
+    )
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        store = InMemoryDefinitionStore()
+        await store.put_many(
+            [
+                StoredDefinition(
+                    spec_id=_SEARCHED_SPEC,
+                    schema_version=1,
+                    canonical_bytes=canonicalize(_SEARCHED_IDENTITY),
+                )
+            ]
+        )
+        set_store(store)
+        client_holder.set_client(UpstreamClient(settings=DataMcpSettings(), transport=transport))
+        runner_holder.set(
+            RunnerClient(
+                base_url="http://runner.test",
+                timeout_s=5.0,
+                read_timeout_s=5.0,
+                caller_principal=None,
+                auth=_no_token,
+                transport=transport,
+            )
+        )
+        yield client
+
+
+@pytest.mark.parametrize("name", _BARE_CALLS)
+async def test_a_bare_spec_fresh_from_search_is_registered_before_its_call_runs(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dfo-apis refuses an id it has not registered, and `search` registers none."""
+    arguments, path = _BARE_CALLS[name]
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json={})
+
+    async with _bare_call_client(handler, monkeypatch) as client:
+        await client.call_tool(name, arguments, raise_on_error=False)
+
+    register, called, *_ = requests
+    assert json.loads(register.content) == {
+        "schema_version": 1,
+        "definition": {
+            "schema_version": 1,
+            "spec_id": _SEARCHED_SPEC,
+            "identity": _SEARCHED_IDENTITY,
+        },
+    }
+    assert (register.method, register.url.path) == ("POST", "/api/datasets/register")
+    assert called.url.path.startswith(path)
+
+
+async def test_a_spec_dfo_apis_will_not_register_refuses_in_the_calling_tools_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            422, json={"code": "spec_id_mismatch", "detail": "differs", "retryable": False}
+        )
+
+    arguments, _ = _BARE_CALLS["aggregate"]
+    async with _bare_call_client(handler, monkeypatch) as client:
+        result = await client.call_tool("aggregate", arguments, raise_on_error=False)
+
+    assert result.is_error is True
+    envelope = _envelope(result)
+    assert (envelope["code"], envelope["fix"]["tool"]) == ("upstream_error", "aggregate")
+    assert [request.url.path for request in requests] == ["/api/datasets/register"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx2.Response(
+            500, json={"code": "identity_quarantined", "detail": "held", "retryable": False}
+        ),
+        httpx2.TimeoutException("slow"),
+    ],
+    ids=["5xx", "timeout"],
+)
+async def test_a_failed_registration_a_retry_may_mend_lets_the_call_run(
+    failure: httpx2.Response | Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dfo-apis may already hold the id, so its answer stands."""
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path != "/api/datasets/register":
+            return httpx2.Response(200, json={})
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    arguments, path = _BARE_CALLS["aggregate"]
+    async with _bare_call_client(handler, monkeypatch) as client:
+        await client.call_tool("aggregate", arguments, raise_on_error=False)
+
+    assert requests[-1].url.path == path
+
+
+async def test_each_bare_id_of_a_call_registers_once_in_a_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_identity = {**_SEARCHED_IDENTITY, "dataset": "DAC2A"}
+    other = spec_id_for(canonicalize(other_identity))
+    registered: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets/register":
+            registered.append(json.loads(request.content)["definition"]["spec_id"])
+        return httpx2.Response(200, json={})
+
+    arguments = {"frame_ref": {"spec_id": _SEARCHED_SPEC}, "right_frame_ref": {"spec_id": other}}
+    async with _bare_call_client(handler, monkeypatch) as client:
+        await get_store().put_many(
+            [
+                StoredDefinition(
+                    spec_id=other, schema_version=1, canonical_bytes=canonicalize(other_identity)
+                )
+            ]
+        )
+        await client.call_tool("compare", arguments, raise_on_error=False)
+        await client.call_tool("compare", arguments, raise_on_error=False)
+
+    assert sorted(registered) == sorted([_SEARCHED_SPEC, other])
+
+
+@pytest.mark.parametrize("store_reads", [True, False], ids=["unheld", "store-down"])
+async def test_a_spec_this_service_cannot_read_is_left_for_dfo_apis_to_answer(
+    store_reads: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            404, json={"code": "spec_not_found", "detail": "unknown", "retryable": False}
+        )
+
+    async def store_down(*_: object, **__: object) -> None:
+        raise DefinitionStoreUnavailable("down")
+
+    if not store_reads:
+        monkeypatch.setattr(InMemoryDefinitionStore, "get", store_down)
+    async with _bare_call_client(handler, monkeypatch) as client:
+        result = await client.call_tool(
+            "aggregate",
+            {"frame_ref": {"spec_id": _BARE_UNSTORED}, "aggregation": "sum"},
+            raise_on_error=False,
+        )
+
+    assert [request.url.path for request in requests] == ["/api/datasets/analysis"]
+    assert _envelope(result)["code"] == "frame_not_held"
+
+
+@pytest.mark.parametrize("name", ["describe_frame", "write_component"])
+@pytest.mark.parametrize("retryable", [False, True], ids=["lost", "expired"])
+@pytest.mark.parametrize(
+    ("lost", "calls"),
+    [
+        # The refused call, then the newest version's read or create.
+        pytest.param(_LOST_SPEC, 2, id="spec_"),
+        # The refused call, the replay, then the replayed pair's read or create.
+        pytest.param(_LOST_OPS, 3, id="ops_"),
+    ],
+)
+async def test_a_public_presentation_call_builds_a_lost_frame_again(
+    name: str,
+    retryable: bool,
+    lost: dict[str, str],
+    calls: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public server forces `rebuild_lost_frames` and lists the tool without it,
+    so a frame the platform no longer holds is built again, a `spec_` frame at its
+    newest version and an `ops_` frame by replaying its recipe, and the reply names
+    both versions. The harness's mount keeps `frame_unavailable`
+    (presentation-mcp's `test_the_mount_refuses_a_lost_pair_frame_unavailable`)."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setattr(
+        presentation_server,
+        "PlatformAssembler",
+        _losing_platform(requests, lost, status=404, retryable=retryable),
+    )
+
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        if lost is _LOST_SPEC:
+            frame = FrameRef(**lost)
+            await get_frame_store().put_mint_record(
+                MintRecord(frame=frame, dataset=frame, options={})
+            )
+        listed = {tool.name: tool for tool in await client.list_tools()}
+        result = await client.call_tool(
+            name, _lost_frame_arguments(name, lost), raise_on_error=False
+        )
+
+    assert "rebuild_lost_frames" not in listed[name].input_schema["properties"]
+    assert result.is_error is False
+    text = "\n".join(block.text for block in result.content if isinstance(block, mt.TextContent))
+    assert lost["content_version"] in text
+    assert _rebuilt_pair(lost)["content_version"] in text
+    assert len(requests) == calls
+
+
+@pytest.mark.parametrize("name", ["describe_frame", "write_component"])
+@pytest.mark.parametrize("lost", [_LOST_SPEC, _LOST_OPS], ids=["spec_", "ops_"])
+async def test_a_public_presentation_call_passes_back_a_503_frame_unavailable(
+    name: str, lost: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 503 `frame_unavailable` is a failed read, so the public call refuses it as
+    retryable and builds nothing."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setattr(
+        presentation_server,
+        "PlatformAssembler",
+        _losing_platform(requests, lost, status=503, retryable=True),
+    )
+
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        result = await client.call_tool(
+            name, _lost_frame_arguments(name, lost), raise_on_error=False
+        )
+
+    envelope = _envelope(result)
+    assert (envelope["code"], envelope["retry_mode"]) == ("frame_unavailable", "retry_after_delay")
+    first = requests[0]
+    assert all(
+        (request.method, request.url.path) == (first.method, first.url.path) for request in requests
+    )
+
+
+async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_types() -> None:
+    """data-mcp's own mount keeps `place_types` for the harness. The public listing
+    omits the argument and any sentence about it, and its description names
+    the columns and party kinds every public frame carries."""
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+
+    async with Client(combined) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+    served = await data_server.mcp.get_tool("get_data")
+
+    assert served is not None
+    assert "place_types" in served.parameters["properties"]
+    get_data = listed["get_data"]
+    assert set(get_data.input_schema["properties"]) == set(served.parameters["properties"]) - {
+        "place_types"
+    }
+    description = get_data.description or ""
+    for named in (
+        "observationAbout_type",
+        "financingProvider_party_kind",
+        "financingRecipient_party_kind",
+        "party, residual, or total",
+    ):
+        assert named in description, named
+
+
+async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> None:
+    """analysis-mcp's own mount keeps `rolling`, `anchor_key`, `rolling_follows_tree`
+    and `rebuild_lost_frames` for the harness, and the public list has none of them.
+    A window bound and a `time_period` threshold take a year relative to the latest
+    in their place."""
+    combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
+
+    async with Client(combined) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+    served = {tool.name: tool for tool in await analysis_server.mcp.list_tools()}
+
+    for name in PUBLIC_VERBS:
+        hidden = {FOLLOWS_TREE, "rebuild_lost_frames"}
+        if name in ROLLING_ARGUMENT_TOOLS:
+            hidden |= {"rolling", "anchor_key"}
+        assert set(listed[name].input_schema["properties"]) == (
+            set(served[name].parameters["properties"]) - hidden
+        ), name
+        assert hidden <= set(served[name].parameters["properties"]), name
+    assert {"rolling", "anchor_key"} <= set(served["growth"].parameters["properties"])
+    relative = {"anchor": {"const": "latest"}, "offset": {"type": "integer", "maximum": 0}}
+    for name, bound in product(("growth", "rank"), ("window_start", "window_end")):
+        branches = listed[name].input_schema["properties"][bound]["anyOf"]
+        assert [branch.get("properties") for branch in branches] == [None, relative], name
+    (threshold,) = [
+        item
+        for item in listed["filter"].input_schema["properties"]["predicates"]["items"]["anyOf"]
+        if item["properties"]["kind"].get("const") == "ordered_threshold"
+    ]
+    assert threshold["properties"]["value"]["anyOf"][-1]["properties"] == relative
+    assert listed.keys() == PUBLIC_TOOLS
+    assert listed["compare"].input_schema["properties"]["operation"]["enum"] == [
+        "difference",
+        "sum",
+    ]
+    assert listed["share_of"].input_schema["properties"]["operation"]["enum"] == [
+        "share",
+        "quotient",
+    ]
 
 
 _KNOWN_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
@@ -1007,7 +1796,7 @@ async def test_a_tool_call_over_the_rate_limit_refuses_in_the_envelope(
         async with Client(mounted_mcp_transport(app, DIRECT[1], token=TOKEN), mode=mode) as client:
             direct = await client.call_tool("aggregate", arguments, raise_on_error=False)
 
-    assert _envelope(results[0])["code"] == "frame_not_held"
+    assert _envelope(results[0])["code"] == "rendering_not_recorded"
     assert (
         results[-1]
         .content[0]
@@ -1032,18 +1821,35 @@ LIMIT_S = 0.5
 _CLIENT_TIMEOUT_S = 10
 
 _ARTIFACT_URI = f"dfo://artifact/spec_{'5' * 32}/cv_1/sha256:{'1' * 64}"
-_UNSTORED_SPEC = "spec_" + "5" * 32
+# A spec the definition store does not hold, and apis' registry answer for it
+# (`GET /api/datasets/{id}/options`), which a public `get_data` reads to choose the
+# type columns it always asks for.
+_UNSTORED_IDENTITY = {
+    "identity_version": "spec1",
+    "shape": {"id": "LimitTestShape", "kind": "stat_var"},
+    "entities": {"reporter": ["country/KEN"]},
+    "facets": {},
+    "requested_window": {"kind": "all"},
+    "slots": [],
+}
+_UNSTORED_SPEC = spec_id_for(canonicalize(_UNSTORED_IDENTITY))
+_REGISTRY_DEFINITION = {
+    "definition": {"schema_version": 1, "spec_id": _UNSTORED_SPEC, "identity": _UNSTORED_IDENTITY}
+}
 
 
 class _StalledUpstream:
-    """apis holding every request until `release` is set, recording the path of
-    each request whose wait was cancelled. Once released, it answers 400."""
+    """apis holding every request but a registry read until `release` is set,
+    recording the path of each request whose wait was cancelled. Once released,
+    it answers 400."""
 
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.cancelled: list[str] = []
 
     async def handler(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.endswith("/options"):
+            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -1246,6 +2052,8 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
                 - poll_time_left_s
             )
             return httpx2.Response(202, json={"operation": operation})
+        if request.url.path.endswith("/options"):
+            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         assert request.url.path == operation["poll"]
         return httpx2.Response(200, json={"operation": operation})
 
@@ -1698,7 +2506,7 @@ async def test_a_presentation_refusal_records_its_code_with_or_without_a_view(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
 ) -> None:
-    """presentation-mcp names its code `error` in `structuredContent`, and an MCP
+    """presentation-mcp names its code `code` in `structuredContent`, and an MCP
     Apps host gets a notice view there instead. The span and the log line name
     the code either way: the platform's `not_found` is the caller's to correct,
     and `transient_unavailable`, a platform the assembler could not reach, is
@@ -1724,7 +2532,7 @@ async def test_a_presentation_refusal_records_its_code_with_or_without_a_view(
 
     for result in (revised, described):
         assert result.is_error is True
-        assert ("error" in (result.structured_content or {})) is not apps_host
+        assert ("code" in (result.structured_content or {})) is not apps_host
     assert langfuse_observations == [
         (
             "combined mcp tools/call write_component",
@@ -1821,7 +2629,7 @@ async def test_each_call_through_the_combined_server_is_logged(
         *(
             f"combined mcp call tool=aggregate outcome={outcome} revision={revision} "
             f"caller=ip:test trace_id=<id> {call_host}"
-            for outcome in ("ok", "frame_not_held")
+            for outcome in ("ok", "rendering_not_recorded")
         ),
     ]
     trace_ids = [re.findall(r"trace_id=([0-9a-f]{32})", message) for message in messages]
@@ -2332,11 +3140,13 @@ class _Alternating(httpx2.AsyncBaseTransport):
 
 
 async def test_a_2025_client_is_served_by_any_instance_without_a_session(
-    running_lifespan: Callable[..., Any],
+    running_lifespan: Callable[..., Any], runner: Any
 ) -> None:
     """Two app instances share the process's frame store, as Cloud Run
     instances share one bucket. A 2025-11-25 client initializes against
-    one and chains a call to the other, and neither issues a session."""
+    one and chains a call to the other, and neither issues a session. The
+    chained public call over a derived input lets its rolling years follow the
+    call's tree."""
     first = create_app(settings=Settings(mcp_api_token=TOKEN))
     second = create_app(settings=Settings(mcp_api_token=TOKEN))
     alternating = _Alternating({"first": first, "second": second})
@@ -2381,6 +3191,7 @@ async def test_a_2025_client_is_served_by_any_instance_without_a_session(
             )
 
     assert chained.is_error is False
+    assert runner.requests[-1]["rolling"] == "tree"
     assert {name for name, _ in alternating.served} == {"first", "second"}
     assert not any("mcp-session-id" in headers for _, headers in alternating.served)
     assert not any("mcp-session-id" in headers for headers in response_headers)
@@ -2942,3 +3753,58 @@ async def test_the_guard_passes_an_mcp_error_and_hides_any_other_exception() -> 
     assert raised.value.code == INTERNAL_ERROR
     assert raised.value.message.startswith("internal_error: skills/list failed")
     _assert_no_secret(raised.value.message)
+
+
+def _keyword_string_literals(source: str, *, keyword: str, callee: str | None = None) -> set[str]:
+    """The string literals passed as `keyword=` in the calls `source` makes, to
+    `callee` only when one is named."""
+    return {
+        argument.value.value
+        for call in ast.walk(ast.parse(source))
+        if isinstance(call, ast.Call)
+        and (callee is None or (isinstance(call.func, ast.Name) and call.func.id == callee))
+        for argument in call.keywords
+        if argument.arg == keyword
+        and isinstance(argument.value, ast.Constant)
+        and isinstance(argument.value.value, str)
+    }
+
+
+def _presentation_refusal_codes() -> set[str]:
+    """Every literal `error=` of a `Refusal(...)` in presentation-mcp. A code
+    taken from an apis problem document (`error=exc.code`) is not a literal and
+    is left to the platform that wrote it."""
+    package = Path(presentation_server.__file__).parent
+    return set().union(
+        *(
+            _keyword_string_literals(path.read_text(), keyword="error", callee="Refusal")
+            for path in package.rglob("*.py")
+        )
+    )
+
+
+def _combined_refusal_codes() -> set[str]:
+    """Every literal `code=` the combined server passes to a refusal."""
+    return _keyword_string_literals(Path(combined_mcp.__file__).read_text(), keyword="code")
+
+
+@pytest.mark.parametrize(
+    "codes",
+    [
+        pytest.param({code.value for code in data_tool_errors.ToolErrorCode}, id="data-mcp"),
+        pytest.param(
+            {code.value for code in analysis_tool_errors.ToolErrorCode}, id="analysis-mcp"
+        ),
+        pytest.param(_presentation_refusal_codes(), id="presentation-mcp"),
+        pytest.param(_combined_refusal_codes(), id="combined-mcp"),
+    ],
+)
+def test_every_refusal_code_a_server_writes_is_in_the_pinned_registry(codes: set[str]) -> None:
+    assert codes
+    unmapped = {
+        code
+        for code in codes
+        if code not in REGISTRY
+        or not REGISTRY[code].permits(endpoint="mcp.tools", channel="mcp_refusal")
+    }
+    assert unmapped == set()

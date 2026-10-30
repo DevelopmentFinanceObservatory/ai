@@ -12,17 +12,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 
 from common.auth import BearerTokenVerifier, apply_gate
+from common.declaration import declared_tool
 from common.logging import configure_logging
 from common.materialisation import aclose_store as aclose_frame_store
 from common.materialisation import install_store_if_unset
 from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddleware
+from common.public_shape import PublicShape
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
+from fastmcp.tools import Tool
+from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -39,9 +43,10 @@ from data_mcp.definition_store import (
     set_store,
 )
 from data_mcp.describe_tool import describe
-from data_mcp.get_data_tool import aclose_background_mints, get_data
+from data_mcp.export_data_tool import export_data
+from data_mcp.get_data_tool import TYPE_COLUMNS, aclose_background_mints, get_data
 from data_mcp.get_skill_file_tool import get_skill_file
-from data_mcp.get_skill_tool import get_skill
+from data_mcp.get_skill_tool import NAMES_GET_SKILL, get_skill
 from data_mcp.manifest import ARTIFACT_URI_TEMPLATE
 from data_mcp.resolve_definition_tool import resolve_definition
 from data_mcp.result_bound import ResultBoundMiddleware
@@ -127,6 +132,24 @@ async def healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+# `export_data` writes. It renders a file and pins it, spending the caller's
+# allowance for a new file. A repeat call returns the same file and spends nothing.
+_EXPORT = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+
+
+def _add_declared(
+    fn: Callable[..., object], *, title: str, annotations: ToolAnnotations = READ_ONLY_CATALOGUE
+) -> None:
+    """Register `fn` as a tool whose listed schema is `declared_tool`'s."""
+    tool = Tool.from_function(fn, version="1", title=title, annotations=annotations)
+    mcp.add_tool(declared_tool(tool))
+
+
 # Each tool's declared implementation version, read by
 # `compiler.surface._declared_version` and pinned per row in
 # `compiler.capabilities`, which lists `get_skill` and `get_skill_file`
@@ -135,29 +158,28 @@ async def healthz(_request: Request) -> JSONResponse:
 # schema on every call is a risk left untaken here. `resolve_definition` and
 # `catalogue_counts` are the harness's: the combined server outside clients
 # reach leaves them out (`harness.combined_mcp`).
-mcp.tool(search_tool.search, version="1", title="Search DFO data", annotations=READ_ONLY_CATALOGUE)
-mcp.tool(get_data, version="1", title="Get data", annotations=READ_ONLY_CATALOGUE)
-mcp.tool(
-    describe,
-    version="1",
-    title="Explain a data identifier",
-    annotations=READ_ONLY_CATALOGUE,
-)
-mcp.tool(get_skill, version="1", title="Load a skill", annotations=READ_ONLY_CATALOGUE)
-mcp.tool(
-    get_skill_file,
-    version="1",
-    title="Read a skill file",
-    annotations=READ_ONLY_CATALOGUE,
-)
-mcp.tool(
-    sources,
-    version="1",
-    title="List data sources",
-    annotations=READ_ONLY_CATALOGUE,
-)
+_add_declared(search_tool.search, title="Search DFO data")
+_add_declared(get_data, title="Get data")
+_add_declared(describe, title="Explain a data identifier")
+_add_declared(get_skill, title="Load a skill")
+_add_declared(get_skill_file, title="Read a skill file")
+_add_declared(sources, title="List data sources")
+_add_declared(export_data, title="Export data as a file", annotations=_EXPORT)
 mcp.tool(resolve_definition, version="1")
 mcp.tool(catalogue_counts, version="1")
+
+# The public form of each tool the combined server lists differently from this
+# mount (`common.public_shape`). Every public `get_data` frame carries the type
+# columns, and the harness asks for them per call. `get_skill` is the public skill
+# tool, so its pages name it.
+PUBLIC_SHAPES: Mapping[str, PublicShape] = {
+    "get_data": PublicShape(
+        paragraphs=(TYPE_COLUMNS,),
+        hidden=frozenset({"place_types"}),
+        forced={"place_types": True},
+    ),
+    "get_skill": PublicShape(hidden=frozenset({NAMES_GET_SKILL}), forced={NAMES_GET_SKILL: True}),
+}
 
 # A templated resource, not a tool -- it surfaces only via
 # `resources/templates/list` discovery, not `resources/list`, so ADK cannot

@@ -11,7 +11,12 @@ answer, or the `ToolRefusal` its reply maps to:
 - 202 is a root dataset still building, `ToolRefusal.analysis_pending` with the
   runner's `retry_after_s`.
 - A problem document keeps the runner's `code`, `detail` and `fix` where this
-  service defines the code, which holds for every engine code. A root the
+  service defines the code, which holds for every engine code, except that
+  `place_levels_mixed` is written again from its `fix`
+  (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. Under
+  `rolling: "tree"`, a derived input with no stored recipe (`recipe_not_found`)
+  is `rolling_reanchor_unavailable`, since it cannot be computed again under the
+  tree's latest year. A root the
   runner cannot read (`snapshot_not_found`, `recipe_not_found`,
   `artifact_expired`) is, in this order: the caller's own frame refs read as
   that root, not held or aged out (`ToolRefusal.frames_lost`, which names
@@ -36,6 +41,19 @@ that ends at another dataset's latest period. The ref's roots are the roots
 the runner read, those behind a derived input and the anchor roots included,
 so the check covers a derived input as it covers a fetched frame.
 
+`replay_derived` asks the runner to compute a derived frame again from its stored
+recipe with `latest: true`, which reads its roots at their datasets' current
+versions, and returns the pair it computed (`common.derived_replay`, which
+presentation-mcp shares). A call whose derived input lost a
+root sends the replayed pair in its place (`tool_pipeline.run_on_runner`). Every
+other call sends `latest: false`, reading each root at the version it names.
+
+A call with relative years states no anchor record: the runner fills them from
+the latest year of the call's whole tree and answers each with its literal
+(`resolved_periods`). A public call over a derived input sends `rolling: "tree"`,
+so the input's own rolling years follow that one latest year too, and the
+summary names each input that took another year alone (`run_tree`).
+
 `read_derived_manifest` and `read_derived_file` read a frame the runner stored,
 by its `ops_` pair, from `GET /api/datasets/derived/{spec_id}/{content_version}`
 and its `/file`, for a caller that needs its recipe or its rows. Each raises
@@ -54,32 +72,41 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
 from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.derived_replay import (
+    ANALYSIS_PATH,
+    DEFAULT_RETRY_AFTER_S,
+    ReplayBusy,
+    ReplayFailed,
+    ReplayPending,
+    busy,
+    pending,
+)
+from common.derived_replay import problem_json as _json
+from common.derived_replay import replay_derived as _replay
+from common.derived_replay import retry_after_s as _retry_after_s
 from common.holder import Holder
 from common.materialisation import FrameRef, LeftOutSeries
-from pydantic import BaseModel, ConfigDict, ValidationError
+from dfo_frame_grammar import shift_period
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from analysis_mcp.settings import Settings
-from analysis_mcp.summary import VerbSummary
+from analysis_mcp.summary import RecomputedInput, ResolvedPeriod, Rolling, VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal
 
 logger = logging.getLogger(__name__)
 
-ANALYSIS_PATH = "/api/datasets/analysis"
 ANCHOR_PATH = "/api/datasets/analysis/anchor"
 DERIVED_PATH = "/api/datasets/derived/{spec_id}/{content_version}"
 DERIVED_FILE_PATH = f"{DERIVED_PATH}/file"
 # The derived file query that answers the frame's rows as one Parquet file.
 DERIVED_FILE_QUERY: Mapping[str, str] = {"format": "parquet", "bundle": "false"}
-
-# The wait a retryable refusal or a failed transport names when dfo-apis sent none.
-DEFAULT_RETRY_AFTER_S = 5.0
 
 # Codes this service defines for its own failures.
 _LOCAL_CODES = frozenset(
@@ -88,18 +115,27 @@ _LOCAL_CODES = frozenset(
         ToolErrorCode.FRAME_EXPIRED,
         ToolErrorCode.FRAME_INTEGRITY_FAILED,
         ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE,
+        ToolErrorCode.ROLLING_REANCHOR_UNAVAILABLE,
         ToolErrorCode.SERVICE_UNAVAILABLE,
         ToolErrorCode.UPSTREAM_ERROR,
         ToolErrorCode.INTERNAL_ERROR,
     }
 )
-_RUNNER_CODES = frozenset(code.value for code in ToolErrorCode if code not in _LOCAL_CODES)
+# Codes the runner's engine refuses a computation with.
+RUNNER_CODES = frozenset(code.value for code in ToolErrorCode if code not in _LOCAL_CODES)
 _UNHELD_ROOT_CODES = frozenset({"snapshot_not_found", "recipe_not_found"})
 _EXPIRED_ROOT_CODE = "artifact_expired"
 _ROOT_CODES = _UNHELD_ROOT_CODES | {_EXPIRED_ROOT_CODE}
+_RECIPE_MISSING_CODE = "recipe_not_found"
+# What dfo-apis answers when it cannot serve a Spec root. These refusals carry no `fix`.
+_SPEC_ROOT_CODES = _ROOT_CODES | {"spec_not_found"}
 _OVER_CEILING_CODE = "over_ceiling"
-_BUSY_CODE = "service_unavailable"
 _RESPONSE_INVALID = "response_invalid"
+
+# An answer's `resolved_periods`, one entry per relative period of the recipe.
+_RESOLVED_PERIODS: TypeAdapter[tuple[ResolvedPeriod, ...]] = TypeAdapter(
+    Annotated[tuple[ResolvedPeriod, ...], Field(min_length=1)]
+)
 
 type Pair = tuple[str, str]
 # The caller's frame refs each root pair of a request stands for: two sides
@@ -205,21 +241,6 @@ def _build() -> RunnerClient:
 runner_holder: Holder[RunnerClient] = Holder(default_factory=_build)
 
 
-def _json(response: httpx2.Response) -> Mapping[str, Any] | None:
-    try:
-        body = response.json()
-    except ValueError:
-        return None
-    return body if isinstance(body, Mapping) else None
-
-
-def _retry_after_s(response: httpx2.Response) -> float:
-    try:
-        return max(float(response.headers.get("retry-after", "")), 0.0)
-    except ValueError:
-        return DEFAULT_RETRY_AFTER_S
-
-
 def _unusable(detail: str) -> ToolRefusal:
     return ToolRefusal.upstream_error(
         upstream_code=_RESPONSE_INVALID, detail=detail, retry_after_s=None
@@ -287,12 +308,19 @@ def _anchor_root_lost(anchor: Anchor, root: Pair, code: str) -> ToolRefusal:
 
 
 async def refusal_for(
-    response: httpx2.Response, *, refs_by_root: RefsByRoot, anchor: Anchor | None = None
+    response: httpx2.Response,
+    *,
+    refs_by_root: RefsByRoot,
+    spec_roots: Collection[str] = (),
+    anchor: Anchor | None = None,
+    tree_rolling: bool = False,
 ) -> ToolRefusal:
     """The refusal a runner's non-2xx `response` maps to. See the module docstring.
 
     `refs_by_root` maps each root pair the request named as a frame to the
-    caller's frame refs, and `anchor` is a rolling call's anchor record.
+    caller's frame refs, `spec_roots` are the Specs it sent alone, `anchor` is a
+    rolling call's anchor record, and `tree_rolling` says the request sent
+    `rolling: "tree"`.
     """
     problem = _json(response)
     if problem is None or not isinstance(problem.get("code"), str):
@@ -307,11 +335,28 @@ async def refusal_for(
     fix: dict[str, Any] = dict(given) if isinstance(given, Mapping) else {}
     retryable = problem.get("retryable") is True
     root: Pair = (str(fix.get("spec_id")), str(fix.get("content_version")))
-    if code in _RUNNER_CODES:
+    if code == ToolErrorCode.PLACE_LEVELS_MIXED and isinstance(fix.get("column"), str):
+        refusal = _place_levels_mixed(fix)
+    elif code in RUNNER_CODES:
         refusal = ToolRefusal(code=ToolErrorCode(code), message=detail, fix=fix)
+    elif (
+        tree_rolling
+        and code == _RECIPE_MISSING_CODE
+        and root[0].startswith("ops_")
+        and (refs := refs_by_root.get(root))
+    ):
+        refusal = ToolRefusal.rolling_reanchor_unavailable(
+            frame_refs=[ref.model_dump() for ref in refs]
+        )
     elif code in _ROOT_CODES and (refs := refs_by_root.get(root)):
         refusal = ToolRefusal.frames_lost(
             frame_refs=[ref.model_dump() for ref in refs], expired=code == _EXPIRED_ROOT_CODE
+        )
+    elif (
+        code in _SPEC_ROOT_CODES and spec_roots and (root[0] in spec_roots or "spec_id" not in fix)
+    ):
+        refusal = ToolRefusal.bare_frames_lost(
+            spec_ids=sorted(spec_roots), expired=code == _EXPIRED_ROOT_CODE
         )
     elif code in _ROOT_CODES and anchor is not None and root in anchor.pairs:
         refusal = _anchor_root_lost(anchor, root, code)
@@ -321,14 +366,8 @@ async def refusal_for(
         )
     elif code == _OVER_CEILING_CODE:
         refusal = ToolRefusal(code=ToolErrorCode.FRAME_TOO_LARGE, message=detail, fix=fix)
-    elif code == _BUSY_CODE and retryable:
-        wait = _retry_after_s(response)
-        refusal = ToolRefusal(
-            code=ToolErrorCode.SERVICE_UNAVAILABLE,
-            message=f"The analysis service is busy: {detail}. Retry after {wait:.1f}s.",
-            fix={"service": "dfo-apis"},
-            retry_after_s=wait,
-        )
+    elif (refused := busy(response)) is not None:
+        refusal = _busy(refused)
     else:
         refusal = ToolRefusal.upstream_error(
             upstream_code=code,
@@ -339,15 +378,38 @@ async def refusal_for(
     return refusal
 
 
+def _place_levels_mixed(fix: Mapping[str, Any]) -> ToolRefusal:
+    """The runner's `place_levels_mixed`, written from its `fix` as this service
+    writes it, so its message names the call this service's tools take."""
+    whole_class = fix.get("whole_class")
+    whole_total = fix.get("whole_total")
+    return ToolRefusal.place_levels_mixed(
+        column=fix["column"],
+        types=[str(cell) for cell in fix.get("types") or ()],
+        whole_total=whole_total if isinstance(whole_total, str) else None,
+        whole_class=whole_class if isinstance(whole_class, str) else None,
+        member_count=int(fix.get("member_count") or 0),
+        members=[str(member) for member in fix.get("example_members") or ()],
+    )
+
+
+def _busy(refused: ReplayBusy) -> ToolRefusal:
+    wait = refused.retry_after_s
+    return ToolRefusal(
+        code=ToolErrorCode.SERVICE_UNAVAILABLE,
+        message=f"The analysis service is busy: {refused.detail}. Retry after {wait:.1f}s.",
+        fix={"service": "dfo-apis"},
+        retry_after_s=wait,
+    )
+
+
 def _pending(response: httpx2.Response) -> ToolRefusal:
-    body = _json(response) or {}
-    retry_after_s = body.get("retry_after_s")
-    operations = body.get("operations")
+    return _pending_refusal(pending(response))
+
+
+def _pending_refusal(waiting: ReplayPending) -> ToolRefusal:
     return ToolRefusal.analysis_pending(
-        retry_after_s=float(retry_after_s)
-        if isinstance(retry_after_s, int | float)
-        else _retry_after_s(response),
-        operations=[str(op) for op in operations] if isinstance(operations, list) else [],
+        retry_after_s=waiting.retry_after_s, operations=list(waiting.operations)
     )
 
 
@@ -401,12 +463,32 @@ def _unread_summary(exc: ValidationError | KeyError) -> str:
 
 
 async def run_tree(
-    node: Mapping[str, Any], *, anchor: Anchor | None = None, refs_by_root: RefsByRoot
+    node: Mapping[str, Any],
+    *,
+    anchor: Anchor | None = None,
+    refs_by_root: RefsByRoot,
+    spec_roots: Collection[str] = (),
+    follows_tree: bool = False,
 ) -> VerbSummary | ToolRefusal:
     """The summary of the tree `node` computed by the runner, or its refusal.
     `anchor`, for a rolling call, sends its record's roots, which the runner takes
-    the latest period over, and checks the answer read no other root."""
+    the latest period over, and checks the answer read no other root.
+
+    The runner computes each derived (`ops_`) input again from its stored recipe.
+    With `follows_tree`, a tree with a derived input sends `rolling: "tree"`, so the
+    input's rolling years follow the one latest year of the whole tree. Any other
+    request omits the field: a dfo-apis that does not know it still answers, and
+    the harness's rolling steps keep the populations they state. Under
+    `rolling: "tree"`, an input whose recipe is missing refuses
+    `rolling_reanchor_unavailable`. The summary's `rolling` names the latest year
+    the answer's `resolved_periods` were filled from and, under `rolling: "tree"`
+    alone, each derived input the runner computed again under another year than
+    its own (`_rolling`)."""
+    derived = _derived_reads(refs_by_root)
+    tree_rolling = follows_tree and bool(derived)
     request: dict[str, Any] = {"tree": node, "latest": False}
+    if tree_rolling:
+        request["rolling"] = "tree"
     if anchor is not None:
         request["anchor_roots"] = list(anchor.nodes)
     response = await runner_holder.get().post(ANALYSIS_PATH, request)
@@ -415,15 +497,101 @@ async def run_tree(
     if response.status_code == httpx2.codes.ACCEPTED:
         return _pending(response)
     if not response.is_success:
-        return await refusal_for(response, refs_by_root=refs_by_root, anchor=anchor)
-    return _ready_summary(_json(response), anchor=anchor)
+        return await refusal_for(
+            response,
+            refs_by_root=refs_by_root,
+            spec_roots=spec_roots,
+            anchor=anchor,
+            tree_rolling=tree_rolling,
+        )
+    body = _json(response)
+    summary = _ready_summary(body, anchor=anchor)
+    if isinstance(summary, ToolRefusal):
+        return summary
+    assert body is not None
+    rolling = await _rolling(body.get("resolved_periods"), derived=derived if tree_rolling else ())
+    if isinstance(rolling, ToolRefusal):
+        return rolling
+    return summary if rolling is None else summary.model_copy(update={"rolling": rolling})
+
+
+def _derived_reads(refs_by_root: RefsByRoot) -> tuple[FrameRef, ...]:
+    """The derived (`ops_`) frames the request reads, each by the pair it names, which
+    for a rebuilt frame is the replay's."""
+    return tuple(
+        FrameRef(spec_id=spec_id, content_version=content_version)
+        for spec_id, content_version in refs_by_root
+        if spec_id.startswith("ops_")
+    )
+
+
+async def _own_latest(ref: FrameRef) -> RecomputedInput | FrameRef | None:
+    """`ref` with its top verb and the latest year its own recipe was filled from;
+    `None` for a recipe with no rolling year, and `ref` itself for a manifest that
+    cannot be read, which is logged, since whether the input was computed again is
+    unknown."""
+    try:
+        manifest = await read_derived_manifest(ref)
+    except DerivedUnread as exc:
+        logger.warning(
+            "derived input %s/%s unchecked for a recomputed year: %s",
+            ref.spec_id,
+            ref.content_version,
+            exc,
+        )
+        return ref
+    anchor = manifest.get("anchor")
+    period = anchor.get("period") if isinstance(anchor, Mapping) else None
+    if not isinstance(period, str):
+        return None
+    recipe = manifest.get("recipe")
+    tree = recipe.get("tree") if isinstance(recipe, Mapping) else None
+    op_spec = tree.get("op_spec") if isinstance(tree, Mapping) else None
+    verb = op_spec.get("verb") if isinstance(op_spec, Mapping) else None
+    return RecomputedInput(
+        **ref.model_dump(), verb=verb if isinstance(verb, str) else None, latest=period
+    )
+
+
+async def _rolling(
+    resolved: object, *, derived: Sequence[FrameRef]
+) -> Rolling | None | ToolRefusal:
+    """The latest year the answer's `resolved` periods were filled from, `None`
+    when it names none, with each of the `derived` inputs whose own recipe took
+    another latest year. `derived` is empty unless the request sent
+    `rolling: "tree"`, since without it each input keeps its stored periods. A
+    derived input with no rolling year of its own and one that took the same year
+    are not named. One whose manifest cannot be read is named as unconfirmed."""
+    if not resolved:
+        return None
+    try:
+        periods = _RESOLVED_PERIODS.validate_python(resolved)
+        latest = shift_period(periods[0].period, -periods[0].offset)
+    except ValueError:
+        return _unusable("the analysis answer's resolved_periods do not fit this service")
+    recomputed: list[RecomputedInput] = []
+    unconfirmed: list[FrameRef] = []
+    if derived:
+        async with asyncio.TaskGroup() as group:
+            reads = [group.create_task(_own_latest(ref)) for ref in derived]
+        owns = [read.result() for read in reads]
+        recomputed = [
+            own for own in owns if isinstance(own, RecomputedInput) and own.latest != latest
+        ]
+        unconfirmed = [own for own in owns if isinstance(own, FrameRef)]
+    return Rolling(
+        latest=latest,
+        periods=periods,
+        recomputed=tuple(recomputed),
+        unconfirmed=tuple(unconfirmed),
+    )
 
 
 def _ready_summary(
     body: Mapping[str, Any] | None, *, anchor: Anchor | None
 ) -> VerbSummary | ToolRefusal:
-    """The summary of the ready answer `body`, or the refusal for an answer outside
-    the contract or, for a rolling call, one that read a root outside `anchor`."""
+    """The summary of the ready answer `body`, or the refusal for an answer outside the contract
+    or, for a rolling call, one that read a root outside `anchor`."""
     if (
         body is None
         or body.get("status") != "ready"
@@ -437,6 +605,26 @@ def _ready_summary(
     except (ValidationError, KeyError) as exc:
         logger.warning("analysis runner summary unreadable: %s", exc)
         return _unusable(f"the analysis summary does not fit this service: {_unread_summary(exc)}")
+
+
+async def replay_derived(ref: FrameRef) -> FrameRef | ToolRefusal:
+    """The pair of the derived frame `ref` computed again from its stored recipe on
+    its datasets' current versions (`common.derived_replay`), or the refusal for a
+    runner that computes no frame: 202 is `analysis_pending` and a busy runner
+    `service_unavailable`, each with its delay. Any other refusal is logged with
+    `ref`."""
+    replayed = await _replay(ref, runner_holder.get().post, logger=logger)
+    match replayed:
+        case ReplayPending():
+            return _pending_refusal(replayed)
+        case ReplayBusy():
+            return _busy(replayed)
+        case ReplayFailed() if replayed.response.status_code == httpx2.codes.OK:
+            # A 200 that names no single frame.
+            return _unusable(replayed.detail)
+        case ReplayFailed():
+            return await refusal_for(replayed.response, refs_by_root={})
+    return replayed
 
 
 async def find_anchor(

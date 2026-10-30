@@ -58,11 +58,14 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import (
     ANCHOR_KEY_PATTERN,
+    RELATIVE_YEAR_ON_RUNNER_ONLY,
     CategoryMatchPredicate,
     FilterOpSpec,
     FilterRolling,
+    FrameRefArgument,
     OrderedThresholdPredicate,
     PlaceLevelPredicate,
+    RelativeYear,
     with_anchor_key,
 )
 from analysis_mcp.rolling_tool import anchored_input
@@ -159,14 +162,15 @@ def _filter_step(op_spec: FilterOpSpec, result: FilterResult, *, trace: Trace) -
 
 
 @holds_input_rows
-async def filter_verb(
+async def filter_verb(  # noqa: PLR0911 -- one refusal per check the call can fail
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The {spec_id, content_version} pair naming a materialised frame or a "
                 "prior verb result. Obtained from get_data's or a prior verb's own digest "
-                "-- never invented."
+                "-- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],
@@ -184,10 +188,7 @@ async def filter_verb(
                 "observationAbout_type, names a place at that level, such as Country, to keep "
                 "one level of place. A role, a window, or a facet binding is out of this "
                 "grammar: filter narrows by value, and scope is narrowed in get_data's "
-                "scope argument. An ordered_threshold on time_period may carry "
-                "rolling, {anchor: 'latest', offset: 0, rule: 'half1'}, marking its value as "
-                "following the latest period of the data, with offset counting whole periods "
-                "back; the value stays the literal period compared against."
+                "scope argument."
             ),
         ),
     ] = (),
@@ -199,7 +200,11 @@ async def filter_verb(
                 "The populations the latest period is taken over, {population: [{spec_id, "
                 "bindings}]}: one entry for each root dataset of the question, bindings "
                 "narrowing its series as {column: [values]}. Required when a predicate "
-                "carries rolling and refused otherwise."
+                "carries rolling and refused otherwise. A threshold on time_period that "
+                "carries rolling compares against the literal value, as a fixed threshold "
+                "does, and the result's {spec_id, content_version} pair differs from the "
+                "fixed call's. Such a call runs only when the record anchor_key names covers "
+                "it, and refuses rolling_anchor_unresolved otherwise."
             ),
         ),
     ] = None,
@@ -226,7 +231,7 @@ async def filter_verb(
     (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`). A `category_match` tests a column's
     own string cell against a closed set of values. This includes the
     `unit` column itself. A `place_level` reads a place's types, such as
-    the `observationAbout_type` column `get_data(place_types=true)` adds,
+    a frame's `observationAbout_type` column,
     by `common.place_type.levels_of`: a frame that names no place holds
     every level of place, and `place_level` on it with `"Country"` keeps
     the countries. A `category_match` on `unit` is an ordinary way
@@ -242,13 +247,8 @@ async def filter_verb(
     `category_match` on the exact span string keeps its rows, and a predicate
     on any other column filters as usual.
 
-    A threshold on `time_period` that carries `rolling` records that its
-    period follows the latest period of the data. The call compares against
-    the literal `value`, as a fixed threshold does, and the result's
-    {spec_id, content_version} pair differs from the fixed call's. Such a call
-    runs only when the record `anchor_key` names covers it
-    (`rolling_tool.anchored_input`), and refuses `rolling_anchor_unresolved`
-    otherwise.
+    A `time_period` threshold's value may be {anchor: 'latest', offset: n},
+    which follows the data as growth's window years do.
 
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.
@@ -270,6 +270,12 @@ async def filter_verb(
     )
     if isinstance(op_spec, ToolResult):
         return op_spec
+    if any(
+        isinstance(predicate, OrderedThresholdPredicate)
+        and isinstance(predicate.value, RelativeYear)
+        for predicate in op_spec.predicates
+    ):
+        return to_tool_result(ToolRefusal.op_spec_invalid(detail=RELATIVE_YEAR_ON_RUNNER_ONLY))
 
     # Canonicalised before the engine runs. See
     # `aggregate_tool.aggregate`'s identical comment on its own `group_by`.
