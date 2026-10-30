@@ -33,6 +33,7 @@ import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
 from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
 from common.derived_replay import ReplayBusy, ReplayFailed, ReplayPending, replay_derived
+from common.echoed_text import truncate_value
 from common.materialisation import FrameRef, dataset_pair
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
@@ -293,8 +294,9 @@ def _frame_ref_incomplete(spec_id: str) -> Refusal:
         error="frame_ref_incomplete",
         retry=RetryMode.CORRECT_AND_RETRY,
         detail=(
-            f"frame_ref names {spec_id} without its content_version. Only a spec_ id "
-            "can be passed alone. Pass the frame_ref the call that made this frame returned."
+            f"frame_ref names {truncate_value(spec_id)} without its content_version. Only a "
+            "spec_ id can be passed alone. Pass the frame_ref the call that made this frame "
+            "returned."
         ),
         fix=(
             "Pass frame_ref as the spec_id and content_version pair the call that made "

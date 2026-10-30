@@ -794,6 +794,32 @@ async def test_request_invalid_maps_and_surfaces_the_pointer() -> None:
     assert "/parts/0/variable_text" in refusal.message
 
 
+@pytest.mark.parametrize(
+    ("tool", "pointer", "problem"),
+    [
+        ("export_data", "/frame/content_version", "frame_ref.content_version: because"),
+        ("export_data", "/format", "format: because"),
+        ("get_data", "/options/groupby/levels/crsPurpose", "breakdown: because"),
+        ("get_data", "/options/columns", "without_party_totals: because"),
+        ("get_data", "/options/layout", "because"),
+        ("get_data", "/input/definition/identity/entities", "spec_id: because"),
+    ],
+)
+async def test_request_invalid_names_the_tools_own_argument(
+    tool: str, pointer: str, problem: str
+) -> None:
+    exc = await _exc_from(422, code="request_invalid", retryable=False, pointer=pointer)
+
+    assert from_upstream_error(exc, tool=tool).fix["problems"] == [problem]
+
+
+def test_frame_ref_incomplete_caps_the_spec_id_it_echoes() -> None:
+    refusal = ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id="ops_" + "x" * 5000)
+
+    assert "...(truncated)" in refusal.message
+    assert len(refusal.message) < 500
+
+
 async def test_request_invalid_without_a_pointer_still_names_the_detail() -> None:
     refusal = await _refusal_from(400, code="request_invalid", retryable=False)
     assert refusal.code == ToolErrorCode.REQUEST_INVALID

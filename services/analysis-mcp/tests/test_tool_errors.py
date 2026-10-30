@@ -801,6 +801,7 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
             "context": {"anchor_key": "rak_" + "1" * 32},
         },
     ),
+    "latest_year_unresolved": ("growth", {"fix": {"detail": "no_qualifying_period"}}),
     "rolling_grain_unsupported": ("growth", {"reason": "r", "periods": ["2020-01"]}),
     "rolling_reanchor_unavailable": ("compare", {"frame_refs": [_PAIR]}),
     "row_budget_full": ("aggregate", {"requested": 10, "free": 1, "max_rows": 5}),

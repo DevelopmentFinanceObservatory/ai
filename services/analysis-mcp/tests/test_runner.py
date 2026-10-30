@@ -1334,6 +1334,86 @@ async def test_a_runner_place_levels_mixed_names_the_level_to_keep(
     assert "place_levels_mixed detail" not in structured["message"]
 
 
+async def test_a_malformed_bare_spec_id_refuses_as_an_argument_error(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    runner = _install(_problem(422, "op_spec_invalid"))
+
+    result = await verbs.growth(
+        frame_ref={"spec_id": "spec_abc"}, window_start="2021", window_end="2022"
+    )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "op_spec_invalid"
+    assert structured["retry_mode"] == "correct_and_retry"
+    assert runner.requests == []
+
+
+async def test_a_tool_without_place_level_is_told_to_filter(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    fix = {"column": "observationAbout_type", "types": ["Country", "Place"]}
+    _install(_problem(422, "place_levels_mixed", fix=fix))
+
+    result = await verbs.quotient_of(
+        frame_ref=_FRAME, denominator_frame_ref=_OTHER_FRAME, numerator_unit="USD"
+    )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "place_levels_mixed"
+    assert structured["fix"] == fix
+    assert "place_level set to" not in structured["message"]
+    assert "place_level predicate" in structured["message"]
+
+
+async def test_a_party_refusal_keeps_its_own_advice_on_a_tool_without_place_level(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    fix = {
+        "column": "financingRecipient_party_kind",
+        "types": ["party", "total"],
+        "whole_total": "DAC countries",
+        "member_count": 2,
+        "example_members": ["France"],
+    }
+    _install(_problem(422, "place_levels_mixed", fix=fix))
+
+    result = await verbs.quotient_of(
+        frame_ref=_FRAME, denominator_frame_ref=_OTHER_FRAME, numerator_unit="USD"
+    )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["fix"]["whole_total"] == "DAC countries"
+
+
+async def test_a_call_with_no_anchor_key_is_not_told_to_resolve_one(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    fix = {"detail": "no_qualifying_period"}
+    engine = (
+        "The latest period of the data is not established: r. Call resolve_anchor with the "
+        "populations and every root frame of the question, then retry with the anchor_key "
+        "and the periods it gives."
+    )
+    _install(_problem(422, "rolling_anchor_unresolved", fix=fix, detail=engine))
+
+    result = await verbs.growth(
+        frame_ref=_FRAME,
+        window_start={"anchor": "latest", "offset": -5},
+        window_end={"anchor": "latest", "offset": 0},
+    )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert structured["fix"] == fix
+    assert "resolve_anchor" not in structured["message"]
+    assert "anchor_key" not in structured["message"]
+
+
 # The merged forms ------------------------------------------------------------------
 
 _ONE_FRAME = {"frame_ref": _FRAME}

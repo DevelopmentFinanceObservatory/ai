@@ -2367,6 +2367,13 @@ async def test_a_bare_ops_id_refuses_frame_ref_incomplete_without_a_call() -> No
     assert calls == []
 
 
+def test_a_bare_ops_id_is_echoed_capped() -> None:
+    detail = client_module._frame_ref_incomplete("ops_" + "x" * 5000).detail
+
+    assert "...(truncated)" in detail
+    assert len(detail) < 500
+
+
 BARE_SPEC_ID = "spec_" + "0123456789abcdef" * 2
 
 

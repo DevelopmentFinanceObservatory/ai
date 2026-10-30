@@ -271,11 +271,16 @@ async def test_tools_mount_from_a_mock_transport_served_release(
     for name, schema in assembled.items():
         tool = tools[name]
         assert tool.input_schema == declared_schema(schema, description=tool.description or "")
+    # A patch's null clears a field, so the declared schema keeps it.
+    jsonschema.validate(
+        {"intent": {"title": None}, "component_id": "cmp_existing", "write_token": "cmw_existing"},
+        tools["write_component"].input_schema,
+    )
 
 
 def _schema_rule_breaks(description: str, schema: Any) -> list[str]:
     """Where a listed tool breaks the declaration rules: a `$comment`, an
-    empty `required`, a nullable `anyOf` on an optional property, a `$defs`
+    empty `required`, a null branch beside a `default` of null, a `$defs`
     or `$ref`, or a sentence of seven words or more stated twice across
     `description` and the schema's descriptions."""
     breaks: list[str] = []
@@ -293,7 +298,8 @@ def _schema_rule_breaks(description: str, schema: Any) -> list[str]:
             breaks.append(f"{path}/required")
         required = set(node.get("required", ()))
         for name, prop in (node.get("properties") or {}).items():
-            if name not in required and {"type": "null"} in prop.get("anyOf", ()):
+            stated_null = "default" in prop and prop["default"] is None
+            if name not in required and stated_null and {"type": "null"} in prop.get("anyOf", ()):
                 breaks.append(f"{path}/properties/{name}/anyOf")
         for key, value in node.items():
             if key == "description" and isinstance(value, str):
@@ -314,8 +320,8 @@ def _schema_rule_breaks(description: str, schema: Any) -> list[str]:
 
 def _release_with_new_schema_notes() -> dict[str, Any]:
     """`RELEASE` with what a later release document could add in new places:
-    a definition carrying a `$comment`, a nullable property referencing it in
-    two members, and a sentence the two share."""
+    a definition carrying a `$comment`, a property defaulting to null referencing
+    it in two members, and a sentence the two share."""
     release = copy.deepcopy(RELEASE)
     style = {
         "$comment": "A developer note.",
@@ -327,7 +333,8 @@ def _release_with_new_schema_notes() -> dict[str, Any]:
         member["$defs"]["style"] = style
     for name in ("line_chart", "bar_chart"):
         members[name]["properties"]["style"] = {
-            "anyOf": [{"$ref": "#/$defs/style"}, {"type": "null"}]
+            "anyOf": [{"$ref": "#/$defs/style"}, {"type": "null"}],
+            "default": None,
         }
     return release
 

@@ -45,6 +45,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Literal, Self, cast
 
+from common.echoed_text import truncate_value
 from common.refusal import refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from fastmcp.tools import ToolResult
@@ -1062,13 +1063,14 @@ class ToolRefusal:
 
     @classmethod
     def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
-        """The frame argument `argument` names `spec_id` with no `content_version`."""
+        """The frame argument `argument` names `spec_id` with no `content_version`.
+        The caller's `spec_id` is echoed capped (`echoed_text.truncate_value`)."""
         return cls(
             code=ToolErrorCode.FRAME_REF_INCOMPLETE,
             message=(
-                f"{argument} names spec_id {spec_id!r} without its content_version. Pass the "
-                "full {spec_id, content_version} pair from the get_data or verb result that "
-                "made the frame."
+                f"{argument} names spec_id {truncate_value(spec_id)!r} without its "
+                "content_version. Pass the full {spec_id, content_version} pair from the "
+                "get_data or verb result that made the frame."
             ),
             fix={"argument": argument},
         )
@@ -1425,14 +1427,41 @@ def _issue_axes(extensions: Mapping[str, Any]) -> list[str]:
 # `scope` argument once the prefix is taken off.
 _UPSTREAM_INPUT_POINTER_PREFIX = "/input/"
 
+# The `get_data` argument behind each mint option a caller can move. `stat_vars="sum"`
+# writes a fixed `groupby`, so only a `breakdown` can make one invalid. The other
+# options are values the tool writes itself and name no argument.
+_GET_DATA_OPTION_ARGUMENTS = {
+    "groupby": "breakdown",
+    "columns": "without_party_totals",
+    "without_party_totals": "without_party_totals",
+}
+
+
+def _argument_pointer(pointer: str, *, tool: str) -> str | None:
+    """Upstream `pointer` as a pointer into `tool`'s own arguments, or `None` when
+    it names none of them. The export body's `frame` is `export_data`'s `frame_ref`.
+    A mint's `options` are `get_data`'s arguments by other names, and its
+    `definition` sidecar is what the caller's `spec_id` stands for."""
+    if tool == "export_data" and (pointer == "/frame" or pointer.startswith("/frame/")):
+        return "/frame_ref" + pointer.removeprefix("/frame")
+    if tool == "get_data" and pointer.startswith("/options/"):
+        argument = _GET_DATA_OPTION_ARGUMENTS.get(pointer.split("/")[2])
+        return None if argument is None else f"/{argument}"
+    if not pointer.startswith(_UPSTREAM_INPUT_POINTER_PREFIX):
+        return pointer
+    rebased = "/" + pointer.removeprefix(_UPSTREAM_INPUT_POINTER_PREFIX)
+    if tool == "get_data" and (rebased == "/definition" or rebased.startswith("/definition/")):
+        return "/spec_id"
+    return rebased
+
 
 def _request_invalid_refusal(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     """`request_invalid` itself sets a top-level `pointer` with no `issues`.
     `invalid_role_ref`/`role_incompatible` set no top-level `pointer`,
     carrying the offending scope role instead in a single-entry `issues[]`
     (`mint.py`'s `InvalidRoleRef`/`RoleIncompatible` branches) — `role` stays
-    unset for the plain shape, which names no axis. A pointer under apis'
-    `/input` envelope is rebased onto the tool's own arguments.
+    unset for the plain shape, which names no axis. The pointer is rebased onto
+    the tool's own arguments (`_argument_pointer`).
     """
     pointer = exc.extensions.get("pointer")
     role = None
@@ -1440,8 +1469,8 @@ def _request_invalid_refusal(exc: UpstreamError, *, tool: str) -> ToolRefusal:
         issue = _first_issue(exc.extensions)
         pointer = issue.get("pointer")
         role = issue.get("axis")
-    if isinstance(pointer, str) and pointer.startswith(_UPSTREAM_INPUT_POINTER_PREFIX):
-        pointer = "/" + pointer.removeprefix(_UPSTREAM_INPUT_POINTER_PREFIX)
+    if isinstance(pointer, str):
+        pointer = _argument_pointer(pointer, tool=tool)
     return ToolRefusal.request_invalid(
         tool=tool,
         pointer=pointer,

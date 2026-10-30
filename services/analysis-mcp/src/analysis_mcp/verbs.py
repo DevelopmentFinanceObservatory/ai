@@ -42,7 +42,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Annotated, Any
 
 from common.materialisation import AnchorRecord, FrameRef, get_store
-from common.place_type import PlaceLevel
+from common.place_type import PARTY_ROLES, PlaceLevel, enrichment_role
 from common.rolling import canonical_roots
 from common.unit_refs import PERCENT_UNIT
 from fastmcp.tools import ToolResult
@@ -140,17 +140,24 @@ _FOLLOWS_TREE_TYPE = Annotated[
 ]
 
 
-def _held_newest(arguments: Arguments) -> tuple[dict[str, Any], tuple[str, ...]]:
-    """`arguments` with each bare `spec_` frame argument held as `newest_ref`, and
-    the Specs those name, each once."""
+def _newest_specs(arguments: Arguments) -> tuple[str, ...]:
+    """The Specs the bare frame arguments in `arguments` name, each once."""
+    named = (_bare(arguments.get(name)) for name in _FRAME_ARGUMENTS)
+    return tuple(dict.fromkeys(spec_id for spec_id in named if spec_id is not None))
+
+
+def _held_newest(arguments: Arguments) -> dict[str, Any]:
+    """`arguments` with each bare `spec_` frame argument held as `newest_ref`.
+
+    Raises:
+        pydantic.ValidationError: a bare id is malformed.
+    """
     held = dict(arguments)
-    newest: dict[str, None] = {}
     for name in _FRAME_ARGUMENTS:
         spec_id = _bare(arguments.get(name))
         if spec_id is not None:
             held[name] = newest_ref(spec_id).model_dump()
-            newest[spec_id] = None
-    return held, tuple(newest)
+    return held
 
 
 # Whether a frame the runner no longer holds is rebuilt and the call sent again
@@ -168,6 +175,31 @@ _REBUILD_LOST_FRAMES_TYPE = Annotated[
         )
     ),
 ]
+
+
+def _followable(
+    arguments: Arguments, refusal: ToolRefusal, *, takes_place_level: bool
+) -> ToolRefusal:
+    """A runner `refusal` with advice the call's tool can follow. The runner writes
+    `rolling_anchor_unresolved` for a caller of `resolve_anchor`, and a call with no
+    `anchor_key` is not one. `place_levels_mixed` asks for `place_level` only where
+    the tool takes it. A party column's message asks for no `place_level`."""
+    if (
+        refusal.code == ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED
+        and arguments.get("anchor_key") is None
+    ):
+        return ToolRefusal.latest_year_unresolved(fix=refusal.fix)
+    column = refusal.fix.get("column")
+    if (
+        refusal.code == ToolErrorCode.PLACE_LEVELS_MIXED
+        and not takes_place_level
+        and isinstance(column, str)
+        and enrichment_role(column, roles=PARTY_ROLES) is None
+    ):
+        return ToolRefusal.place_levels_mixed(
+            column=column, types=refusal.fix.get("types", ()), takes_place_level=False
+        )
+    return refusal
 
 
 def _on_runner(
@@ -202,18 +234,24 @@ def _on_runner(
         arguments = bound.arguments
         if (incomplete := frame_ref_incomplete(arguments)) is not None:
             return to_tool_result(incomplete)
-        held, newest = _held_newest(arguments)
-        op_spec = build_op_spec_or_refusal(lambda: build(held))
+        op_spec = build_op_spec_or_refusal(lambda: build(_held_newest(arguments)))
         if isinstance(op_spec, ToolResult):
             return op_spec
+
+        def refined(refusal: ToolRefusal) -> ToolRefusal:
+            followable = _followable(
+                arguments, refusal, takes_place_level=place_level_description is not None
+            )
+            return followable if refine is None else refine(arguments, followable)
+
         return await run_on_runner(
             op_spec,
             anchor_key=arguments.get("anchor_key"),
             place_level=place_level,
-            newest=newest,
+            newest=_newest_specs(arguments),
             follows_tree=arguments[FOLLOWS_TREE],
             rebuild_lost_frames=arguments[REBUILD_LOST_FRAMES],
-            refine=None if refine is None else functools.partial(refine, arguments),
+            refine=refined,
         )
 
     listed = [*signature.parameters.values()]

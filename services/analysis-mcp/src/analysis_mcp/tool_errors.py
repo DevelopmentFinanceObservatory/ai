@@ -195,7 +195,9 @@ and `growth`, `rank` and `filter` raise it for a rolling call whose
 `anchor_key` names no stored record, or a record that does not cover the
 call. `fix["detail"]` names the check that failed. It is retryable, since a
 `resolve_anchor` call over the question's populations and root frames gives
-the key and the period to write the literals from. `rolling_grain_unsupported`
+the key and the period to write the literals from. A call stating a relative
+year has no key: the runner raises the code from its own latest year, and
+`ToolRefusal.latest_year_unresolved` asks for fixed years. `rolling_grain_unsupported`
 fires when a population's periods are not calendar years, which the frames
 do not change between calls, so it is `do_not_retry`.
 
@@ -223,6 +225,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Literal, Self
 
+from common.echoed_text import MAX_LABEL_CHARS, truncate_value
 from common.materialisation import FrameRef
 from common.place_type import (
     PARTY_ROLES,
@@ -240,12 +243,7 @@ from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, UnitRequest
 from fastmcp.tools import ToolResult
 
-from analysis_mcp.disambiguation import (
-    MAX_LABEL_CHARS,
-    DisambiguationCandidate,
-    DisambiguationPayload,
-    truncate_value,
-)
+from analysis_mcp.disambiguation import DisambiguationCandidate, DisambiguationPayload
 from analysis_mcp.units import unit_json, unit_name
 
 
@@ -793,7 +791,7 @@ class ToolRefusal:
     def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
         """The frame argument `argument` names `spec_id`, which is no `spec_` id, with
         no `content_version`. The caller's `spec_id` is echoed capped
-        (`disambiguation.truncate_value`)."""
+        (`echoed_text.truncate_value`)."""
         shown = truncate_value(spec_id)
         return cls(
             code=ToolErrorCode.FRAME_REF_INCOMPLETE,
@@ -1512,6 +1510,7 @@ class ToolRefusal:
         whole_class: str | None = None,
         member_count: int = 0,
         members: Sequence[str] = (),
+        takes_place_level: bool = True,
     ) -> Self:
         """`types` are the distinct cells of `column`, sorted and capped by
         the engine that found them, and empty when the frame carries no such
@@ -1526,7 +1525,9 @@ class ToolRefusal:
         members it may hold, of which `members` are examples. The message asks
         to keep the whole totals alone, by a filter on the role's whole column,
         or the members alone, by a filter on `column`, and `fix.filters` holds
-        both."""
+        both. Any other column's message asks for `place_level` where the
+        tool takes it (`takes_place_level`), and otherwise for a `place_level`
+        predicate through `filter`."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and whole_total is not None:
             counted = f"{member_count} member{'' if member_count == 1 else 's'}"
@@ -1594,6 +1595,13 @@ class ToolRefusal:
             )
         levels = sorted({level for cell in types for level in levels_of(cell) & PLACE_LEVELS})
         level = _COUNTRY_LEVEL if _COUNTRY_LEVEL in levels else next(iter(levels), None)
+        keep_one_level = (
+            "Repeat the call with place_level set to the level to keep, for example "
+            'place_level="Country".'
+            if takes_place_level
+            else f"Filter the frame first with a place_level predicate on {column!r} naming "
+            "the level to keep, such as Country, then retry with that result's frame_ref."
+        )
         return cls(
             code=ToolErrorCode.PLACE_LEVELS_MIXED,
             message=(
@@ -1603,12 +1611,10 @@ class ToolRefusal:
                 "regions, World Bank groups, countries and their subdivisions side by side, "
                 "and ranking or summing them together counts a place beside the places inside "
                 "it. A type outside those levels, such as Place or ProvisionalNode, names no "
-                "level, and no level kept leaves the places that carry it alone. Repeat the "
-                "call with place_level set to the level to keep, for example "
-                'place_level="Country".'
+                f"level, and no level kept leaves the places that carry it alone. {keep_one_level}"
             ),
             fix={"column": column, "types": list(types)}
-            | ({} if level is None else {"place_level": level}),
+            | ({} if level is None or not takes_place_level else {"place_level": level}),
         )
 
     @classmethod
@@ -1625,6 +1631,21 @@ class ToolRefusal:
                 "then retry with the anchor_key and the periods it gives."
             ),
             fix={"detail": detail, **(context or {})},
+        )
+
+    @classmethod
+    def latest_year_unresolved(cls, *, fix: Mapping[str, Any]) -> Self:
+        """`rolling_anchor_unresolved` for a call that stated a relative year, which
+        has no `anchor_key` to resolve and retry with. `fix` is the runner's, whose
+        `detail` names the check that failed."""
+        return cls(
+            code=ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED,
+            message=(
+                f"The latest year of the data is not established ({fix.get('detail')}), so "
+                "a year counted from it cannot be worked out. State the periods as fixed "
+                "years instead."
+            ),
+            fix=dict(fix),
         )
 
     @classmethod

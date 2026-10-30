@@ -33,12 +33,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from common.echoed_text import truncate_value
 from common.time_grain import span_label
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import UnitCell
 
 from analysis_mcp.artifact import Exclusion, Interval, Time
-from analysis_mcp.disambiguation import truncate_value
 from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.summary import (
     LIST_CAP,

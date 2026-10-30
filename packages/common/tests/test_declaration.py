@@ -82,24 +82,29 @@ def test_a_ref_that_cannot_be_inlined_refuses_naming_its_pointer(
         declared_schema(schema, description="")
 
 
-def test_an_optional_property_is_its_own_type_with_a_default_that_is_not_null() -> None:
+def test_only_a_stated_null_default_drops_the_null_branch() -> None:
+    nested = {"title": {"anyOf": [{"type": "string"}, _NULL]}}
     schema = {
         "type": "object",
         "properties": {
-            "none": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
-            "set": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 3},
-            "two": {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}]},
-            "kept": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "none": {"anyOf": [{"type": "string"}, _NULL], "default": None},
+            "two": {"anyOf": [{"type": "string"}, {"type": "integer"}, _NULL], "default": None},
+            "set": {"anyOf": [{"type": "integer"}, _NULL], "default": 3},
+            "patch": {"type": "object", "properties": nested},
+            "kept": {"anyOf": [{"type": "string"}, _NULL]},
         },
         "required": ["kept"],
     }
 
     assert declared_schema(schema, description="")["properties"] == {
         "none": {"type": "string"},
-        "set": {"type": "integer", "default": 3},
         "two": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+        # Omitted means 3, so null means something else.
+        "set": {"anyOf": [{"type": "integer"}, _NULL], "default": 3},
+        # No default: omission keeps a stored value and null clears it.
+        "patch": {"type": "object", "properties": nested},
         # Required: null is a value the caller must be able to send.
-        "kept": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "kept": {"anyOf": [{"type": "string"}, _NULL]},
     }
 
 
@@ -196,22 +201,21 @@ class _Window(BaseModel):
     start: int
 
 
-async def test_a_hidden_argument_is_unlisted_and_still_parses() -> None:
+async def test_an_explicit_null_still_parses_where_the_schema_lists_no_null() -> None:
     received: list[Any] = []
 
     def read(
         window: Annotated[_Window | None, Field(description="The window.")] = None,
-        legacy: bool = True,
     ) -> str:
-        received.append((window, legacy))
+        received.append(window)
         return "ok"
 
     mcp = FastMCP("t")
-    mcp.add_tool(declared_tool(Tool.from_function(read), hidden=("legacy",)))
+    mcp.add_tool(declared_tool(Tool.from_function(read)))
 
     async with Client(mcp) as client:
         (tool,) = await client.list_tools()
-        result = await client.call_tool("read", {"legacy": False}, raise_on_error=False)
+        result = await client.call_tool("read", {"window": None}, raise_on_error=False)
 
     assert tool.input_schema["properties"] == {
         "window": {
@@ -222,4 +226,4 @@ async def test_a_hidden_argument_is_unlisted_and_still_parses() -> None:
         }
     }
     assert result.is_error is False
-    assert received == [(None, False)]
+    assert received == [None]

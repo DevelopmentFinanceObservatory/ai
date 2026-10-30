@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any, cast, override
 
 import httpx2
+import jsonschema
 import langfuse
 import pytest
 import tiktoken
@@ -929,9 +930,9 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
 
 # The most o200k tokens the public tool list may cost as a client hands it to its
 # model (the compact JSON of each tool's name, description and input schema). Every
-# client pays it on every turn. The bound is the measured count, 17,878, rounded up
+# client pays it on every turn. The bound is the measured count, 18,018, rounded up
 # to the next 500. The list must stay within 20,000. Lower the bound as it shrinks.
-_PUBLIC_LIST_TOKEN_BOUND = 18_000
+_PUBLIC_LIST_TOKEN_BOUND = 18_500
 
 
 async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
@@ -975,7 +976,7 @@ async def test_the_public_list_stays_within_its_token_bound(
 def _schema_faults(node: object, path: str = "") -> Iterator[str]:
     """Where `node`, a JSON schema, holds what a client's model reads as noise or
     drops: a `$comment`, `$ref` or `$defs`, an empty `required`, or an `anyOf` with
-    a null branch."""
+    a null branch beside a `default` of null, where null says what omission says."""
     if isinstance(node, list):
         for index, item in enumerate(node):
             yield from _schema_faults(item, f"{path}[{index}]")
@@ -988,13 +989,18 @@ def _schema_faults(node: object, path: str = "") -> Iterator[str]:
     if node.get("required") == []:
         yield f"{path}/required"
     branches = node.get("anyOf")
-    if isinstance(branches, list) and {"type": "null"} in branches:
+    if (
+        isinstance(branches, list)
+        and {"type": "null"} in branches
+        and "default" in node
+        and node["default"] is None
+    ):
         yield f"{path}/anyOf"
     for key, value in node.items():
         yield from _schema_faults(value, f"{path}/{key}")
 
 
-async def test_no_public_schema_holds_noise_or_a_nullable_branch(
+async def test_no_public_schema_holds_noise_or_a_redundant_null_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     faults = {
@@ -1004,6 +1010,17 @@ async def test_no_public_schema_holds_noise_or_a_nullable_branch(
     }
 
     assert faults == {}
+
+
+async def test_the_public_write_component_takes_a_patch_that_clears_a_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = {tool.name: tool for tool in await _public_list(monkeypatch)}
+
+    jsonschema.validate(
+        {"intent": {"title": None}, "component_id": "cmp_existing", "write_token": "cmw_existing"},
+        tools["write_component"].input_schema,
+    )
 
 
 # The harness's tools and arguments, and the tools the merged ones replaced, none of

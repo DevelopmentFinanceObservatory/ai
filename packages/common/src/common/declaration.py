@@ -2,14 +2,17 @@
 
 Pydantic derives a tool's schema from its signature with developer-facing
 parts a client pays for on every turn: definitions stated under `$defs` and
-referred to by `$ref`, an `anyOf: [X, {"type": "null"}]` on every optional
-argument, and sentences the tool description already says. `declared_schema`
-returns the schema with:
+referred to by `$ref`, an `anyOf: [X, {"type": "null"}]` on every argument
+defaulting to null, and sentences the tool description already says.
+`declared_schema` returns the schema with:
 
 1. every `$comment` removed;
 2. every empty `required: []` removed;
-3. each optional property written as its own type, keeping a non-null
-   `default`, since an absent optional property already means null;
+3. each optional property that states `default: null` written as its own
+   type, since that default says an absent property already means null. Every
+   other nullable property keeps its null branch, as in a presentation patch,
+   whose fields state no default because omitting one keeps the stored value
+   and null clears it;
 4. each sentence of seven words or more kept once across the description and
    the schema, the first occurrence staying, in the description when it is
    there. Sentences compare with whitespace collapsed, since a description
@@ -25,7 +28,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from fastmcp.tools import Tool
@@ -41,17 +44,9 @@ _SENTENCE_BREAK = re.compile(r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<=[.!?])\s+")
 _MIN_WORDS = 7
 
 
-def declared_tool(tool: Tool, *, hidden: Iterable[str] = ()) -> Tool:
-    """`tool` with its parameters replaced by `declared_schema`, less `hidden`.
-
-    A hidden argument stays in the function signature, so a call that sends
-    it still parses. The declared schema no longer offers it. It is dropped
-    before sentences are compared, so no listed sentence gives way to it.
-    """
-    parameters = copy.deepcopy(tool.parameters)
-    for name in hidden:
-        del parameters["properties"][name]
-    tool.parameters = declared_schema(parameters, description=tool.description or "")
+def declared_tool(tool: Tool) -> Tool:
+    """`tool` with its parameters replaced by `declared_schema`."""
+    tool.parameters = declared_schema(tool.parameters, description=tool.description or "")
     return tool
 
 
@@ -123,10 +118,12 @@ def _drop_comment_and_empty_required(node: Schema) -> None:
 
 
 def _collapse_optional_nullables(node: Schema) -> None:
-    """Replace each optional property's `anyOf: [X, null]` with X.
+    """Replace `anyOf: [X, null]` with X on each optional property that states
+    `default: null`.
 
     A required property keeps its null branch, since there null is a value
-    the caller has to be able to send.
+    the caller has to be able to send. So does a property with no default or
+    another one, where null and omission differ.
     """
     properties = node.get("properties")
     if not isinstance(properties, dict):
@@ -138,12 +135,14 @@ def _collapse_optional_nullables(node: Schema) -> None:
             and isinstance(prop, dict)
             and isinstance(prop.get("anyOf"), list)
             and _NULL in prop["anyOf"]
+            and "default" in prop
+            and prop["default"] is None
         ):
             properties[name] = _without_null(prop)
 
 
 def _without_null(prop: Schema) -> Schema:
-    """`prop` without its null branch and without a `default` of null.
+    """`prop` without its null branch and its `default` of null.
 
     Where both the property and its one remaining branch carry a description,
     the property's own wins. It is written for this argument, and the
@@ -151,8 +150,6 @@ def _without_null(prop: Schema) -> Schema:
     """
     branches = [branch for branch in prop["anyOf"] if branch != _NULL]
     outer = {key: value for key, value in prop.items() if key not in ("anyOf", "default")}
-    if prop.get("default") is not None:
-        outer["default"] = prop["default"]
     if len(branches) > 1:
         return {**outer, "anyOf": branches}
     return {**branches[0], **outer}

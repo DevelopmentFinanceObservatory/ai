@@ -1562,17 +1562,6 @@ def _without_unserved_flow_types(
     return True
 
 
-def _negotiate_unserved_columns(
-    *,
-    options: dict[str, Any],
-    removable: set[str],
-    spec_id: str,
-    refused: UpstreamError,
-) -> bool:
-    """Narrow policy-added metadata after one complete column refusal."""
-    return _without_unserved_flow_types(options, refused, removable=removable)
-
-
 @dataclass(frozen=True, kw_only=True)
 class RootMint:
     """A root frame `mint_recorded_root` confirmed in the materialisation store.
@@ -1753,9 +1742,7 @@ async def _mint_recorded_response(
                 raise_upstream_error=True,
             )
         except UpstreamError as exc:
-            if attempt == 0 and _negotiate_unserved_columns(
-                options=options, refused=exc, removable=removable, spec_id=spec_id
-            ):
+            if attempt == 0 and _without_unserved_flow_types(options, exc, removable=removable):
                 request_body["options"] = options
                 continue
             if identity is None and exc.code == "spec_not_found":
