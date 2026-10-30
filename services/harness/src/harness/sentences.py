@@ -800,6 +800,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "operation_uncovered",
             "derived_input_ordinal",
             "derived_input_unrecoverable",
+            "rolling_reanchor_unavailable",
             "derived_input_unusable",
             "rendering_not_recorded",
             "join_output_collision",

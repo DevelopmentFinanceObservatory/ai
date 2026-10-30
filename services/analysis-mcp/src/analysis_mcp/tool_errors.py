@@ -296,6 +296,7 @@ class ToolErrorCode(StrEnum):
     PLACE_LEVELS_MIXED = "place_levels_mixed"
     ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
     ROLLING_GRAIN_UNSUPPORTED = "rolling_grain_unsupported"
+    ROLLING_REANCHOR_UNAVAILABLE = "rolling_reanchor_unavailable"
     SERVICE_UNAVAILABLE = "service_unavailable"
     RENDERING_NOT_RECORDED = "rendering_not_recorded"
     UPSTREAM_ERROR = "upstream_error"
@@ -359,6 +360,7 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.PLACE_LEVELS_MIXED: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.ROLLING_REANCHOR_UNAVAILABLE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.SERVICE_UNAVAILABLE: RetryMode.RETRY_AFTER_DELAY,
     ToolErrorCode.RENDERING_NOT_RECORDED: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.UPSTREAM_ERROR: RetryMode.RETRY_AFTER_DELAY,
@@ -1633,6 +1635,23 @@ class ToolRefusal:
                 "State the periods as fixed years instead."
             ),
             fix={"periods": list(periods)},
+        )
+
+    @classmethod
+    def rolling_reanchor_unavailable(cls, *, frame_refs: Sequence[Mapping[str, str]]) -> Self:
+        """The derived (`ops_`) inputs `frame_refs` hold no stored recipe, so the
+        runner cannot compute them again inside this call's tree, where every
+        rolling year follows one latest year."""
+        named = ", ".join(f"{ref['spec_id']}/{ref['content_version']}" for ref in frame_refs)
+        return cls(
+            code=ToolErrorCode.ROLLING_REANCHOR_UNAVAILABLE,
+            message=(
+                f"The derived frame {named} holds no stored recipe, so this call cannot "
+                "compute it again under one latest year with its other inputs. Make it "
+                "again: call get_data for the data it came from, repeat the verb calls "
+                "that made it, and retry with the frame_ref the last one returns."
+            ),
+            fix={"frame_refs": [dict(ref) for ref in frame_refs], "tool": "get_data"},
         )
 
     @classmethod

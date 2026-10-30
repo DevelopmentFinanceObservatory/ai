@@ -63,6 +63,7 @@ from analysis_mcp.runner_client import runner_holder
 from analysis_mcp.settings import Settings
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.verbs import (
+    FOLLOWS_TREE,
     REBUILD_LOST_FRAMES,
     aggregate,
     compare,
@@ -219,16 +220,17 @@ mcp.add_tool(
 
 # The public form of each tool the combined server lists differently from this
 # mount (`common.public_shape`). A rolling call needs `resolve_anchor`'s
-# `anchor_key`, and only the harness calls `resolve_anchor`. Every public verb
-# rebuilds a frame the runner no longer holds.
-_REBUILDS = PublicShape(hidden=frozenset({REBUILD_LOST_FRAMES}), forced={REBUILD_LOST_FRAMES: True})
-_ROLLING_REBUILDS = PublicShape(
-    hidden=frozenset({"rolling", "anchor_key", REBUILD_LOST_FRAMES}),
-    forced={REBUILD_LOST_FRAMES: True},
+# `anchor_key`, and only the harness calls `resolve_anchor`. Every public verb lets
+# a derived input's rolling years follow the call's tree, and rebuilds a frame the
+# runner no longer holds.
+_PUBLIC_FLAGS = {FOLLOWS_TREE: True, REBUILD_LOST_FRAMES: True}
+_PUBLIC_VERB = PublicShape(hidden=frozenset(_PUBLIC_FLAGS), forced=_PUBLIC_FLAGS)
+_PUBLIC_ROLLING_VERB = PublicShape(
+    hidden=frozenset({"rolling", "anchor_key", *_PUBLIC_FLAGS}), forced=_PUBLIC_FLAGS
 )
 PUBLIC_SHAPES: Mapping[str, PublicShape] = {
-    **dict.fromkeys(("aggregate", "compare", "share_of", "join"), _REBUILDS),
-    **dict.fromkeys(("growth", "rank", "filter"), _ROLLING_REBUILDS),
+    **dict.fromkeys(("aggregate", "compare", "share_of", "join"), _PUBLIC_VERB),
+    **dict.fromkeys(("growth", "rank", "filter"), _PUBLIC_ROLLING_VERB),
 }
 
 

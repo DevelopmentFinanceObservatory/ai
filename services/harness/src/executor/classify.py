@@ -222,6 +222,9 @@ STOP_CODES = frozenset(
         "join_output_collision",
         "derived_input_unusable",
         "derived_input_unrecoverable",
+        # A derived input with no stored recipe, which the runner cannot compute
+        # again inside the call's tree. Making it again is a different plan.
+        "rolling_reanchor_unavailable",
         "derived_input_ordinal",
         "quotient_of_side_unit_unsupported",
         # A verb read a frame whose mint options hold one dfo-apis' analysis

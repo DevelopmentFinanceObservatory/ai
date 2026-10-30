@@ -68,10 +68,13 @@ from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import (
     ANCHOR_KEY_PATTERN,
     MAX_RANK_LIMIT,
+    RELATIVE_YEAR_ON_RUNNER_ONLY,
     FrameRefArgument,
     PinnedUnit,
     RankOpSpec,
+    RelativeYear,
     WindowRolling,
+    WindowYear,
     with_anchor_key,
 )
 from analysis_mcp.rolling_tool import anchored_input
@@ -237,7 +240,7 @@ async def _resolve_measured_frame(
 
 
 @holds_input_rows
-async def rank(
+async def rank(  # noqa: PLR0911 -- one refusal per check the call can fail
     frame_ref: Annotated[
         FrameRefArgument,
         Field(
@@ -265,19 +268,23 @@ async def rank(
         ),
     ] = None,
     window_start: Annotated[
-        str | None,
+        WindowYear | None,
         Field(
             default=None,
-            pattern=r"^\d{4}$",
-            description="The window's first calendar year. Must be set together with window_end.",
+            description=(
+                "The window's first calendar year. Must be set together with window_end. "
+                "Or {anchor: 'latest', offset: -9} to follow the data."
+            ),
         ),
     ] = None,
     window_end: Annotated[
-        str | None,
+        WindowYear | None,
         Field(
             default=None,
-            pattern=r"^\d{4}$",
-            description="The window's last calendar year. Must be set together with window_start.",
+            description=(
+                "The window's last calendar year. Must be set together with window_start. "
+                "Or {anchor: 'latest', offset: 0} to follow the data."
+            ),
         ),
     ] = None,
     unit: Annotated[
@@ -379,6 +386,9 @@ async def rank(
     full calendar range, falls below the configured coverage floor. A
     period where no entity has any data at all is invisible to this check.
 
+    A window year given as {anchor: 'latest', offset: n} follows the data
+    as growth's window years do.
+
     Collapsed, every output row's `time_period` is the extent of the
     periods the window holds, such as `2018/2022`, or that one period when
     the window holds only one. A frame whose rows carry one span, such as
@@ -441,6 +451,10 @@ async def rank(
     )
     if isinstance(op_spec, ToolResult):
         return op_spec
+    if isinstance(op_spec.window_start, RelativeYear) or isinstance(
+        op_spec.window_end, RelativeYear
+    ):
+        return to_tool_result(ToolRefusal.op_spec_invalid(detail=RELATIVE_YEAR_ON_RUNNER_ONLY))
 
     # `rank_by` is canonicalised before the engine runs. See
     # `aggregate_tool.aggregate`'s identical comment on its own `group_by`.

@@ -58,12 +58,14 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import (
     ANCHOR_KEY_PATTERN,
+    RELATIVE_YEAR_ON_RUNNER_ONLY,
     CategoryMatchPredicate,
     FilterOpSpec,
     FilterRolling,
     FrameRefArgument,
     OrderedThresholdPredicate,
     PlaceLevelPredicate,
+    RelativeYear,
     with_anchor_key,
 )
 from analysis_mcp.rolling_tool import anchored_input
@@ -160,7 +162,7 @@ def _filter_step(op_spec: FilterOpSpec, result: FilterResult, *, trace: Trace) -
 
 
 @holds_input_rows
-async def filter_verb(
+async def filter_verb(  # noqa: PLR0911 -- one refusal per check the call can fail
     frame_ref: Annotated[
         FrameRefArgument,
         Field(
@@ -245,6 +247,9 @@ async def filter_verb(
     `category_match` on the exact span string keeps its rows, and a predicate
     on any other column filters as usual.
 
+    A `time_period` threshold's value may be {anchor: 'latest', offset: n},
+    which follows the data as growth's window years do.
+
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.
         predicates: Row-value predicates, applied as a conjunction. Empty keeps every row.
@@ -265,6 +270,12 @@ async def filter_verb(
     )
     if isinstance(op_spec, ToolResult):
         return op_spec
+    if any(
+        isinstance(predicate, OrderedThresholdPredicate)
+        and isinstance(predicate.value, RelativeYear)
+        for predicate in op_spec.predicates
+    ):
+        return to_tool_result(ToolRefusal.op_spec_invalid(detail=RELATIVE_YEAR_ON_RUNNER_ONLY))
 
     # Canonicalised before the engine runs. See
     # `aggregate_tool.aggregate`'s identical comment on its own `group_by`.

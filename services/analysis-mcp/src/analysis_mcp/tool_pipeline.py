@@ -306,6 +306,7 @@ async def run_on_runner(
     anchor_key: str | None = None,
     place_level: PlaceLevel | None = None,
     newest: Collection[str] = (),
+    follows_tree: bool = False,
     rebuild_lost_frames: bool = False,
     refine: Callable[[ToolRefusal], ToolRefusal] | None = None,
 ) -> ToolResult:
@@ -313,8 +314,9 @@ async def run_on_runner(
     A rolling call's `anchor_key` sends the roots of its anchor record beside the
     tree (`runner_tree.verb_tree`), and its answer is checked against them
     (`runner_client.run_tree`). `place_level` filters each input to that level
-    first. `newest` are the Specs passed as bare `spec_id`s, held in `op_spec`
-    under `runner_tree.newest_ref` and read at their newest version. With
+    first. `follows_tree` lets a derived input's rolling years follow the call's
+    tree (`run_tree`). `newest` are the Specs passed as bare `spec_id`s, held in
+    `op_spec` under `runner_tree.newest_ref` and read at their newest version. With
     `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring);
     without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
     refusal before it is returned.
@@ -334,7 +336,12 @@ async def run_on_runner(
         )
         if isinstance(tree, ToolRefusal):
             return tree
-        return await run_tree(tree.node, anchor=tree.anchor, refs_by_root=tree.refs_by_root)
+        return await run_tree(
+            tree.node,
+            anchor=tree.anchor,
+            refs_by_root=tree.refs_by_root,
+            follows_tree=follows_tree,
+        )
 
     answer = await run()
     rebuilt: dict[Pair, _Rebuilt] = {}

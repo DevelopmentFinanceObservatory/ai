@@ -431,11 +431,48 @@ _CALL_BY_VERB: Mapping[str, type[_Call]] = {
 }
 
 
+class ResolvedPeriod(BaseModel):
+    """One relative period of a computed recipe and the literal it was filled
+    with, as the answer's `resolved_periods` lists it."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    offset: int = Field(le=0)
+    period: str
+
+
+class RecomputedInput(BaseModel):
+    """A derived input the runner computed again under the call's latest year:
+    its pair, its top verb, and the latest year it took alone, `None` when its
+    manifest could not be read."""
+
+    model_config = ConfigDict(frozen=True)
+
+    spec_id: str
+    content_version: str
+    verb: str | None
+    latest: str | None
+
+
+class Rolling(BaseModel):
+    """The latest year a call's relative periods were filled from: `latest`,
+    each relative period with its literal (`periods`, by offset), and the
+    derived inputs computed again under `latest` (`recomputed`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    latest: str
+    periods: tuple[ResolvedPeriod, ...]
+    recomputed: tuple[RecomputedInput, ...] = ()
+
+
 class VerbSummary(BaseModel):
     """A verb call's summary, from which its digest and its `VerbResult` are built.
 
     `result` is the verb's `*Facts`. `derived` is the derived marker's detail
     (`frame_ref_resolution.DerivedMarker`), `None` when the result carries none.
+    `rolling` is the latest year the call's relative periods were filled from,
+    which the answer states beside the summary, `None` for a call with none.
     """
 
     model_config = ConfigDict(extra="ignore", frozen=True, arbitrary_types_allowed=True)
@@ -456,6 +493,7 @@ class VerbSummary(BaseModel):
     execution_identity: ExecutionIdentity
     derived: dict[str, Any] | None = None
     result: Any
+    rolling: Rolling | None = None
 
     @classmethod
     def parse(cls, summary: Mapping[str, Any]) -> VerbSummary:

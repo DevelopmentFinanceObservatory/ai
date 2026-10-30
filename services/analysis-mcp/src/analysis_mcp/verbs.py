@@ -13,8 +13,11 @@ of place on the runner (`runner_tree.verb_tree`). `compare`
 takes `sum_of`'s form under `operation="sum"`, and `share_of` takes
 `quotient_of`'s under `operation="quotient"`: the form picks the op-spec, so each
 keeps its own runner call, result and refusals. A share whose sides hold two
-units refuses with `fix` naming the quotient form. A rolling
-`growth`, `rank` or `filter` needs an `anchor_key`, checked by
+units refuses with `fix` naming the quotient form. A window bound or a
+`time_period` threshold given as a relative year (`op_spec.RelativeYear`) goes
+to the runner as it is, with no overlay and no anchor record, and the runner
+fills it from the latest year of the call's tree. A `growth`, `rank` or
+`filter` stating a `rolling` overlay needs an `anchor_key`, checked by
 `op_spec.with_anchor_key`. The key reaches no request. The call sends the roots
 of the anchor record it names as `anchor_roots`, and the runner checks each
 rolling literal against the latest period it finds over them
@@ -121,6 +124,22 @@ def frame_ref_incomplete(arguments: Arguments) -> ToolRefusal | None:
     return None
 
 
+# The argument that lets a derived input's rolling years follow the call's tree
+# (`runner_client.run_tree`). The public server forces it on
+# (`server.PUBLIC_SHAPES`); the harness never sets it, so its requests and the
+# latest years of its anchor records are as they were.
+FOLLOWS_TREE = "rolling_follows_tree"
+_FOLLOWS_TREE_TYPE = Annotated[
+    bool,
+    Field(
+        description=(
+            "True computes each derived input's rolling years again under this call's one "
+            "latest year."
+        )
+    ),
+]
+
+
 def _held_newest(arguments: Arguments) -> tuple[dict[str, Any], tuple[str, ...]]:
     """`arguments` with each bare `spec_` frame argument held as `newest_ref`, and
     the Specs those name, each once."""
@@ -159,18 +178,19 @@ def _on_runner(
     place_level_description: str | None = None,
 ) -> Tool:
     """The registered tool for `in_process`. It keeps that tool's signature and
-    docstring, with `REBUILD_LOST_FRAMES` added, builds its op-spec with `build` from
-    the bound arguments, and computes it on the runner. `refine` rewrites a runner
-    refusal given the call's arguments. `place_level_description`, when given, adds
-    `place_level` to the signature with that description."""
+    docstring, with `FOLLOWS_TREE` and `REBUILD_LOST_FRAMES` added, builds its op-spec
+    with `build` from the bound arguments, and computes it on the runner. `refine`
+    rewrites a runner refusal given the call's arguments. `place_level_description`,
+    when given, adds `place_level` to the signature with that description."""
     signature = inspect.signature(in_process)
-    rebuild = inspect.Parameter(
-        REBUILD_LOST_FRAMES,
-        inspect.Parameter.KEYWORD_ONLY,
-        default=False,
-        annotation=_REBUILD_LOST_FRAMES_TYPE,
-    )
-    signature = signature.replace(parameters=[*signature.parameters.values(), rebuild])
+    flags = [
+        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=False, annotation=kind)
+        for name, kind in (
+            (FOLLOWS_TREE, _FOLLOWS_TREE_TYPE),
+            (REBUILD_LOST_FRAMES, _REBUILD_LOST_FRAMES_TYPE),
+        )
+    ]
+    signature = signature.replace(parameters=[*signature.parameters.values(), *flags])
 
     @functools.wraps(in_process)
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:
@@ -191,17 +211,21 @@ def _on_runner(
             anchor_key=arguments.get("anchor_key"),
             place_level=place_level,
             newest=newest,
+            follows_tree=arguments[FOLLOWS_TREE],
             rebuild_lost_frames=arguments[REBUILD_LOST_FRAMES],
             refine=None if refine is None else functools.partial(refine, arguments),
         )
 
-    listed = signature
-    annotations = {**in_process.__annotations__, REBUILD_LOST_FRAMES: _REBUILD_LOST_FRAMES_TYPE}
+    listed = [*signature.parameters.values()]
+    annotations = {
+        **in_process.__annotations__,
+        **{flag.name: flag.annotation for flag in flags},
+    }
     if place_level_description is not None:
         place_level = _place_level(place_level_description)
-        listed = signature.replace(parameters=[*signature.parameters.values(), place_level])
+        listed.insert(-len(flags), place_level)
         annotations["place_level"] = place_level.annotation
-    tool.__signature__ = listed  # ty: ignore[unresolved-attribute]  # inspect reads it
+    tool.__signature__ = signature.replace(parameters=listed)  # ty: ignore[unresolved-attribute]  # inspect reads it
     tool.__annotations__ = annotations
     return tool
 

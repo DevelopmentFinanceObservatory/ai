@@ -198,7 +198,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         inputs=(_FRAME_IN,),
         outputs=(_FRAME_OUT,),
         implementation_version="1",
-        input_schema_hash="b82ce5b96ed177c83bd07afc04ee8a45e29f543624b04d5d98af5c8762d83b91",
+        input_schema_hash="56c61f132049b0dce008fc704292d32e74f3ee36c61c23420c3d2fd147b55475",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -209,7 +209,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `change`, `rolling` and `anchor_key` parameters.
-        input_schema_hash="19c06cefcde43786f6af141cf1323ff5ff14b82e9902bee38840897463d2be27",
+        input_schema_hash="642a4d4797583789ebe5f77acfdddfec4c29405d7c434b8e29c90790572308c2",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -219,7 +219,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         inputs=(_FRAME_IN, ToolInput(parameter="right_frame_ref", artifact=ArtifactKind.FRAME_REF)),
         outputs=(_FRAME_OUT,),
         implementation_version="1",
-        input_schema_hash="35ffce457e65d78123fa71ebfa85dedbc3bac932db7a11ba5709e66b8689fc3d",
+        input_schema_hash="950474d58d784dae44a5acec0c708ce68ebfc5f8fdded7c8f2bbab7d4e5ba9de",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -230,7 +230,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `per_period`, `limit`, `rolling` and `anchor_key` parameters.
-        input_schema_hash="0f29e23de6a0ff74d41599ed10e2f241d8fca3525b49b82b18a80c378067eace",
+        input_schema_hash="8fcc3652181830ae7eefd1a3dd528be5e4a9c26c8db8d64c3627a5146d2060a2",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -244,7 +244,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
-        input_schema_hash="7347407c708749ff42d09b9878e3d19194009c379d52a76f258a8d6d85e9520e",
+        input_schema_hash="fa180a17e8e3074802a5bf15541860b60bd180209a3ff40424509b679b6bed79",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -257,7 +257,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         ),
         outputs=(_FRAME_OUT,),
         implementation_version="1",
-        input_schema_hash="bc22d4e9fdebfd4d780ada27c1b9cf77f433c92e3d85b494a1738abef1c276dc",
+        input_schema_hash="0d064813f5a442a61882d27e902a8fad47d57b37f0b64c1951d381814fdb6922",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -267,7 +267,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         inputs=(_FRAME_IN, ToolInput(parameter="right_frame_ref", artifact=ArtifactKind.FRAME_REF)),
         outputs=(_FRAME_OUT,),
         implementation_version="1",
-        input_schema_hash="54e3629e6ea990fd05d00a6f89c8a85d9d417fcdd1eebd628b7cd08e508375e9",
+        input_schema_hash="c519ee68eb55a5419fde0ca46ec53bc5365f36197a0aa426240c6200fc010408",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
@@ -279,7 +279,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_level` predicate, the 21-character period operand, a
         # threshold's `rolling`, and the `rolling` and `anchor_key` parameters.
-        input_schema_hash="284a569abd0e913aaf18eabb7326297a546b8f24715f4926500cec1b0d78cb77",
+        input_schema_hash="f543182d432e6fa8299675a40ecd23cadcbbcbfaf2062c7bbea5b4d751e9b711",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
         empty_is_an_answer=True,
     ),
@@ -290,7 +290,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         inputs=(_FRAME_IN, ToolInput(parameter="right_frame_ref", artifact=ArtifactKind.FRAME_REF)),
         outputs=(_FRAME_OUT,),
         implementation_version="1",
-        input_schema_hash="ebf5be7efebf1ee76d2fab81280de589e42dcfef0512436c5ab9ed08a5869475",
+        input_schema_hash="bbdcd181b86ad0fd4d0b6075f355fc6ebd5144c1c5102d266f053c37436b5809",
         output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     # Finds the latest period a workflow's rolling steps follow. It implements no

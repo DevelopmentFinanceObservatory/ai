@@ -60,6 +60,8 @@ from analysis_mcp.summary import (
     PooledParties,
     QuotientOfFacts,
     RankFacts,
+    RecomputedInput,
+    Rolling,
     ShareOfFacts,
     SumOfFacts,
     VerbSummary,
@@ -1455,10 +1457,41 @@ def render_filter_digest(
     return "\n\n".join(sections)
 
 
+def _relative_name(offset: int) -> str:
+    return "latest" if offset == 0 else f"latest{offset}"
+
+
+def _recomputed_name(recomputed: RecomputedInput) -> str:
+    pair = f"{recomputed.spec_id}, {recomputed.content_version}"
+    named = pair if recomputed.verb is None else f"{recomputed.verb} {pair}"
+    return named if recomputed.latest is None else f"{named} (alone, latest {recomputed.latest})"
+
+
+def _rolling_section(rolling: Rolling) -> str:
+    """The latest year a call's relative periods were filled from, each period's
+    literal, and each derived input computed again under that year."""
+    periods = ", ".join(
+        f"{_relative_name(period.offset)} is {period.period}" for period in rolling.periods
+    )
+    text = (
+        f"Rolling: the latest year is {rolling.latest}, the newest year at least half of "
+        f"the series counted hold; {periods}."
+    )
+    if rolling.recomputed:
+        inputs = "; ".join(_recomputed_name(recomputed) for recomputed in rolling.recomputed)
+        text += (
+            f" This call computed its rolling inputs again under the latest year "
+            f"{rolling.latest}, so their values here can differ from their own results: "
+            f"{inputs}."
+        )
+    return text
+
+
 def render_summary_digest(summary: VerbSummary) -> str:
     """The digest of a verb call the runner `summary` states, rendered by its
     verb's `render_*_digest` from the summary's facts, canonical parameters,
-    identity, derived marker, exclusions and time."""
+    identity, derived marker, exclusions and time, with the latest year its
+    relative periods were filled from (`_rolling_section`) before the identity."""
     parameters = summary.parameters
     result = summary.result
     render: Callable[..., str]
@@ -1495,7 +1528,7 @@ def render_summary_digest(summary: VerbSummary) -> str:
             render = render_join_digest
         case _:
             raise TypeError(f"no digest renders a {type(result).__name__}")
-    return render(
+    digest = render(
         result=result,
         **own,
         op_spec_hash=summary.spec_id,
@@ -1505,3 +1538,8 @@ def render_summary_digest(summary: VerbSummary) -> str:
         exclusions=summary.exclusions,
         time=summary.time,
     )
+    if summary.rolling is None:
+        return digest
+    # Before the identity block, the one section every digest ends with.
+    head, _, identity = digest.rpartition("\n\n")
+    return "\n\n".join([head, _rolling_section(summary.rolling), identity])
