@@ -17,8 +17,8 @@ code. A derived frame (`ops_`) exports its own columns, which carry no labels. A
 pair it resolved; the result names that pair. Any other bare id refuses
 `frame_ref_incomplete`.
 
-dfo-apis answers `snapshot_not_found`, `artifact_expired`, `spec_not_found` or `not_found`
-for a frame it cannot export, and the tool refuses `frame_unavailable`. It never exports
+dfo-apis answers `snapshot_not_found`, `artifact_expired` or `spec_not_found` for a frame
+it cannot export, and the tool refuses `frame_unavailable`. It never exports
 another version in place of the one named.
 """
 
@@ -49,9 +49,7 @@ _DERIVED_PREFIX = "ops_"
 _FETCHED_PREFIX = "spec_"
 
 # The codes dfo-apis answers for a frame it cannot find or read back.
-_FRAME_UNAVAILABLE_CODES = frozenset(
-    {"snapshot_not_found", "artifact_expired", "spec_not_found", "not_found"}
-)
+_FRAME_UNAVAILABLE_CODES = frozenset({"snapshot_not_found", "artifact_expired", "spec_not_found"})
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -149,6 +147,14 @@ def _refusal(exc: UpstreamError, *, frame: ExportFrameRef, export_format: str) -
             refusal = ToolRefusal.provenance_unavailable(spec_id=frame["spec_id"])
         case "licence_not_redistributable":
             refusal = ToolRefusal.licence_not_redistributable(detail=exc.detail)
+        case "not_found":
+            # The exports door never answers `not_found`, so one from its path means
+            # the deployment serves no exports route.
+            refusal = ToolRefusal.capability_unavailable(
+                detail="this deployment of dfo-apis serves no exports route",
+                trace_id=exc.trace_id,
+                capability_version=exc.capability_version,
+            )
         case code if code in _FRAME_UNAVAILABLE_CODES:
             refusal = ToolRefusal.frame_unavailable(spec_id=frame["spec_id"], upstream_code=code)
         case "service_unavailable" if exc.retry_after_s is not None:

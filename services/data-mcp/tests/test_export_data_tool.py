@@ -313,7 +313,6 @@ async def test_a_refused_prepare_maps_to_the_envelope(
         (404, "snapshot_not_found"),
         (410, "artifact_expired"),
         (404, "spec_not_found"),
-        (404, "not_found"),
     ],
 )
 @pytest.mark.parametrize(
@@ -348,3 +347,16 @@ async def test_a_frame_the_platform_cannot_export_refuses_frame_unavailable(
     )
     # No fallback to another version: the one prepare is the only export call.
     assert [r.method for r in requests if r.url.path == "/api/datasets/exports"] == ["POST"]
+
+
+async def test_a_prepare_route_that_answers_not_found_refuses_capability_unavailable() -> None:
+    """A deployment without the exports route answers 404 `not_found` on its path while the
+    Datasets surface is mounted; the frame itself is not in question."""
+    result = await _call(_refusing(404, "not_found"), {"frame_ref": FETCHED})
+
+    envelope = result.structured_content
+    assert envelope is not None
+    assert (envelope["code"], envelope["retry_mode"]) == (
+        "capability_unavailable",
+        "do_not_retry",
+    )
