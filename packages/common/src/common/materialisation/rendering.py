@@ -17,9 +17,10 @@ never named.
   mends it.
 - `RecordUnread`: the store failed the read, which a retry may mend.
 
-A pair dfo-apis resolved a bare `spec_id` to is the dataset version of the default
-rendering, which nobody fetched with `get_data`. `record_bare_read` writes its record,
-so a later call naming that pair finds its rendering stated.
+A pair dfo-apis resolved a bare `spec_id` to is a dataset version read with the default
+enrichment, which nobody fetched with `get_data`. `record_bare_read` writes its record,
+so a later call naming that pair reads what a Spec root reads: the enrichment columns the
+version's roles take, which only dfo-apis can resolve (`root_rendering`).
 """
 
 from __future__ import annotations
@@ -38,11 +39,19 @@ from common.materialisation.holder import get_store
 from common.materialisation.mint_record import MintRecord
 from common.materialisation.store import FrameIntegrityError
 
+# The mint option that asks apis to add the enrichment the version's own role columns take
+# (apis' `MintOptions.enrichment`). apis answers as a mint naming the columns it resolved to,
+# and the manifest's artifact lists them in its `rendering`, so a frame minted with it is
+# named by them (`data_mcp.frame_materialisation.resolved_options`).
+ENRICHMENT = "enrichment"
+DEFAULT_ENRICHMENT = "default"
+
 # The mint options a root is read with: the frame-layout Parquet, its enrichment
 # columns, the party-total cut and the groupby of a breakdown or a sum (dfo-apis
-# `analysis_roots.dataset_root`).
+# `analysis_roots.dataset_root`). `enrichment` is that of a bare read's record, which
+# states no columns.
 ROOT_READ_OPTIONS = frozenset(
-    {"format", "bundle", "layout", "columns", "without_party_totals", "groupby"}
+    {"format", "bundle", "layout", "columns", ENRICHMENT, "without_party_totals", "groupby"}
 )
 
 
@@ -64,14 +73,16 @@ _RECORD_WRITE_TIMEOUT_S = 2.0
 
 
 def root_rendering(record: MintRecord) -> dict[str, Any]:
-    """The rendering of a root read as `record`'s options state."""
+    """The rendering of a root read as `record`'s options state. A rendering with no
+    `columns` takes the default enrichment (dfo-apis `RootRendering.columns`)."""
     rendering: dict[str, Any] = {
         "without_party_totals": record.options.get("without_party_totals") is True,
+    }
+    if record.options.get(ENRICHMENT) != DEFAULT_ENRICHMENT:
         # Sorted and listed once, as dfo-apis keeps a root's columns
         # (`analysis_roots.mint_options`), so the recipe's normal form is the one
         # dfo-apis computes.
-        "columns": sorted(set(record.options.get("columns") or ())),
-    }
+        rendering["columns"] = sorted(set(record.options.get("columns") or ()))
     if (groupby := record.options.get("groupby")) is not None:
         rendering["groupby"] = groupby
     return rendering
@@ -144,17 +155,10 @@ async def frame_rendering(
     return FrameRendering(record=record)
 
 
-async def record_bare_read(spec_id: str, content_version: str, *, logger: logging.Logger) -> None:
-    """Write the mint record of the pair dfo-apis resolved a bare `spec_id` to, in the
-    default rendering. Best effort: the reply stands either way, and a failed write is
-    logged on `logger`, the caller's own. A value that is no pair writes nothing. The
-    store keeps the first record under a pair, so a record `get_data` wrote stands. No
-    frame was read, so the record has no `stat_var_count`."""
-    try:
-        pair = FrameRef(spec_id=spec_id, content_version=content_version)
-    except ValidationError:
-        return
-    record = MintRecord(frame=pair, dataset=pair, options=dict(DEFAULT_MINT_OPTIONS))
+async def write_mint_record(record: MintRecord, *, logger: logging.Logger) -> bool:
+    """Write `record`, reporting whether the store took it within
+    `_RECORD_WRITE_TIMEOUT_S`, for a reply that stands either way. A failed write is
+    logged on `logger`, the caller's own."""
     try:
         async with asyncio.timeout(_RECORD_WRITE_TIMEOUT_S):
             await get_store().put_mint_record(record)
@@ -162,5 +166,23 @@ async def record_bare_read(spec_id: str, content_version: str, *, logger: loggin
         # Broad on purpose, as `frame_rendering` reads it: the store's failures belong
         # to its backend.
         logger.warning(
-            "mint record of %s/%s unstored", pair.spec_id, pair.content_version, exc_info=True
+            "mint record of %s/%s unstored",
+            record.frame.spec_id,
+            record.frame.content_version,
+            exc_info=True,
         )
+        return False
+    return True
+
+
+async def record_bare_read(spec_id: str, content_version: str, *, logger: logging.Logger) -> None:
+    """Write the mint record of the pair dfo-apis resolved a bare `spec_id` to, read with
+    the default enrichment. A value that is no pair writes nothing. The store keeps the
+    first record under a pair, so a record `get_data` wrote stands. No frame was read, so
+    the record has no `stat_var_count`."""
+    try:
+        pair = FrameRef(spec_id=spec_id, content_version=content_version)
+    except ValidationError:
+        return
+    options = {**DEFAULT_MINT_OPTIONS, ENRICHMENT: DEFAULT_ENRICHMENT}
+    await write_mint_record(MintRecord(frame=pair, dataset=pair, options=options), logger=logger)

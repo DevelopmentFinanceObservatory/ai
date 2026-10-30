@@ -473,7 +473,7 @@ async def run_tree(
     the answer's `resolved_periods` were filled from and, under `rolling: "tree"`
     alone, each derived input the runner computed again under another year than
     its own (`_rolling`)."""
-    derived = _derived_refs(refs_by_root)
+    derived = _derived_reads(refs_by_root)
     tree_rolling = follows_tree and bool(derived)
     request: dict[str, Any] = {"tree": node, "latest": False}
     if tree_rolling:
@@ -500,10 +500,13 @@ async def run_tree(
     return summary if rolling is None else summary.model_copy(update={"rolling": rolling})
 
 
-def _derived_refs(refs_by_root: RefsByRoot) -> tuple[FrameRef, ...]:
-    """The derived (`ops_`) frames among the call's inputs."""
+def _derived_reads(refs_by_root: RefsByRoot) -> tuple[FrameRef, ...]:
+    """The derived (`ops_`) frames the request reads, each by the pair it names, which
+    for a rebuilt frame is the replay's and no longer the caller's."""
     return tuple(
-        ref for refs in refs_by_root.values() for ref in refs if ref.spec_id.startswith("ops_")
+        FrameRef(spec_id=spec_id, content_version=content_version)
+        for spec_id, content_version in refs_by_root
+        if spec_id.startswith("ops_")
     )
 
 

@@ -42,7 +42,9 @@ from common.materialisation.mint_record import (
     normal_groupby,
 )
 from common.materialisation.rendering import (
+    DEFAULT_ENRICHMENT,
     DEFAULT_MINT_OPTIONS,
+    ENRICHMENT,
     FrameRendering,
     RecordUnread,
     RenderingUnknown,
@@ -50,6 +52,7 @@ from common.materialisation.rendering import (
     record_bare_read,
     root_rendering,
     unread_options,
+    write_mint_record,
 )
 from common.materialisation.store import (
     FrameExpired,
@@ -68,7 +71,9 @@ from common.materialisation.trace_codec import (
 )
 
 __all__ = [
+    "DEFAULT_ENRICHMENT",
     "DEFAULT_MINT_OPTIONS",
+    "ENRICHMENT",
     "AnchorPopulation",
     "AnchorRecord",
     "AnchorRecordIntegrityError",
@@ -116,4 +121,5 @@ __all__ = [
     "set_store",
     "store_is_set",
     "unread_options",
+    "write_mint_record",
 ]

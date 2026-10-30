@@ -4,6 +4,7 @@ answer maps to."""
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
@@ -29,6 +30,7 @@ from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
     MintRecord,
+    rendering,
     set_store,
 )
 from runner_replay import REPLIES_PATH
@@ -424,6 +426,14 @@ def _record(options: dict[str, Any]) -> MintRecord:
             },
         ),
         (
+            _record({"format": "parquet", "enrichment": "default"}),
+            {
+                "spec_id": _SPEC,
+                "content_version": _DATASET_CV,
+                "rendering": {"without_party_totals": False},
+            },
+        ),
+        (
             _record({"format": "parquet", "groupby": _SUM}),
             {
                 "spec_id": _SPEC,
@@ -485,6 +495,7 @@ def _record(options: dict[str, Any]) -> MintRecord:
     ids=[
         "no-mint-record",
         "mint-record",
+        "bare-read-record",
         "stat-vars-sum",
         "breakdown-with-columns",
         "flow-columns-sorted",
@@ -1063,6 +1074,28 @@ async def test_a_bare_spec_id_is_sent_as_its_spec_and_the_frame_it_read_is_recor
     assert await store.get_mint_record(FrameRef(**_READ_FRAME)) == _READ_RECORD
 
 
+class _HungMintRecordWrites(InMemoryMaterialisationStore):
+    async def put_mint_record(self, record: MintRecord) -> None:
+        await asyncio.Event().wait()
+
+
+async def test_a_record_write_that_hangs_leaves_the_answer_standing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rendering, "_RECORD_WRITE_TIMEOUT_S", 0.01)
+    set_store(_HungMintRecordWrites())
+    try:
+        _install(_reading_spec)
+        result = await asyncio.wait_for(
+            verbs.aggregate(frame_ref={"spec_id": _SPEC}, aggregation="sum"), timeout=2.0
+        )
+    finally:
+        set_store(None)
+
+    assert result.is_error is False, _text(result)
+    assert _READ_FRAME["content_version"] not in _text(result)
+
+
 async def test_a_bare_spec_id_whose_read_cannot_be_recorded_names_no_pair(
     store: InMemoryMaterialisationStore,
 ) -> None:
@@ -1179,6 +1212,44 @@ async def test_a_lost_frame_whose_record_read_fails_refuses_retryably() -> None:
         DEFAULT_RETRY_AFTER_S,
     )
     assert len(runner.requests) == 1
+
+
+async def test_a_rebuilt_input_the_tree_recomputed_is_named_by_its_replayed_pair(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    lost_root = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+    ready = _recorded_ready("growth")
+    assert ready["resolved_periods"]
+    replayed_manifest = {
+        "anchor": {"period": "1999"},
+        "recipe": {"tree": {"op_spec": {"verb": "growth"}}},
+    }
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            if _REPLAYED["content_version"] in body["get"]:
+                return httpx2.Response(200, json=replayed_manifest)
+            return _problem(404, "snapshot_not_found")
+        if body["latest"]:
+            return httpx2.Response(200, json=_ready_as(_REPLAYED))
+        if _DERIVED in body["tree"]["inputs"].values():
+            return _problem(404, "snapshot_not_found", fix=lost_root)
+        return httpx2.Response(200, json=ready)
+
+    _install(answer)
+    result = await verbs.compare(
+        frame_ref=_FRAME,
+        right_frame_ref=_DERIVED,
+        rolling_follows_tree=True,
+        rebuild_lost_frames=True,
+    )
+
+    assert result.is_error is False, _text(result)
+    assert "computed its rolling inputs again" in _text(result)
+    assert (
+        f"growth {_REPLAYED['spec_id']}, {_REPLAYED['content_version']} (alone, latest 1999)"
+        in _text(result)
+    )
 
 
 @pytest.mark.parametrize(

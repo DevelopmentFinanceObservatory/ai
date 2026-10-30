@@ -45,7 +45,9 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import rfc8785
 from common.materialisation import (
+    DEFAULT_ENRICHMENT,
     DEFAULT_MINT_OPTIONS,
+    ENRICHMENT,
     FrameExpired,
     FrameIntegrityError,
     FrameRef,
@@ -182,13 +184,6 @@ _LEGACY_KIND_COLUMN = "kind"
 # then. A cut that leaves rows out is a version of its own, which the manifest's pair names.
 WITHOUT_PARTY_TOTALS = "without_party_totals"
 
-
-# The mint option that asks apis to add the enrichment the version's own role columns take
-# (apis' `MintOptions.enrichment`). apis answers as a mint naming the columns it resolved to,
-# and the manifest's artifact lists them in its `rendering`, so a frame minted with it is
-# named by them (`resolved_options`).
-ENRICHMENT = "enrichment"
-DEFAULT_ENRICHMENT = "default"
 
 # The coverage dimension apis counts a frame's years under, beside one per role column.
 _YEARS_DIMENSION = "years"
@@ -347,7 +342,8 @@ async def materialise_and_register(
     so a frame stored without a record gains one the next time it is minted. A refusal writes none, and neither does a degraded outcome that saw no
     frame: the record states the frame's StatVar count, the store keeps the first
     record written under a pair, and one written without the count would stand for
-    good.
+    good. The one record written without a frame in view is a bare read's
+    (`common.materialisation.record_bare_read`), which holds no `groupby`.
 
     Called once per successful `get_data` mint, after the manifest itself has already
     validated. Checks the store first: a pair already held, read back under a row claim

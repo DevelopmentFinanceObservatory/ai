@@ -562,6 +562,7 @@ _READ_AS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "fra
     ("options", "rendering", "summed", "default_rows"),
     [
         (_READ_AS, {"without_party_totals": False, "columns": []}, False, True),
+        ({**_READ_AS, "enrichment": "default"}, {"without_party_totals": False}, False, True),
         (
             {**_READ_AS, "columns": ["b", "a", "a"]},
             {"without_party_totals": False, "columns": ["a", "b"]},
@@ -581,7 +582,7 @@ _READ_AS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "fra
             False,
         ),
     ],
-    ids=["default", "columns", "party-total-cut", "groupby"],
+    ids=["default", "default-enrichment", "columns", "party-total-cut", "groupby"],
 )
 async def test_frame_rendering_answers_what_the_record_states(
     options: dict[str, Any], rendering: dict[str, Any], summed: bool, default_rows: bool
@@ -667,6 +668,8 @@ async def test_a_bare_read_records_the_default_rendering_and_keeps_a_record_alre
 
     assert isinstance(answer, FrameRendering)
     assert answer.record.dataset == _FRAME
+    # A root with no `columns` takes the enrichment a `get_data` frame carries.
+    assert answer.rendering == {"without_party_totals": False}
     assert answer.default_rows
     assert await store.get_mint_record(_DATASET) == summed
 

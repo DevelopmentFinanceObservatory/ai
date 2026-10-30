@@ -18,8 +18,10 @@ names the dataset version apis holds and the options it was read with. Its root
 is that version with the rendering the options state: `without_party_totals`,
 `columns`, the enrichment columns sorted and each listed once, `[]` when the frame
 has none, and `groupby` when the frame was fetched with a `breakdown` or a
-`stat_vars` sum, which the dataset of the mint record is already summed for. A `spec_` pair with no mint
-record is sent as a version read with no columns. A record that does not decode
+`stat_vars` sum, which the dataset of the mint record is already summed for. The record
+of a bare read states the default enrichment, so its root names no `columns` and takes
+what a Spec root takes. A `spec_` pair with no mint record is sent as a version read with
+no columns. A record that does not decode
 refuses `frame_integrity_failed`, and any other failed read of it
 `service_unavailable`, which a retry may mend. The runner reads a root with
 no other option, so a frame fetched with one refuses `rendering_not_recorded`.
@@ -65,6 +67,7 @@ answer is checked to have read no root outside the record (`runner_client`).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
@@ -82,6 +85,7 @@ from common.materialisation import (
     get_store,
     root_rendering,
     unread_options,
+    write_mint_record,
 )
 from common.place_type import PLACE_ROLE, TYPED_ROLES, PlaceLevel, type_column
 from pydantic import ValidationError
@@ -211,7 +215,8 @@ async def record_spec_reads(
     """The frames of the Specs `spec_ids` the runner read to compute `result`, each
     put in the store as its mint record, by Spec. A frame whose manifest or record
     cannot be read, or whose record cannot be stored, is left out, so the caller is
-    named no pair a later call cannot read again."""
+    named no pair a later call cannot read again. The writes run together under one
+    bound (`write_mint_record`), since the answer already exists."""
     try:
         manifest = await read_derived_manifest(result)
     except DerivedUnread as exc:
@@ -219,23 +224,22 @@ async def record_spec_reads(
         return {}
     recipe = manifest.get("recipe")
     roots = recipe.get("roots") if isinstance(recipe, Mapping) else None
-    read: dict[str, tuple[FrameRef, ...]] = {}
+    records: dict[Pair, MintRecord] = {}
     for root in roots if isinstance(roots, list) else ():
         try:
             record = MintRecord.model_validate(root)
         except ValidationError:
             continue
-        spec_id = record.dataset.spec_id
-        if spec_id not in spec_ids or record.frame in read.get(spec_id, ()):
-            continue
-        try:
-            await get_store().put_mint_record(record)
-        except Exception:
-            # Broad on purpose, as `_mint_record` reads it: the store's failures belong
-            # to its backend.
-            logger.warning("mint record of %s unstored", spec_id, exc_info=True)
-            continue
-        read[spec_id] = (*read.get(spec_id, ()), record.frame)
+        if record.dataset.spec_id in spec_ids:
+            records.setdefault((record.frame.spec_id, record.frame.content_version), record)
+    written = await asyncio.gather(
+        *(write_mint_record(record, logger=logger) for record in records.values())
+    )
+    read: dict[str, tuple[FrameRef, ...]] = {}
+    for record, stored in zip(records.values(), written, strict=True):
+        if stored:
+            spec_id = record.dataset.spec_id
+            read[spec_id] = (*read.get(spec_id, ()), record.frame)
     return read
 
 

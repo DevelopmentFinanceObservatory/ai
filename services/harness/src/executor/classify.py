@@ -230,7 +230,7 @@ STOP_CODES = frozenset(
         # A verb read a frame whose mint options hold one dfo-apis' analysis
         # runner reads no root with: anything past the format, bundle and layout, the enrichment
         # columns, the party-total cut and the groupby of a `breakdown` or a
-        # `stat_vars` sum (`analysis_mcp.runner_tree._READ_OPTIONS`). Fetching
+        # `stat_vars` sum (`common.materialisation.rendering.ROOT_READ_OPTIONS`). Fetching
         # the frame another way is a different plan.
         "rendering_not_recorded",
         # The newest period a run's rolling steps stand on, which the executor

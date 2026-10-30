@@ -6,7 +6,10 @@ A root frame is one data-mcp's `get_data` registered from an apis service mint. 
 the request that produced it, and that trace is written inside the frame's
 insert-only object, so it can gain no field for a frame the store already holds.
 The mint record is written separately, under the same pair, on every `get_data`
-call that registers or finds the frame.
+call that registers or finds the frame. Three other writers cover a frame no `get_data`
+named: `analysis_mcp.runner_tree.record_spec_reads` records the frame a Spec root read,
+from the stored recipe's root records, `rendering.record_bare_read` records the pair a
+bare `spec_id` resolved to, and `data_mcp.mint_recovery` rebuilds a lost record.
 
 A record holds:
 
@@ -18,7 +21,9 @@ A record holds:
   is that version's canonical frame.
 - `dataset`: the pair apis names the materialisation by, which every
   rendering of it shares.
-- `options`: the mint request's `options` as `get_data` sent them. `get_data` sends
+- `options`: the mint request's `options` as `get_data` sent them, with an `enrichment`
+  resolved to the columns apis named, so only a bare read's record holds `enrichment`.
+  `get_data` sends
   `groupby.by` sorted (`normal_groupby`), as apis records it, and a record decodes
   with the options as written, so a stored recipe root keeps the normal form it was
   published under. A record written before `get_data` sorted `by` keeps its own
@@ -34,7 +39,9 @@ A record holds:
   the frame (`data_mcp.frame_materialisation.observed_shape`). `None` on a record
   written before the count was kept, on one rebuilt (`data_mcp.mint_recovery`)
   for a `groupby` sum with a version of its own whose frame the store no longer
-  holds, and on one a bare read wrote (`rendering.record_bare_read`).
+  holds, and on one a bare read wrote (`rendering.record_bare_read`), which saw no
+  frame. A record without the count stands for good once written. A bare read's is
+  safe, since it holds no `groupby` and a pair naming a `groupby` differs from it.
 - `enrichment_stamp`: the `enrichment_stamp` of the artifact the frame was read from
   (`data_mcp.manifest.ArtifactEntry.enrichment_stamp`) when `options.columns` asks for
   a `{role}_party_kind` column, else `None`. It is also `None` on a record written
