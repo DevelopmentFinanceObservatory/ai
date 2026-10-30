@@ -48,8 +48,9 @@ callers goes. `build_combined_mcp` adds it outermost first:
   `place_types` and with it true on every call, every verb without
   `rolling_follows_tree` and `rebuild_lost_frames` and with both true, and
   `growth`, `rank` and `filter` without the harness's `rolling` and
-  `anchor_key`. A call that sends
-  an argument the public form hides is refused as an unknown argument.
+  `anchor_key`. A call that sends a hidden argument the public form does not
+  force is refused as an unknown argument; a forced one is accepted and
+  overwritten.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
   unknown tool name, arguments that fail the tool's input schema, or an
   exception from the tool itself. A resource read that raised an
@@ -939,9 +940,11 @@ class _PublicArguments(Middleware):
     """Lists each tool as `public_tool` declares it, and writes a tool's
     `PublicShape.forced` arguments over every call's.
 
-    A call that sends an argument the public form hides, forced or not, raises
+    A call that sends an argument the public form hides and does not force raises
     the `ValidationError` an unlisted name raises, so `_RefuseRaisedErrors`
-    refuses it as `request_invalid` before the child validates or runs it."""
+    refuses it as `request_invalid` before the child validates or runs it. A
+    forced argument the caller sends is accepted and overwritten, since clients
+    send `get_data`'s `place_types`."""
 
     @override
     async def on_list_tools(
@@ -962,7 +965,11 @@ class _PublicArguments(Middleware):
         if shape is None:
             return await call_next(context)
         sent = context.message.arguments or {}
-        if hidden := [argument for argument in sent if argument in shape.hidden]:
+        if hidden := [
+            argument
+            for argument in sent
+            if argument in shape.hidden and argument not in shape.forced
+        ]:
             raise ValidationError(f"{name} takes no {', '.join(hidden)}") from (
                 PydanticValidationError.from_exception_data(
                     name,
@@ -1134,7 +1141,8 @@ def _merged_name_refusal(name: str) -> ToolResult:
             f"No tool is named {name!r}. Call {tool} with the same skill_id, path, offset "
             "and digest."
         )
-        fix: dict[str, Any] = {"tool": tool}
+        # `get_skill` reads one file of a skill when `path` is set.
+        fix: dict[str, Any] = {"tool": tool, "argument": "path"}
     else:
         message = (
             f'No tool is named {name!r}. Call {tool} with operation="{operation}" and the '

@@ -888,7 +888,7 @@ async def test_an_operation_outside_the_enum_names_the_values_it_takes(
     [
         ("sum_of", {"tool": "compare", "operation": "sum"}),
         ("quotient_of", {"tool": "share_of", "operation": "quotient"}),
-        ("get_skill_file", {"tool": "get_skill"}),
+        ("get_skill_file", {"tool": "get_skill", "argument": "path"}),
     ],
 )
 async def test_a_merged_name_refuses_naming_the_listed_call(
@@ -1043,11 +1043,12 @@ class _ForwardedArguments(Middleware):
         return ToolResult(content="recorded")
 
 
-async def test_a_public_get_data_always_asks_for_the_type_columns() -> None:
+@pytest.mark.parametrize("sent", [{"place_types": False}, {}], ids=["false", "absent"])
+async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str, bool]) -> None:
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
     forwarded = _ForwardedArguments()
     combined.add_middleware(forwarded)
-    arguments = {"spec_id": "spec_" + "0" * 32}
+    arguments = {"spec_id": "spec_" + "0" * 32, **sent}
 
     async with Client(combined) as client:
         await client.call_tool("get_data", arguments)
@@ -1064,37 +1065,45 @@ async def test_a_public_get_data_always_asks_for_the_type_columns() -> None:
     ]
 
 
+_GROWTH = {"frame_ref": UNHELD_FRAME, "window_start": "2015"}
+
+
 @pytest.mark.parametrize(
-    ("tool", "arguments", "hidden"),
+    ("sent", "forwarded_as", "refused"),
     [
-        ("get_data", {"spec_id": "spec_" + "0" * 32, "place_types": False}, "place_types"),
         (
-            "growth",
-            {"frame_ref": UNHELD_FRAME, "window_start": "2015", "rolling": {"x": 1}},
-            "rolling",
+            {**_GROWTH, "rebuild_lost_frames": False},
+            {**_GROWTH, FOLLOWS_TREE: True, "rebuild_lost_frames": True},
+            None,
         ),
+        ({**_GROWTH, "rolling": {"x": 1}}, None, "rolling"),
     ],
     ids=["forced", "hidden"],
 )
-async def test_a_public_call_sending_a_hidden_argument_refuses_it_as_unknown(
-    tool: str, arguments: dict[str, Any], hidden: str
+async def test_a_public_call_refuses_a_hidden_argument_and_overwrites_a_forced_one(
+    sent: dict[str, Any], forwarded_as: dict[str, Any] | None, refused: str | None
 ) -> None:
-    """The child's schema for the argument is never read, and the call never runs."""
+    """A forced argument is accepted with the forced value written over it. A hidden
+    one the public form does not force is refused as unknown before the child's
+    schema reads it, and the call never runs."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
     forwarded = _ForwardedArguments()
     combined.add_middleware(forwarded)
 
     async with Client(combined) as client:
         listed = {listed.name: listed for listed in await client.list_tools()}
-        result = await client.call_tool(tool, arguments, raise_on_error=False)
+        result = await client.call_tool("growth", sent, raise_on_error=False)
 
-    assert result.is_error is True
+    if refused is None:
+        assert result.is_error is False
+        assert forwarded.arguments == [forwarded_as]
+        return
     envelope = _envelope(result)
     assert (envelope["code"], envelope["retry_mode"]) == ("request_invalid", "correct_and_retry")
     assert envelope["fix"] == {
-        "tool": tool,
-        "problems": [f"{hidden}: Unexpected keyword argument"],
-        "accepted": list(listed[tool].input_schema["properties"]),
+        "tool": "growth",
+        "problems": [f"{refused}: Unexpected keyword argument"],
+        "accepted": list(listed["growth"].input_schema["properties"]),
     }
     assert forwarded.arguments == []
 
