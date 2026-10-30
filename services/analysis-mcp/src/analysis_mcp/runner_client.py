@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -127,6 +127,8 @@ _UNHELD_ROOT_CODES = frozenset({"snapshot_not_found", "recipe_not_found"})
 _EXPIRED_ROOT_CODE = "artifact_expired"
 _ROOT_CODES = _UNHELD_ROOT_CODES | {_EXPIRED_ROOT_CODE}
 _RECIPE_MISSING_CODE = "recipe_not_found"
+# What dfo-apis answers when it cannot serve a Spec root. These refusals carry no `fix`.
+_SPEC_ROOT_CODES = _ROOT_CODES | {"spec_not_found"}
 _OVER_CEILING_CODE = "over_ceiling"
 _RESPONSE_INVALID = "response_invalid"
 
@@ -309,14 +311,16 @@ async def refusal_for(
     response: httpx2.Response,
     *,
     refs_by_root: RefsByRoot,
+    spec_roots: Collection[str] = (),
     anchor: Anchor | None = None,
     tree_rolling: bool = False,
 ) -> ToolRefusal:
     """The refusal a runner's non-2xx `response` maps to. See the module docstring.
 
     `refs_by_root` maps each root pair the request named as a frame to the
-    caller's frame refs, `anchor` is a rolling call's anchor record, and
-    `tree_rolling` says the request sent `rolling: "tree"`.
+    caller's frame refs, `spec_roots` are the Specs it sent alone, `anchor` is a
+    rolling call's anchor record, and `tree_rolling` says the request sent
+    `rolling: "tree"`.
     """
     problem = _json(response)
     if problem is None or not isinstance(problem.get("code"), str):
@@ -347,6 +351,12 @@ async def refusal_for(
     elif code in _ROOT_CODES and (refs := refs_by_root.get(root)):
         refusal = ToolRefusal.frames_lost(
             frame_refs=[ref.model_dump() for ref in refs], expired=code == _EXPIRED_ROOT_CODE
+        )
+    elif (
+        code in _SPEC_ROOT_CODES and spec_roots and (root[0] in spec_roots or "spec_id" not in fix)
+    ):
+        refusal = ToolRefusal.bare_frames_lost(
+            spec_ids=sorted(spec_roots), expired=code == _EXPIRED_ROOT_CODE
         )
     elif code in _ROOT_CODES and anchor is not None and root in anchor.pairs:
         refusal = _anchor_root_lost(anchor, root, code)
@@ -457,6 +467,7 @@ async def run_tree(
     *,
     anchor: Anchor | None = None,
     refs_by_root: RefsByRoot,
+    spec_roots: Collection[str] = (),
     follows_tree: bool = False,
 ) -> VerbSummary | ToolRefusal:
     """The summary of the tree `node` computed by the runner, or its refusal.
@@ -487,7 +498,11 @@ async def run_tree(
         return _pending(response)
     if not response.is_success:
         return await refusal_for(
-            response, refs_by_root=refs_by_root, anchor=anchor, tree_rolling=tree_rolling
+            response,
+            refs_by_root=refs_by_root,
+            spec_roots=spec_roots,
+            anchor=anchor,
+            tree_rolling=tree_rolling,
         )
     body = _json(response)
     summary = _ready_summary(body, anchor=anchor)

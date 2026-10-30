@@ -161,6 +161,15 @@ def encode_mint_record(record: MintRecord) -> bytes:
     return rfc8785.dumps(record.model_dump(mode="json"))
 
 
+def read_mint_record(value: object) -> MintRecord:
+    """The record `value` holds, with any member a later deployment added dropped.
+
+    Raises:
+        pydantic.ValidationError: When `value` does not fit the record's shape.
+    """
+    return MintRecord(**_LenientMintRecord.model_validate(value).model_dump())
+
+
 def decode_mint_record(data: bytes) -> MintRecord:
     """The record `encode_mint_record` wrote as `data`.
 
@@ -168,5 +177,4 @@ def decode_mint_record(data: bytes) -> MintRecord:
         ValueError: When `data` is not JSON or does not fit the record's shape
             (`pydantic.ValidationError` is a `ValueError`).
     """
-    lenient = _LenientMintRecord.model_validate(json.loads(data))
-    return MintRecord(**lenient.model_dump())
+    return read_mint_record(json.loads(data))

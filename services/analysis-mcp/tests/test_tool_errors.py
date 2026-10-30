@@ -670,6 +670,7 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
     "frame_not_held": ("aggregate", {"spec_id": _SPEC, "content_version": _CV}),
     "frame_expired": ("aggregate", {"spec_id": _SPEC, "content_version": _CV}),
     "frames_lost": ("compare", {"frame_refs": [_PAIR, _PAIR], "expired": False}),
+    "bare_frames_lost": ("compare", {"spec_ids": ["spec_" + "1" * 32], "expired": False}),
     "frame_ref_incomplete": (
         "compare",
         {"argument": "right_frame_ref", "spec_id": "ops_" + "1" * 32},

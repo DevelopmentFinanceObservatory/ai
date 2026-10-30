@@ -40,6 +40,7 @@ from common.materialisation.mint_record import (
     encode_mint_record,
     groupby_axes,
     normal_groupby,
+    read_mint_record,
 )
 from common.materialisation.rendering import (
     DEFAULT_ENRICHMENT,
@@ -114,6 +115,7 @@ __all__ = [
     "groupby_axes",
     "install_store_if_unset",
     "normal_groupby",
+    "read_mint_record",
     "record_bare_read",
     "register_content_version_deriver",
     "register_trace_codec",

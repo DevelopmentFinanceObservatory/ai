@@ -52,6 +52,10 @@ callers goes. `build_combined_mcp` adds it outermost first:
   `rolling` and `anchor_key`. A call that sends a hidden argument the public form does not
   force is refused as an unknown argument; a forced one is accepted and
   overwritten.
+- `_RegisterBareSpecs` registers with dfo-apis the definition of each `spec_` id a call
+  passes alone, so an id fresh from `search` reads as `get_data` would mint it
+  (`data_mcp.definition_registration`). Studio goes through `get_data`, which registers
+  as it mints.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
   unknown tool name, arguments that fail the tool's input schema, or an
   exception from the tool itself. A resource read that raised an
@@ -115,7 +119,9 @@ from data_mcp.deadline import (
     EXTERNAL_CALL_LIMIT_S,
     use_call_budget,
 )
+from data_mcp.definition_registration import register_held_definition
 from data_mcp.definition_store import get_store as get_definition_store
+from data_mcp.definition_writes import SPEC_ID_PATTERN
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import PUBLIC_SHAPES as DATA_PUBLIC_SHAPES
 from data_mcp.server import healthz as data_healthz
@@ -283,6 +289,7 @@ def build_combined_mcp(
         _ShapeResults(server=combined),
         _RefuseRaisedErrors(server=combined),
         _PublicArguments(),
+        _RegisterBareSpecs(),
     ):
         combined.add_middleware(middleware)
     combined.add_extension(
@@ -992,6 +999,47 @@ class _PublicArguments(Middleware):
         arguments = {**sent, **shape.forced}
         message = context.message.model_copy(update={"arguments": arguments})
         return await call_next(context.copy(message=message))
+
+
+# The arguments that name a frame, and the intent member of `write_component` that does.
+_FRAME_ARGUMENTS = ("frame_ref", "right_frame_ref", "denominator_frame_ref")
+_BARE_SPEC_ID = re.compile(SPEC_ID_PATTERN)
+
+
+def _bare_spec_ids(arguments: dict[str, Any]) -> list[str]:
+    """The `spec_` ids `arguments` pass alone, each once."""
+    intent = arguments.get("intent")
+    frames = [
+        *(arguments.get(name) for name in _FRAME_ARGUMENTS),
+        intent.get("frame_ref") if isinstance(intent, dict) else None,
+    ]
+    return list(
+        dict.fromkeys(
+            spec_id
+            for frame in frames
+            if isinstance(frame, dict)
+            and frame.get("content_version") is None
+            and isinstance(spec_id := frame.get("spec_id"), str)
+            and _BARE_SPEC_ID.match(spec_id)
+        )
+    )
+
+
+class _RegisterBareSpecs(Middleware):
+    """Registers each `spec_` id a call passes alone before the call runs. A
+    registration dfo-apis refuses answers the call."""
+
+    @override
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        for spec_id in _bare_spec_ids(context.message.arguments or {}):
+            refused = await register_held_definition(spec_id)
+            if refused is not None:
+                return refused
+        return await call_next(context)
 
 
 def public_tool(tool: Tool) -> Tool:

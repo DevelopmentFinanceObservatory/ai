@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -83,6 +83,7 @@ from common.materialisation import (
     RenderingUnknown,
     frame_rendering,
     get_store,
+    read_mint_record,
     root_rendering,
     unread_options,
     write_mint_record,
@@ -136,12 +137,13 @@ def newest_ref(spec_id: str) -> FrameRef:
 @dataclass(frozen=True, kw_only=True)
 class Tree:
     """A request tree, the caller's frame refs each of its roots stands for, by the
-    pair the root names (the runner's refusals name a root by that pair), and a
-    rolling call's anchor record."""
+    pair the root names (the runner's refusals name a root by that pair), a rolling
+    call's anchor record, and the Specs sent as Spec roots, which name no pair."""
 
     node: dict[str, Any]
     refs_by_root: Mapping[Pair, tuple[FrameRef, ...]]
     anchor: Anchor | None = None
+    spec_roots: frozenset[str] = frozenset()
 
 
 async def _mint_record(ref: FrameRef) -> MintRecord | None | ToolRefusal:
@@ -209,36 +211,70 @@ async def spec_root(ref: FrameRef) -> dict[str, Any] | ToolRefusal:
             )
 
 
+def _recipe_slots(step: Mapping[str, Any]) -> dict[str, str]:
+    """The op-spec slot a stored recipe keeps each input of the request node `step`
+    under, the mirror of `_sides`."""
+    second = _SECOND_SLOT.get(step["verb"])
+    if second is None or "other" not in step["inputs"]:
+        return {"data": "frame_ref"}
+    if step["verb"] == Verb.COMPARE:
+        return {"data": second, "other": "frame_ref"}
+    return {"data": "frame_ref", "other": second}
+
+
+def _spec_roots_read(
+    sent: Mapping[str, Any], stored: Mapping[str, Any], roots: Sequence[object]
+) -> Iterator[tuple[str, object]]:
+    """Each Spec root of the request tree `sent` with the record dfo-apis keeps for it,
+    read at the same place in the stored recipe's tree `stored`, since a record names
+    the served id, which can differ from the id sent. A stored node is `{"root": index}`
+    or holds `inputs` by op-spec slot (`_recipe_slots`)."""
+    match stored:
+        case {"root": int(index)} if "content_version" not in sent and index < len(roots):
+            yield sent["spec_id"], roots[index]
+        case {"inputs": Mapping() as inputs} if "inputs" in sent:
+            for name, slot in _recipe_slots(sent).items():
+                if slot in inputs:
+                    yield from _spec_roots_read(sent["inputs"][name], inputs[slot], roots)
+
+
 async def record_spec_reads(
-    result: FrameRef, spec_ids: Collection[str]
+    result: FrameRef, tree: Mapping[str, Any]
 ) -> dict[str, tuple[FrameRef, ...]]:
-    """The frames of the Specs `spec_ids` the runner read to compute `result`, each
-    put in the store as its mint record, by Spec. A frame whose manifest or record
-    cannot be read, or whose record cannot be stored, is left out, so the caller is
-    named no pair a later call cannot read again. The writes run together under one
-    bound (`write_mint_record`), since the answer already exists."""
+    """The frames the runner read for the Spec roots of the request `tree` to compute
+    `result`, each put in the store as its mint record, by the id sent. A frame whose
+    manifest or record cannot be read, or whose record cannot be stored, is left out,
+    so the caller is named no pair a later call cannot read again. The writes run
+    together under one bound (`write_mint_record`), since the answer already exists."""
     try:
         manifest = await read_derived_manifest(result)
     except DerivedUnread as exc:
         logger.warning("manifest of %s unread; Spec reads not recorded: %s", result.spec_id, exc)
         return {}
     recipe = manifest.get("recipe")
+    stored = recipe.get("tree") if isinstance(recipe, Mapping) else None
     roots = recipe.get("roots") if isinstance(recipe, Mapping) else None
+    if not isinstance(stored, Mapping) or not isinstance(roots, list):
+        logger.warning("recipe of %s holds no tree; Spec reads not recorded", result.spec_id)
+        return {}
     records: dict[Pair, MintRecord] = {}
-    for root in roots if isinstance(roots, list) else ():
+    sent_as: dict[Pair, str] = {}
+    for spec_id, root in _spec_roots_read(tree, stored, roots):
         try:
-            record = MintRecord.model_validate(root)
-        except ValidationError:
+            record = read_mint_record(root)
+        except ValidationError as exc:
+            logger.warning("record of %s in %s skipped: %s", spec_id, result.spec_id, exc)
             continue
-        if record.dataset.spec_id in spec_ids:
-            records.setdefault((record.frame.spec_id, record.frame.content_version), record)
+        pair = (record.frame.spec_id, record.frame.content_version)
+        records.setdefault(pair, record)
+        sent_as.setdefault(pair, spec_id)
     written = await asyncio.gather(
         *(write_mint_record(record, logger=logger) for record in records.values())
     )
     read: dict[str, tuple[FrameRef, ...]] = {}
-    for record, stored in zip(records.values(), written, strict=True):
-        if stored:
-            spec_id = record.dataset.spec_id
+    for (pair, record), stored_record in zip(records.items(), written, strict=True):
+        if stored_record:
+            spec_id = sent_as[pair]
             read[spec_id] = (*read.get(spec_id, ()), record.frame)
     return read
 
@@ -340,6 +376,7 @@ async def verb_tree(
     arguments = op_spec.model_dump(mode="json", exclude=set(_FRAME_SLOTS), exclude_none=True)
     inputs: dict[str, Any] = {}
     refs_by_root: dict[Pair, tuple[FrameRef, ...]] = {}
+    spec_roots: set[str] = set()
     data, other = _sides(op_spec)
     keys = dict(zip(("data", "other"), _side_keys(op_spec), strict=True))
     for name, ref in (("data", data), ("other", other)):
@@ -361,7 +398,9 @@ async def verb_tree(
             else _level_step(node, ref, level=place_level, keys=keys[name])
         )
         # A Spec root names no pair: the runner names the version it read.
-        if pair is not None:
+        if pair is None:
+            spec_roots.add(node["spec_id"])
+        else:
             held = refs_by_root.get(pair, ())
             refs_by_root[pair] = held if ref in held else (*held, ref)
     anchor: Anchor | None = None
@@ -373,4 +412,6 @@ async def verb_tree(
             return anchored
         anchor = anchored
     node = {"verb": str(op_spec.verb), "arguments": arguments, "inputs": inputs}
-    return Tree(node=node, refs_by_root=refs_by_root, anchor=anchor)
+    return Tree(
+        node=node, refs_by_root=refs_by_root, anchor=anchor, spec_roots=frozenset(spec_roots)
+    )

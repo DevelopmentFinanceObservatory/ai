@@ -821,15 +821,16 @@ def render_sum_of_digest(
     derived: Mapping[str, object] | None = None,
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
+    heading: str = "sum_of",
 ) -> str:
     """Render `result` (the facts of `analysis_mcp.engine.sum_of.run_sum_of`) into
-    the digest text a successful `sum_of` tool call returns. Each period one
-    side alone reports, which the sum leaves out, is named with that side
-    and its value there, straight after the label, so a reader keeping only
+    the digest text a successful `sum_of` tool call returns, opening with `heading`.
+    Each period one side alone reports, which the sum leaves out, is named with that
+    side and its value there, straight after the label, so a reader keeping only
     the digest's start still has it. The coverage line states the summed
     span and each side's offered span and coverage."""
     header = (
-        f"sum_of: {len(result.intersected_periods)} period(s) both sides report "
+        f"{heading}: {len(result.intersected_periods)} period(s) both sides report "
         f"(left offered {len(result.left_periods)}, right offered {len(result.right_periods)})"
     )
     label_line = (
@@ -1271,9 +1272,11 @@ def render_quotient_of_digest(
     derived: Mapping[str, object] | None = None,
     exclusions: Sequence[Exclusion] = (),
     time: Time | None = None,
+    heading: str = "quotient_of",
 ) -> str:
     """Render `result` (the facts of `analysis_mcp.engine.quotient_of.run_quotient_of`)
-    into the digest text a successful `quotient_of` tool call returns.
+    into the digest text a successful `quotient_of` tool call returns, opening with
+    `heading`.
 
     Every quotient is a plain number in the composed unit, which the header
     and the quotients' heading both name. What the result leaves out comes
@@ -1291,7 +1294,7 @@ def render_quotient_of_digest(
         if any(keys)
         else f"{len(quotients)} matched period(s)"
     )
-    header = f"quotient_of: {counted}, in {unit_text}"
+    header = f"{heading}: {counted}, in {unit_text}"
     label_line = (
         f"stat_var {result.stat_var}: "
         f"{_side_text(result.numerator_stat_var, result.numerator_resolved_unit)} divided by "
@@ -1487,11 +1490,13 @@ def _rolling_section(rolling: Rolling) -> str:
     return text
 
 
-def render_summary_digest(summary: VerbSummary) -> str:
+def render_summary_digest(summary: VerbSummary, *, heading: str | None = None) -> str:
     """The digest of a verb call the runner `summary` states, rendered by its
     verb's `render_*_digest` from the summary's facts, canonical parameters,
     identity, derived marker, exclusions and time, with the latest year its
-    relative periods were filled from (`_rolling_section`) before the identity."""
+    relative periods were filled from (`_rolling_section`) before the identity.
+    `heading`, when given, opens a `sum_of` or `quotient_of` digest in the verb's
+    place."""
     parameters = summary.parameters
     result = summary.result
     render: Callable[..., str]
@@ -1520,10 +1525,12 @@ def render_summary_digest(summary: VerbSummary) -> str:
             render = render_compare_digest
         case SumOfFacts():
             render = render_sum_of_digest
+            own = {} if heading is None else {"heading": heading}
         case ShareOfFacts():
             render = render_share_of_digest
         case QuotientOfFacts():
             render = render_quotient_of_digest
+            own = {} if heading is None else {"heading": heading}
         case JoinFacts():
             render = render_join_digest
         case _:

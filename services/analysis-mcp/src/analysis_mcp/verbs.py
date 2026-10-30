@@ -12,7 +12,9 @@ argument naming a `spec_` id alone is read at the Spec's newest version
 of place on the runner (`runner_tree.verb_tree`). `compare`
 takes `sum_of`'s form under `operation="sum"`, and `share_of` takes
 `quotient_of`'s under `operation="quotient"`. The form picks the op-spec, so each
-keeps its own runner call, result and refusals. A share whose sides hold two
+keeps its own runner call, result and refusals, and on the public server, which
+lists neither `sum_of` nor `quotient_of`, a digest headed by the public tool and
+its `operation`. A share whose sides hold two
 units refuses with `fix` naming the quotient form. A window bound or a
 `time_period` threshold given as a relative year (`op_spec.RelativeYear`) goes
 to the runner as it is, with no overlay and no anchor record, and the runner
@@ -71,6 +73,7 @@ from analysis_mcp.op_spec import (
     RankOpSpec,
     ShareOfOpSpec,
     SumOfOpSpec,
+    Verb,
     with_anchor_key,
 )
 from analysis_mcp.runner_client import find_anchor
@@ -178,6 +181,13 @@ _REBUILD_LOST_FRAMES_TYPE = Annotated[
 ]
 
 
+# The public tool and `operation` of each verb the public server does not list.
+_PUBLIC_FORMS = {
+    Verb.SUM_OF: 'compare operation="sum"',
+    Verb.QUOTIENT_OF: 'share_of operation="quotient"',
+}
+
+
 def _followable(
     arguments: Arguments, refusal: ToolRefusal, *, takes_place_level: bool
 ) -> ToolRefusal:
@@ -261,6 +271,7 @@ def _on_runner(
             follows_tree=arguments[FOLLOWS_TREE],
             rebuild_lost_frames=arguments[REBUILD_LOST_FRAMES],
             refine=refined,
+            heading=_PUBLIC_FORMS.get(op_spec.verb) if arguments[FOLLOWS_TREE] else None,
         )
 
     listed = [*signature.parameters.values()]

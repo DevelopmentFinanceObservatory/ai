@@ -1045,13 +1045,19 @@ _READ_RECORD = MintRecord(
 )
 
 
+def _recipe_of(*roots: object) -> httpx2.Response:
+    """A result's manifest, whose recipe reads each of `roots` in one slot of its verb."""
+    slots = ("frame_ref", "right_frame_ref")
+    inputs = {slot: {"root": index} for index, slot in enumerate(slots[: len(roots)])}
+    recipe = {"tree": {"op_spec": {"verb": "aggregate"}, "inputs": inputs}, "roots": list(roots)}
+    return httpx2.Response(200, json={"recipe": recipe})
+
+
 def _reading_spec(body: dict[str, Any]) -> httpx2.Response:
     """The runner's answer to a call that reads `_SPEC` at its newest version, and to
     the read of its result's manifest, whose recipe records the frame read."""
     if "get" in body:
-        return httpx2.Response(
-            200, json={"recipe": {"roots": [_READ_RECORD.model_dump(mode="json")]}}
-        )
+        return _recipe_of(_READ_RECORD.model_dump(mode="json"))
     read = {"spec_id": _SPEC, "content_version": _NEWER_CV}
     return httpx2.Response(200, json=_reading(_recorded_ready("aggregate"), read))
 
@@ -1108,6 +1114,132 @@ async def test_a_bare_spec_id_whose_read_cannot_be_recorded_names_no_pair(
     assert result.is_error is False, _text(result)
     assert _READ_FRAME["content_version"] not in _text(result)
     assert await store.get_mint_record(FrameRef(**_READ_FRAME)) is None
+
+
+async def test_a_bare_spec_read_under_its_served_id_is_named_by_the_id_sent(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    """dfo-apis records a Spec root under the id it served, so each sent id is read off
+    the recipe's tree: here the two sides come back served in the other's place."""
+    served = FrameRef(spec_id=_OTHER_SPEC, content_version=_NEWER_CV)
+    other = FrameRef(spec_id=_SPEC, content_version=_CV)
+    first = MintRecord(frame=served, dataset=served, options={"format": "parquet"})
+    second = MintRecord(frame=other, dataset=other, options={"format": "parquet"})
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _recipe_of(*(record.model_dump(mode="json") for record in (first, second)))
+        return httpx2.Response(200, json=_recorded_ready())
+
+    _install(answer)
+    result = await verbs.compare(
+        frame_ref={"spec_id": _SPEC}, right_frame_ref={"spec_id": _OTHER_SPEC}
+    )
+
+    assert result.is_error is False, _text(result)
+    assert f"{_SPEC} was read at its newest version as {_OTHER_SPEC}, {_NEWER_CV}." in _text(result)
+    assert f"{_OTHER_SPEC} was read at its newest version as {_SPEC}, {_CV}." in _text(result)
+    assert await store.get_mint_record(served) == first
+
+
+async def test_a_root_record_from_a_later_deployment_is_kept_and_a_broken_one_is_logged(
+    store: InMemoryMaterialisationStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    readable = {**_READ_RECORD.model_dump(mode="json"), "added_later": True}
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if "get" in body:
+            return _recipe_of(readable, {"frame": "broken"})
+        return httpx2.Response(200, json=_recorded_ready())
+
+    _install(answer)
+    with caplog.at_level("WARNING", logger="analysis_mcp.runner_tree"):
+        result = await verbs.compare(
+            frame_ref={"spec_id": _SPEC}, right_frame_ref={"spec_id": _OTHER_SPEC}
+        )
+
+    assert result.is_error is False, _text(result)
+    assert await store.get_mint_record(FrameRef(**_READ_FRAME)) == _READ_RECORD
+    assert [record.args[0] for record in caplog.records] == [_OTHER_SPEC]
+
+
+@pytest.mark.parametrize(
+    ("code", "lost"),
+    [
+        ("spec_not_found", "frame_not_held"),
+        ("snapshot_not_found", "frame_not_held"),
+        ("artifact_expired", "frame_expired"),
+    ],
+)
+async def test_a_bare_frame_dfo_apis_cannot_serve_is_named_in_a_lost_frame_refusal(
+    store: InMemoryMaterialisationStore, code: str, lost: str
+) -> None:
+    """A Spec root's refusal has no `fix`, so it names no root. The bare frame is the one
+    to blame, and the derived input beside it is left out of the refusal."""
+    runner = _install(_problem(404, code))
+    result = await verbs.compare(
+        frame_ref={"spec_id": _SPEC}, right_frame_ref=_DERIVED, rebuild_lost_frames=True
+    )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (lost, "correct_and_retry")
+    assert structured["fix"] == {"spec_ids": [_SPEC]}
+    assert len(runner.requests) == 1
+
+
+async def test_a_refusal_over_another_frame_is_not_read_as_the_rebuilt_ones(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    await store.put_mint_record(_record({"format": "parquet"}))
+    lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        if body["tree"]["inputs"]["other"].get("content_version"):
+            return _problem(404, "snapshot_not_found", fix=lost)
+        return _problem(404, "recipe_not_found", fix=_DERIVED)
+
+    _install(answer)
+    result = await verbs.compare(
+        frame_ref=_FRAME,
+        right_frame_ref=_DERIVED,
+        rolling_follows_tree=True,
+        rebuild_lost_frames=True,
+    )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["code"] == "rolling_reanchor_unavailable"
+    assert structured["fix"]["frame_refs"] == [_DERIVED]
+
+
+async def test_a_refusal_no_retry_mends_stays_so_on_the_call_sent_again(
+    store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await store.put_mint_record(_record({"format": "parquet"}))
+    lost = {"spec_id": _SPEC, "content_version": _DATASET_CV}
+    read_record = store.get_mint_record
+
+    async def corrupt_beside_it(ref: FrameRef) -> MintRecord | None:
+        if ref == FrameRef(**_OTHER_FRAME):
+            raise FrameIntegrityError(ref, reason="sha256 mismatch")
+        return await read_record(ref)
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        monkeypatch.setattr(store, "get_mint_record", corrupt_beside_it)
+        return _problem(404, "snapshot_not_found", fix=lost)
+
+    _install(answer)
+    result = await verbs.compare(
+        frame_ref=_FRAME, right_frame_ref=_OTHER_FRAME, rebuild_lost_frames=True
+    )
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "frame_integrity_failed",
+        "do_not_retry",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1682,6 +1814,35 @@ async def test_a_merged_form_sends_and_replies_as_its_own_tool(
     assert replies[0].structured_content == replies[1].structured_content
     assert replies[0].content == replies[1].content
     assert replies[0].is_error is replies[1].is_error is (answer == "refused")
+
+
+@pytest.mark.parametrize(
+    ("merged", "verb", "public", "heading"),
+    [
+        (verbs.compare, "sum_of", True, 'compare operation="sum": '),
+        (verbs.compare, "sum_of", False, "sum_of: "),
+        (verbs.share_of, "quotient_of", True, 'share_of operation="quotient": '),
+        (verbs.share_of, "quotient_of", False, "quotient_of: "),
+    ],
+    ids=["sum-public", "sum-harness", "quotient-public", "quotient-harness"],
+)
+async def test_a_merged_form_heads_its_digest_with_the_tool_its_caller_can_see(
+    store: InMemoryMaterialisationStore,
+    merged: Callable[..., Any],
+    verb: str,
+    public: bool,
+    heading: str,
+) -> None:
+    _install(httpx2.Response(200, json=_recorded_ready(verb)))
+    arguments = (
+        {"frame_ref": _FRAME, "right_frame_ref": _DERIVED, "operation": "sum"}
+        if verb == "sum_of"
+        else {"frame_ref": _FRAME, "denominator_frame_ref": _DERIVED, "operation": "quotient"}
+    )
+    result = await merged(**arguments, rolling_follows_tree=public)
+
+    assert result.is_error is False, _text(result)
+    assert _text(result).startswith(heading)
 
 
 _CONVERTED = {"base": "dcid:USDollar", "price_basis": "constant", "base_year": 2022}

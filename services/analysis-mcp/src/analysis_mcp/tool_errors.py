@@ -790,6 +790,24 @@ class ToolRefusal:
         )
 
     @classmethod
+    def bare_frames_lost(cls, *, spec_ids: Sequence[str], expired: bool) -> Self:
+        """`frame_expired` (`expired`) or `frame_not_held` for a call whose frames
+        `spec_ids`, passed without a `content_version`, the runner could not read at
+        their newest version. Its refusal names no root, so each is named, and it names
+        no version, so `lost_frames` holds none of them: reading the newest version is
+        all a rebuild would do."""
+        named = ", ".join(spec_ids)
+        return cls(
+            code=ToolErrorCode.FRAME_EXPIRED if expired else ToolErrorCode.FRAME_NOT_HELD,
+            message=(
+                f"The newest version of {named} cannot be read, and retrying with the same "
+                "spec_id reaches the same refusal. Call get_data with the spec_id, or search "
+                "for the data again, and retry with the frame_ref it returns."
+            ),
+            fix={"spec_ids": list(spec_ids)},
+        )
+
+    @classmethod
     def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
         """The frame argument `argument` names `spec_id`, which is no `spec_` id, with
         no `content_version`. The caller's `spec_id` is echoed capped

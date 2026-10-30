@@ -33,6 +33,7 @@ import tiktoken
 from analysis_mcp import server as analysis_server
 from analysis_mcp import tool_errors as analysis_tool_errors
 from analysis_mcp.fixtures import seed_fixture_store
+from analysis_mcp.runner_client import RunnerClient, runner_holder
 from analysis_mcp.verbs import FOLLOWS_TREE
 from common import auth as mcp_auth
 from common import refusal as refusal_module
@@ -53,7 +54,12 @@ from data_mcp.deadline import (
     EXTERNAL_CALL_LIMIT_S,
     CallBudget,
 )
-from data_mcp.definition_store import InMemoryDefinitionStore, set_store
+from data_mcp.definition_store import (
+    DefinitionStoreUnavailable,
+    InMemoryDefinitionStore,
+    StoredDefinition,
+    set_store,
+)
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
 from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.mint_ledger import MintLedger
@@ -1142,6 +1148,7 @@ async def test_a_public_call_refuses_a_hidden_argument_and_overwrites_a_forced_o
 
 
 _LOST_SPEC = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "d" * 32}
+_BARE_UNSTORED = "spec_" + "e" * 32
 _LOST_OPS = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "d" * 32}
 
 
@@ -1208,6 +1215,149 @@ def _lost_frame_arguments(name: str, lost: dict[str, str]) -> dict[str, Any]:
     if name == "describe_frame":
         return {"frame_ref": lost}
     return {"intent": {**LINE_CHART_INTENT, "frame_ref": lost}}
+
+
+_SEARCHED_IDENTITY: dict[str, Any] = {"dataset": "DAC1", "fixed": {"measure": "ODA"}}
+_SEARCHED_SPEC = spec_id_for(canonicalize(_SEARCHED_IDENTITY))
+_BARE_CALLS: dict[str, tuple[dict[str, Any], str]] = {
+    "aggregate": (
+        {"frame_ref": {"spec_id": _SEARCHED_SPEC}, "aggregation": "sum"},
+        "/api/datasets/analysis",
+    ),
+    "describe_frame": ({"frame_ref": {"spec_id": _SEARCHED_SPEC}}, "/api/presentation/frames"),
+    "write_component": (
+        {"intent": {**LINE_CHART_INTENT, "frame_ref": {"spec_id": _SEARCHED_SPEC}}},
+        "/api/presentation/components",
+    ),
+    "export_data": ({"frame_ref": {"spec_id": _SEARCHED_SPEC}}, "/api/datasets/exports"),
+}
+
+
+async def _no_token() -> dict[str, str]:
+    return {}
+
+
+@asynccontextmanager
+async def _bare_call_client(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[Client]:
+    """A client of the combined server whose three upstream clients answer through
+    `handler`, with the release answered, and `_SEARCHED_SPEC` as `search` stores it."""
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/presentation/release":
+            return httpx2.Response(200, json=_RELEASE)
+        return handler(request)
+
+    transport = httpx2.MockTransport(answer)
+    monkeypatch.setattr(
+        presentation_server,
+        "PlatformAssembler",
+        lambda *, settings, auth=None: PlatformAssembler(
+            settings=settings, auth=auth, transport=transport
+        ),
+    )
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        store = InMemoryDefinitionStore()
+        await store.put_many(
+            [
+                StoredDefinition(
+                    spec_id=_SEARCHED_SPEC,
+                    schema_version=1,
+                    canonical_bytes=canonicalize(_SEARCHED_IDENTITY),
+                )
+            ]
+        )
+        set_store(store)
+        client_holder.set_client(UpstreamClient(settings=DataMcpSettings(), transport=transport))
+        runner_holder.set(
+            RunnerClient(
+                base_url="http://runner.test",
+                timeout_s=5.0,
+                read_timeout_s=5.0,
+                caller_principal=None,
+                auth=_no_token,
+                transport=transport,
+            )
+        )
+        yield client
+
+
+@pytest.mark.parametrize("name", _BARE_CALLS)
+async def test_a_bare_spec_fresh_from_search_is_registered_before_its_call_runs(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dfo-apis refuses an id it has not registered, and `search` registers none."""
+    arguments, path = _BARE_CALLS[name]
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json={})
+
+    async with _bare_call_client(handler, monkeypatch) as client:
+        await client.call_tool(name, arguments, raise_on_error=False)
+
+    register, called, *_ = requests
+    assert json.loads(register.content) == {
+        "schema_version": 1,
+        "definition": {
+            "schema_version": 1,
+            "spec_id": _SEARCHED_SPEC,
+            "identity": _SEARCHED_IDENTITY,
+        },
+    }
+    assert (register.method, register.url.path) == ("POST", "/api/datasets/register")
+    assert called.url.path.startswith(path)
+
+
+async def test_a_spec_dfo_apis_will_not_register_refuses_before_the_call_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            500, json={"code": "identity_quarantined", "detail": "held", "retryable": False}
+        )
+
+    arguments, _ = _BARE_CALLS["aggregate"]
+    async with _bare_call_client(handler, monkeypatch) as client:
+        result = await client.call_tool("aggregate", arguments, raise_on_error=False)
+
+    assert result.is_error is True
+    assert _envelope(result)["code"] == "upstream_error"
+    assert [request.url.path for request in requests] == ["/api/datasets/register"]
+
+
+@pytest.mark.parametrize("store_reads", [True, False], ids=["unheld", "store-down"])
+async def test_a_spec_this_service_cannot_read_is_left_for_dfo_apis_to_answer(
+    store_reads: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            404, json={"code": "spec_not_found", "detail": "unknown", "retryable": False}
+        )
+
+    async def store_down(*_: object, **__: object) -> None:
+        raise DefinitionStoreUnavailable("down")
+
+    if not store_reads:
+        monkeypatch.setattr(InMemoryDefinitionStore, "get", store_down)
+    async with _bare_call_client(handler, monkeypatch) as client:
+        result = await client.call_tool(
+            "aggregate",
+            {"frame_ref": {"spec_id": _BARE_UNSTORED}, "aggregation": "sum"},
+            raise_on_error=False,
+        )
+
+    assert [request.url.path for request in requests] == ["/api/datasets/analysis"]
+    assert _envelope(result)["code"] == "frame_not_held"
 
 
 @pytest.mark.parametrize("name", ["describe_frame", "write_component"])

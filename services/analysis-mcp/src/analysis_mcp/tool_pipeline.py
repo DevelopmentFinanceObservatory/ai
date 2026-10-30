@@ -25,10 +25,10 @@ stored recipe on current data (`runner_client.replay_derived`). The runner names
 lost dataset per refusal, so a call over two lost datasets is sent again once per
 side, at most once per distinct frame argument. A `spec_` frame whose rendering
 cannot be established refuses as `spec_root` says. A replay the runner cannot run
-yet refuses with its own delay. When any other replay fails, or the call sent again
-refuses for any reason but the engine's over the data or a transient failure, the
-call refuses with the last lost-frame refusal and the sentence that says so
-(`ToolRefusal.not_rebuilt`). A transient refusal stays itself, with its delay.
+yet refuses with its own delay. When any other replay fails, the call refuses with
+the lost-frame refusal and the sentence that says so (`ToolRefusal.not_rebuilt`). The
+call sent again keeps its own refusal, and gains that sentence only when it names a
+frame still lost.
 The frame each bare `spec_id` and each fetched-again `spec_` frame was read as is
 recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
 opens with a sentence naming that frame's pair, and one naming the pair each rebuilt
@@ -54,8 +54,8 @@ from analysis_mcp.execution_identity import ExecutionIdentity, current_execution
 from analysis_mcp.frame_ref_resolution import call_row_claim, op_spec_hash_or_refusal
 from analysis_mcp.identity import mint_toolkit_content_version
 from analysis_mcp.result import VerbResult, observed_shape
-from analysis_mcp.runner_client import RUNNER_CODES, Pair, replay_derived, run_tree
-from analysis_mcp.runner_tree import newest_ref, record_spec_reads, spec_root, verb_tree
+from analysis_mcp.runner_client import Pair, replay_derived, run_tree
+from analysis_mcp.runner_tree import Tree, newest_ref, record_spec_reads, spec_root, verb_tree
 from analysis_mcp.summary import VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 
@@ -287,8 +287,7 @@ def _newest_sentence(spec_id: str, read: Mapping[str, tuple[FrameRef, ...]]) -> 
     """The sentence naming the frame a bare `spec_id` was read as."""
     if not (frames := read.get(spec_id)):
         return f"{spec_id} was read at its newest version."
-    versions = ", ".join(frame.content_version for frame in frames)
-    return f"{spec_id} was read at its newest version as content_version {versions}."
+    return f"{spec_id} was read at its newest version as {_pairs(frames)}."
 
 
 def _frame_count(op_spec: OpSpecVariant) -> int:
@@ -302,12 +301,6 @@ def _frame_count(op_spec: OpSpecVariant) -> int:
     )
 
 
-def _not_rebuilt(refusal: ToolRefusal) -> bool:
-    """Whether the call sent again over rebuilt frames refused for want of them: any
-    refusal but the engine's over the data it read and a transient one."""
-    return refusal.code not in RUNNER_CODES and not _transient(refusal)
-
-
 async def run_on_runner(
     op_spec: OpSpecVariant,
     *,
@@ -317,6 +310,7 @@ async def run_on_runner(
     follows_tree: bool = False,
     rebuild_lost_frames: bool = False,
     refine: Callable[[ToolRefusal], ToolRefusal] | None = None,
+    heading: str | None = None,
 ) -> ToolResult:
     """The reply every registered verb returns for `op_spec`, computed by the runner.
     A rolling call's `anchor_key` sends the roots of its anchor record beside the
@@ -327,7 +321,8 @@ async def run_on_runner(
     `op_spec` under `runner_tree.newest_ref` and read at their newest version. With
     `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring).
     Without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
-    refusal before it is returned.
+    refusal before it is returned. `heading`, when given, opens the digest of a
+    `sum_of` or `quotient_of` computed under another tool's name.
 
     `structured_content` is the summary's `VerbResult` fields and `content` the
     digest rendered from its facts, as the in-process tools built both. A frame
@@ -337,17 +332,21 @@ async def run_on_runner(
     replaced: dict[Pair, dict[str, Any]] = {
         (spec_id, newest_ref(spec_id).content_version): {"spec_id": spec_id} for spec_id in newest
     }
+    sent: Tree | None = None
 
     async def run() -> VerbSummary | ToolRefusal:
+        nonlocal sent
         tree = await verb_tree(
             op_spec, anchor_key=anchor_key, place_level=place_level, replaced=replaced
         )
         if isinstance(tree, ToolRefusal):
             return tree
+        sent = tree
         return await run_tree(
             tree.node,
             anchor=tree.anchor,
             refs_by_root=tree.refs_by_root,
+            spec_roots=tree.spec_roots,
             follows_tree=follows_tree,
         )
 
@@ -371,20 +370,15 @@ async def run_on_runner(
             rebuilt[pair] = root
             replaced[pair] = root.node
         answer = await run()
-    if lost is not None and isinstance(answer, ToolRefusal) and _not_rebuilt(answer):
-        return to_tool_result((answer if answer.lost_frames else lost).not_rebuilt())
     if isinstance(answer, ToolRefusal):
+        if lost is not None and answer.lost_frames:
+            return to_tool_result(answer.not_rebuilt())
         return to_tool_result(answer if refine is None else refine(answer))
-    fetched = {
-        *newest,
-        *(root.ref.spec_id for root in rebuilt.values() if "content_version" not in root.node),
-    }
     read = (
         await record_spec_reads(
-            FrameRef(spec_id=answer.spec_id, content_version=answer.content_version),
-            fetched,
+            FrameRef(spec_id=answer.spec_id, content_version=answer.content_version), sent.node
         )
-        if fetched
+        if sent is not None and sent.spec_roots
         else {}
     )
     sentences = [
@@ -395,7 +389,7 @@ async def run_on_runner(
         )
         if sentence is not None
     ]
-    digest = render_summary_digest(answer)
+    digest = render_summary_digest(answer, heading=heading)
     return ToolResult(
         content="\n\n".join([" ".join(sentences), digest]) if sentences else digest,
         structured_content=answer.verb_result().model_dump(mode="json"),
