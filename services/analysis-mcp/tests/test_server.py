@@ -30,6 +30,7 @@ from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
 from analysis_mcp.rolling_tool import RESOLVE_ANCHOR_OUTPUT_SCHEMA, RESOLVE_ANCHOR_VERSION
 from analysis_mcp.server import _build_store, _lifespan, _with_internal_error_backstop, mcp
 from analysis_mcp.settings import Settings
+from analysis_mcp.verbs import FOLLOWS_TREE
 from common import refusal as refusal_module
 from common.declaration import declared_tool
 from common.materialisation import InMemoryMaterialisationStore, get_store, set_store
@@ -385,6 +386,9 @@ async def test_every_registered_tool_keeps_its_in_process_twins_schema_and_descr
     leveled = set()
     for name, tool in registered.items():
         schema = copy.deepcopy(tool.input_schema)
+        # Each verb adds the one argument its runner request reads (`verbs._on_runner`).
+        if name != "resolve_anchor":
+            assert schema["properties"].pop(FOLLOWS_TREE)["type"] == "boolean", name
         if schema["properties"].pop("place_level", None) is not None:
             leveled.add(name)
         assert schema == expected[name].input_schema, name

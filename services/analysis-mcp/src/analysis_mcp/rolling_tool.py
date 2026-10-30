@@ -746,7 +746,7 @@ def _rolling_literals(
             ("window_start", op_spec.window_start, rolling.window_start),
             ("window_end", op_spec.window_end, rolling.window_end),
         )
-        if reference is not None and literal is not None
+        if reference is not None and isinstance(literal, str)
     ]
 
 

@@ -63,6 +63,7 @@ from analysis_mcp.runner_client import runner_holder
 from analysis_mcp.settings import Settings
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.verbs import (
+    FOLLOWS_TREE,
     aggregate,
     compare,
     filter_verb,
@@ -218,10 +219,17 @@ mcp.add_tool(
 
 # The public form of each tool the combined server lists differently from this
 # mount (`common.public_shape`). A rolling call needs `resolve_anchor`'s
-# `anchor_key`, and only the harness calls `resolve_anchor`.
-PUBLIC_SHAPES: Mapping[str, PublicShape] = dict.fromkeys(
-    ("growth", "rank", "filter"), PublicShape(hidden=frozenset({"rolling", "anchor_key"}))
+# `anchor_key`, and only the harness calls `resolve_anchor`. Every public verb that
+# reads a derived input lets its rolling years follow the call's tree.
+_FOLLOWS_TREE = PublicShape(hidden=frozenset({FOLLOWS_TREE}), forced={FOLLOWS_TREE: True})
+_ROLLING_FOLLOWS_TREE = PublicShape(
+    hidden=frozenset({"rolling", "anchor_key", FOLLOWS_TREE}),
+    forced={FOLLOWS_TREE: True},
 )
+PUBLIC_SHAPES: Mapping[str, PublicShape] = {
+    **dict.fromkeys(("aggregate", "compare", "share_of", "join"), _FOLLOWS_TREE),
+    **dict.fromkeys(("growth", "rank", "filter"), _ROLLING_FOLLOWS_TREE),
+}
 
 
 class _NameUnknownVerbsMiddleware(Middleware):

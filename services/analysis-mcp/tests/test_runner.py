@@ -67,7 +67,9 @@ class _Runner:
 
     @property
     def body(self) -> dict[str, Any]:
-        return json.loads(self.requests[-1].content)
+        """The body of the last POST, past any manifest read after it."""
+        posts = [request for request in self.requests if request.method == "POST"]
+        return json.loads(posts[-1].content)
 
 
 def _install(
@@ -163,6 +165,25 @@ async def test_a_two_sided_call_fills_data_and_other_by_the_runners_slots(
     assert rendered == inputs
     assert runner.body["latest"] is False
     assert "anchor_roots" not in runner.body
+    assert "rolling" not in runner.body
+
+
+@pytest.mark.parametrize(
+    ("right_frame_ref", "rolling"),
+    [(_DERIVED, "tree"), (_OTHER_FRAME, None)],
+    ids=["derived-input", "fetched-frames"],
+)
+async def test_a_call_following_its_tree_flags_only_a_tree_with_a_derived_input(
+    store: InMemoryMaterialisationStore, right_frame_ref: dict[str, str], rolling: str | None
+) -> None:
+    # A tree of fetched frames sends no flag, so a dfo-apis that does not know it
+    # still answers.
+    runner = _install(_problem(422, "op_spec_invalid"))
+    await verbs.compare(
+        frame_ref=_FRAME, right_frame_ref=right_frame_ref, rolling_follows_tree=True
+    )
+
+    assert runner.body.get("rolling") == rolling
 
 
 _ROLLING = {
@@ -204,8 +225,9 @@ async def _rolling_growth(frame_ref: dict[str, str], anchor_key: str) -> Any:
     )
 
 
+@pytest.mark.parametrize("frame_ref", [_FRAME, _DERIVED], ids=["fetched-frame", "derived-input"])
 async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
-    store: InMemoryMaterialisationStore,
+    store: InMemoryMaterialisationStore, frame_ref: dict[str, str]
 ) -> None:
     # The record was resolved over a second root beside the call's own frame, as
     # over both sides of a pairing whose one side the call grows. The second was
@@ -228,9 +250,12 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
         return _problem(422, "op_spec_invalid")
 
     runner = _install(answer)
-    result = await _rolling_growth(_FRAME, record.anchor_key)
+    result = await _rolling_growth(frame_ref, record.anchor_key)
 
     assert result.is_error is False, result.content
+    # The harness's step states its populations, which a derived input's own
+    # overlay keeps: the request leaves the input's rolling years as stored.
+    assert "rolling" not in runner.body
     tree = runner.body["tree"]
     assert tree["verb"] == "growth"
     assert tree["arguments"]["window_start"] == "2021"
@@ -763,6 +788,21 @@ async def test_a_lost_root_behind_a_derived_input_refuses_that_input_unrecoverab
         "frame_refs": [_DERIVED],
         "root": {"spec_id": _SPEC, "content_version": _DATASET_CV},
     }
+
+
+async def test_a_derived_input_with_no_recipe_refuses_reanchor_unavailable(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    _install(_problem(404, "recipe_not_found", fix=_DERIVED))
+    result = await verbs.compare(frame_ref=_FRAME, right_frame_ref=_DERIVED)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "rolling_reanchor_unavailable",
+        "correct_and_retry",
+    )
+    assert structured["fix"] == {"frame_refs": [_DERIVED], "tool": "get_data"}
 
 
 @pytest.mark.parametrize(

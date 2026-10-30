@@ -6272,6 +6272,138 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"rolling\":\"tree\",\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"inputs\":{\"data\":{\"content_version\":\"ocv_d971cc5bddae69cfad74f619ca9b6242\",\"spec_id\":\"ops_72f6c8509f2e577055a6f0d55ef7a13e\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: aggregate, then aggregate.",
+            "spec": {
+              "spec_id": "ops_f89c61974dde8e9fe18a624b6a071e73",
+              "recipe": {
+                "normal_form_hash": "rnf_fe5b153c101052b86023d362013012b6",
+                "replay_key": "rpk_9335c35d6e515d6a4e9e58a217587947"
+              }
+            },
+            "content_version": "ocv_5caa272282da20b20dd52f626006e24f",
+            "output_digest": "out_b5a0f74237fdc7870fd6c6e724f487f0",
+            "roots": [
+              {
+                "spec_id": "spec_fdf343db22646eac2d6e30d8cac9a5f9",
+                "content_version": "cv_fdf343db22646eac2d6e30d8cac9a5f9",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:4d2f357a4a058c838dde0b5261eb5a91c7ffe48f5fb1e9b47893024b551ef5de",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_e89ad2d8cec34678a772fdbbb55ec5bb",
+      "output_digest": "out_b5a0f74237fdc7870fd6c6e724f487f0",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_f89c61974dde8e9fe18a624b6a071e73",
+        "content_version": "ocv_5caa272282da20b20dd52f626006e24f",
+        "frame_content_version": "cv_e89ad2d8cec34678a772fdbbb55ec5bb",
+        "rows": 1,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2021",
+          "end": "2023",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 1,
+          "present_cell_count": 1,
+          "group_summaries": [
+            {
+              "group_key": [],
+              "value": 423642000000.0,
+              "row_count": 5,
+              "time_period_min": "2021/2023",
+              "time_period_max": "2021/2023",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2021/2023"
+          ],
+          "period_label": "2021/2023",
+          "entity_count": null,
+          "period_entities": [
+            [
+              "2021/2023",
+              5
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 1,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2021",
+        "end": "2023",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"mean\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"financingProvider\"],\"window_end\":\"2023\",\"window_start\":\"2020\"},\"inputs\":{\"data\":{\"content_version\":\"cv_3b94199faebf47c6e8bc2cc3432dc666\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"verb\":\"rank\"}}": {
     "status": 200,
     "body": {

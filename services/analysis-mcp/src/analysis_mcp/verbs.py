@@ -13,8 +13,11 @@ of place on the runner (`runner_tree.verb_tree`). `compare`
 takes `sum_of`'s form under `operation="sum"`, and `share_of` takes
 `quotient_of`'s under `operation="quotient"`: the form picks the op-spec, so each
 keeps its own runner call, result and refusals. A share whose sides hold two
-units refuses with `fix` naming the quotient form. A rolling
-`growth`, `rank` or `filter` needs an `anchor_key`, checked by
+units refuses with `fix` naming the quotient form. A window bound or a
+`time_period` threshold given as a relative year (`op_spec.RelativeYear`) goes
+to the runner as it is, with no overlay and no anchor record, and the runner
+fills it from the latest year of the call's tree. A `growth`, `rank` or
+`filter` stating a `rolling` overlay needs an `anchor_key`, checked by
 `op_spec.with_anchor_key`. The key reaches no request. The call sends the roots
 of the anchor record it names as `anchor_roots`, and the runner checks each
 rolling literal against the latest period it finds over them
@@ -120,6 +123,22 @@ def frame_ref_incomplete(arguments: Arguments) -> ToolRefusal | None:
     return None
 
 
+# The argument that lets a derived input's rolling years follow the call's tree
+# (`runner_client.run_tree`). The public server forces it on
+# (`server.PUBLIC_SHAPES`); the harness never sets it, so its requests and the
+# latest years of its anchor records are as they were.
+FOLLOWS_TREE = "rolling_follows_tree"
+_FOLLOWS_TREE_TYPE = Annotated[
+    bool,
+    Field(
+        description=(
+            "True computes each derived input's rolling years again under this call's one "
+            "latest year."
+        )
+    ),
+]
+
+
 def _held_newest(arguments: Arguments) -> tuple[dict[str, Any], tuple[str, ...]]:
     """`arguments` with each bare `spec_` frame argument held as `newest_ref`, and
     the Specs those name, each once."""
@@ -141,11 +160,15 @@ def _on_runner(
     place_level_description: str | None = None,
 ) -> Tool:
     """The registered tool for `in_process`. It keeps that tool's signature and
-    docstring, builds its op-spec with `build` from the bound arguments, and
-    computes it on the runner. `refine` rewrites a runner refusal given the
-    call's arguments. `place_level_description`, when given, adds `place_level` to the
-    signature with that description."""
+    docstring, with `FOLLOWS_TREE` added, builds its op-spec with `build` from the
+    bound arguments, and computes it on the runner. `refine` rewrites a runner
+    refusal given the call's arguments. `place_level_description`, when given, adds
+    `place_level` to the signature with that description."""
     signature = inspect.signature(in_process)
+    follows_tree = inspect.Parameter(
+        FOLLOWS_TREE, inspect.Parameter.KEYWORD_ONLY, default=False, annotation=_FOLLOWS_TREE_TYPE
+    )
+    signature = signature.replace(parameters=[*signature.parameters.values(), follows_tree])
 
     @functools.wraps(in_process)
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:
@@ -166,15 +189,18 @@ def _on_runner(
             anchor_key=arguments.get("anchor_key"),
             place_level=place_level,
             newest=newest,
+            follows_tree=arguments[FOLLOWS_TREE],
             refine=None if refine is None else functools.partial(refine, arguments),
         )
 
+    listed = [*signature.parameters.values()]
+    annotations = {**in_process.__annotations__, FOLLOWS_TREE: _FOLLOWS_TREE_TYPE}
     if place_level_description is not None:
         place_level = _place_level(place_level_description)
-        tool.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]  # inspect reads it
-            parameters=[*signature.parameters.values(), place_level]
-        )
-        tool.__annotations__ = {**in_process.__annotations__, "place_level": place_level.annotation}
+        listed.insert(-1, place_level)
+        annotations["place_level"] = place_level.annotation
+    tool.__signature__ = signature.replace(parameters=listed)  # ty: ignore[unresolved-attribute]  # inspect reads it
+    tool.__annotations__ = annotations
     return tool
 
 

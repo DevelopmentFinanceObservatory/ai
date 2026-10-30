@@ -19,7 +19,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, MutableMapping
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
-from itertools import pairwise
+from itertools import pairwise, product
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -31,6 +31,7 @@ import tiktoken
 from analysis_mcp import server as analysis_server
 from analysis_mcp import tool_errors as analysis_tool_errors
 from analysis_mcp.fixtures import seed_fixture_store
+from analysis_mcp.verbs import FOLLOWS_TREE
 from common import auth as mcp_auth
 from common import refusal as refusal_module
 from common import telemetry
@@ -283,14 +284,14 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     assert {"search", "get_data", "aggregate", *PRESENTATION_TOOLS} <= _described(
         combined_tools
     ).keys()
-    # `get_data` is listed without `place_types`, and `growth`, `rank` and `filter`
-    # without the harness's rolling arguments
+    # `get_data` is listed without `place_types`, and the public verbs without
+    # `rolling_follows_tree` and the harness's rolling arguments
     # (`test_the_public_get_data_lists_the_type_columns_in_place_of_place_types`,
     # `test_the_public_list_leaves_out_the_harness_rolling_arguments`).
     combined_described, direct_described = _described(combined_tools), _described(direct_tools)
     assert [
         name for name in combined_described if combined_described[name] != direct_described[name]
-    ] == ["get_data", *ROLLING_ARGUMENT_TOOLS]
+    ] == ["get_data", "aggregate", "compare", "growth", "rank", "share_of", "join", "filter"]
     assert any(tool.output_schema is not None for tool in direct_tools)
     assert [tool.output_schema for tool in combined_tools] == [None] * len(combined_tools)
     assert combined_templates == direct_templates
@@ -837,7 +838,9 @@ async def test_arguments_that_fail_the_input_schema_refuse_in_the_envelope(
     assert [problem.split(":")[0] for problem in envelope["fix"]["problems"]] == ["aggregation"]
     aggregate = await analysis_server.mcp.get_tool("aggregate")
     assert aggregate is not None
-    assert envelope["fix"]["accepted"] == list(aggregate.parameters["properties"])
+    assert envelope["fix"]["accepted"] == [
+        name for name in aggregate.parameters["properties"] if name != FOLLOWS_TREE
+    ]
 
 
 @REVISIONS
@@ -915,9 +918,9 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
 
 # The most o200k tokens the public tool list may cost, as a client hands it to its
 # model: the compact JSON of each tool's name, description and input schema. Every
-# client pays it on every turn. The bound is the measured count, 17,143, rounded up
+# client pays it on every turn. The bound is the measured count, 17,869, rounded up
 # to the next 500. The list must stay within 20,000; lower the bound as it shrinks.
-_PUBLIC_LIST_TOKEN_BOUND = 17_500
+_PUBLIC_LIST_TOKEN_BOUND = 18_000
 
 
 async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:
@@ -1045,7 +1048,7 @@ async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str
 
     assert forwarded.arguments == [
         {**arguments, "place_types": True},
-        {"frame_ref": UNHELD_FRAME, "aggregation": "sum"},
+        {"frame_ref": UNHELD_FRAME, "aggregation": "sum", FOLLOWS_TREE: True},
     ]
 
 
@@ -1077,7 +1080,8 @@ async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_type
 
 async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> None:
     """analysis-mcp's own mount keeps `rolling` and `anchor_key` for the harness, and
-    the public list has neither."""
+    the public list has neither. A window bound and a `time_period` threshold take a
+    year relative to the latest in their place."""
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
 
     async with Client(combined) as client:
@@ -1087,8 +1091,18 @@ async def test_the_public_list_leaves_out_the_harness_rolling_arguments() -> Non
     for name in ROLLING_ARGUMENT_TOOLS:
         assert set(listed[name].input_schema["properties"]) == set(
             served[name].parameters["properties"]
-        ) - {"rolling", "anchor_key"}
+        ) - {"rolling", "anchor_key", FOLLOWS_TREE}
     assert {"rolling", "anchor_key"} <= set(served["growth"].parameters["properties"])
+    relative = {"anchor": {"const": "latest"}, "offset": {"type": "integer", "maximum": 0}}
+    for name, bound in product(("growth", "rank"), ("window_start", "window_end")):
+        branches = listed[name].input_schema["properties"][bound]["anyOf"]
+        assert [branch.get("properties") for branch in branches] == [None, relative], name
+    (threshold,) = [
+        item
+        for item in listed["filter"].input_schema["properties"]["predicates"]["items"]["anyOf"]
+        if item["properties"]["kind"].get("const") == "ordered_threshold"
+    ]
+    assert threshold["properties"]["value"]["anyOf"][-1]["properties"] == relative
     assert listed.keys() == PUBLIC_TOOLS
     assert listed["compare"].input_schema["properties"]["operation"]["enum"] == [
         "difference",
@@ -2650,11 +2664,13 @@ class _Alternating(httpx2.AsyncBaseTransport):
 
 
 async def test_a_2025_client_is_served_by_any_instance_without_a_session(
-    running_lifespan: Callable[..., Any],
+    running_lifespan: Callable[..., Any], runner: Any
 ) -> None:
     """Two app instances share the process's frame store, as Cloud Run
     instances share one bucket. A 2025-11-25 client initializes against
-    one and chains a call to the other, and neither issues a session."""
+    one and chains a call to the other, and neither issues a session. The
+    chained public call over a derived input lets its rolling years follow the
+    call's tree."""
     first = create_app(settings=Settings(mcp_api_token=TOKEN))
     second = create_app(settings=Settings(mcp_api_token=TOKEN))
     alternating = _Alternating({"first": first, "second": second})
@@ -2699,6 +2715,7 @@ async def test_a_2025_client_is_served_by_any_instance_without_a_session(
             )
 
     assert chained.is_error is False
+    assert runner.requests[-1]["rolling"] == "tree"
     assert {name for name, _ in alternating.served} == {"first", "second"}
     assert not any("mcp-session-id" in headers for _, headers in alternating.served)
     assert not any("mcp-session-id" in headers for headers in response_headers)

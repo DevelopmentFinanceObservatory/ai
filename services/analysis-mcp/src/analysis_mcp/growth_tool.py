@@ -67,10 +67,13 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import (
     ANCHOR_KEY_PATTERN,
+    RELATIVE_YEAR_ON_RUNNER_ONLY,
     FrameRefArgument,
     GrowthOpSpec,
     PinnedUnit,
+    RelativeYear,
     WindowRolling,
+    WindowYear,
     with_anchor_key,
 )
 from analysis_mcp.rolling_tool import anchored_input
@@ -225,7 +228,7 @@ def _unreadable_input_refusal(
 
 
 @holds_input_rows
-async def growth(
+async def growth(  # noqa: PLR0911 -- one refusal per check the call can fail
     frame_ref: Annotated[
         FrameRefArgument,
         Field(
@@ -238,11 +241,22 @@ async def growth(
         ),
     ],
     window_start: Annotated[
-        str, Field(pattern=r"^\d{4}$", description="The window's first calendar year, e.g. '2020'.")
+        WindowYear,
+        Field(
+            description=(
+                "The window's first calendar year, e.g. '2020'. Or {anchor: 'latest', "
+                "offset: -9} to follow the data."
+            )
+        ),
     ],
     window_end: Annotated[
-        str,
-        Field(pattern=r"^\d{4}$", description="The window's last calendar year, e.g. '2023'."),
+        WindowYear,
+        Field(
+            description=(
+                "The window's last calendar year, e.g. '2023'. Or {anchor: 'latest', "
+                "offset: 0} to follow the data."
+            )
+        ),
     ],
     entity_by: Annotated[
         tuple[str, ...],
@@ -334,6 +348,12 @@ async def growth(
     endpoint and suggesting a window at least one entity holds both ends of,
     when one exists.
 
+    A window year given as {anchor: 'latest', offset: n} follows the data:
+    the call takes the newest year at least half of the input's series hold
+    and moves back -n years. It computes over those literal years, which the
+    result names, and a card drawn from the result moves forward when new
+    data lands.
+
     Each output row's `time_period` is the window as a span, such as
     `2020/2023`. A frame whose rows already carry a span, such as an
     `aggregate` or `rank` result over several years, refuses
@@ -378,6 +398,10 @@ async def growth(
     )
     if isinstance(op_spec, ToolResult):
         return op_spec
+    if isinstance(op_spec.window_start, RelativeYear) or isinstance(
+        op_spec.window_end, RelativeYear
+    ):
+        return to_tool_result(ToolRefusal.op_spec_invalid(detail=RELATIVE_YEAR_ON_RUNNER_ONLY))
 
     # `entity_by` is canonicalised before the engine runs -- see
     # `aggregate_tool.aggregate`'s identical comment on its own `group_by`.
@@ -500,8 +524,8 @@ async def growth(
         trace=output_trace,
         step=_growth_step(op_spec, result, trace=output_trace),
         digest=lambda: render_growth_digest(
-            window_start=op_spec.window_start,
-            window_end=op_spec.window_end,
+            window_start=result.window_start,
+            window_end=result.window_end,
             entity_by=entity_by,
             result=facts_of(result),
             op_spec_hash=op_spec_hash,

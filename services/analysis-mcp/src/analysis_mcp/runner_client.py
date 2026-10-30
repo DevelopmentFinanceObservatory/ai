@@ -13,7 +13,9 @@ answer, or the `ToolRefusal` its reply maps to:
 - A problem document keeps the runner's `code`, `detail` and `fix` where this
   service defines the code, which holds for every engine code, except that
   `place_levels_mixed` is written again from its `fix`
-  (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. A root the
+  (`ToolRefusal.place_levels_mixed`), so its message names this service's calls. A derived input
+  with no stored recipe (`recipe_not_found`) is `rolling_reanchor_unavailable`,
+  since the runner computes every derived input again. A root the
   runner cannot read (`snapshot_not_found`, `recipe_not_found`,
   `artifact_expired`) is, in this order: the caller's own frame refs read as
   that root, not held or aged out (`ToolRefusal.frames_lost`, which names
@@ -44,6 +46,12 @@ versions, and returns the pair it computed. A call whose derived input lost a
 root sends the replayed pair in its place (`tool_pipeline.run_on_runner`); every
 other call sends `latest: false`, reading each root at the version it names.
 
+A call with relative years states no anchor record: the runner fills them from
+the latest year of the call's whole tree and answers each with its literal
+(`resolved_periods`). A public call over a derived input sends `rolling: "tree"`,
+so the input's own rolling years follow that one latest year too, and the
+summary names each input that took another year alone (`run_tree`).
+
 `read_derived_manifest` and `read_derived_file` read a frame the runner stored,
 by its `ops_` pair, from `GET /api/datasets/derived/{spec_id}/{content_version}`
 and its `/file`, for a caller that needs its recipe or its rows. Each raises
@@ -64,17 +72,18 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
 from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
 from common.holder import Holder
 from common.materialisation import FrameRef, LeftOutSeries
-from pydantic import BaseModel, ConfigDict, ValidationError
+from dfo_frame_grammar import shift_period
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from analysis_mcp.settings import Settings
-from analysis_mcp.summary import VerbSummary
+from analysis_mcp.summary import RecomputedInput, ResolvedPeriod, Rolling, VerbSummary
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal
 
 logger = logging.getLogger(__name__)
@@ -96,6 +105,7 @@ _LOCAL_CODES = frozenset(
         ToolErrorCode.FRAME_EXPIRED,
         ToolErrorCode.FRAME_INTEGRITY_FAILED,
         ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE,
+        ToolErrorCode.ROLLING_REANCHOR_UNAVAILABLE,
         ToolErrorCode.SERVICE_UNAVAILABLE,
         ToolErrorCode.UPSTREAM_ERROR,
         ToolErrorCode.INTERNAL_ERROR,
@@ -106,9 +116,15 @@ RUNNER_CODES = frozenset(code.value for code in ToolErrorCode if code not in _LO
 _UNHELD_ROOT_CODES = frozenset({"snapshot_not_found", "recipe_not_found"})
 _EXPIRED_ROOT_CODE = "artifact_expired"
 _ROOT_CODES = _UNHELD_ROOT_CODES | {_EXPIRED_ROOT_CODE}
+_RECIPE_MISSING_CODE = "recipe_not_found"
 _OVER_CEILING_CODE = "over_ceiling"
 _BUSY_CODE = "service_unavailable"
 _RESPONSE_INVALID = "response_invalid"
+
+# An answer's `resolved_periods`, one entry per relative period of the recipe.
+_RESOLVED_PERIODS: TypeAdapter[tuple[ResolvedPeriod, ...]] = TypeAdapter(
+    Annotated[tuple[ResolvedPeriod, ...], Field(min_length=1)]
+)
 
 type Pair = tuple[str, str]
 # The caller's frame refs each root pair of a request stands for: two sides
@@ -320,6 +336,14 @@ async def refusal_for(
         refusal = _place_levels_mixed(fix)
     elif code in RUNNER_CODES:
         refusal = ToolRefusal(code=ToolErrorCode(code), message=detail, fix=fix)
+    elif (
+        code == _RECIPE_MISSING_CODE
+        and root[0].startswith("ops_")
+        and (refs := refs_by_root.get(root))
+    ):
+        refusal = ToolRefusal.rolling_reanchor_unavailable(
+            frame_refs=[ref.model_dump() for ref in refs]
+        )
     elif code in _ROOT_CODES and (refs := refs_by_root.get(root)):
         refusal = ToolRefusal.frames_lost(
             frame_refs=[ref.model_dump() for ref in refs], expired=code == _EXPIRED_ROOT_CODE
@@ -427,12 +451,29 @@ def _unread_summary(exc: ValidationError | KeyError) -> str:
 
 
 async def run_tree(
-    node: Mapping[str, Any], *, anchor: Anchor | None = None, refs_by_root: RefsByRoot
+    node: Mapping[str, Any],
+    *,
+    anchor: Anchor | None = None,
+    refs_by_root: RefsByRoot,
+    follows_tree: bool = False,
 ) -> VerbSummary | ToolRefusal:
     """The summary of the tree `node` computed by the runner, or its refusal.
     `anchor`, for a rolling call, sends its record's roots, which the runner takes
-    the latest period over, and checks the answer read no other root."""
+    the latest period over, and checks the answer read no other root.
+
+    The runner computes each derived (`ops_`) input again from its stored recipe.
+    With `follows_tree`, a tree with a derived input sends `rolling: "tree"`, so the
+    input's rolling years follow the one latest year of the whole tree. Any other
+    request omits the field: a dfo-apis that does not know it still answers, and
+    the harness's rolling steps keep the populations they state. An input whose recipe
+    is missing refuses `rolling_reanchor_unavailable`. The summary's `rolling`
+    names the latest year the answer's `resolved_periods` were filled from and
+    each derived input the runner computed again under another year than its
+    own (`_rolling`)."""
+    derived = _derived_refs(refs_by_root)
     request: dict[str, Any] = {"tree": node, "latest": False}
+    if follows_tree and derived:
+        request["rolling"] = "tree"
     if anchor is not None:
         request["anchor_roots"] = list(anchor.nodes)
     response = await runner_holder.get().post(ANALYSIS_PATH, request)
@@ -442,7 +483,67 @@ async def run_tree(
         return _pending(response)
     if not response.is_success:
         return await refusal_for(response, refs_by_root=refs_by_root, anchor=anchor)
-    return _ready_summary(_json(response), anchor=anchor)
+    body = _json(response)
+    summary = _ready_summary(body, anchor=anchor)
+    if isinstance(summary, ToolRefusal):
+        return summary
+    assert body is not None
+    rolling = await _rolling(body.get("resolved_periods"), derived=derived)
+    if isinstance(rolling, ToolRefusal):
+        return rolling
+    return summary if rolling is None else summary.model_copy(update={"rolling": rolling})
+
+
+def _derived_refs(refs_by_root: RefsByRoot) -> tuple[FrameRef, ...]:
+    """The derived (`ops_`) frames among the call's inputs."""
+    return tuple(
+        ref for refs in refs_by_root.values() for ref in refs if ref.spec_id.startswith("ops_")
+    )
+
+
+async def _own_latest(ref: FrameRef) -> RecomputedInput | None:
+    """`ref` with its top verb and the latest year its own recipe was filled from,
+    both `None` when its manifest cannot be read; `None` for a recipe with no
+    rolling year."""
+    try:
+        manifest = await read_derived_manifest(ref)
+    except DerivedUnread:
+        return RecomputedInput(**ref.model_dump(), verb=None, latest=None)
+    anchor = manifest.get("anchor")
+    period = anchor.get("period") if isinstance(anchor, Mapping) else None
+    if not isinstance(period, str):
+        return None
+    recipe = manifest.get("recipe")
+    tree = recipe.get("tree") if isinstance(recipe, Mapping) else None
+    op_spec = tree.get("op_spec") if isinstance(tree, Mapping) else None
+    verb = op_spec.get("verb") if isinstance(op_spec, Mapping) else None
+    return RecomputedInput(
+        **ref.model_dump(), verb=verb if isinstance(verb, str) else None, latest=period
+    )
+
+
+async def _rolling(
+    resolved: object, *, derived: Sequence[FrameRef]
+) -> Rolling | None | ToolRefusal:
+    """The latest year the answer's `resolved` periods were filled from, `None`
+    when it names none, with each of the `derived` inputs whose own recipe took
+    another latest year, or whose manifest cannot be read. A derived input with no
+    rolling year of its own, or one that took the same year, is computed as it was
+    and is not named."""
+    if not resolved:
+        return None
+    try:
+        periods = _RESOLVED_PERIODS.validate_python(resolved)
+        latest = shift_period(periods[0].period, -periods[0].offset)
+    except ValueError:
+        return _unusable("the analysis answer's resolved_periods do not fit this service")
+    recomputed: list[RecomputedInput] = []
+    if derived:
+        async with asyncio.TaskGroup() as group:
+            reads = [group.create_task(_own_latest(ref)) for ref in derived]
+        owns = [read.result() for read in reads]
+        recomputed = [own for own in owns if own is not None and own.latest != latest]
+    return Rolling(latest=latest, periods=periods, recomputed=tuple(recomputed))
 
 
 def _ready_summary(
