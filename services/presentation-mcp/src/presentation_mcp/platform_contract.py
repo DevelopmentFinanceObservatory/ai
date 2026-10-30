@@ -27,8 +27,8 @@ RESOLVED_PAYLOAD_META_KEY = "org.one.dfo/resolved_payload"
 VIEW_STATE_META_KEY = "org.one.dfo/view_state"
 
 # The key under which a describe_frame view or a create's reply names the
-# version its `spec_` frame_ref asked for and the newest version read in its
-# place, when the platform no longer holds the one asked for and the call set
+# version its frame_ref asked for and the one built in its place, when the
+# platform no longer holds the one asked for and the call set
 # `rebuild_lost_frames`.
 FRAME_NOTE_KEY = "frame_note"
 
@@ -107,9 +107,9 @@ class WriteReply:
     # a create result alone. `server.py` keeps it out of `_meta` and out of
     # the Prefab shell. `None` on a revise.
     write_token: str | None = None
-    # Creates only: the sentence naming the version the intent's `spec_`
-    # frame_ref asked for and the newest version drawn in its place, when the
-    # platform no longer held the one asked for. Model vocabulary, under
+    # Creates only: the sentence naming the version the intent's frame_ref
+    # asked for and the one built in its place, when the platform no longer
+    # held the one asked for. Model vocabulary, under
     # `FRAME_NOTE_KEY`. `None` otherwise.
     frame_note: str | None = None
 
@@ -126,9 +126,10 @@ class Assembler(Protocol):
     ) -> WriteReply | Refusal:
         """Resolve a complete intent against its frame and mint revision 1.
 
-        With `rebuild_lost_frames`, a `spec_` frame_ref the platform no longer
-        holds is drawn at its newest version, and the reply names both
-        versions under `FRAME_NOTE_KEY`.
+        With `rebuild_lost_frames`, a frame_ref the platform no longer holds is
+        built again, a `spec_` frame at its newest version and an `ops_` frame
+        from its recipe on current data, and the reply names both versions
+        under `FRAME_NOTE_KEY`.
         """
         ...
 
@@ -160,8 +161,9 @@ class Assembler(Protocol):
         Reads `frame_ref["spec_id"]` and `frame_ref["content_version"]` to
         address the platform request. A `spec_` id with no content_version
         reads its newest version, which the view names. With
-        `rebuild_lost_frames`, so does a `spec_` pair the platform no longer
-        holds, and the view names both versions under `FRAME_NOTE_KEY`.
+        `rebuild_lost_frames`, a pair the platform no longer holds is built
+        again as `create_component` builds it, and the view names both
+        versions under `FRAME_NOTE_KEY`.
         `dimension` narrows the view to one dimension's values. `query`
         filters those values.
         """

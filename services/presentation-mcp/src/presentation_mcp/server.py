@@ -182,9 +182,9 @@ _PRESENTATION_ONLY_FIELDS: dict[str, frozenset[str]] = {
 type IncludeProjection = Literal["auto", "full", "none"]
 
 # The public form of each tool the combined server lists differently from this
-# mount (`common.public_shape`). A public describe_frame or create reads a `spec_`
-# frame the platform no longer holds at its newest version; the harness keeps
-# `frame_unavailable` and replays the frame itself.
+# mount (`common.public_shape`). A public describe_frame or create builds a frame
+# the platform no longer holds again; the harness keeps `frame_unavailable` and
+# replays the frame itself.
 _PUBLIC_FRAME_TOOL = PublicShape(
     hidden=frozenset({REBUILD_LOST_FRAMES}), forced={REBUILD_LOST_FRAMES: True}
 )

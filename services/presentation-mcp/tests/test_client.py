@@ -2414,8 +2414,14 @@ async def test_create_component_forwards_a_bare_spec_id_unchanged() -> None:
     assert json.loads(request.content)["intent"] == intent
 
 
-# apis' refusal of a spec_ pair whose version it no longer holds.
+# apis' refusals of a pair it no longer holds: lost, and expired, which apis
+# marks retryable.
 _VERSION_LOST = _problem_body(code="frame_unavailable", retryable=False, status=404)
+_FRAME_EXPIRED = _problem_body(code="frame_unavailable", retryable=True, status=404)
+_LOST_BODIES = [
+    pytest.param(_VERSION_LOST, id="lost"),
+    pytest.param(_FRAME_EXPIRED, id="expired"),
+]
 
 
 def _sequence_handler(*responses: httpx2.Response) -> tuple[list[httpx2.Request], Handler]:
@@ -2433,6 +2439,7 @@ def _sequence_handler(*responses: httpx2.Response) -> tuple[list[httpx2.Request]
 _DERIVED_PATH = f"/api/presentation/frames/{_DERIVED_REF.spec_id}/{_DERIVED_REF.content_version}"
 
 
+@pytest.mark.parametrize("lost", _LOST_BODIES)
 @pytest.mark.parametrize(
     ("record", "pair_path"),
     [
@@ -2448,6 +2455,7 @@ async def test_get_frame_view_reads_a_lost_spec_pair_at_its_newest_version(
     materialisation_store: InMemoryMaterialisationStore,
     record: MintRecord | None,
     pair_path: str,
+    lost: bytes,
 ) -> None:
     """With `rebuild_lost_frames`, a spec_ pair apis no longer holds is read
     through the newest-version route, and the view names the version asked
@@ -2456,7 +2464,7 @@ async def test_get_frame_view_reads_a_lost_spec_pair_at_its_newest_version(
         await materialisation_store.put_mint_record(record)
     body = {"spec_id": _DERIVED_REF.spec_id, "content_version": "cv_9", "dimensions": {}}
     requests, handler = _sequence_handler(
-        httpx2.Response(404, content=_VERSION_LOST), httpx2.Response(200, json=body)
+        httpx2.Response(404, content=lost), httpx2.Response(200, json=body)
     )
 
     async with _assembler(handler) as assembler:
@@ -2476,32 +2484,8 @@ async def test_get_frame_view_reads_a_lost_spec_pair_at_its_newest_version(
 
 
 @pytest.mark.usefixtures("materialisation_store")
-@pytest.mark.parametrize(
-    ("status", "code", "retryable", "rebuild_lost_frames"),
-    [
-        pytest.param(404, "frame_unavailable", False, False, id="without rebuild_lost_frames"),
-        pytest.param(503, "frame_unavailable", True, True, id="retryable frame_unavailable"),
-        pytest.param(404, "spec_not_found", False, True, id="another code"),
-    ],
-)
-async def test_get_frame_view_relays_a_spec_pair_refusal_it_does_not_rebuild(
-    status: int, code: str, retryable: bool, rebuild_lost_frames: bool
-) -> None:
-    problem = _problem_body(code=code, retryable=retryable, status=status)
-    requests, handler = _counting_handler(httpx2.Response(status, content=problem))
-
-    async with _assembler(handler) as assembler:
-        reply = await assembler.get_frame_view(
-            frame_ref=_DERIVED_REF.model_dump(), rebuild_lost_frames=rebuild_lost_frames
-        )
-
-    assert isinstance(reply, Refusal)
-    assert reply.error == code
-    assert {request.url.path for request in requests} == {_DERIVED_PATH}
-
-
-@pytest.mark.usefixtures("materialisation_store")
-async def test_create_component_draws_a_lost_spec_pair_at_its_newest_version() -> None:
+@pytest.mark.parametrize("lost", _LOST_BODIES)
+async def test_create_component_draws_a_lost_spec_pair_at_its_newest_version(lost: bytes) -> None:
     """With `rebuild_lost_frames`, a create whose spec_ pair apis no longer
     holds is sent again with the spec_id alone under the same write token,
     and the reply names both versions."""
@@ -2510,7 +2494,7 @@ async def test_create_component_draws_a_lost_spec_pair_at_its_newest_version() -
         "provenance": {"inputs": [{"spec_id": _DERIVED_REF.spec_id, "content_version": "cv_9"}]},
     }
     requests, handler = _sequence_handler(
-        httpx2.Response(404, content=_VERSION_LOST),
+        httpx2.Response(404, content=lost),
         httpx2.Response(201, json={**WRITE_BODY, "resolved_payload": envelope}),
     )
     intent = {**INTENT, "frame_ref": _DERIVED_REF.model_dump()}
@@ -2542,6 +2526,164 @@ async def test_create_component_without_rebuild_lost_frames_relays_frame_unavail
     assert reply.error == "frame_unavailable"
     (request,) = requests
     assert json.loads(request.content)["intent"] == intent
+
+
+_LOST_OPS = FrameRef(spec_id="ops_" + "e" * 32, content_version="ocv_" + "e" * 32)
+_REPLAYED_OPS = FrameRef(spec_id=_LOST_OPS.spec_id, content_version="ocv_" + "f" * 32)
+_REPLAY_READY = httpx2.Response(
+    200,
+    json={
+        "ref": {
+            "members": [
+                {
+                    "spec": {"spec_id": _REPLAYED_OPS.spec_id},
+                    "content_version": _REPLAYED_OPS.content_version,
+                }
+            ]
+        }
+    },
+)
+
+
+@pytest.mark.usefixtures("materialisation_store")
+@pytest.mark.parametrize(
+    ("status", "code", "retryable", "rebuild_lost_frames"),
+    [
+        pytest.param(404, "frame_unavailable", False, False, id="without rebuild_lost_frames"),
+        pytest.param(503, "frame_unavailable", True, True, id="503 frame_unavailable"),
+        pytest.param(404, "spec_not_found", False, True, id="another code"),
+    ],
+)
+@pytest.mark.parametrize("ref", [_DERIVED_REF, _LOST_OPS], ids=["spec_", "ops_"])
+async def test_get_frame_view_relays_a_refusal_it_does_not_rebuild(
+    ref: FrameRef, status: int, code: str, retryable: bool, rebuild_lost_frames: bool
+) -> None:
+    problem = _problem_body(code=code, retryable=retryable, status=status)
+    requests, handler = _counting_handler(httpx2.Response(status, content=problem))
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.get_frame_view(
+            frame_ref=ref.model_dump(), rebuild_lost_frames=rebuild_lost_frames
+        )
+
+    assert isinstance(reply, Refusal)
+    assert reply.error == code
+    assert {request.url.path for request in requests} == {
+        f"/api/presentation/frames/{ref.spec_id}/{ref.content_version}"
+    }
+
+
+def _replaying_handler(
+    replay: httpx2.Response, refused: httpx2.Response
+) -> tuple[list[httpx2.Request], Handler]:
+    """apis refusing `_LOST_OPS` with `refused`, answering its replay with
+    `replay`, and holding the pair a replay computes."""
+    requests: list[httpx2.Request] = []
+    view = {**_REPLAYED_OPS.model_dump(), "dimensions": {}}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path == "/api/datasets/analysis":
+            return replay
+        lost = _LOST_OPS.content_version in (
+            request.url.path if request.method == "GET" else request.content.decode()
+        )
+        if lost:
+            return refused
+        return (
+            httpx2.Response(200, json=view)
+            if request.method == "GET"
+            else (httpx2.Response(201, json=WRITE_BODY))
+        )
+
+    return requests, handler
+
+
+async def _rebuilt_ops(
+    call: str, replay: httpx2.Response, lost: bytes = _VERSION_LOST
+) -> tuple[Mapping[str, Any] | WriteReply | Refusal, list[httpx2.Request]]:
+    """`call` with `rebuild_lost_frames` on `_LOST_OPS`, which apis refuses with
+    the 404 problem `lost`, and the requests it made."""
+    requests, handler = _replaying_handler(replay, httpx2.Response(404, content=lost))
+    async with _assembler(handler) as assembler:
+        if call == "get_frame_view":
+            reply = await assembler.get_frame_view(
+                frame_ref=_LOST_OPS.model_dump(), rebuild_lost_frames=True
+            )
+        else:
+            reply = await assembler.create_component(
+                intent={**INTENT, "frame_ref": _LOST_OPS.model_dump()},
+                caller=Caller.EXTERNAL,
+                rebuild_lost_frames=True,
+            )
+    return reply, requests
+
+
+@pytest.mark.usefixtures("materialisation_store")
+@pytest.mark.parametrize("lost", _LOST_BODIES)
+@pytest.mark.parametrize("call", ["get_frame_view", "create_component"])
+async def test_a_lost_ops_pair_is_replayed_and_read_at_the_pair_the_replay_names(
+    call: str, lost: bytes
+) -> None:
+    reply, requests = await _rebuilt_ops(call, _REPLAY_READY, lost)
+
+    assert not isinstance(reply, Refusal)
+    note = reply.frame_note if isinstance(reply, WriteReply) else reply[FRAME_NOTE_KEY]
+    assert note is not None
+    assert _LOST_OPS.content_version in note
+    assert _REPLAYED_OPS.content_version in note
+    replay, rebuilt = requests[-2:]
+    assert json.loads(replay.content) == {"tree": _LOST_OPS.model_dump(), "latest": True}
+    if call == "get_frame_view":
+        assert rebuilt.url.path == (
+            f"/api/presentation/frames/{_REPLAYED_OPS.spec_id}/{_REPLAYED_OPS.content_version}"
+        )
+    else:
+        assert json.loads(rebuilt.content)["intent"]["frame_ref"] == _REPLAYED_OPS.model_dump()
+
+
+@pytest.mark.usefixtures("materialisation_store")
+@pytest.mark.parametrize("call", ["get_frame_view", "create_component"])
+@pytest.mark.parametrize(
+    ("replay", "error", "retry", "retry_after_s"),
+    [
+        pytest.param(
+            httpx2.Response(202, json={"retry_after_s": 4.0}),
+            "transient_unavailable",
+            RetryMode.RETRY_AFTER_DELAY,
+            4.0,
+            id="pending",
+        ),
+        pytest.param(
+            httpx2.Response(503, content=_problem_body(code="service_unavailable", retryable=True)),
+            "transient_unavailable",
+            RetryMode.RETRY_AFTER_DELAY,
+            5.0,
+            id="busy",
+        ),
+        pytest.param(
+            httpx2.Response(500, content=_problem_body(code="internal_error", retryable=False)),
+            "frame_unavailable",
+            RetryMode.DO_NOT_RETRY,
+            None,
+            id="failed",
+        ),
+    ],
+)
+async def test_a_lost_ops_pair_whose_replay_computes_nothing_refuses(
+    call: str,
+    replay: httpx2.Response,
+    error: str,
+    retry: RetryMode,
+    retry_after_s: float | None,
+) -> None:
+    """A replay that must wait refuses with its delay; one that failed refuses as
+    the lost pair did."""
+    reply, requests = await _rebuilt_ops(call, replay)
+
+    assert isinstance(reply, Refusal)
+    assert (reply.error, reply.retry, reply.retry_after_s) == (error, retry, retry_after_s)
+    assert requests[-1].url.path == "/api/datasets/analysis"
 
 
 @pytest.mark.parametrize("component_id", _INVALID_COMPONENT_IDS)

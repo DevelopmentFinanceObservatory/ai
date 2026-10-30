@@ -2167,29 +2167,25 @@ async def test_describe_frame_names_the_version_it_read(
         assert named_version in text
 
 
+def _lost_pair_call(name: str, frame_ref: dict[str, str]) -> dict[str, Any]:
+    if name == "describe_frame":
+        return {"frame_ref": frame_ref}
+    return {"intent": {"type": "table", "frame_ref": frame_ref, "select": {}}}
+
+
 @pytest.mark.usefixtures("frame_store")
+@pytest.mark.parametrize("name", ["describe_frame", "write_component"])
 @pytest.mark.parametrize(
-    ("name", "arguments"),
+    "frame_ref",
     [
-        (
-            "describe_frame",
-            {"frame_ref": {"spec_id": _SPEC_ID, "content_version": _LOST_VERSION}},
-        ),
-        (
-            "write_component",
-            {
-                "intent": {
-                    "type": "table",
-                    "frame_ref": {"spec_id": _SPEC_ID, "content_version": _LOST_VERSION},
-                    "select": {},
-                }
-            },
+        pytest.param({"spec_id": _SPEC_ID, "content_version": _LOST_VERSION}, id="spec_"),
+        pytest.param(
+            {"spec_id": "ops_" + "e" * 32, "content_version": "ocv_" + "e" * 32}, id="ops_"
         ),
     ],
-    ids=["describe_frame", "write_component"],
 )
-async def test_the_mount_refuses_a_lost_spec_pair_frame_unavailable(
-    name: str, arguments: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+async def test_the_mount_refuses_a_lost_pair_frame_unavailable(
+    name: str, frame_ref: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The harness's call sets no `rebuild_lost_frames`, so a lost pair reaches
     it as `frame_unavailable` after one request, and its own replay answers."""
@@ -2201,7 +2197,9 @@ async def test_the_mount_refuses_a_lost_spec_pair_frame_unavailable(
     )
 
     async with _client() as client:
-        result = await client.call_tool(name, arguments, raise_on_error=False)
+        result = await client.call_tool(
+            name, _lost_pair_call(name, frame_ref), raise_on_error=False
+        )
 
     assert _assert_refusal_envelope(result)["code"] == "frame_unavailable"
     assert len(frame_requests) == 1

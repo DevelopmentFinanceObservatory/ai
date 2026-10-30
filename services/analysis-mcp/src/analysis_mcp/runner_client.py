@@ -43,7 +43,8 @@ so the check covers a derived input as it covers a fetched frame.
 
 `replay_derived` asks the runner to compute a derived frame again from its stored
 recipe with `latest: true`, which reads its roots at their datasets' current
-versions, and returns the pair it computed. A call whose derived input lost a
+versions, and returns the pair it computed (`common.derived_replay`, which
+presentation-mcp shares). A call whose derived input lost a
 root sends the replayed pair in its place (`tool_pipeline.run_on_runner`); every
 other call sends `latest: false`, reading each root at the version it names.
 
@@ -78,6 +79,18 @@ from typing import Annotated, Any
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
 from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.derived_replay import (
+    ANALYSIS_PATH,
+    DEFAULT_RETRY_AFTER_S,
+    ReplayBusy,
+    ReplayFailed,
+    ReplayPending,
+    busy,
+    pending,
+)
+from common.derived_replay import problem_json as _json
+from common.derived_replay import replay_derived as _replay
+from common.derived_replay import retry_after_s as _retry_after_s
 from common.holder import Holder
 from common.materialisation import FrameRef, LeftOutSeries
 from dfo_frame_grammar import shift_period
@@ -89,15 +102,11 @@ from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal
 
 logger = logging.getLogger(__name__)
 
-ANALYSIS_PATH = "/api/datasets/analysis"
 ANCHOR_PATH = "/api/datasets/analysis/anchor"
 DERIVED_PATH = "/api/datasets/derived/{spec_id}/{content_version}"
 DERIVED_FILE_PATH = f"{DERIVED_PATH}/file"
 # The derived file query that answers the frame's rows as one Parquet file.
 DERIVED_FILE_QUERY: Mapping[str, str] = {"format": "parquet", "bundle": "false"}
-
-# The wait a retryable refusal or a failed transport names when dfo-apis sent none.
-DEFAULT_RETRY_AFTER_S = 5.0
 
 # Codes this service defines for its own failures.
 _LOCAL_CODES = frozenset(
@@ -119,7 +128,6 @@ _EXPIRED_ROOT_CODE = "artifact_expired"
 _ROOT_CODES = _UNHELD_ROOT_CODES | {_EXPIRED_ROOT_CODE}
 _RECIPE_MISSING_CODE = "recipe_not_found"
 _OVER_CEILING_CODE = "over_ceiling"
-_BUSY_CODE = "service_unavailable"
 _RESPONSE_INVALID = "response_invalid"
 
 # An answer's `resolved_periods`, one entry per relative period of the recipe.
@@ -229,21 +237,6 @@ def _build() -> RunnerClient:
 
 
 runner_holder: Holder[RunnerClient] = Holder(default_factory=_build)
-
-
-def _json(response: httpx2.Response) -> Mapping[str, Any] | None:
-    try:
-        body = response.json()
-    except ValueError:
-        return None
-    return body if isinstance(body, Mapping) else None
-
-
-def _retry_after_s(response: httpx2.Response) -> float:
-    try:
-        return max(float(response.headers.get("retry-after", "")), 0.0)
-    except ValueError:
-        return DEFAULT_RETRY_AFTER_S
 
 
 def _unusable(detail: str) -> ToolRefusal:
@@ -363,14 +356,8 @@ async def refusal_for(
         )
     elif code == _OVER_CEILING_CODE:
         refusal = ToolRefusal(code=ToolErrorCode.FRAME_TOO_LARGE, message=detail, fix=fix)
-    elif code == _BUSY_CODE and retryable:
-        wait = _retry_after_s(response)
-        refusal = ToolRefusal(
-            code=ToolErrorCode.SERVICE_UNAVAILABLE,
-            message=f"The analysis service is busy: {detail}. Retry after {wait:.1f}s.",
-            fix={"service": "dfo-apis"},
-            retry_after_s=wait,
-        )
+    elif (refused := busy(response)) is not None:
+        refusal = _busy(refused)
     else:
         refusal = ToolRefusal.upstream_error(
             upstream_code=code,
@@ -396,15 +383,23 @@ def _place_levels_mixed(fix: Mapping[str, Any]) -> ToolRefusal:
     )
 
 
+def _busy(refused: ReplayBusy) -> ToolRefusal:
+    wait = refused.retry_after_s
+    return ToolRefusal(
+        code=ToolErrorCode.SERVICE_UNAVAILABLE,
+        message=f"The analysis service is busy: {refused.detail}. Retry after {wait:.1f}s.",
+        fix={"service": "dfo-apis"},
+        retry_after_s=wait,
+    )
+
+
 def _pending(response: httpx2.Response) -> ToolRefusal:
-    body = _json(response) or {}
-    retry_after_s = body.get("retry_after_s")
-    operations = body.get("operations")
+    return _pending_refusal(pending(response))
+
+
+def _pending_refusal(waiting: ReplayPending) -> ToolRefusal:
     return ToolRefusal.analysis_pending(
-        retry_after_s=float(retry_after_s)
-        if isinstance(retry_after_s, int | float)
-        else _retry_after_s(response),
-        operations=[str(op) for op in operations] if isinstance(operations, list) else [],
+        retry_after_s=waiting.retry_after_s, operations=list(waiting.operations)
     )
 
 
@@ -586,48 +581,22 @@ def _ready_summary(
 
 async def replay_derived(ref: FrameRef) -> FrameRef | ToolRefusal:
     """The pair of the derived frame `ref` computed again from its stored recipe on
-    its datasets' current versions, or the refusal for a runner that computes no
-    frame: 202 is `analysis_pending` and a busy runner `service_unavailable`, each
-    with its delay. Any other refusal is logged with `ref`."""
-    response = await runner_holder.get().post(
-        ANALYSIS_PATH, {"tree": ref.model_dump(), "latest": True}
-    )
-    replayed = await _replayed(response)
-    if isinstance(replayed, ToolRefusal) and replayed.code is not ToolErrorCode.SERVICE_UNAVAILABLE:
-        logger.warning(
-            "replay of derived frame %s, %s refused: status %s, %s",
-            ref.spec_id,
-            ref.content_version,
-            None if isinstance(response, ToolRefusal) else response.status_code,
-            replayed.code,
-        )
+    its datasets' current versions (`common.derived_replay`), or the refusal for a
+    runner that computes no frame: 202 is `analysis_pending` and a busy runner
+    `service_unavailable`, each with its delay. Any other refusal is logged with
+    `ref`."""
+    replayed = await _replay(ref, runner_holder.get().post, logger=logger)
+    match replayed:
+        case ReplayPending():
+            return _pending_refusal(replayed)
+        case ReplayBusy():
+            return _busy(replayed)
+        case ReplayFailed() if replayed.response.status_code == httpx2.codes.OK:
+            # A 200 that names no single frame.
+            return _unusable(replayed.detail)
+        case ReplayFailed():
+            return await refusal_for(replayed.response, refs_by_root={})
     return replayed
-
-
-async def _replayed(response: httpx2.Response | ToolRefusal) -> FrameRef | ToolRefusal:
-    """The pair a replay's `response` names, or its refusal."""
-    if isinstance(response, ToolRefusal):
-        return response
-    if response.status_code == httpx2.codes.ACCEPTED:
-        return _pending(response)
-    if response.status_code != httpx2.codes.OK:
-        return await refusal_for(response, refs_by_root={})
-    body = _json(response) or {}
-    ref_body = body.get("ref")
-    members = ref_body.get("members") if isinstance(ref_body, Mapping) else None
-    member = members[0] if isinstance(members, list) and len(members) == 1 else None
-    if not isinstance(member, Mapping):
-        return _unusable("the replayed analysis answer names no single frame")
-    spec = member.get("spec")
-    try:
-        return FrameRef.model_validate(
-            {
-                "spec_id": spec.get("spec_id") if isinstance(spec, Mapping) else None,
-                "content_version": member.get("content_version"),
-            }
-        )
-    except ValidationError:
-        return _unusable("the replayed analysis answer names no single frame")
 
 
 async def find_anchor(

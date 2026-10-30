@@ -1111,30 +1111,47 @@ async def test_a_public_call_refuses_a_hidden_argument_and_overwrites_a_forced_o
     assert forwarded.arguments == []
 
 
-_LOST_PAIR = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "d" * 32}
-_NEWEST_VERSION = "cv_" + "9" * 32
+_LOST_SPEC = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "d" * 32}
+_LOST_OPS = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "d" * 32}
 
 
-def _losing_platform(requests: list[httpx2.Request]) -> Callable[..., PlatformAssembler]:
+def _rebuilt_pair(lost: dict[str, str]) -> dict[str, str]:
+    """The pair `_losing_platform` builds `lost` again as."""
+    return {**lost, "content_version": lost["content_version"][:-32] + "9" * 32}
+
+
+def _losing_platform(
+    requests: list[httpx2.Request], lost: dict[str, str], *, status: int, retryable: bool
+) -> Callable[..., PlatformAssembler]:
     """A factory for `presentation_mcp.server.PlatformAssembler` over a platform that
-    serves `_RELEASE`, refuses `_LOST_PAIR` `frame_unavailable`, and reads or draws
-    its Spec at `_NEWEST_VERSION` when the spec_id comes alone. `requests` records
-    every call but the release."""
-    lost = {"code": "frame_unavailable", "retryable": False, "detail": "gone"}
+    serves `_RELEASE`, refuses `lost` `frame_unavailable` with `status` and
+    `retryable`, and holds `_rebuilt_pair`
+    of it: the Spec's newest version, read or drawn when the spec_id comes alone, or
+    the pair the analysis runner's replay computes. `requests` records every call but
+    the release."""
+    refused = httpx2.Response(
+        status, json={"code": "frame_unavailable", "retryable": retryable, "detail": "gone"}
+    )
+    rebuilt = _rebuilt_pair(lost)
     envelope = resolved_revision("line_chart", component_id="cmp_1", revision=1)
-    newest = {"spec_id": _LOST_PAIR["spec_id"], "content_version": _NEWEST_VERSION}
-    envelope = {**envelope, "provenance": {**envelope["provenance"], "inputs": [newest]}}
+    envelope = {**envelope, "provenance": {**envelope["provenance"], "inputs": [rebuilt]}}
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/presentation/release":
             return httpx2.Response(200, json=_RELEASE)
         requests.append(request)
         if request.method == "GET":
-            if request.url.path.endswith(_LOST_PAIR["content_version"]):
-                return httpx2.Response(404, json=lost)
-            return httpx2.Response(200, json={**newest, "dimensions": {}})
-        if "content_version" in json.loads(request.content)["intent"]["frame_ref"]:
-            return httpx2.Response(404, json=lost)
+            if request.url.path.endswith(lost["content_version"]):
+                return refused
+            return httpx2.Response(200, json={**rebuilt, "dimensions": {}})
+        if request.url.path == "/api/datasets/analysis":
+            member = {
+                "spec": {"spec_id": rebuilt["spec_id"]},
+                "content_version": rebuilt["content_version"],
+            }
+            return httpx2.Response(200, json={"ref": {"members": [member]}})
+        if json.loads(request.content)["intent"]["frame_ref"] == lost:
+            return refused
         body = {
             "component_id": "cmp_1",
             "revision": 1,
@@ -1152,34 +1169,81 @@ def _losing_platform(requests: list[httpx2.Request]) -> Callable[..., PlatformAs
     return factory
 
 
+def _lost_frame_arguments(name: str, lost: dict[str, str]) -> dict[str, Any]:
+    if name == "describe_frame":
+        return {"frame_ref": lost}
+    return {"intent": {**LINE_CHART_INTENT, "frame_ref": lost}}
+
+
+@pytest.mark.parametrize("name", ["describe_frame", "write_component"])
+@pytest.mark.parametrize("retryable", [False, True], ids=["lost", "expired"])
 @pytest.mark.parametrize(
-    ("name", "arguments"),
+    ("lost", "calls"),
     [
-        ("describe_frame", {"frame_ref": _LOST_PAIR}),
-        ("write_component", {"intent": {**LINE_CHART_INTENT, "frame_ref": _LOST_PAIR}}),
+        # The refused call, then the newest version's read or create.
+        pytest.param(_LOST_SPEC, 2, id="spec_"),
+        # The refused call, the replay, then the replayed pair's read or create.
+        pytest.param(_LOST_OPS, 3, id="ops_"),
     ],
-    ids=["describe_frame", "write_component"],
 )
-async def test_a_public_presentation_call_reads_a_lost_spec_pair_at_its_newest_version(
-    name: str, arguments: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+async def test_a_public_presentation_call_builds_a_lost_frame_again(
+    name: str,
+    retryable: bool,
+    lost: dict[str, str],
+    calls: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The public server forces `rebuild_lost_frames` and lists the tool without it,
-    so a frame the platform no longer holds is read at its newest version and the
-    reply names both versions. The harness's mount keeps `frame_unavailable`
-    (presentation-mcp's `test_the_mount_refuses_a_lost_spec_pair_frame_unavailable`)."""
+    so a frame the platform no longer holds is built again, a `spec_` frame at its
+    newest version and an `ops_` frame by replaying its recipe, and the reply names
+    both versions. The harness's mount keeps `frame_unavailable`
+    (presentation-mcp's `test_the_mount_refuses_a_lost_pair_frame_unavailable`)."""
     requests: list[httpx2.Request] = []
-    monkeypatch.setattr(presentation_server, "PlatformAssembler", _losing_platform(requests))
+    monkeypatch.setattr(
+        presentation_server,
+        "PlatformAssembler",
+        _losing_platform(requests, lost, status=404, retryable=retryable),
+    )
 
     async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
-        result = await client.call_tool(name, arguments, raise_on_error=False)
+        result = await client.call_tool(
+            name, _lost_frame_arguments(name, lost), raise_on_error=False
+        )
 
     assert "rebuild_lost_frames" not in listed[name].input_schema["properties"]
     assert result.is_error is False
     text = "\n".join(block.text for block in result.content if isinstance(block, mt.TextContent))
-    assert _LOST_PAIR["content_version"] in text
-    assert _NEWEST_VERSION in text
-    assert len(requests) == 2
+    assert lost["content_version"] in text
+    assert _rebuilt_pair(lost)["content_version"] in text
+    assert len(requests) == calls
+
+
+@pytest.mark.parametrize("name", ["describe_frame", "write_component"])
+@pytest.mark.parametrize("lost", [_LOST_SPEC, _LOST_OPS], ids=["spec_", "ops_"])
+async def test_a_public_presentation_call_passes_back_a_503_frame_unavailable(
+    name: str, lost: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 503 `frame_unavailable` is a read that failed, not a lost frame, so the
+    public call refuses it as retryable and builds nothing."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setattr(
+        presentation_server,
+        "PlatformAssembler",
+        _losing_platform(requests, lost, status=503, retryable=True),
+    )
+
+    async with Client(build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))) as client:
+        result = await client.call_tool(
+            name, _lost_frame_arguments(name, lost), raise_on_error=False
+        )
+
+    envelope = _envelope(result)
+    assert (envelope["code"], envelope["retry_mode"]) == ("frame_unavailable", "retry_after_delay")
+    first = requests[0]
+    assert all(
+        (request.method, request.url.path) == (first.method, first.url.path) for request in requests
+    )
 
 
 async def test_the_public_get_data_lists_the_type_columns_in_place_of_place_types() -> None:

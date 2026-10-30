@@ -64,15 +64,15 @@ _FRAME_REF_DESCRIPTION = (
 # describe_frame's, whose content_version is optional.
 _BARE_SPEC_ID_SENTENCE = "Leave content_version out to pass a spec_id and have the server fetch it."
 
-# Whether a `spec_` frame the platform no longer holds is read at its newest
-# version (`client.PlatformAssembler`). The public server forces it on
+# Whether a frame the platform no longer holds is built again
+# (`client.PlatformAssembler`). The public server forces it on
 # (`server.PUBLIC_SHAPES`); the harness never sets it, so a lost frame reaches it
 # as `frame_unavailable`, which its own replay answers. analysis-mcp's verbs
 # take the same argument.
 REBUILD_LOST_FRAMES = "rebuild_lost_frames"
 _REBUILD_LOST_FRAMES_DESCRIPTION = (
-    "True reads a spec_ frame the platform no longer holds at its newest version, "
-    "and the reply names both versions."
+    "True builds a frame the platform no longer holds again: a spec_ frame at its "
+    "newest version, an ops_ frame from its recipe. The reply names both versions."
 )
 
 _DESCRIBE_COMPONENT_ID_DESCRIPTION = (
