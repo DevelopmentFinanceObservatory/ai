@@ -17,6 +17,12 @@ code. A derived frame (`ops_`) exports its own columns, which carry no labels. A
 pair it resolved; the result names that pair. Any other bare id refuses
 `frame_ref_incomplete`.
 
+A `spec_` pair `get_data` fetched with options, such as the type columns, is held under a
+pair of its own, which dfo-apis never stored. The mint record the frame store keeps beside
+that frame names the dataset version dfo-apis holds (`MintRecord.dataset`), and the tool
+exports that version (`_stored_pair`). The result names the pair the caller passed and the
+version exported.
+
 dfo-apis answers `snapshot_not_found`, `artifact_expired` or `spec_not_found` for a frame
 it cannot export, and the tool refuses `frame_unavailable`. It never exports
 another version in place of the one named.
@@ -24,8 +30,10 @@ another version in place of the one named.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Literal, NotRequired, TypedDict
 
+from common.materialisation import FrameRef, get_store
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, with_config
@@ -35,6 +43,8 @@ from data_mcp.client_holder import get_client
 from data_mcp.deadline import EXTERNAL_CALL_LIMIT_S, EXTERNAL_CALL_MARGIN_S, CallDeadline
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
+
+logger = logging.getLogger(__name__)
 
 _PREPARE_ROUTE = f"{DATASETS_PREFIX}/exports"
 
@@ -102,9 +112,41 @@ def _licence_line(licence: ExportLicence) -> str:
     return f"- {licence.label}: {terms}{f' ({licence.url})' if licence.url else ''}"
 
 
-def _render_digest(facts: ExportFacts, *, url: str) -> str:
+async def _stored_pair(spec_id: str, content_version: str) -> tuple[str, str]:
+    """The pair dfo-apis holds for the frame `{spec_id, content_version}`.
+
+    A `spec_` pair whose mint record names another dataset pair (`MintRecord.dataset`) maps
+    to that pair. Any other pair is returned as given: an `ops_` pair, a pair with no mint
+    record or one equal to its dataset pair, and a value that is not a pair the store could
+    hold. A lookup that fails is logged and the pair returned as given, so dfo-apis then
+    refuses a pair it never stored as `frame_unavailable`.
+    """
+    if not spec_id.startswith(_FETCHED_PREFIX):
+        return spec_id, content_version
+    try:
+        ref = FrameRef(spec_id=spec_id, content_version=content_version)
+    except ValidationError:
+        return spec_id, content_version
+    try:
+        record = await get_store().get_mint_record(ref)
+    except Exception:
+        # Broad on purpose: the store's failure modes belong to its backend (the storage
+        # client, its auth and its transport), and the lookup only ever improves a call.
+        logger.warning(
+            "mint record of %s/%s unreadable; exporting the pair as given",
+            spec_id,
+            content_version,
+            exc_info=True,
+        )
+        return spec_id, content_version
+    if record is None or record.frame == record.dataset:
+        return spec_id, content_version
+    return record.dataset.spec_id, record.dataset.content_version
+
+
+def _render_digest(facts: ExportFacts, *, url: str, frame_ref: dict[str, str]) -> str:
     """The digest: file, format, shape, size, link, citation, licences, how long the file
-    is kept, the frame version exported, and which columns the file holds."""
+    is kept, the frame and the stored version exported, and which columns the file holds."""
     file_format = _FORMAT_NAMES[facts.format]
     if facts.bundle:
         file_format += " in a zip with README.md, datapackage.json and CITATION.cff"
@@ -118,8 +160,13 @@ def _render_digest(facts: ExportFacts, *, url: str) -> str:
         "Licences:",
         *(_licence_line(licence) for licence in facts.licences),
         "Kept: permanently. The link needs no key and does not expire.",
-        f"Frame: {facts.frame['spec_id']} at content_version {facts.frame['content_version']}",
+        f"Frame: {frame_ref['spec_id']} at content_version {frame_ref['content_version']}",
     ]
+    if facts.frame != frame_ref:
+        lines.append(
+            f"Exported version: {facts.frame['spec_id']} at content_version "
+            f"{facts.frame['content_version']}, the stored version the frame was fetched from"
+        )
     if facts.frame["spec_id"].startswith(_DERIVED_PREFIX):
         lines.append("Columns: the derived frame's own. Code labels come with fetched frames only.")
     else:
@@ -201,14 +248,11 @@ async def export_data(
         return to_tool_result(
             ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=spec_id)
         )
-    frame = (
-        {"spec_id": spec_id}
-        if not content_version
-        else {
-            "spec_id": spec_id,
-            "content_version": content_version,
-        }
-    )
+    if content_version:
+        stored_spec_id, stored_version = await _stored_pair(spec_id, content_version)
+        frame = {"spec_id": stored_spec_id, "content_version": stored_version}
+    else:
+        frame = {"spec_id": spec_id}
     client = get_client()
     body = {"frame": frame, "format": format, "bundle": bundle}
     try:
@@ -231,6 +275,10 @@ async def export_data(
             )
         )
     url = client.public_url(facts.url_path)
+    # The caller's pair, or the one dfo-apis resolved a bare spec_id to.
+    named = (
+        {"spec_id": spec_id, "content_version": content_version} if content_version else facts.frame
+    )
     structured = {
         "url": url,
         **facts.model_dump(
@@ -246,7 +294,8 @@ async def export_data(
                 "pinned",
             }
         ),
-        "frame_ref": facts.frame,
+        "frame_ref": named,
+        "exported_frame_ref": facts.frame,
     }
     link = ResourceLink(
         type="resource_link",
@@ -256,7 +305,10 @@ async def export_data(
         size=facts.bytes,
     )
     return ToolResult(
-        content=[TextContent(type="text", text=_render_digest(facts, url=url)), link],
+        content=[
+            TextContent(type="text", text=_render_digest(facts, url=url, frame_ref=named)),
+            link,
+        ],
         structured_content=structured,
         is_error=False,
     )

@@ -14,6 +14,7 @@ from common.caller import (
     conversation_caller,
     supplied_caller,
 )
+from common.materialisation import FrameRef, InMemoryMaterialisationStore, MintRecord, set_store
 from data_mcp import client_holder
 from data_mcp.server import mcp
 from fastmcp import Client
@@ -138,6 +139,7 @@ async def test_an_export_answers_the_public_link_and_the_file_facts(
         "columns": 14,
         "sha256": "f" * 64,
         "frame_ref": frame,
+        "exported_frame_ref": frame,
         "citation": facts["citation"],
         "licences": facts["licences"],
         "pinned": True,
@@ -359,4 +361,37 @@ async def test_a_prepare_route_that_answers_not_found_refuses_capability_unavail
     assert (envelope["code"], envelope["retry_mode"]) == (
         "capability_unavailable",
         "do_not_retry",
+    )
+
+
+async def test_a_frame_fetched_with_options_exports_the_dataset_version_its_mint_record_names() -> (
+    None
+):
+    """A get_data frame with type columns is held under a pair dfo-apis never stored; the
+    prepare names the dataset pair, and the result names both."""
+    held = {"spec_id": FETCHED["spec_id"], "content_version": "cv_" + "6" * 32}
+    store = InMemoryMaterialisationStore()
+    await store.put_mint_record(
+        MintRecord(
+            frame=FrameRef(**held),
+            dataset=FrameRef(**FETCHED),
+            options={"columns": ["observationAbout_type"]},
+        )
+    )
+    set_store(store)
+    requests: list[httpx2.Request] = []
+
+    result = await _call(_door(requests), {"frame_ref": held})
+
+    assert [json.loads(r.content)["frame"] for r in requests] == [FETCHED]
+    assert result.structured_content is not None
+    assert (
+        result.structured_content["frame_ref"],
+        result.structured_content["exported_frame_ref"],
+    ) == (held, FETCHED)
+    digest = text_of(result)
+    assert f"Frame: {held['spec_id']} at content_version {held['content_version']}" in digest
+    assert (
+        f"Exported version: {FETCHED['spec_id']} at content_version {FETCHED['content_version']}"
+        in digest
     )

@@ -162,7 +162,7 @@ The `export_data` tool turns a frame into a file the user keeps and returns a pu
 
 #### Parameters
 
-- `frame_ref`: `{spec_id, content_version}` from a `get_data` or verb result, fetched (`spec_`) or derived (`ops_`). A bare `spec_` id goes to dfo-apis alone, which exports the newest version it holds and answers the pair it resolved; the result names that pair. A bare `ops_` id refuses `frame_ref_incomplete` and sends nothing.
+- `frame_ref`: `{spec_id, content_version}` from a `get_data` or verb result, fetched (`spec_`) or derived (`ops_`). A bare `spec_` id goes to dfo-apis alone, which exports the newest version it holds and answers the pair it resolved; the result names that pair. A bare `ops_` id refuses `frame_ref_incomplete` and sends nothing. A `spec_` pair `get_data` fetched with options, such as the type columns, is held under a pair of its own that dfo-apis never stored; its mint record in the frame store names the dataset version dfo-apis holds (`MintRecord.dataset`), and the tool exports that version.
 - `format`: `csv` (default), `xlsx` or `parquet`.
 - `bundle`: Optional, default `false`. `true` wraps the file in a zip with `README.md`, `datapackage.json` and `CITATION.cff`.
 
@@ -170,9 +170,9 @@ The `export_data` tool turns a frame into a file the user keeps and returns a pu
 
 Returns a `ToolResult` with the following items.
 
-- Text content with the file name, format, rows and columns of the data table, size, link, citation, one line per source with its licence (or "licence not stated") and terms URL, how long the file is kept (permanently, since it is pinned), the `{spec_id, content_version}` pair exported, and which columns it holds: a fetched frame's long layout with a `_label` column beside each code, or a derived frame's own columns, which carry no labels.
+- Text content with the file name, format, rows and columns of the data table, size, link, citation, one line per source with its licence (or "licence not stated") and terms URL, how long the file is kept (permanently, since it is pinned), the `{spec_id, content_version}` pair named, the stored version exported when that differs, and which columns it holds: a fetched frame's long layout with a `_label` column beside each code, or a derived frame's own columns, which carry no labels.
 - A `resource_link` block to the link, with the file's media type and size.
-- Structured content `{url, file_name, media_type, bytes, rows, columns, sha256, frame_ref, citation, licences, pinned}`, each licence `{source, label, licence, url}`.
+- Structured content `{url, file_name, media_type, bytes, rows, columns, sha256, frame_ref, exported_frame_ref, citation, licences, pinned}`, each licence `{source, label, licence, url}`. `frame_ref` is the pair the caller passed, or the one dfo-apis resolved a bare `spec_id` to; `exported_frame_ref` is the version dfo-apis exported.
 
 Refusals use the shared envelope. A CSV or xlsx request over 250,000 rows refuses `over_ceiling` with `correct_and_retry` and `fix` `{"format": "parquet"}`. A spent allowance refuses `allowance_exhausted` with `do_not_retry` and `retry_after_s` to the next UTC midnight, from dfo-apis' `Retry-After`. Backpressure or a spent daily pin budget refuses `service_unavailable` with `retry_after_delay` and dfo-apis' `Retry-After` as `retry_after_s`. A derived frame stored without a recipe refuses `provenance_unavailable`, and a source on dfo-apis' licence deny-list `licence_not_redistributable`, both `do_not_retry`. A frame dfo-apis cannot find or read back (`snapshot_not_found`, `artifact_expired`, `spec_not_found`) refuses `frame_unavailable` with `refresh_then_retry`, the upstream code in `upstream_code`, `fix` `{"next_step": "get_data"}` for a `spec_` frame, and a message naming the call that makes the frame again. The tool never exports another version in place of the one named. A `not_found` from the prepare path means the deployment serves no exports route, and refuses `capability_unavailable` with `do_not_retry`. Every other code maps as it does for `get_data`.
 
