@@ -3547,10 +3547,8 @@ def _presentation_refusal_codes() -> set[str]:
 
 
 def _combined_refusal_codes() -> set[str]:
-    """Every literal `code=` the combined server passes to a refusal, and every
-    code `_ERROR_CODES` ranks as an error."""
-    source = Path(combined_mcp.__file__).read_text()
-    return _keyword_string_literals(source, keyword="code") | combined_mcp._ERROR_CODES
+    """Every literal `code=` the combined server passes to a refusal."""
+    return _keyword_string_literals(Path(combined_mcp.__file__).read_text(), keyword="code")
 
 
 @pytest.mark.parametrize(
@@ -3566,4 +3564,10 @@ def _combined_refusal_codes() -> set[str]:
 )
 def test_every_refusal_code_a_server_writes_is_in_the_pinned_registry(codes: set[str]) -> None:
     assert codes
-    assert codes - REGISTRY.codes == set()
+    unmapped = {
+        code
+        for code in codes
+        if code not in REGISTRY
+        or not REGISTRY[code].permits(endpoint="mcp.tools", channel="mcp_refusal")
+    }
+    assert unmapped == set()
