@@ -56,6 +56,10 @@ PAGE_CHARS = 32_000
 
 _UNMOUNTED_DETAIL = "this deployment does not serve the Skills API"
 
+# The tool a skill read's `request_invalid` names. `get_skill_file` takes the
+# same arguments, and the public server lists only `get_skill`.
+_SKILL_TOOL = "get_skill"
+
 _MAX_AGE = re.compile(r"(?:^|,)\s*max-age\s*=\s*(\d+)\s*(?:,|$)", re.IGNORECASE)
 
 
@@ -192,6 +196,7 @@ def check_skill_id(skill_id: str) -> ToolRefusal | None:
     """A refusal for an id no skill can carry, or `None` for one that might."""
     if not _SKILL_ID_PATTERN.fullmatch(skill_id) or len(skill_id) > SKILL_ID_MAX_CHARS:
         return ToolRefusal.request_invalid(
+            tool=_SKILL_TOOL,
             pointer="/skill_id",
             detail=(
                 f"{skill_id!r} is not a skill id; an id is lower-case letters and digits in "
@@ -209,6 +214,7 @@ def check_path(path: str) -> ToolRefusal | None:
     if path == SKILL_MAIN_FILE or (len(path) <= PATH_MAX_CHARS and _PATH_PATTERN.fullmatch(path)):
         return None
     return ToolRefusal.request_invalid(
+        tool=_SKILL_TOOL,
         pointer="/path",
         detail=(
             f"{path!r} is not a skill file path; a path is {SKILL_MAIN_FILE} or one "
@@ -222,6 +228,7 @@ def check_digest(digest: str) -> ToolRefusal | None:
     if _DIGEST_PATTERN.fullmatch(digest):
         return None
     return ToolRefusal.request_invalid(
+        tool=_SKILL_TOOL,
         pointer="/digest",
         detail=(
             f"{digest!r} is not a file digest; pass the digest a page's closing line names, "
@@ -297,6 +304,7 @@ def offset_refusal(offset: int, *, path: str, length: int) -> ToolRefusal | None
     if offset == 0 or 0 < offset < length:
         return None
     return ToolRefusal.request_invalid(
+        tool=_SKILL_TOOL,
         pointer="/offset",
         detail=(
             f"offset {offset} is outside {path}, which is {length} characters; pass 0 or "
@@ -394,4 +402,4 @@ def _refusal_from_upstream(
             trace_id=exc.trace_id,
             capability_version=exc.capability_version,
         )
-    return from_upstream_error(exc)
+    return from_upstream_error(exc, tool=_SKILL_TOOL)

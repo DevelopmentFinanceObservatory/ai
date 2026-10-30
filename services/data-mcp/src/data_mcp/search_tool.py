@@ -556,7 +556,7 @@ async def resolve_and_register(
             deadline=_call_deadline(budget_s),
         )
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="search"))
     try:
         envelope = response.json()
     except ValueError as exc:
@@ -713,6 +713,7 @@ async def search(
     if not parts and raw_query is None:
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="search",
                 pointer="/raw_query",
                 detail="search needs `parts`, or `raw_query` for Search to read as text",
             )
@@ -727,6 +728,7 @@ async def search(
     except ValidationError as exc:
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="search",
                 pointer=f"/_meta/{SEARCH_CONTEXT_META_KEY}",
                 detail=f"the search context is not a SearchContext: {exc}",
             )

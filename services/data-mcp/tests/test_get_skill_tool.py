@@ -163,9 +163,14 @@ async def test_a_path_answers_as_get_skill_file_does_naming_get_skill(
 
 
 def _renamed(value: Any) -> Any:
-    """`value` with every printed `get_skill_file(` call read as `get_skill(`."""
+    """`value` with every printed `get_skill_file(` call, and the tool a refusal's
+    `fix` names, read as `get_skill`."""
+    if value == "get_skill_file":
+        return "get_skill"
     if isinstance(value, str):
-        return value.replace("get_skill_file(", "get_skill(")
+        return value.replace("get_skill_file(", "get_skill(").replace(
+            '"get_skill_file"', '"get_skill"'
+        )
     if isinstance(value, dict):
         return {key: _renamed(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -184,7 +189,7 @@ async def test_an_offset_without_a_path_refuses_request_invalid_without_a_call()
 
     refusal = refusal_of(result)
     assert refusal["code"] == "request_invalid"
-    assert refusal["fix"]["pointer"] == "/path"
+    assert refusal["fix"]["problems"][0].startswith("path: ")
     assert requests == []
 
 
@@ -298,7 +303,7 @@ async def test_a_malformed_id_refuses_request_invalid_without_a_call(skill_id: s
 
     refusal = refusal_of(result)
     assert refusal["code"] == "request_invalid"
-    assert refusal["fix"]["pointer"] == "/skill_id"
+    assert refusal["fix"]["problems"][0].startswith("skill_id: ")
     assert requests == []
 
 

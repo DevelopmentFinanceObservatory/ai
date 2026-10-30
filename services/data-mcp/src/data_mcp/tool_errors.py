@@ -129,6 +129,21 @@ if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
     # this import-time guard should hold even under `-O`.
     raise AssertionError("every ToolErrorCode needs exactly one _RETRY_MODE_BY_CODE entry")
 
+# The arguments each tool's public schema accepts, which a `request_invalid`
+# refusal's `fix.accepted` lists. `get_data`'s `place_types` is the harness's
+# and the public schema hides it (`server.PUBLIC_SHAPES`).
+TOOL_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
+    "search": ("parts", "raw_query"),
+    "get_data": ("spec_id", "scope", "stat_vars", "without_party_totals", "breakdown"),
+    "describe": ("ids",),
+    "get_skill": ("skill_id", "path", "offset", "digest"),
+    "get_skill_file": ("skill_id", "path", "offset", "digest"),
+    "sources": ("ref",),
+    "export_data": ("frame_ref", "format", "bundle"),
+    "resolve_definition": ("spec_id", "identity", "entity_groups", "scope_entries"),
+    "catalogue_counts": (),
+}
+
 # Five keeps `entity_ambiguous` payloads bounded without starving the model
 # of real choices.
 ENTITY_CANDIDATE_CAP = 5
@@ -667,19 +682,18 @@ class ToolRefusal:
     def request_invalid(
         cls,
         *,
+        tool: str,
         pointer: str | None,
         detail: str | None,
         role: str | None = None,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # `pointer` is a JSON Pointer into the posted request body, naming the
-        # argument at fault; it isn't among the six fields `UpstreamError`
-        # names directly, so it arrives through `exc.extensions`. `role` is
-        # `invalid_role_ref`/`role_incompatible`'s own addition (`mint.py`):
-        # both name the offending scope role structurally, in `ProblemIssue.
-        # axis`, so a caller can act on it directly rather than parsing it
-        # back out of `pointer`'s trailing path segment.
+        # `pointer` is a JSON Pointer into `tool`'s arguments, naming the one at
+        # fault. `role` is `invalid_role_ref`/`role_incompatible`'s own addition
+        # (`mint.py`), which the message names. `fix` takes the shape of the
+        # combined server's validation refusal: the tool, one `field: problem`
+        # line, and the arguments the tool accepts (`TOOL_ARGUMENTS`).
         if pointer and role:
             message = (
                 f"The request was invalid at {pointer} (role {role!r}): {detail}. "
@@ -691,13 +705,15 @@ class ToolRefusal:
             )
         else:
             message = f"The request was invalid: {detail}. Correct the argument and retry."
-        fix: dict[str, Any] = {"pointer": pointer, "detail": detail}
-        if role is not None:
-            fix["role"] = role
+        field = ".".join(pointer.strip("/").split("/")) if pointer else None
         return cls(
             code=ToolErrorCode.REQUEST_INVALID,
             message=message,
-            fix=fix,
+            fix={
+                "tool": tool,
+                "problems": [f"{field}: {detail}" if field else str(detail)],
+                "accepted": list(TOOL_ARGUMENTS[tool]),
+            },
             trace_id=trace_id,
             capability_version=capability_version,
         )
@@ -1050,7 +1066,7 @@ class ToolRefusal:
                 "full {spec_id, content_version} pair from the get_data or verb result that "
                 "made the frame."
             ),
-            fix={"argument": argument, "spec_id": spec_id},
+            fix={"argument": argument},
         )
 
     @classmethod
@@ -1369,12 +1385,19 @@ def _issue_axes(extensions: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _request_invalid_refusal(exc: UpstreamError) -> ToolRefusal:
+# apis' search and mint bodies wrap the tool's arguments under `input`, so an
+# upstream pointer such as `/input/scope/entities/donor` names the tool's own
+# `scope` argument once the prefix is taken off.
+_UPSTREAM_INPUT_POINTER_PREFIX = "/input/"
+
+
+def _request_invalid_refusal(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     """`request_invalid` itself sets a top-level `pointer` with no `issues`.
     `invalid_role_ref`/`role_incompatible` set no top-level `pointer`,
     carrying the offending scope role instead in a single-entry `issues[]`
     (`mint.py`'s `InvalidRoleRef`/`RoleIncompatible` branches) — `role` stays
-    unset for the plain shape, which names no axis.
+    unset for the plain shape, which names no axis. A pointer under apis'
+    `/input` envelope is rebased onto the tool's own arguments.
     """
     pointer = exc.extensions.get("pointer")
     role = None
@@ -1382,7 +1405,10 @@ def _request_invalid_refusal(exc: UpstreamError) -> ToolRefusal:
         issue = _first_issue(exc.extensions)
         pointer = issue.get("pointer")
         role = issue.get("axis")
+    if isinstance(pointer, str) and pointer.startswith(_UPSTREAM_INPUT_POINTER_PREFIX):
+        pointer = "/" + pointer.removeprefix(_UPSTREAM_INPUT_POINTER_PREFIX)
     return ToolRefusal.request_invalid(
+        tool=tool,
         pointer=pointer,
         role=role,
         detail=exc.detail,
@@ -1391,7 +1417,7 @@ def _request_invalid_refusal(exc: UpstreamError) -> ToolRefusal:
     )
 
 
-def _definition_not_reproducible_refusal(exc: UpstreamError) -> ToolRefusal:
+def _definition_not_reproducible_refusal(exc: UpstreamError, *, tool: str) -> ToolRefusal:
     """`DefinitionNotReproducible` (`mint_errors.py`) names the spec_id in
     `issues[].member` and each entity role the stored identity binds and the
     graph's current account of the StatVar no longer declares in an
@@ -1400,18 +1426,15 @@ def _definition_not_reproducible_refusal(exc: UpstreamError) -> ToolRefusal:
     the message points to the two moves `get_data` can make: rerun `search`
     for a fresh spec_id, or retry `get_data` with those roles left out of
     `scope.entities`. A body that names no role, such as a failed operation
-    with no stored refusal, offers only the `search` move.
+    with no stored refusal, offers only the `search` move. `fix` is
+    `request_invalid`'s: one problem per role, or one on `spec_id` when the
+    body names none.
     """
-    spec_id = _first_issue(exc.extensions).get("member")
     roles = list(dict.fromkeys(_issue_axes(exc.extensions)))
-    fix: dict[str, Any] = {}
-    if spec_id is not None:
-        fix["spec_id"] = spec_id
-    fix["upstream_code"] = "definition_not_reproducible"
-    fix["role_bound"] = True
-    if roles:
-        fix["roles"] = roles
-    fix["next_tool"] = "search"
+    problems = [
+        f"scope.entities.{role}: the source no longer declares this role" for role in roles
+    ] or ["spec_id: the stored definition binds an entity role the source no longer declares"]
+    fix = {"tool": tool, "problems": problems, "accepted": list(TOOL_ARGUMENTS[tool])}
     rerun = "Run search again without the role phrase and use the spec_id it returns."
     if roles:
         named = ", ".join(roles)
@@ -1529,7 +1552,9 @@ def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
     )
 
 
-def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusal | None:
+def _map_known_upstream_code(
+    code: str | None, exc: UpstreamError, *, tool: str
+) -> ToolRefusal | None:
     """Dispatch the upstream-exact codes to their typed factories.
 
     `code` is the refusal's own code (`refusal_code`). Several upstream codes
@@ -1595,9 +1620,9 @@ def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusa
             capability_version=exc.capability_version,
         ),
         ToolErrorCode.REQUEST_INVALID: lambda: (
-            _definition_not_reproducible_refusal(exc)
+            _definition_not_reproducible_refusal(exc, tool=tool)
             if code == "definition_not_reproducible"
-            else _request_invalid_refusal(exc)
+            else _request_invalid_refusal(exc, tool=tool)
         ),
         ToolErrorCode.SPEC_NOT_EXPORTABLE: lambda: ToolRefusal.spec_not_exportable(
             detail=exc.detail or "this spec resolves to no exportable member",
@@ -1660,8 +1685,9 @@ def refusal_code(exc: UpstreamError) -> str | None:
     return cause_code if isinstance(cause_code, str) and cause_code else exc.code
 
 
-def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
-    """Translate an apis service call failure into the tool-facing refusal grammar.
+def from_upstream_error(exc: UpstreamError, *, tool: str) -> ToolRefusal:
+    """Translate an apis service call failure of `tool` into the tool-facing
+    refusal grammar.
 
     The refusal's own code (`refusal_code`) picks the refusal: the problem's
     `code`, or for a failed operation (`operation_failed`) the code of the
@@ -1697,7 +1723,7 @@ def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
         exc.code == _OPERATION_FAILED_CODE and code in _FAILED_OPERATION_CAUSES_RETRIED_IN_PLACE
     )
     if not retried_in_place:
-        mapped = _map_known_upstream_code(code, exc)
+        mapped = _map_known_upstream_code(code, exc, tool=tool)
         if mapped is not None:
             return mapped
     # The refusal's code — the explicit `upstream_error` entry or any other,

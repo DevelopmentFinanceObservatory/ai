@@ -371,7 +371,7 @@ async def _breakdown_refusal(
         )
         document = response.json()
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="get_data"))
     except ValueError as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
@@ -400,6 +400,7 @@ async def _breakdown_refusal(
         listed = ", ".join(sorted(str(axis) for axis in axes)) or "none"
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="get_data",
                 pointer="/breakdown/code_system",
                 detail=f"{breakdown.code_system!r} cannot be rolled up to a level; "
                 f"this deployment rolls up {listed}",
@@ -441,7 +442,7 @@ def _refusal_for_unresolved_outcome(
     if isinstance(outcome, InvalidName):
         return to_tool_result(
             ToolRefusal.request_invalid(
-                pointer=f"/scope/entities/{role}", role=role, detail=outcome.reason
+                tool="get_data", pointer=f"/scope/entities/{role}", role=role, detail=outcome.reason
             )
         )
     return None
@@ -552,7 +553,7 @@ async def _registry_identity_or_refuse(
     except UpstreamError as exc:
         if exc.code == "spec_not_found":
             return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="get_data"))
     except (ValueError, KeyError, TypeError) as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
@@ -612,51 +613,13 @@ async def _resolve_entities_or_refuse(
     except TimeoutError:
         return _pre_mint_deadline_refusal(service="dfo-apis", step="entity resolution")
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="get_data"))
     except (ValueError, KeyError, TypeError) as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
                 detail=f"the resolve response did not match the shape this service expects: {exc}"
             )
         )
-
-
-# The prefix an upstream `request_invalid` pointer carries for a scope-entities role, in
-# apis' own wire envelope (`{input: {scope: {entities: {role: [...]}}}}`), which differs
-# from this tool's own `scope.entities.{role}` argument path, which `InvalidName` above
-# already points into directly.
-_UPSTREAM_ENTITIES_ROLE_POINTER_PREFIX = "/input/scope/entities/"
-
-
-def _rebase_entities_role_pointer(refusal: ToolRefusal) -> ToolRefusal:
-    """Rewrite an upstream-derived entities-role pointer onto this tool's own argument path.
-
-    `invalid_role_ref`/`role_incompatible` map to `request_invalid` with a pointer straight
-    off apis' wire (`/input/scope/entities/{role}`), while a locally-rejected name
-    (`InvalidName` above) already points at `/scope/entities/{role}` -- this tool's own
-    `scope` argument, with no `/input` wrapper, since that wrapper names apis' request
-    envelope, not anything this tool's own caller ever supplied. Same argument, one
-    convention: this rebases the upstream-derived pointer onto the local one rather than
-    leaving a caller to notice the two never match.
-    """
-    pointer = refusal.fix.get("pointer")
-    if refusal.code is not ToolErrorCode.REQUEST_INVALID or not isinstance(pointer, str):
-        return refusal
-    if not pointer.startswith(_UPSTREAM_ENTITIES_ROLE_POINTER_PREFIX):
-        return refusal
-    rebased = "/scope/entities/" + pointer[len(_UPSTREAM_ENTITIES_ROLE_POINTER_PREFIX) :]
-    # Rebuilt through `request_invalid` itself: that factory renders `message` with the
-    # pointer embedded inline (`f"...at {pointer}..."`), so `message` and `fix` have to come
-    # from one call to name the same rebased path. `retry_after_s` and `upstream_code` are
-    # not carried through explicitly: `_request_invalid_refusal` never sets either for this
-    # code, so both are already at their factory defaults on `refusal` too.
-    return ToolRefusal.request_invalid(
-        pointer=rebased,
-        detail=refusal.fix.get("detail"),
-        role=refusal.fix.get("role"),
-        trace_id=refusal.trace_id,
-        capability_version=refusal.capability_version,
-    )
 
 
 async def _load_identity_or_refuse(
@@ -1535,7 +1498,7 @@ async def _attempt_mint(
                 # `definition_not_held` -- "held by neither store nor registry"
                 # -- is what this completes.
                 return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-            refusal = _rebase_entities_role_pointer(from_upstream_error(exc))
+            refusal = from_upstream_error(exc, tool="get_data")
             if admission is not None:
                 refusal = declined_in_background(refusal, exc)
             return minted(to_tool_result(refusal))
@@ -1843,7 +1806,7 @@ async def _mint_recorded_response(
                 continue
             if identity is None and exc.code == "spec_not_found":
                 return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-            return to_tool_result(from_upstream_error(exc))
+            return to_tool_result(from_upstream_error(exc, tool="get_data"))
         if isinstance(payload, ToolResult):
             return payload
         return payload, options
@@ -2093,6 +2056,7 @@ async def get_data(
     if breakdown is not None and stat_vars == "sum":
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="get_data",
                 pointer="/stat_vars",
                 detail='"sum" totals the whole family into one series, which leaves no '
                 'code to break it down by; use "separate" with breakdown',

@@ -40,6 +40,7 @@ from data_mcp.tool_errors import ToolRefusal, to_tool_result
 def _digest_required(*, tool: str, skill_id: str, path: str) -> ToolRefusal:
     restart = f'{tool}(skill_id="{skill_id}", path="{path}", offset=0)'
     return ToolRefusal.request_invalid(
+        tool=tool,
         pointer="/digest",
         detail=(
             "a page past offset 0 needs the digest the previous page's closing line names; "

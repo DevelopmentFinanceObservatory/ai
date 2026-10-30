@@ -109,7 +109,7 @@ async def catalogue_counts() -> ToolResult:
             )
         )
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="catalogue_counts"))
     return ToolResult(
         content=counts_sentence(counts),
         structured_content={"catalogue_version": version, "counts": counts.model_dump()},

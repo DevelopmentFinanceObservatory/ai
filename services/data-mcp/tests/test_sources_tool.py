@@ -445,7 +445,9 @@ async def test_a_ref_that_is_not_a_source_node_refuses_request_invalid_with_the_
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["code"] == "request_invalid"
-    assert result.structured_content["fix"]["detail"] == "country/KEN is a Place, not a source"
+    assert result.structured_content["fix"]["problems"] == [
+        "ref: country/KEN is a Place, not a source"
+    ]
 
 
 async def test_a_malformed_ref_is_refused_before_any_read() -> None:
@@ -532,9 +534,9 @@ async def test_a_request_invalid_with_no_detail_names_the_ref_itself() -> None:
 
     assert result.is_error is True
     assert result.structured_content is not None
-    assert result.structured_content["fix"]["detail"] == (
-        "'country/KEN' is not a dataset the catalogue names"
-    )
+    assert result.structured_content["fix"]["problems"] == [
+        "ref: 'country/KEN' is not a dataset the catalogue names"
+    ]
 
 
 def _wide_catalogue(datasets: int) -> dict[str, Any]:
