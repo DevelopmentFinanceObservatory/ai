@@ -16,7 +16,7 @@ file with the reason it sits where it does.
 The fenced foreign-agent relay is the exception to every other ceiling's
 rounding: no relayed text may reach the planner at all. ADK relays another
 agent's turn into a request as fenced user text
-(`google.adk.flows.llm_flows._fencing._present_other_agent_message`), and no
+(`google.adk.flows.llm_flows.context._fencing._present_other_agent_message`), and no
 other agent runs inside a planner run, so any relayed part is a regression.
 
 Every realistic-input ceiling is proved live by `test_every_ceiling_fails_when_its_segment_grows`.

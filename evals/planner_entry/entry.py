@@ -57,16 +57,14 @@ from google.adk import Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import EventActions
+from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.workflow import START, Workflow
-from google.adk.workflow.utils._workflow_hitl_utils import (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
-    create_request_input_response,
-)
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
 from harness.graph.seams import PlannerModel
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState

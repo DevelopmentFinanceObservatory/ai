@@ -59,12 +59,12 @@ from data_mcp.definition_writes import windowed_identity
 from data_mcp.scope import ChoiceOrigin, ScopeEntry
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
+from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id

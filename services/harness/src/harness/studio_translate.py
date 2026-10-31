@@ -60,9 +60,7 @@ from executor.artifacts import declared_ranked_before_limit
 from executor.outcomes import RefusalKind
 from executor.run import current_step_id
 from google.adk.events import Event
-from google.adk.workflow.utils._workflow_hitl_utils import (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
-)
+from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.agent import PROPOSE_PLAN

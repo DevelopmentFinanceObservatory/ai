@@ -17,8 +17,8 @@ from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.run import current_step_id
 from google.adk.events import Event
 from google.adk.events.event import NodeInfo
+from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.sessions import InMemorySessionService
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
 from harness.chart_binding import TopMembers
 from harness.conversation import current_conversation_id

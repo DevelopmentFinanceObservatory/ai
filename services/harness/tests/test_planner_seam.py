@@ -37,6 +37,7 @@ from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk import Context, Event
+from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
@@ -45,10 +46,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import START, Workflow, node
-from google.adk.workflow.utils._workflow_hitl_utils import (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
-    create_request_input_response,
-)
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
 from harness import plan_display, planner_seam
 from harness.decision_pick import DecisionPick

@@ -122,7 +122,7 @@ from planner.records import (
 )
 from pydantic import Field
 
-# ADK's own fence marker (`google.adk.flows.llm_flows._fencing.QUOTED_CONTENT_BEGIN`).
+# ADK's own fence marker (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`).
 # Spelled out literally, not imported: the point of counting this bucket is to
 # notice if the marker or the relaying it marks ever moves, which importing the
 # same constant from the module that emits it would hide.

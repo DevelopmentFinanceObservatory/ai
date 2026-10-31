@@ -27,7 +27,10 @@ import httpx2
 from fastapi import FastAPI
 from google.adk.apps import App
 from google.adk.events import Event
-from google.adk.flows.llm_flows._fencing import OTHER_AGENT_CONTEXT_PREAMBLE, QUOTED_CONTENT_BEGIN
+from google.adk.flows.llm_flows.context._fencing import (
+    OTHER_AGENT_CONTEXT_PREAMBLE,
+    QUOTED_CONTENT_BEGIN,
+)
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner

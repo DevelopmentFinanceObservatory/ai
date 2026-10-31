@@ -1338,11 +1338,11 @@ def check_transcript(
 # ---------------------------------------------------------------------------
 
 # ADK's fence around another agent's quoted turn
-# (`google.adk.flows.llm_flows._fencing.QUOTED_CONTENT_BEGIN`), spelled out so a
+# (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`), spelled out so a
 # change to the marker shows here instead of passing unnoticed.
 RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
 # The function name ADK gives a pause for the user's input
-# (`google.adk.workflow.utils._workflow_hitl_utils.REQUEST_INPUT_FUNCTION_CALL_NAME`).
+# (`google.adk.flows.llm_flows.functions.REQUEST_INPUT_FUNCTION_CALL_NAME`).
 REQUEST_INPUT_NAME = "adk_request_input"
 
 # ADK opens each relayed payload with the relaying agent's name in brackets; its

@@ -68,7 +68,7 @@ from compiler.sources import (
 )
 from data_mcp.scope import ChoiceOrigin, ScopeAxis
 from data_mcp.settings import Settings as DataMcpSettings
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.plan_display import plan_words
 from harness.scope_choices import (
     ANY_REPORTERS,

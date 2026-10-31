@@ -103,11 +103,11 @@ from compiler.surface import ToolSurface
 from executor.classify import ExecutorCode
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
 from planner.agent import PROPOSE_PLAN, ToolContextSession, declare_ready, with_source_reads
 from planner.operations import OperationKind
@@ -223,7 +223,7 @@ _BRIEFED_STATE_KEY = "planner:seam_briefed"
 # every branch (`flows/llm_flows/contents._is_event_belongs_to_branch`), so
 # the orchestrator, which runs on its own branch (`harness.graph`), would
 # read the planner's calls and results back as fenced user text
-# (`flows/llm_flows/_fencing._present_other_agent_message`).
+# (`flows/llm_flows/context/_fencing._present_other_agent_message`).
 #
 # The name is a fixed root segment. Each `_propose` call is a separate
 # dynamic run, and `use_sub_branch` would give each its own (`dfo_planner@1`,
