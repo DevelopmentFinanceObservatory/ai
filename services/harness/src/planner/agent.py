@@ -60,8 +60,6 @@ from data_mcp.scope import ChoiceOrigin, ScopeEntry
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
-from google.adk.events.event import Event
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
@@ -83,6 +81,7 @@ from harness.scope_choices import (
     switch_entries,
 )
 from harness.tool_contracts import resolver_digest
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
 from submission.prices_choice import (
@@ -2707,34 +2706,8 @@ def prepend_brief(callback_context: CallbackContext, llm_request: LlmRequest) ->
     if not brief:
         return
     llm_request.contents.insert(
-        _after_question(callback_context.session.events, llm_request.contents),
+        after_turn_question(callback_context, llm_request.contents),
         types.Content(role="user", parts=[types.Part(text=brief)]),
-    )
-
-
-def _after_question(events: Sequence[Event], contents: Sequence[types.Content]) -> int:
-    """The position just past the turn's question in `contents`, or 0 when they lack it.
-
-    The question is the latest user message with no node path that is not a
-    function response: the message the turn opened on, which ADK shows every
-    node of the workflow. A user's answer to an ask is a function response.
-    """
-    question = next(
-        (
-            event.content
-            for event in reversed(events)
-            if event.author == "user"
-            and not event.node_info.path
-            and event.content is not None
-            and not event.get_function_responses()
-        ),
-        None,
-    )
-    if question is None:
-        return 0
-    return next(
-        (len(contents) - i for i, content in enumerate(reversed(contents)) if content == question),
-        0,
     )
 
 

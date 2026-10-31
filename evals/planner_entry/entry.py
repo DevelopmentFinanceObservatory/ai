@@ -57,7 +57,6 @@ from google.adk import Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import EventActions
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
@@ -81,6 +80,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
 from planner.agent import read_full_history

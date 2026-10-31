@@ -18218,16 +18218,18 @@ _ANSWER = types.Content(
 def test_the_brief_follows_the_turns_question_found_by_what_it_is(
     contents: list[types.Content], at: int
 ) -> None:
-    """The question is the latest user message with no node path that is not a
-    function response, so the user's answer to an ask, the latest user event
-    on a resume, is passed over."""
+    """The question is the turn's latest user message with no node path that
+    holds text, so the user's answer to an ask, the latest user event on a
+    resume, is passed over."""
     events = [
-        Event(author="user", content=_QUESTION),
-        Event(author="dfo_planner", content=_ASK_CALL),
-        Event(author="user", content=_ANSWER),
+        Event(invocation_id="turn", author="user", content=_QUESTION),
+        Event(invocation_id="turn", author="dfo_planner", content=_ASK_CALL),
+        Event(invocation_id="turn", author="user", content=_ANSWER),
     ]
     context = SimpleNamespace(
-        state={BRIEF_STATE_KEY: "the brief"}, session=SimpleNamespace(events=events)
+        state={BRIEF_STATE_KEY: "the brief"},
+        session=SimpleNamespace(events=events),
+        invocation_id="turn",
     )
     request = LlmRequest(contents=[content.model_copy() for content in contents])
 

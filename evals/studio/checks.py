@@ -54,6 +54,7 @@ from harness.reply_figures import (
     point_figure,
     series_ends,
 )
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import STUDIO_FRAME_ADAPTER
 from pydantic import ValidationError
 
@@ -1341,9 +1342,8 @@ def check_transcript(
 # (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`), spelled out so a
 # change to the marker shows here instead of passing unnoticed.
 RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
-# The function name ADK gives a pause for the user's input
-# (`google.adk.flows.llm_flows.functions.REQUEST_INPUT_FUNCTION_CALL_NAME`).
-REQUEST_INPUT_NAME = "adk_request_input"
+# The function name ADK gives a pause for the user's input.
+REQUEST_INPUT_NAME = REQUEST_INPUT_FUNCTION_CALL_NAME
 
 # ADK opens each relayed payload with the relaying agent's name in brackets; its
 # own framing sentence carries the marker with no name.

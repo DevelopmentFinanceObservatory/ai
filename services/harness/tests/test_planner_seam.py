@@ -37,7 +37,6 @@ from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk import Context, Event
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
@@ -83,6 +82,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
 from planner.agent import _elected_spec_ids
@@ -1572,14 +1572,27 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
 
 
-async def test_a_spec_an_earlier_replan_refused_stays_out_until_the_next_first_draft() -> None:
+@pytest.mark.parametrize(
+    "offered",
+    [{}, {"alternatives": "spec_" + "d" * 32, "other_prices": "spec_" + "e" * 32}],
+    ids=["no_siblings", "refused_reading_offers_siblings"],
+)
+async def test_a_spec_an_earlier_replan_refused_stays_out_until_the_next_first_draft(
+    offered: dict[str, str],
+) -> None:
     """Two replans after one first draft, each refusing a different spec: the
     second still neither shows nor lets the planner pin the first one's. The
-    next first-draft entry starts clean."""
+    next first-draft entry starts clean. Another count and other prices the
+    refused reading offered stay shown."""
     seam = _seam()
     llm = ScriptedPlannerLlm(script=["still nothing"] * 8)
     seam._agent.model = llm
     readings = _turn_readings()
+    if offered:
+        readings[0] |= {
+            "counted_as": "gross disbursements",
+            **{field: [{"spec_id": spec_id, "label": field}] for field, spec_id in offered.items()},
+        }
     calls: list[dict[str, Any]] = [
         {},
         {"refusal": _rediscovery_refusal(SPEC)},
@@ -1611,6 +1624,7 @@ async def test_a_spec_an_earlier_replan_refused_stays_out_until_the_next_first_d
     assert pinnable == [[SPEC, SPEC_B, SPEC_C], [SPEC_B, SPEC_C], [SPEC_B], [SPEC, SPEC_B, SPEC_C]]
     assert f"definite {SPEC}" not in briefs[2] and f"chosen {SPEC_C}" not in briefs[2]
     assert f"candidate {SPEC_B}" in briefs[2]
+    assert all(f"[{spec_id}]" in briefs[2] for spec_id in offered.values())
     assert f"definite {SPEC}" in briefs[3]
 
 
@@ -3090,20 +3104,13 @@ async def test_every_planner_generation_runs_at_the_low_thinking_config(
     )
 
 
-async def test_a_later_entry_carries_the_earlier_tool_calls(
+async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """A later entry on the same session (the `amend` edge) sends only the
-    full brief, and its first generation reads the first entry's tool calls
-    from history, since both run on the same node path here. Run as a
-    workflow node with no explicit `include_contents`, ADK defaults the
-    planner to `'none'`, which builds every request from the latest user
-    event onwards (`_get_current_turn_contents`,
-    `google.adk.flows.llm_flows.contents`), which is the amendment alone.
-    `planner.agent.create_planner_agent` pins `include_contents='default'` to
-    stop that; reverting the pin fails this test on the later entry's first
-    generation.
-    """
+    """Two entries of one turn, each its own `run_node` child as the graph's
+    planner node runs them: the later entry's first request holds the turn's
+    question, the brief after it with the amendment, and none of the earlier
+    entry's tool calls, since a `single_turn` run reads only its own node path."""
     seam = _translator_seam(
         responses={
             "search": _NO_DATA_SEARCH_RESPONSE,
@@ -3120,28 +3127,39 @@ async def test_a_later_entry_carries_the_earlier_tool_calls(
         ]
     )
     seam._agent.model = planner_llm
-    harness = _SeamHarness()
     plan_json = draft.model_dump(mode="json")
+    entries: list[dict[str, Any]] = [{}, {"amendment": "only since 2015"}]
 
-    await harness.run(seam, question="gdp guatemala", readings=[], prior_plan=plan_json)
-    await harness.run(
-        seam,
-        question="gdp guatemala",
-        readings=[],
-        prior_plan=plan_json,
-        amendment="only since 2015",
+    async def _turn(ctx: Context, node_input: Any) -> None:
+        del node_input
+        for entry in entries:
+
+            async def _entry(ctx: Context, node_input: Any, entry: dict[str, Any] = entry) -> Any:
+                del node_input
+                return await seam(
+                    ctx=ctx, question="gdp guatemala", readings=[], prior_plan=plan_json, **entry
+                )
+
+            await ctx.run_node(node(_entry, name="planner", rerun_on_resume=True))
+
+    wf = Workflow(
+        name="seam_test_wf", edges=[(START, node(_turn, name="turn", rerun_on_resume=True))]
     )
+    sessions = InMemorySessionService()
+    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    content = types.Content(role="user", parts=[types.Part(text="probe")])
+    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+        pass
 
     # `captured_requests[0..2]` are the first entry: `get_skill`,
     # `propose_plan`, and the closing text. `[3]` is the later entry's first
     # generation.
+    earlier = _call_and_response_names(planner_llm.captured_requests[2])
+    assert {"FC:get_skill", "FR:get_skill", "FC:propose_plan", "FR:propose_plan"} <= set(earlier)
     later = planner_llm.captured_requests[3]
-    assert "only since 2015" in _prompt_text(later)
-    names = _call_and_response_names(later)
-    assert "FC:get_skill" in names
-    assert "FR:get_skill" in names
-    assert "FC:propose_plan" in names
-    assert "FR:propose_plan" in names
+    assert "only since 2015" in _brief_follows_the_question(later)
+    assert _call_and_response_names(later) == []
 
 
 # An `unsupported` `search` answer: translation refers the plan back as

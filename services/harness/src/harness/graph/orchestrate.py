@@ -146,13 +146,13 @@ def orchestrate_node(*, orchestrator: LlmAgent) -> Callable[[Context, Any], Asyn
             if hand_back.failure is not None:
                 status[ORCHESTRATOR_STATUS_FAILURE_KEY] = hand_back.failure
             yield Event(custom_metadata=status, branch="")
-        answer = await ctx.run_node(orchestrator, None, override_branch=orchestrator.name)
-        # A turn that ends on an `ask_user` or `plan` hand-off ends on the
-        # tool's result, with no text (`orchestrator_tools._pend`), so the
-        # agent's output is None. ADK records no output for an event whose
-        # output is None, and a resume could not replay past this node, so
-        # the node outputs empty text instead.
-        yield Event(output=answer if answer is not None else "")
+        await ctx.run_node(orchestrator, None, override_branch=orchestrator.name)
+        # A `chat`-mode agent sets no output: ADK reads an agent's output only
+        # in `single_turn` and `task` mode, so `run_node` returns None. `route`
+        # reads the pending action from state, not this node's output. ADK
+        # records no output for an event whose output is None, and a resume
+        # could not replay past this node, so the node outputs empty text.
+        yield Event(output="")
 
     return orchestrate
 
