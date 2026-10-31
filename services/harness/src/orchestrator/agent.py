@@ -335,21 +335,23 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
         )
 
 
-def _without_adk_identity(
-    name: str, description: str
-) -> Callable[[CallbackContext, LlmRequest], None]:
+def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], None]:
     """A before-model callback that takes out of the system instruction the
     line ADK appends to a chat-mode agent's
     (`google.adk.flows.llm_flows.prompt._identity`, built here from the same
-    f-string), so the model reads `INSTRUCTION` as it is. On gemini-3.8-flash that line alone switched the
-    orchestrator into thinking in 6 of 6 replays, at about 50 s and 6-8k
-    reasoning tokens a planned turn, and ADK has no setting to leave it out.
+    f-string for an agent with no description), so the model reads
+    `INSTRUCTION` as it is. ADK has no setting to leave the line out.
+
+    On gemini-3.8-flash the line alone switches the orchestrator's first call
+    into thinking. In replays of that call it flipped 6 of 6: with the line,
+    98 to 703 reasoning tokens and 7 to 12 s a call; without it, 0 tokens and
+    about 2.5 s a call. Across a whole planned turn of the e2e scenario H3,
+    the orchestrator's model time was about 79 s with the line against 25 s
+    without, and its reasoning 7.6k tokens against 0.
+
     It runs before the model is called, so the shared prefix cache
     (`harness.prefix_cache`) holds the instruction without it."""
-    line = f'You are an agent. Your internal name is "{name}".'
-    if description:
-        line += f' The description about you is "{description}".'
-    appended = "\n\n" + line
+    appended = f'\n\nYou are an agent. Your internal name is "{name}".'
 
     def drop(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
         instruction = llm_request.config.system_instruction
@@ -432,7 +434,7 @@ def create_orchestrator_agent(
         # single_turn node run reads only the events on its own node path,
         # which leaves out every hand-back (`harness.graph.orchestrate`).
         mode="chat",
-        before_model_callback=[_without_adk_identity(AGENT_NAME, ""), prepend_digests],
+        before_model_callback=[_without_adk_identity(AGENT_NAME), prepend_digests],
         # Thought summaries are requested for the traces. The studio stream
         # does not carry them.
         generate_content_config=types.GenerateContentConfig(

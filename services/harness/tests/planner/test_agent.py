@@ -62,6 +62,7 @@ from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
 from harness.studio_state import _turn_identities
 from harness.tool_contracts import reading_facts
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import RecordedIdentity, _periods
 from planner import agent as planner_agent
 from planner.agent import (
@@ -261,7 +262,7 @@ RequirementFactory = Callable[..., EvidenceRequirement]
 DerivedRequirementFactory = Callable[..., AggregateRequirement]
 RequirementPair = tuple[EvidenceRequirement, ...]
 
-SIMPLE_TOOLS = ("adk_request_input", "propose_plan", "reject_plan")
+SIMPLE_TOOLS = (REQUEST_INPUT_FUNCTION_CALL_NAME, "propose_plan", "reject_plan")
 
 SPEC = "spec_" + "a" * 32
 POPULATION_SPEC = "spec_" + "c" * 32

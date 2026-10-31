@@ -1572,31 +1572,60 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
 
 
-@pytest.mark.parametrize(
-    "offered",
-    [{}, {"alternatives": "spec_" + "d" * 32, "other_prices": "spec_" + "e" * 32}],
-    ids=["no_siblings", "refused_reading_offers_siblings"],
-)
-async def test_a_spec_an_earlier_replan_refused_stays_out_until_the_next_first_draft(
-    offered: dict[str, str],
-) -> None:
-    """Two replans after one first draft, each refusing a different spec: the
-    second still neither shows nor lets the planner pin the first one's. The
-    next first-draft entry starts clean. Another count and other prices the
-    refused reading offered stay shown."""
-    seam = _seam()
-    llm = ScriptedPlannerLlm(script=["still nothing"] * 8)
-    seam._agent.model = llm
+# A spec Search offered as another count of `SPEC`'s reading.
+_SIBLING = "spec_" + "d" * 32
+
+
+def _offering_readings(siblings: str) -> list[dict[str, Any]]:
+    """`_turn_readings` with `SPEC`'s reading offering no other count, or
+    offering `_SIBLING` unfetched, or offering it and the reading a `fetch`
+    of it gained."""
     readings = _turn_readings()
-    if offered:
-        readings[0] |= {
-            "counted_as": "gross disbursements",
-            **{field: [{"spec_id": spec_id, "label": field}] for field, spec_id in offered.items()},
-        }
+    if siblings == "none":
+        return readings
+    readings[0] |= {
+        "counted_as": "gross disbursements",
+        "alternatives": [{"spec_id": _SIBLING, "label": "net disbursements"}],
+    }
+    if siblings == "fetched":
+        fetched = SearchReading.model_validate(
+            {
+                "text": "aid",
+                "status": "chosen",
+                "spec_id": _SIBLING,
+                "counted_as": "net disbursements",
+                "sibling_of": {"spec_id": SPEC, "axis": "what"},
+            }
+        ).with_fetch({"spec_id": _SIBLING, "summary": "5 observations, 2020-2024"})
+        readings.append(fetched.model_dump(mode="json"))
+    return readings
+
+
+def _avoided(brief: str) -> str:
+    """The line of `brief` holding the sentence that names the refused specs."""
+    (line,) = [line for line in brief.splitlines() if "Do not propose" in line]
+    return line
+
+
+@pytest.mark.parametrize("siblings", ["none", "unfetched", "fetched"])
+async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
+    siblings: str,
+) -> None:
+    """Two replans and an amendment after one first draft, the replans
+    refusing `SPEC` and then `SPEC_C`. Every call renders the same readings,
+    refused ones and the other counts they offered included. From the first
+    refusal on, each call's brief names every spec refused so far in one
+    sentence and leaves them out of the pin sources. The next first-draft
+    entry starts clean."""
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
+    seam._agent.model = llm
+    readings = _offering_readings(siblings)
     calls: list[dict[str, Any]] = [
         {},
         {"refusal": _rediscovery_refusal(SPEC)},
         {"refusal": _rediscovery_refusal(SPEC_C)},
+        {"amendment": "only since 2015"},
         {},
     ]
     pinnable: list[list[str]] = []
@@ -1621,11 +1650,112 @@ async def test_a_spec_an_earlier_replan_refused_stays_out_until_the_next_first_d
     async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
         pass
 
-    assert pinnable == [[SPEC, SPEC_B, SPEC_C], [SPEC_B, SPEC_C], [SPEC_B], [SPEC, SPEC_B, SPEC_C]]
-    assert f"definite {SPEC}" not in briefs[2] and f"chosen {SPEC_C}" not in briefs[2]
-    assert f"candidate {SPEC_B}" in briefs[2]
-    assert all(f"[{spec_id}]" in briefs[2] for spec_id in offered.values())
-    assert f"definite {SPEC}" in briefs[3]
+    shown = [SPEC, SPEC_B, SPEC_C, *([_SIBLING] if siblings == "fetched" else [])]
+    refused_by_call = [(), (SPEC,), (SPEC, SPEC_C), (SPEC, SPEC_C), ()]
+    assert pinnable == [
+        [spec_id for spec_id in shown if spec_id not in refused] for refused in refused_by_call
+    ]
+    (readings_text,) = {brief.split("\nQuestion: ")[0] for brief in briefs}
+    for spec_id in (SPEC, SPEC_C, *([_SIBLING] if siblings != "none" else [])):
+        assert spec_id in readings_text
+    for brief, refused in zip(briefs, refused_by_call, strict=True):
+        if not refused:
+            assert "Do not propose" not in brief
+            continue
+        avoided = _avoided(brief)
+        assert all(spec_id in avoided for spec_id in refused)
+        assert _SIBLING not in avoided and SPEC_B not in avoided
+    # The second replan names its own refusal's reason and the earlier one's.
+    assert "member_count = 872" in _avoided(briefs[2])
+    assert planner_seam._REFUSED_EARLIER in _avoided(briefs[3])
+
+
+@pytest.mark.parametrize("siblings", ["unfetched", "fetched"])
+async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offered(
+    decision: Any, requirement: Any, siblings: str
+) -> None:
+    """A replan after the executor refused France's gross disbursements to
+    Kenya pins the net count Search offered beside them. Admission records
+    the draft with the pin as stated, whether a `fetch` of the net count gave
+    it a reading of its own, which makes it a pin source, or not."""
+    (part,) = resolver_digest(_FRANCE_KENYA)["part_digests"]
+    block = part["spec_block"]
+    gross = block["spec_id"]
+    net = block["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
+    stored = {k: v for k, v in part.items() if k not in ("spec_block", "candidate_blocks")}
+    readings = [SearchReading.from_part({**stored, **reading_facts(block)})]
+    assert net in {alternative.spec_id for alternative in readings[0].alternatives}
+    if siblings == "fetched":
+        sibling = SearchReading.model_validate(
+            {
+                "text": "aid",
+                "status": "chosen",
+                "spec_id": net,
+                "counted_as": "net disbursements",
+                "sibling_of": {"spec_id": gross, "axis": "what"},
+            }
+        )
+        readings.append(sibling.with_fetch({"spec_id": net, "summary": "5 observations"}))
+    dumped = [reading.model_dump(mode="json") for reading in readings]
+    dataset = requirement()
+    first_draft = {
+        "question": "aid",
+        "answer_mode": "series",
+        "decisions": [decision().model_dump(mode="json")],
+        "evidence_requirements": [
+            dataset.model_copy(update={"source_spec_id": gross}).model_dump(mode="json")
+        ],
+    }
+    repinned = dataset.model_copy(update={"source_spec_id": net}).model_dump(mode="json")
+    seam = _seam()
+    drafting = ScriptedPlannerLlm(script=[[("propose_plan", first_draft)]])
+    replanning = ScriptedPlannerLlm(
+        script=[[("propose_plan", {"evidence_requirements": [repinned], "amends_version": 1})]]
+    )
+    after: dict[str, Any] = {}
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        seam._agent.model = drafting
+        await seam(ctx=ctx, question="aid", readings=dumped)
+        first = load_plan(ctx.state)
+        assert first is not None
+        seam._agent.model = replanning
+        await seam(
+            ctx=ctx,
+            question="aid",
+            readings=dumped,
+            prior_plan=first.model_dump(mode="json"),
+            refusal=_rediscovery_refusal(gross),
+        )
+        after["plan"] = load_plan(ctx.state)
+        after["pinnable"] = list(pin_sources(cast(SessionState, ctx.session.state)))
+
+    wf = Workflow(
+        name="seam_test_wf",
+        edges=[(START, node(_node, name="seam_under_test", rerun_on_resume=True))],
+    )
+    sessions = InMemorySessionService()
+    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
+    session = await sessions.create_session(
+        app_name=_APP, user_id=_USER, state={ORCHESTRATOR_SPECS_KEY: {gross: block}}
+    )
+    content = types.Content(role="user", parts=[types.Part(text="probe")])
+    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+        pass
+
+    (answered,) = [
+        part.function_response.response
+        for content in replanning.captured_requests[-1].contents
+        for part in content.parts or []
+        if part.function_response and part.function_response.name == "propose_plan"
+    ]
+    assert (answered["outcome"], answered["status"], answered["version"]) == ("ok", "draft", 2)
+    assert after["pinnable"] == ([net] if siblings == "fetched" else [])
+    plan = after["plan"]
+    assert plan is not None
+    assert [r.source_spec_id for r in plan.evidence_requirements] == [net]  # type: ignore[union-attr]
+    assert gross in _avoided(_brief_follows_the_question(replanning.captured_requests[0]))
 
 
 async def test_the_shown_ids_are_exactly_the_ids_the_readings_text_names(

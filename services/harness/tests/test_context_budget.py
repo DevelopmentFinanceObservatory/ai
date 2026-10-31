@@ -873,6 +873,7 @@ def _seam_brief(
     question: str = "compare population and gdp for guatemala since the year 2000",
     refusal: dict[str, Any] | None = None,
     amendment: str | None = None,
+    refused: Sequence[str] = (),
 ) -> str:
     """One `_message` render, the way `PlannerSeam.__call__` asks for it."""
     seam = PlannerSeam(
@@ -887,6 +888,7 @@ def _seam_brief(
         canvas_digest=canvas_digest,
         conversation_digest=conversation_digest,
         ledger=_readings_ledger(readings),
+        refused=refused,
     )
 
 
@@ -1475,10 +1477,12 @@ def _earned_decline_ceiling() -> int:
 
 
 def _ask_kwargs(ask: str) -> dict[str, Any]:
-    """`_seam_brief`'s arguments for the amendment ask or the refusal ask."""
+    """`_seam_brief`'s arguments for the amendment ask or the refusal ask. The
+    amendment follows replans that refused a hundred and one specs, whose
+    sentence it carries."""
     if ask == "refusal":
         return {"refusal": _maximal_refusal()}
-    return {"amendment": _BRIEF_AMENDMENT}
+    return {"amendment": _BRIEF_AMENDMENT, "refused": [_spec(index) for index in range(1, 102)]}
 
 
 def _ask_only(ask: str) -> str:
@@ -1528,7 +1532,8 @@ def _refused_sentence_ceiling(sentence: Callable[[list[tuple[str, str]]], str]) 
 def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
     """What each part of `_maximal_brief_parts(ask)` can be, from the caps that bound it.
 
-    The question and the amendment are cut at `MAX_QUESTION_CHARS`. A refusal
+    The question and the amendment are cut at `MAX_QUESTION_CHARS`, and so
+    is the sentence naming the specs refused before the amendment. A refusal
     is cut there as JSON, then again in each sentence the ask adds to it: the
     asks the failed run computed, the specs to avoid, and the `share_of` steps
     to repair. The declines it earned are a closed set. The wording around each
@@ -1545,7 +1550,14 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
             + _share_units_repair_ceiling()
         )
     else:
-        ask_ceiling = _ask_chars(amendment="x") - 1 + MAX_QUESTION_CHARS
+        # The specs refused before the amendment render on a line of their own.
+        ask_ceiling = (
+            _ask_chars(amendment="x")
+            - 1
+            + MAX_QUESTION_CHARS
+            + len("\n\n")
+            + _refused_sentence_ceiling(planner_seam._avoid_sentence)
+        )
     return {
         "readings": READINGS_SECTION_CEILING,
         "canvas digest": CANVAS_SECTION_CEILING,
