@@ -1510,7 +1510,9 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "When the brief lists asks, the requirements that answer each one, "
         "keyed by `ask`. Every ask is answered here or declined in `declined` "
         "with its number as `ask_ref`, exactly once, or both when the plan "
-        "computes part of it."
+        "computes part of it. When the user's amendment removes every requirement "
+        "answering an ask, leave that ask out of both: the plan records that the "
+        "user removed it."
     ),
     "across_years": (
         "The `id` of each step that combines its years, an `aggregate` whose `group_by` "

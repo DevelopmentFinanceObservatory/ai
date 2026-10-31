@@ -1308,6 +1308,10 @@ def _decline_unearned(
     the same decline. A `BREAKDOWN_NOT_KEPT` decline is earned by its own
     rule, which checks a carried one too (`_breakdown_decline_unearned`).
     `detail.asks` lists the refused asks a decline named, when there are any.
+    In an entry the user's amendment opens (`amendment_entry`), a decline of
+    an ask whose every answering requirement in `previous` this plan removes
+    is told to leave the ask out instead, since `Plan.amend` records it in
+    `dropped_asks`; `detail.removed_asks` lists those asks.
     """
     carried = {decline.key for decline in previous.declined} if previous is not None else set()
     declines = [
@@ -1337,12 +1341,35 @@ def _decline_unearned(
             f" A `period_reduction_unstated` refusal named ask {_ask_list(refused)} in this "
             "entry, so a computation states it: make the change that refusal offers."
         )
+    removed = sorted(
+        {decline.ask_ref for decline in declines} & _asks_removed_by_amendment(plan, previous, view)
+    )
+    if removed:
+        message += (
+            f" This amendment removes every requirement answering ask {_ask_list(removed)}: "
+            "leave it out of `answered` and `declined`, and the plan records that the user "
+            "removed it."
+        )
     return problem(
         ProblemCode.DECLINE_UNEARNED,
         message,
         outcome=Outcome.INVALID_INPUT,
-        detail={"operations": unearned} | ({"asks": refused} if refused else {}),
+        detail={"operations": unearned}
+        | ({"asks": refused} if refused else {})
+        | ({"removed_asks": removed} if removed else {}),
     )
+
+
+def _asks_removed_by_amendment(plan: Plan, previous: Plan | None, view: SessionView) -> set[int]:
+    """The asks `previous` answered whose every answering requirement `plan` no longer states.
+
+    Empty outside an entry the user's amendment opens (`amendment_entry`),
+    the only one where removing an ask's answer drops the ask.
+    """
+    if previous is None or not amendment_entry(view.state):
+        return set()
+    stated = {requirement.id for requirement in plan.evidence_requirements}
+    return {answer.ask for answer in previous.answered if stated.isdisjoint(answer.outputs)}
 
 
 def _declinable(

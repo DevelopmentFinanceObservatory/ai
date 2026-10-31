@@ -18249,13 +18249,16 @@ def test_no_brief_in_state_leaves_the_request_alone() -> None:
     assert request.contents == [_QUESTION]
 
 
+@pytest.mark.parametrize("declines", [False, True], ids=["leaves-it-out", "declines-it"])
 @pytest.mark.parametrize("amendment", [True, False], ids=["users-amendment", "replan"])
 def test_an_amendment_removing_an_asks_answer_drops_the_ask_only_for_the_user(
-    decision: DecisionFactory, requirement: RequirementFactory, amendment: bool
+    decision: DecisionFactory, requirement: RequirementFactory, amendment: bool, declines: bool
 ) -> None:
     """The user's amendment removes Nigeria's requirement and restates only the
     other answers: Nigeria's ask is dropped. Outside such an entry the ask
-    still needs an answer or a decline."""
+    still needs an answer or a decline. A patch declining that ask, which no
+    tool answered `unsupported`, is refused, and in the user's amendment the
+    refusal names the ask as one to leave out."""
     countries = ("ghana", "kenya", "nigeria")
     requirements = [
         requirement(id=country, entities=[Entity(name=country.title(), role="debtor")])
@@ -18279,10 +18282,18 @@ def test_an_amendment_removing_an_asks_answer_drops_the_ask_only_for_the_user(
         tool_context=ctx,
         removed_evidence_requirements=["nigeria"],
         answered=[AskAnswer(ask=n, outputs=(c,)) for n, c in enumerate(countries[:2])],
+        declined=[
+            Decline(ask="ODA to Nigeria", code=UnsupportedOperation.UNSUPPORTED_ASK, ask_ref=2)
+        ]
+        if declines
+        else (),
         amends_version=1,
     )
 
-    if amendment:
+    if declines:
+        assert amended["code"] == ProblemCode.DECLINE_UNEARNED.value, amended
+        assert amended["detail"].get("removed_asks") == ([2] if amendment else None)
+    elif amendment:
         assert amended["outcome"] == Outcome.OK.value, amended
         plan = load_plan(ctx.state)
         assert plan is not None

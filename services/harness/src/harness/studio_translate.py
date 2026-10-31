@@ -92,7 +92,7 @@ from harness.provenance import (
 )
 from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
-from harness.sentences import MAX_SENTENCE_CHARS, failure_sentence
+from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -1875,7 +1875,9 @@ class _Translator:
                 PlanAsk(
                     ask=str(row["ask"]),
                     answered_by=cast("list[str]", row["answered_by"]),
-                    declined=cast("str | None", row["reason"]),
+                    declined=DROPPED_REASON
+                    if row["dropped"]
+                    else cast("str | None", row["reason"]),
                     not_computed=cast("str | None", row["not_computed"])
                     if row["answered_by"]
                     else None,

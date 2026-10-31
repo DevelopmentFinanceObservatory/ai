@@ -399,8 +399,14 @@ source the requirement states. A requirement the next proposal pins to the one
 the user picked, answering an ask raised after the referral, drops its stated
 `source`, so the compiler accepts the source they chose. A pin the planner chose
 keeps the stated source, and the compiler refuses it again. The amended plan
-passes through the same validators as a first draft. `starts_new_plan` begins a
-plan at version 1 instead. The wording of `question` plays no part in that
+passes through the same validators as a first draft. In an entry the user's
+amendment at the approval card opened (`planner.plan.amendment_entry`), an ask
+whose every answering requirement the patch removes, and which the patch
+neither answers nor declines, moves to `Plan.dropped_asks`: it counts as
+accounted for, the plan card gives "you removed it from the plan" as its
+reason, and `plan_done` reports it as removed. A patch that declines such an
+ask is refused `decline_unearned`, with the ask in `detail.removed_asks`.
+`starts_new_plan` begins a plan at version 1 instead. The wording of `question` plays no part in that
 choice, so a reworded question cannot be read as a new plan.
 
 **`question_fixed` holds the turn's question against a restart.**

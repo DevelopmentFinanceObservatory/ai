@@ -443,8 +443,9 @@ words why the plan does not compute it. A declined ask has an empty
 `answered_by`, unless the plan answers it in part: such an ask carries
 both, and `not_computed` names the part the plan does not compute, in the
 user's words. `not_computed` is optional and appears only on an ask
-answered in part. Every ask is answered, declined, or answered in part
-exactly once. A plan given no asks omits the field. `schema_version` stays 1.
+answered in part. An ask the user removed by amending the plan is
+declined with the reason "you removed it from the plan". Every ask is
+answered, declined, or answered in part exactly once. A plan given no asks omits the field. `schema_version` stays 1.
 
 ## Several questions in one pause (delta 21, v1.6)
 
