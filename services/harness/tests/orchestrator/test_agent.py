@@ -121,6 +121,34 @@ async def test_the_static_prefix_is_the_same_whatever_the_canvas(scripted_llm: A
     assert [content.parts[0].text for content in first.contents[1:]] == ["and Ghana?"]
 
 
+async def test_the_model_reads_the_instruction_without_the_identity_line_adk_appends(
+    scripted_llm: Any,
+):
+    # Fails when ADK stops appending its identity line or rewords it: the
+    # orchestrator's removal of that line then needs revisiting.
+    model = scripted_llm()
+    built: list[Any] = []
+    agent = create_orchestrator_agent(model_name="unused").model_copy(update={"model": model})
+    agent.before_model_callback = [
+        lambda callback_context, llm_request: built.append(llm_request.config.system_instruction),
+        *agent.before_model_callback,
+    ]
+    sessions = InMemorySessionService()
+    await sessions.create_session(app_name="t", user_id="u", session_id="s")
+    runner = Runner(agent=agent, app_name="t", session_service=sessions)
+    async for _ in runner.run_async(
+        user_id="u",
+        session_id="s",
+        new_message=types.Content(role="user", parts=[types.Part(text="and Ghana?")]),
+    ):
+        pass
+
+    assert (
+        built[0] == INSTRUCTION + '\n\nYou are an agent. Your internal name is "dfo_orchestrator".'
+    )
+    assert model.captured_requests[0].config.system_instruction == INSTRUCTION
+
+
 async def test_a_turn_with_no_digest_opens_on_the_date_and_the_question(scripted_llm: Any):
     request = await _first_request(scripted_llm)
 
