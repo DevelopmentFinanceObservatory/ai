@@ -418,7 +418,11 @@ async def test_limit_keeps_the_top_entities_and_reports_the_rest(seeded) -> None
     digest = result.content[0].text
     assert "limit 2 (kept 2 of 5 ranked entities)" in digest
     assert "beyond_limit (ranked beyond the limit): 9 row(s)" in digest
-    assert "#5 reporter=dcid:FRA" in digest
+    assert "2 ranked entit(y/ies):" in digest
+    assert [line.split()[0] for line in digest.splitlines() if line.startswith("  #")] == [
+        "#1",
+        "#2",
+    ]
 
     stored_frame, stored_trace = await store.get(
         FrameRef(

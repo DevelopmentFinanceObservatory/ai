@@ -6,16 +6,18 @@ A root frame is one data-mcp's `get_data` registered from an apis service mint. 
 the request that produced it, and that trace is written inside the frame's
 insert-only object, so it can gain no field for a frame the store already holds.
 The mint record is written separately, under the same pair, on every `get_data`
-call that registers or finds the frame. Three other writers cover a frame no `get_data`
+call that registers or finds the frame. Four other writers cover a frame no `get_data`
 named: `analysis_mcp.runner_tree.record_spec_reads` records the frame a Spec root read,
 from the stored recipe's root records, `rendering.record_bare_read` records the pair a
-bare `spec_id` resolved to, and `data_mcp.mint_recovery` rebuilds a lost record.
+bare `spec_id` resolved to, `data_mcp.mint_recovery` rebuilds a lost record, and
+`presentation_mcp.client._record_moved_pair` copies a lost frame's rendering to the
+pair `frame_ref_for` derives from the version dfo-apis' frame refresh moved it to.
 
 A record holds:
 
 - `frame`: the pair the store holds the frame under. For a mint with
   `options.columns`, `options.groupby` or `options.without_party_totals` set this is
-  the pair `data_mcp.frame_materialisation.frame_ref_for` derives, whose
+  the pair `frame_name.frame_ref_for` derives, whose
   `content_version` is a one-way hash of the apis `content_version`, the
   columns, the groupby and the cut. For any other mint it is `dataset`, and the frame
   is that version's canonical frame.
@@ -39,9 +41,12 @@ A record holds:
   the frame (`data_mcp.frame_materialisation.observed_shape`). `None` on a record
   written before the count was kept, on one rebuilt (`data_mcp.mint_recovery`)
   for a `groupby` sum with a version of its own whose frame the store no longer
-  holds, and on one a bare read wrote (`rendering.record_bare_read`), which saw no
-  frame. A record without the count stands for good once written. A bare read's is
-  safe, since it holds no `groupby` and a pair naming a `groupby` differs from it.
+  holds, on one a bare read wrote (`rendering.record_bare_read`), which saw no
+  frame, and on one a frame refresh moved (`presentation_mcp.client
+  ._record_moved_pair`), which saw none of the new version. A record without the
+  count stands for good once written. A bare read's is safe, since it holds no
+  `groupby` and a pair naming a `groupby` differs from it, and a moved frame's since
+  its pair names its rendering.
 - `enrichment_stamp`: the `enrichment_stamp` of the artifact the frame was read from
   (`data_mcp.manifest.ArtifactEntry.enrichment_stamp`) when `options.columns` asks for
   a `{role}_party_kind` column, else `None`. It is also `None` on a record written

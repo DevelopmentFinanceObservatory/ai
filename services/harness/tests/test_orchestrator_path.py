@@ -4,6 +4,7 @@ with a scripted model: answer, ask, plan, and what the agent reads after each.""
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -1168,21 +1169,30 @@ def test_an_ask_answered_in_part_hands_back_its_steps_and_the_part_not_computed(
     }
 
 
-def _ranking(entities: int, *, limit: int | None = None, label: str = "") -> StepSummary:
+def _ranking(
+    entities: int,
+    *,
+    limit: int | None = None,
+    label: str = "",
+    years: tuple[str, ...] = ("2023",),
+    warnings: tuple[str, ...] = (),
+) -> StepSummary:
     """The summary of a rank step over `entities` countries named `label` after
     their number, as `analysis_mcp` renders its digest, with the row count of
-    the frame it keeps and, under a `limit`, the entries it ranked."""
+    the frame it keeps and, under a `limit`, the entries it ranked. Several
+    `years` rank each year on its own. `warnings` are the run's."""
     frame = Frame.build(
         role_keys=["observationAbout"],
         rows=[
             {
                 "stat_var": "dcid:LifeExpectancy",
                 "observationAbout": f"country/C{number:02d}{label}",
-                "time_period": "2023",
+                "time_period": year,
                 "value": 80.0 - number,
                 "unit": "dcid:Years",
             }
             for number in range(entities)
+            for year in years
         ],
     )
     result = run_rank(
@@ -1192,11 +1202,12 @@ def _ranking(entities: int, *, limit: int | None = None, label: str = "") -> Ste
         window_start=None,
         window_end=None,
         ascending=False,
+        per_period=len(years) > 1,
         limit=limit,
     )
     digest = render_rank_digest(
         rank_by=("observationAbout",),
-        result=result,
+        result=dataclasses.replace(result, warnings=warnings),
         op_spec_hash="ops_" + "1" * 32,
         content_version="ocv_" + "1" * 32,
         execution_identity=current_execution_identity(),
@@ -1244,17 +1255,34 @@ def test_a_ranking_of_four_is_handed_back_whole() -> None:
 
 @pytest.mark.parametrize("limit", [10, 20], ids=["limit-10", "limit-20"])
 def test_a_limited_ranking_hands_back_every_row_its_frame_keeps_and_no_others(limit: int) -> None:
-    """The digest lists the first 20 of 70 ranked entities under a `limit` of
-    20 or fewer, which the frame keeps whole."""
+    """The digest lists the rows the frame keeps, a `limit` of 20 or fewer of the
+    70 ranked entities, and they are handed back whole."""
     ranking = _ranking(70, limit=limit)
     rows = _rows_of(ranking.digest)
 
     handed = _handed_back(*ranking)
 
-    assert ranking.rows == limit and len(rows) == 20
-    assert "70 ranked entit(y/ies):" in handed
+    assert ranking.rows == limit and len(rows) == limit
+    assert f"{limit} ranked entit(y/ies):" in handed
     assert f"limit {limit} (kept {limit} of 70 ranked entities)" in handed[0]
-    assert _rows_of("\n".join(handed)) == rows[:limit]
+    assert _rows_of("\n".join(handed)) == rows
+
+
+@pytest.mark.parametrize("periods", [3, 20], ids=["3-periods", "20-periods"])
+def test_a_limited_ranking_of_each_period_hands_back_its_header_and_closing_lines(
+    periods: int,
+) -> None:
+    """Blocks of 3 rows hold few lines each, yet a line per period would pass the
+    hand-back cap and cut the lines after them."""
+    years = tuple(str(2000 + offset) for offset in range(periods))
+    ranking = _ranking(40, limit=3, years=years, warnings=("the window is sparse",))
+
+    handed = _handed_back(*ranking)
+
+    assert f"kept {3 * periods} of {40 * periods} ranked rows" in handed[0]
+    assert not [line for line in handed if "ranked entit(y/ies)" in line or "#" in line]
+    assert any(line.startswith("unit: ") for line in handed)
+    assert "  - the window is sparse" in handed
 
 
 @pytest.mark.parametrize(

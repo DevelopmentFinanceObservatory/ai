@@ -71,8 +71,8 @@ _BARE_SPEC_ID_SENTENCE = "Leave content_version out to pass a spec_id and have t
 # take the same argument.
 REBUILD_LOST_FRAMES = "rebuild_lost_frames"
 _REBUILD_LOST_FRAMES_DESCRIPTION = (
-    "True rebuilds a lost frame: spec_ at its newest version, ops_ from its recipe. "
-    "A summed, cut or unrecorded spec_ frame refuses."
+    "True rebuilds a lost frame: spec_ at its current version in the same rendering, "
+    "ops_ from its recipe."
 )
 
 _DESCRIBE_COMPONENT_ID_DESCRIPTION = (

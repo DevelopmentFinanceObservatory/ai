@@ -49,7 +49,9 @@ verb, on each input, so the call computes the tree an explicit `filter` call and
 the verb over its result would, and gets its ids. The step's predicate reads the
 `{role}_type` column of the first typed role (`common.place_type.TYPED_ROLES`)
 the side keys by (`_place_role`), else of `observationAbout`, the one place role
-whose mixed levels refuse `place_levels_mixed`.
+whose mixed levels refuse `place_levels_mixed`. A frame without that column
+refuses `role_ambiguous` on `predicates`, a parameter the caller did not send, so
+`verbs` rewrites that refusal for the columns `place_level_columns` names.
 
 The runner checks every rolling literal against the latest period it finds
 itself, so no tree carries `anchor_key`. The key names the anchor record
@@ -355,6 +357,11 @@ def _side_keys(op_spec: OpSpecVariant) -> tuple[tuple[str, ...], tuple[str, ...]
         # A pooled denominator, which no column keys.
         return numerator_by, ()
     return numerator_by, tuple(denominator_by.get(key, key) for key in numerator_by)
+
+
+def place_level_columns(op_spec: OpSpecVariant) -> frozenset[str]:
+    """The columns the `place_level` steps of a call of `op_spec` read."""
+    return frozenset(type_column(_place_role(keys)) for keys in _side_keys(op_spec))
 
 
 def _level_step(

@@ -44,7 +44,13 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Annotated, Any
 
 from common.materialisation import AnchorRecord, FrameRef, get_store
-from common.place_type import PARTY_ROLES, PlaceLevel, enrichment_role
+from common.place_type import (
+    PARTY_ROLES,
+    TYPED_ROLES,
+    PlaceLevel,
+    enrichment_role,
+    type_column,
+)
 from common.rolling import canonical_roots
 from common.unit_refs import PERCENT_UNIT
 from fastmcp.tools import ToolResult
@@ -77,7 +83,7 @@ from analysis_mcp.op_spec import (
     with_anchor_key,
 )
 from analysis_mcp.runner_client import find_anchor
-from analysis_mcp.runner_tree import Pair, newest_ref, root_node
+from analysis_mcp.runner_tree import Pair, newest_ref, place_level_columns, root_node
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import build_op_spec_or_refusal, run_on_runner
 
@@ -189,14 +195,20 @@ _PUBLIC_FORMS = {
 
 
 def _followable(
-    arguments: Arguments, refusal: ToolRefusal, *, takes_place_level: bool
+    arguments: Arguments,
+    refusal: ToolRefusal,
+    *,
+    takes_place_level: bool,
+    level_columns: frozenset[str],
 ) -> ToolRefusal:
     """A runner `refusal` with advice the call's tool can follow. The runner writes
     `rolling_anchor_unresolved` for a caller of `resolve_anchor`. A call with no
     `anchor_key` is told of its derived inputs, whose stored recipes the call computes
     again, or else of the years it stated. `place_levels_mixed` asks
     for `place_level` only where the tool takes it. A party column's message asks for
-    no `place_level`."""
+    no `place_level`. A `role_ambiguous` on `predicates` naming `level_columns`, the
+    columns the call's `place_level` steps read, is about an argument the caller sent
+    as `place_level`, so it says so."""
     if (
         refusal.code == ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED
         and arguments.get("anchor_key") is None
@@ -208,6 +220,20 @@ def _followable(
             if isinstance(ref, Mapping) and str(ref.get("spec_id")).startswith("ops_")
         ]
         return ToolRefusal.latest_year_unresolved(fix=refusal.fix, derived=derived)
+    columns = refusal.fix.get("columns")
+    if (
+        refusal.code == ToolErrorCode.ROLE_AMBIGUOUS
+        and refusal.fix.get("parameter") == "predicates"
+        and columns
+        and level_columns.issuperset(columns)
+    ):
+        available = refusal.fix.get("available", ())
+        return ToolRefusal.place_level_side_unnamed(
+            columns=columns,
+            available=[
+                column for role in TYPED_ROLES if (column := type_column(role)) in available
+            ],
+        )
     column = refusal.fix.get("column")
     if (
         refusal.code == ToolErrorCode.PLACE_LEVELS_MIXED
@@ -256,10 +282,14 @@ def _on_runner(
         op_spec = build_op_spec_or_refusal(lambda: build(_held_newest(arguments)))
         if isinstance(op_spec, ToolResult):
             return op_spec
+        level_columns = frozenset() if place_level is None else place_level_columns(op_spec)
 
         def refined(refusal: ToolRefusal) -> ToolRefusal:
             followable = _followable(
-                arguments, refusal, takes_place_level=place_level_description is not None
+                arguments,
+                refusal,
+                takes_place_level=place_level_description is not None,
+                level_columns=level_columns,
             )
             return followable if refine is None else refine(arguments, followable)
 

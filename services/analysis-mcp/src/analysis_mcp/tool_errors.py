@@ -22,7 +22,11 @@ object. A converted candidate's label names its price basis and currency, a
 composed candidate's label reads "<numerator> per <denominator>", and the
 `id` of either is the object to pin. `role_ambiguous` names whichever
 column-list parameter the calling verb actually has in `fix["parameter"]`,
-never a hardcoded name borrowed from `aggregate`.
+never a hardcoded name borrowed from `aggregate`. `place_level_side_unnamed`
+is the same code for the `place_level` argument, whose column the call's keys
+did not settle. `fix["available"]` lists the frame's `{role}_type` columns, and
+the retry goes through `filter` with the argument in `fix["retry_without"]` left
+out, since sending it again repeats the refused step.
 
 `comparison_periods_disjoint` fires when compare's two sides share no
 overlapping period; `growth_gap_year` fires when no entity has a row in
@@ -555,6 +559,35 @@ class ToolRefusal:
                 f"Available: {available}."
             ),
             fix={"parameter": parameter, "columns": columns, "available": available},
+        )
+
+    @classmethod
+    def place_level_side_unnamed(cls, *, columns: list[str], available: list[str]) -> Self:
+        """A `place_level` step read `columns`, which this frame lacks. `available`
+        holds the frame's `{role}_type` columns. Choosing a side here could drop every
+        row, as on a frame whose provider is a DAC group, so the caller chooses. `filter`
+        is the one route for every verb, since a pooled `share_of` denominator has no key to
+        name a side with and a key added to `group_by` changes the rows the call returns.
+        """
+        next_step = (
+            "Call filter with a place_level predicate on the column of the side to keep, on "
+            "each frame this call reads. Then repeat this call on the filtered frames without "
+            "place_level. Or leave place_level out."
+            if available
+            else "Leave place_level out."
+        )
+        return cls(
+            code=ToolErrorCode.ROLE_AMBIGUOUS,
+            message=(
+                f"place_level reads {columns}, which this frame does not have. Its place "
+                f"type columns: {available}. {next_step}"
+            ),
+            fix={
+                "parameter": "place_level",
+                "columns": columns,
+                "available": available,
+                "retry_without": "place_level",
+            },
         )
 
     @classmethod

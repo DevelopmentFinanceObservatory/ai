@@ -20,7 +20,7 @@ own discipline of bounding the model-facing text while the full result stays
 reachable, here by resolving the same `{spec_id, content_version}` pair as a
 downstream verb's `frame_ref`. `tests/test_digest_budget.py` catches a leak
 of that bound. `render_rank_digest` takes the head of its own
-already-caller-ordered `entity_ranks`, since `ascending` states which end of
+already-caller-ordered `kept_ranks`, since `ascending` states which end of
 the ranking the caller wants. Every other renderer's own order is
 framework-defined (canonical, chronological, or grain-based) rather than
 caller-stated, so those pick the shown entries by magnitude instead
@@ -937,9 +937,9 @@ def render_rank_digest(
     own column carries with no `limit`; `_derived_note` states that
     distinction when `derived["ordinal"]` is set.
 
-    `result.limit` adds the kept and ranked counts to the header. The rank
-    block lists the whole ranking, so the header's count and each line's
-    rank number say which entries the output frame holds.
+    `result.limit` adds the kept and ranked counts to the header, and the rank
+    block lists the entries the output frame holds. A caller who wants the
+    entries past the limit drops `limit`.
     """
     reduction_text = result.aggregation if result.aggregation is not None else "(raw value)"
     if result.window_start is None:
@@ -958,16 +958,16 @@ def render_rank_digest(
             f"{len(result.entity_ranks)} ranked {counted})"
         )
 
-    # Positional, not `summary.capped`: `entity_ranks` is already ordered by the
+    # Positional, not `summary.capped`: `kept_ranks` is already ordered by the
     # caller's own criterion (`ascending`, or its default) within each
     # period, so the head of each block is what a caller asking for "the 20
     # lowest/highest" wants. A magnitude selection would show the opposite
     # end of the ranking from rank 1.
     private = frozenset(result.private_parties)
     ranks_block = (
-        _per_period_ranks_block(result.entity_ranks, private=private)
+        _per_period_ranks_block(result.kept_ranks, private=private)
         if result.per_period
-        else _rank_block(result.entity_ranks, private=private)
+        else _rank_block(result.kept_ranks, private=private)
     )
 
     unit_line = f"unit: {_unit_text(result.resolved_unit)}"

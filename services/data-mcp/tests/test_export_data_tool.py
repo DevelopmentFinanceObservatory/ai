@@ -514,15 +514,14 @@ async def test_a_failed_read_of_the_mint_record_refuses_retryably_without_a_prep
     [{"by": ["sector_level1"]}, {"by": ["stat_var"]}],
     ids=["breakdown", "stat-vars-sum"],
 )
-async def test_a_summed_frame_held_under_its_base_pair_refuses_without_a_prepare(
+async def test_a_summed_frame_exports_the_pair_its_mint_record_names(
     groupby: dict[str, Any],
 ) -> None:
-    """A groupby that keeps the version names the base pair as its dataset; exporting that
-    version would hand over the unsummed rows."""
+    held = {"spec_id": FETCHED["spec_id"], "content_version": "cv_" + "6" * 32}
     store = InMemoryMaterialisationStore()
     await store.put_mint_record(
         MintRecord(
-            frame=FrameRef(**FETCHED),
+            frame=FrameRef(**held),
             dataset=FrameRef(**FETCHED),
             options={"format": "parquet", "bundle": False, "layout": "frame", "groupby": groupby},
         )
@@ -530,13 +529,8 @@ async def test_a_summed_frame_held_under_its_base_pair_refuses_without_a_prepare
     set_store(store)
     requests: list[httpx2.Request] = []
 
-    result = await _call(_door(requests), {"frame_ref": FETCHED})
+    result = await _call(_door(requests), {"frame_ref": held})
 
-    envelope = result.structured_content
-    assert envelope is not None
-    assert (envelope["code"], envelope["retry_mode"], envelope["fix"]) == (
-        "capability_unavailable",
-        "do_not_retry",
-        {"next_step": "get_data"},
-    )
-    assert requests == []
+    assert [json.loads(r.content)["frame"] for r in requests] == [FETCHED]
+    assert result.structured_content is not None
+    assert result.structured_content["exported_frame_ref"] == FETCHED

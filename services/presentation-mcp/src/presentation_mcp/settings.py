@@ -115,7 +115,7 @@ class Settings(FrameServiceSettings):
     revise and exempts a principal holding the publish grant, so Studio's
     writes spend none. An external caller's write never carries it
     (`client.PlatformAssembler._card_write_headers`). No other apis route this
-    service calls reads the header. Must equal
+    service calls reads this principal. Must equal
     whatever the apis deployment's own `DATASETS_FIRST_PARTY_PRINCIPAL` env
     var holds. The two are separate deployments, and nothing keeps them in
     sync but a deployer setting the same value on both. `None` (the default,
@@ -133,6 +133,13 @@ class Settings(FrameServiceSettings):
     against that client's allowance. Unset or blank, or for a caller named any
     other way, the write carries neither header, and dfo-apis counts it against
     the address it sees for this service, one allowance every such caller shares.
+
+    `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) is the principal apis grants
+    `refresh`, the value `harness.settings.Settings` reads from the same env var, since
+    the harness co-mounts this service in its process. `rebuild_lost_frames` sends it to
+    `POST /api/datasets/frames/refresh` for a lost `spec_` frame whose rows a newest read
+    would not hold (`client.PlatformAssembler._refreshed`). Unset or blank, such a frame
+    refuses `rendering_not_recorded`.
 
     `presentation_public_url` is the URL at which this service's routes are
     reachable from a browser, mount path included: the co-mounted harness
@@ -175,11 +182,17 @@ class Settings(FrameServiceSettings):
     frame_store_verify_content_version: bool = False
     datasets_first_party_principal: str | None = None
     dfo_caller_principal: SecretStr | None = None
+    live_refresh_principal: SecretStr | None = None
     presentation_public_url: str = Field(default="", validate_default=True)
     chart_render_timeout_s: float = 2.0
     chart_worker_warm: bool = True
 
-    @field_validator("datasets_first_party_principal", "dfo_caller_principal", mode="before")
+    @field_validator(
+        "datasets_first_party_principal",
+        "dfo_caller_principal",
+        "live_refresh_principal",
+        mode="before",
+    )
     @classmethod
     def _blank_principal_is_unset(cls, value: object) -> object:
         """A blank env value means "unconfigured", matching

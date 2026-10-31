@@ -163,8 +163,8 @@ def _counted_blocks(lines: list[str]) -> list[tuple[int, int, int]]:
 def _lists_kept_rows(summary: StepSummary, blocks: list[tuple[int, int, int]]) -> bool:
     """Whether `summary` is a ranking that ran with a `limit`, keeps no more
     rows than a card draws, and whose one block of rank lines holds every row
-    the frame keeps. The digest lists at most `_LIST_CAP` rows of the whole
-    ranking, so a frame that keeps more is not listed whole."""
+    the frame keeps. The digest lists at most `_LIST_CAP` rows, so a frame that
+    keeps more is not listed whole."""
     if summary.tool != _RANKING_TOOL or summary.ranked_before_limit is None:
         return False
     if summary.rows is None or len(blocks) != 1:
@@ -179,22 +179,31 @@ def _without_entity_lines(summary: StepSummary, *, whole_ranking: bool = True) -
     states the count, and a line saying how many lines were left out. The
     digest of any other tool is returned as it is.
 
-    A rank digest lists the first rows of the whole ranking, past the
-    `limit` its frame keeps. Its one block of rows in rank order starts with
-    the frame's `summary.rows` rows, which are the rows kept. The block is cut
-    to them, and where the ranking ran with a limit, keeps no more rows than
-    a card draws and the block lists every one (`_lists_kept_rows`), they are
-    all handed back, if `whole_ranking`. Otherwise the block is cut to its
-    first and last of those rows. A digest prints at most
-    `analysis_mcp.digest._LIST_CAP` rows, so a frame that keeps more rows than
-    the block holds keeps the first row and the count, and the marker says the
-    last row is not listed. A rank digest with a block for each period, or of
-    a frame whose row count is unknown, keeps the count only."""
+    A rank digest lists the rows its frame keeps. When the ranking ran with
+    a limit, keeps no more rows than a card draws and its one block lists
+    every one (`_lists_kept_rows`), all rows are handed back if
+    `whole_ranking`. Otherwise the block is cut to its first and last rows. A
+    digest prints at most `analysis_mcp.digest._LIST_CAP` rows, so a frame that
+    keeps more rows than the block holds keeps the first row and the count, and
+    the marker says the last row is not listed. A limited rank digest with a
+    block for each period has its blocks replaced by one marker, since its
+    header states the kept and ranked counts, and a line per period can pass
+    `_HAND_BACK_CAP` and lose the unit, coverage and warning lines after them.
+    Any other rank digest with a block for each period, or of a frame whose row
+    count is unknown, has each block of more than `_LINES_KEPT_WHOLE` lines cut
+    to its count."""
     if summary.tool != _RANKING_TOOL and summary.tool not in _COUNT_ONLY_TOOLS:
         return summary.digest
     lines = summary.digest.split("\n")
     blocks = _counted_blocks(lines)
     ranking = summary.tool == _RANKING_TOOL and summary.rows is not None and len(blocks) == 1
+    if summary.ranked_before_limit is not None and len(blocks) > 1:
+        first = blocks[0][1] - 2  # The period heading over the first count heading.
+        last = blocks[-1][2]
+        while last < len(lines) and lines[last].lstrip().startswith("..."):
+            last += 1
+        marker = f"({len(blocks)} period blocks left out; the header states the counts)"
+        return "\n".join([*lines[:first], marker, *lines[last:]])
     whole = whole_ranking and _lists_kept_rows(summary, blocks)
     kept: list[str] = []
     cursor = 0
