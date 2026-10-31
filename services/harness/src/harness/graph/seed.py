@@ -15,6 +15,7 @@ from typing import Any
 
 from compiler.surface import ToolSurface
 from google.adk import Context
+from orchestrator.agent import SEEDED_STATE_KEY
 from planner.plan import (
     SEEDS_STATE_KEY,
 )
@@ -23,6 +24,7 @@ from translator.discovery import (
     DefinitionNotResolvedError,
 )
 
+from harness.graph.orchestrate import AgentHandBack
 from harness.graph.resume import ResumeRuns
 from harness.graph.seams import (
     Executor,
@@ -53,6 +55,14 @@ from harness.tool_contracts import (
 logger = logging.getLogger(__name__)
 
 
+def _seed_hand_back(hand_back: dict[str, str]) -> dict[str, Any]:
+    """`hand_back`, `{"status", "text"}`, as the `AgentHandBack` that answers
+    none of the agent's calls."""
+    return AgentHandBack(
+        answers=None, status=hand_back["status"], text=hand_back["text"]
+    ).model_dump(mode="json")
+
+
 def _turn_ran_before(ctx: Context) -> bool:
     """Whether another workflow node already ran in `ctx`'s invocation.
 
@@ -80,21 +90,23 @@ def seed_node(
     definition_surface: ToolSurface,
     resume: ResumeRuns | None = None,
     fetch: Callable[..., Awaitable[dict[str, Any]]] | None = None,
-) -> Callable[[Context, Any], AsyncIterator[dict[str, str]]]:
+) -> Callable[[Context, Any], AsyncIterator[dict[str, Any]]]:
     """The `seed` node, carrying on unfinished runs through `resume`,
     resolving seeds and applying a chip through `definition_surface`,
     fetching a chip's data with `fetch`, the orchestrator's `fetch` tool,
     and recording its steps through `executor`."""
 
-    async def receive_seeds(ctx: Context, node_input: Any) -> AsyncIterator[dict[str, str]]:
+    async def receive_seeds(ctx: Context, node_input: Any) -> AsyncIterator[dict[str, Any]]:
         """Carry on the runs an earlier turn left unfinished (`resume`,
         `harness.graph.resume`), then hand the agent the datasets the user
         brought from Search, or the data of the chip the user clicked
         (`APPLY_CHOICE_STATE_KEY`, `harness.graph.switch.apply_stored_choice`).
         The hand-back names the runs first, then the seeds or the chip, each
-        as its own paragraph. Once the session holds it, which it does when
-        the yield returns, the runs it delivers are acknowledged
-        (`harness.graph.resume.Resumed.acknowledge`).
+        as its own paragraph. It answers none of the agent's calls
+        (`AgentHandBack`), so the agent reads it after the user's message
+        (`orchestrator.agent.prepend_digests`). Once the session holds it,
+        which it does when the yield returns, the runs it delivers are
+        acknowledged (`harness.graph.resume.Resumed.acknowledge`).
 
         No output when there is none of these. A run that resumes a turn
         already under way (`_turn_ran_before`) clears the seeds slot and
@@ -109,6 +121,8 @@ def seed_node(
         ctx.state[SEEDS_STATE_KEY] = None
         if _turn_ran_before(ctx):
             return
+        # A fresh turn opens with no seed hand-back on record.
+        ctx.state[SEEDED_STATE_KEY] = None
         resumed = await resume(ctx) if resume is not None else None
         seeded = await take(ctx, raw)
         pick = state_json(ctx, APPLY_CHOICE_STATE_KEY)
@@ -126,10 +140,10 @@ def seed_node(
             )
         if resumed is None:
             if seeded is not None:
-                yield seeded
+                yield _seed_hand_back(seeded)
             return
         runs = resumed.hand_back
-        yield (
+        yield _seed_hand_back(
             runs
             if seeded is None
             else {"status": seeded["status"], "text": f"{runs['text']}\n\n{seeded['text']}"}

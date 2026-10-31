@@ -18,7 +18,6 @@ from executor.run import current_step_id
 from google.adk.events import Event
 from google.adk.events.event import NodeInfo
 from google.adk.sessions import InMemorySessionService
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
 from harness.chart_binding import TopMembers
 from harness.conversation import current_conversation_id
@@ -56,6 +55,7 @@ from harness.studio_translate import (
     _tool_call_label,
     _Translator,
 )
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import ActivityStep, CompositionActor, CompositionManifest, StepStatus
 from planner.plan import plan_revision
 from planner.workflow import ToolId

@@ -4,12 +4,15 @@ ADK hands an `Exception` raised inside a tool to the agent's
 `on_tool_error_callback`. A dict the callback returns becomes the tool's
 result, and `None` lets the exception fail the turn. `answering_tool_failures`
 builds that callback, so a tool that breaks costs the model one tool result
-and the user still gets an answer from what did work. Pauses and cancellation
-are `BaseException`s and never reach it.
+and the user still gets an answer from what did work. A pause is a
+`BaseException` and never reaches it. A cancelled call does, for cleanup only
+(`flows/llm_flows/tools/_error_handler.notify_tool_cancelled`), and ADK
+ignores what the callback returns for it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Collection
 from typing import Any
@@ -21,7 +24,9 @@ from harness.tool_contracts import HarnessCode, harness_retry_mode
 
 logger = logging.getLogger(__name__)
 
-type ToolErrorCallback = Callable[[BaseTool, dict[str, Any], ToolContext, Exception], dict | None]
+type ToolErrorCallback = Callable[
+    [BaseTool, dict[str, Any], ToolContext, BaseException], dict | None
+]
 
 
 def answering_tool_failures(tool_names: Collection[str]) -> ToolErrorCallback:
@@ -32,13 +37,14 @@ def answering_tool_failures(tool_names: Collection[str]) -> ToolErrorCallback:
     The exception's message stays out of the answer, since it can carry
     internal URLs or data. A name outside `tool_names` is a tool the model
     made up. The callback returns `None` for it, so ADK's own answer, which
-    lists the tools the model can call, stands.
+    lists the tools the model can call, stands. A cancelled call is no
+    failure, so the callback logs nothing for it and returns `None`.
     """
 
     def answer(
-        tool: BaseTool, args: dict[str, Any], tool_context: ToolContext, error: Exception
+        tool: BaseTool, args: dict[str, Any], tool_context: ToolContext, error: BaseException
     ) -> dict | None:
-        if tool.name not in tool_names:
+        if isinstance(error, asyncio.CancelledError) or tool.name not in tool_names:
             return None
         failure = type(error).__name__
         logger.error(

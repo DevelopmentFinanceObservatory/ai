@@ -34,6 +34,7 @@ from planner.plan import (
 from harness import plan_display
 from harness.chart_binding import MAX_SERIES_PER_COMPONENT
 from harness.graph.delivery import Delivery, deliver, frame_read
+from harness.graph.orchestrate import AgentHandBack
 from harness.graph.seams import (
     Executor,
 )
@@ -52,6 +53,8 @@ from harness.graph.state import (
     frame_id_for,
     readable_plan,
     register_frames,
+    stored_mapping,
+    stored_sequence,
 )
 from harness.sentences import DECLINE_REASONS
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
@@ -623,7 +626,7 @@ def record_plan(
     without searching again. `run_id` is the run the plan executed as, which
     a later turn reads the record's status from.
     """
-    readings = dict(state.get(ORCHESTRATOR_READINGS_KEY) or {})
+    readings = dict(stored_mapping(state, ORCHESTRATOR_READINGS_KEY))
     unavailable = dict(state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})
     for row in plan_display.step_rows(plan):
         args = cast("dict[str, Any]", row["args"])
@@ -645,8 +648,8 @@ def record_plan(
         # A source an earlier turn's search returned is a searched one too,
         # and keeps its block in that turn's record.
         searched={
-            *(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
-            *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("spec_ids", []),
+            *stored_mapping(state, ORCHESTRATOR_SPECS_KEY),
+            *stored_mapping(state, ORCHESTRATOR_PRIOR_LEDGER_KEY).get("spec_ids", []),
         },
         failed_steps=frozenset(stopped.values()),
         run_id=run_id,
@@ -655,7 +658,7 @@ def record_plan(
         aligned_bases=_aligned_bases(state),
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
-        *(state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),
+        *stored_sequence(state, ORCHESTRATOR_PLAN_RECORDS_KEY),
         plan_record.model_dump(mode="json"),
     ]
     return plan_record
@@ -703,7 +706,10 @@ def plan_done_node(
         notes on how the figures were computed (`totals`, `answer_notes`), what failed, each cut, and
         each ask the brief listed with its outputs' status or its decline
         (`_ask_status`), then the plan record
-        (`harness.turn_records.PlanRecord`). A step refused
+        (`harness.turn_records.PlanRecord`), under `plan_record`. It is the
+        result of the agent's `plan` call (`AgentHandBack`): a sentence that
+        says what to do with it as the result's text, and the rest as its
+        structured fields. A step refused
         `capability_unavailable` marks its spec_id unavailable to `fetch`
         for the rest of the turn and does not give the plan call back.
 
@@ -762,10 +768,11 @@ def plan_done_node(
             # A final refusal (an internal or repeated failure, or a question
             # declined whole) fails the same way for any brief.
             again = not node_input.get("final") and _give_plan_back(ctx)
-            computed = listed = ""
+            computed = ""
+            listing: dict[str, Any] = {}
             if kept:
                 brief_asks = load_asks(ctx.state)
-                result = hand_back.listing(
+                listing = hand_back.listing(
                     ctx.state,
                     [
                         await earlier(int(number), brief_asks[int(number)])
@@ -773,20 +780,21 @@ def plan_done_node(
                     ],
                 )
                 computed = (
-                    f"{_partial_result(result['asks'], frames=bool(result['frames']))} "
+                    f"{_partial_result(listing['asks'], frames=bool(listing['frames']))} "
                     "Every other ask was not computed. "
                 )
-                listed = f"\n{json.dumps(result)}"
-            yield {
-                "status": ORCHESTRATOR_PLAN_FAILED_STATUS,
+            refused = AgentHandBack(
+                answers="plan",
+                status=ORCHESTRATOR_PLAN_FAILED_STATUS,
                 # The refusal's code, which words the failed step the user sees.
-                "failure": {"code": node_input.get("code")},
-                "text": "The planner could not make a plan: "
+                failure={"code": node_input.get("code")},
+                text="The planner could not make a plan: "
                 f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}Answer with search "
                 "and fetch where you can, and say plainly what could not be calculated."
-                + (" A brief that avoids the problem may be planned once more." if again else "")
-                + listed,
-            }
+                + (" A brief that avoids the problem may be planned once more." if again else ""),
+                body=listing,
+            )
+            yield refused.model_dump(mode="json")
             return
         plan = readable_plan(ctx, ctx.state.get("plan"))
         wholes = plan_display.share_wholes(plan) if plan is not None else {}
@@ -814,7 +822,7 @@ def plan_done_node(
         if run is not None and not unfinished:
             delivery = await deliver(run_ledger, run["run_id"], read=read)
         unrecorded = unfinished and run.get("status") in ("unfinished", "not_started")
-        record = ""
+        record: dict[str, str] = {}
         if plan is not None:
             stopped = _stop_causes(plan, failed.get("step_id") if failed else None)
             plan_record = record_plan(
@@ -825,7 +833,7 @@ def plan_done_node(
                 run_id=run.get("run_id") if run else None,
             )
             failed = shown_failure(failed, plan, stopped)
-            record = "\n" + plan_record.render(budget=_PLAN_RECORD_CHARS)
+            record["plan_record"] = plan_record.render(budget=_PLAN_RECORD_CHARS)
             if plan_record.asks and not unrecorded:
                 asks = [_ask_status(ask, ran, failed, stopped) for ask in plan_record.asks]
         if (failed or unfinished) and asks:
@@ -885,10 +893,13 @@ def plan_done_node(
             )
         else:
             lead = "The approved plan ran. Chart its frames and answer."
-        yield {
-            "status": ORCHESTRATOR_PLAN_RAN_STATUS,
-            "text": f"{lead}\n{json.dumps(result)}{record}",
-        }
+        ran_back = AgentHandBack(
+            answers="plan",
+            status=ORCHESTRATOR_PLAN_RAN_STATUS,
+            text=lead,
+            body={**result, **record},
+        )
+        yield ran_back.model_dump(mode="json")
         if delivery is not None:
             await delivery.acknowledge()
 

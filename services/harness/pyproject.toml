@@ -14,7 +14,7 @@ dependencies = [
     "dfo-spec-kit-frame-grammar",
     "fastapi>=0.139.1",
     "fastmcp>=4.0.10,<5",
-    "google-adk[db]==2.10.0",
+    "google-adk[db]==2.13.0",
     # harness.langfuse_export loads observation rows into BigQuery.
     "google-cloud-bigquery>=3.46",
     # harness.server builds its loopback self-check client on httpx2, and

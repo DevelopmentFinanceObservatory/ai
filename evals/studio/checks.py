@@ -54,6 +54,7 @@ from harness.reply_figures import (
     point_figure,
     series_ends,
 )
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import STUDIO_FRAME_ADAPTER
 from pydantic import ValidationError
 
@@ -1338,12 +1339,11 @@ def check_transcript(
 # ---------------------------------------------------------------------------
 
 # ADK's fence around another agent's quoted turn
-# (`google.adk.flows.llm_flows._fencing.QUOTED_CONTENT_BEGIN`), spelled out so a
+# (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`), spelled out so a
 # change to the marker shows here instead of passing unnoticed.
 RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
-# The function name ADK gives a pause for the user's input
-# (`google.adk.workflow.utils._workflow_hitl_utils.REQUEST_INPUT_FUNCTION_CALL_NAME`).
-REQUEST_INPUT_NAME = "adk_request_input"
+# The function name ADK gives a pause for the user's input.
+REQUEST_INPUT_NAME = REQUEST_INPUT_FUNCTION_CALL_NAME
 
 # ADK opens each relayed payload with the relaying agent's name in brackets; its
 # own framing sentence carries the marker with no name.
@@ -1675,18 +1675,17 @@ def _listed_asks(evidence: Evidence) -> list[str]:
 
 
 def _handed_back_asks(evidence: Evidence) -> dict[str, dict[str, Any]]:
-    """Each ask a plan's hand-back to the orchestrator reports, by its text."""
+    """Each ask a plan's hand-back to the orchestrator reports, by its text.
+    The hand-back is the result of the orchestrator's `plan` call."""
     reported: dict[str, dict[str, Any]] = {}
     for request in _requests(evidence, agent="orchestrator"):
         for content in request["contents"]:
             for part in content.get("parts", []):
-                for line in (part.get("text") or "").split("\n"):
-                    try:
-                        body = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(body, dict):
-                        reported.update({ask["ask"]: ask for ask in body.get("asks", [])})
+                response = part.get("function_response")
+                if not response or response["name"] != "plan":
+                    continue
+                asks = (response.get("response") or {}).get("asks", [])
+                reported.update({ask["ask"]: ask for ask in asks})
     return reported
 
 

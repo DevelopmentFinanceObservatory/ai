@@ -33,7 +33,7 @@ from typing import Any, get_args
 import pytest
 from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from langfuse.api import DatasetItem, NotFoundError
 from planner.plan import EvidenceRequirement
 from pydantic import ValidationError

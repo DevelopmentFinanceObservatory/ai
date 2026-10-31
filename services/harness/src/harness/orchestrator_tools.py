@@ -155,6 +155,8 @@ from harness.graph.state import (
     prices_question,
     register_frames,
     store_search,
+    stored_mapping,
+    stored_sequence,
     turn_budgets,
 )
 from harness.reply_figures import (
@@ -193,7 +195,8 @@ _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
-# action; the Studio stream holds back later text only after one of these.
+# action; the Studio stream holds back later text only after one of these,
+# and `harness.graph.orchestrate` answers the call whose last result holds it.
 HANDED_OFF = "handed_off"
 # The identity member each `get_data` scope member replaces.
 _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets": "facets"}
@@ -616,14 +619,14 @@ async def _member_cells(
     (`_read_member_cells`). A read that succeeded is kept for the turn in the
     frame's entry of `ORCHESTRATOR_FRAMES_KEY`; one that failed answers None
     and is made again on the next call."""
-    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    frames = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)
     frame = frames[frame_id]
     if _MEMBER_CELLS in frame:
         return frame[_MEMBER_CELLS]
     cells = await _read_member_cells(frame, executor)
     if cells is None:
         return None
-    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    frames = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)
     state[ORCHESTRATOR_FRAMES_KEY] = {
         **frames,
         frame_id: {**frames[frame_id], _MEMBER_CELLS: cells},
@@ -943,7 +946,7 @@ async def _top_select(
         dimension multiplies or the frame cannot be read; otherwise why its
         rows gave no ranking (`_ranked`).
     """
-    frame = (state.get(ORCHESTRATOR_FRAMES_KEY) or {})[chart.frame]
+    frame = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)[chart.frame]
     if frame["view"].get("rolling") or chart.latest_periods is not None:
         return _Unranked("period_moves")
     over = over_cap_dimension(select=select, view=frame["view"])
@@ -1314,7 +1317,7 @@ def _breakdowns_missing(
     totalled = [role for ask in asks for role in ask.over]
     held: dict[str, str] = {}
     shared: dict[str, str] = {}
-    for stored in tool_context.state.get(ORCHESTRATOR_SEARCHES_KEY) or []:
+    for stored in stored_sequence(tool_context.state, ORCHESTRATOR_SEARCHES_KEY):
         reading = SearchReading.model_validate(stored)
         if reading.status in SETTLED_STATUSES and reading.spec_id:
             text = reading.text or reading.spec_id
@@ -1395,7 +1398,7 @@ def _named_spec_ids(tool_context: ToolContext) -> set[str]:
     """Every spec_id this turn's search results named: each part's own and each
     candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count and other
     prices a part's result offers (`measure_choice`)."""
-    specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    specs = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
     named = set(specs)
     for block in specs.values():
         choice = measure_choice(block or {})
@@ -1483,7 +1486,9 @@ def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[s
     """Record `action` as the turn's pending action, unless one is pending.
 
     A recorded action skips the model call that would only end the turn: the
-    workflow's `route` node acts on it once the turn ends. The refusal of a
+    workflow's `route` node acts on it once the turn ends. The record stands
+    as the call's result until the hand-back replaces it, a later response
+    under the call's id (`harness.graph.orchestrate`). The refusal of a
     second hand-off goes back to the model.
     """
     pending = pending_action(tool_context.state)
@@ -1496,7 +1501,7 @@ def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[s
     tool_context.state[ORCHESTRATOR_PENDING_KEY] = action.model_dump(mode="json")
     tool_context.actions.skip_summarization = True
     return {
-        "status": "Recorded. End your turn now; the result comes back as the next message.",
+        "status": "Recorded. End your turn now; the result replaces this record.",
         HANDED_OFF: action.kind,
     }
 
@@ -1505,8 +1510,7 @@ def _spec_block(tool_context: ToolContext, spec_id: str) -> Mapping[str, Any] | 
     """The spec block this turn's search returned for `spec_id`, else the one
     an earlier turn of the conversation stored (`earlier_block`); `None`
     when neither did."""
-    state = tool_context.state
-    block = (state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(spec_id)
+    block = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
     return block if block is not None else earlier_block(spec_id)
 
 
@@ -1608,9 +1612,9 @@ def _attach_fetch(
     state = tool_context.state
     searches = [
         SearchReading.model_validate(stored)
-        for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or []
+        for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)
     ]
-    block = (state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(spec_id)
+    block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
     candidate_of = next(
         (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
     )
@@ -2035,7 +2039,7 @@ def build_orchestrator_tools(
         reading = stat_vars or (
             "separate"
             if breakdown is not None
-            else (tool_context.state.get(ORCHESTRATOR_READINGS_KEY) or {}).get(spec_id)
+            else stored_mapping(tool_context.state, ORCHESTRATOR_READINGS_KEY).get(spec_id)
         )
         block = _spec_block(tool_context, spec_id)
         if block is None:
@@ -2046,7 +2050,7 @@ def build_orchestrator_tools(
                 return _unresolved_refusal(spec_id, exc)
             if block is not None:
                 tool_context.state[ORCHESTRATOR_SPECS_KEY] = {
-                    **(tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+                    **stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY),
                     spec_id: block,
                 }
         source = None
@@ -2064,7 +2068,7 @@ def build_orchestrator_tools(
         key = _fetch_key(args, block)
         earlier = (tool_context.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
-            frames = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+            frames = stored_mapping(tool_context.state, ORCHESTRATOR_FRAMES_KEY)
             found = (
                 {**earlier, "spec_id": spec_id, "same_data_as": earlier["spec_id"]}
                 if earlier.get("refusal")
@@ -2267,7 +2271,7 @@ def build_orchestrator_tools(
         is on the canvas, drawn this turn or an earlier one, is not drawn
         again: its figures are read from the card's head revision
         (`_stored_card`), and a card that cannot be read is refused."""
-        frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+        frames = stored_mapping(tool_context.state, ORCHESTRATOR_FRAMES_KEY)
         on_canvas = _canvas_series(tool_context)
         held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
         drawn_cards: dict[str, dict[str, Any]] = (
@@ -2531,12 +2535,12 @@ def build_orchestrator_tools(
         carries the spec_id the result gives it, and the answer names that
         spec_id when the user picks it. A prices question names its part in
         `prices_of`, and its options are filled in. Each spec_id goes on one option. End
-        your turn after calling ask_user. Every answer comes back as the next
-        message.
+        your turn after calling ask_user. Every answer comes back as this
+        call's result.
         """
         parts = open_parts(tool_context.state)
         questions = [prices_question(question, parts) for question in questions]
-        blocks = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+        blocks = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
         refused = _questions_refusal(
             questions,
             _named_spec_ids(tool_context),
@@ -2570,8 +2574,8 @@ def build_orchestrator_tools(
         Each ask is `{"text", "by", "over", "across_years"}`. Every party a
         search this turn held open goes in some ask's `by` or `over`, and the
         plan keeps the parties each ask lists in `by` together in one output.
-        End your turn after calling it; the plan's result comes back as the
-        next message.
+        End your turn after calling it; the plan's result comes back as this
+        call's result.
         """
         texts = [ask.text for ask in asks]
         refused = _asks_refusal(texts) or _breakdowns_missing(tool_context, asks)

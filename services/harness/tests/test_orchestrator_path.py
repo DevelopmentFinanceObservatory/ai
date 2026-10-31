@@ -25,13 +25,14 @@ from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
 from google.adk.events import EventActions
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, State
 from google.adk.workflow import START, Workflow
 from google.genai import types
 from harness import plan_display
 from harness.conversation import current_conversation_id
 from harness.graph import execute as execute_module
 from harness.graph import plan_done as plan_done_module
+from harness.graph.orchestrate import orchestrate_node
 from harness.graph.plan_done import (
     HandBack,
     StepSummary,
@@ -63,7 +64,7 @@ from harness.graph.state import (
     pending_action,
 )
 from harness.graph.workflow import planner_entry
-from harness.orchestrator_tools import build_orchestrator_tools
+from harness.orchestrator_tools import HANDED_OFF, build_orchestrator_tools
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface, scripted_publish_result
@@ -96,7 +97,6 @@ from .orchestrator_fakes import (
     call,
     carries_an_interrupt,
     chart,
-    content_text,
     create_request_input_response,
     definite_envelope,
     fetch_call,
@@ -974,6 +974,111 @@ def _tool_answers(request: Any) -> dict[str, Any]:
     }
 
 
+def _results_of(content: types.Content, name: str) -> list[dict[str, Any]]:
+    """The results `content` gives calls to `name`."""
+    return [
+        p.function_response.response or {}
+        for p in content.parts or []
+        if p.function_response and p.function_response.name == name
+    ]
+
+
+def _paired_results(request: Any) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Each function call in `request`, in order, by name, with the results
+    the content after it gives that name. The request carries no call ids,
+    so Gemini pairs a call with the responses that follow it."""
+    contents = request.contents
+    pairs = []
+    for place, content in enumerate(contents):
+        following = contents[place + 1] if place + 1 < len(contents) else None
+        for part in content.parts or []:
+            if part.function_call:
+                name = part.function_call.name or ""
+                pairs.append((name, _results_of(following, name) if following else []))
+    return pairs
+
+
+def _assert_one_result_per_call(request: Any) -> None:
+    """Every call in `request` is followed by exactly one result, and no
+    result stands without its call."""
+    pairs = _paired_results(request)
+    assert [len(results) for _, results in pairs] == [1] * len(pairs)
+    responses = [p for c in request.contents for p in c.parts or [] if p.function_response]
+    assert len(responses) == len(pairs)
+
+
+def _the_hand_back(request: Any, name: str) -> dict[str, Any]:
+    """The one result `request` shows for the agent's call to `name`."""
+    ((result,),) = [results for called, results in _paired_results(request) if called == name]
+    assert HANDED_OFF not in result
+    return result
+
+
+async def test_a_trailing_hand_back_is_the_one_result_of_its_plan_call():
+    """The model's request right after a plan ran ends on the plan's
+    hand-back. ADK merges every response to the call there, the later
+    replacing the earlier, so the call shows the hand-back and not `_pend`'s
+    record of the hand-off."""
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=["Kenya's debt service"]),
+        types.Part.from_text(text="Charted."),
+        planner=ScriptedPlannerModel(),
+        tool_surface=ScriptedSurface(),
+        executor=_describes,
+    )
+    await open_session(runner)
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
+    revision = approval.args["payload"]["revision"]
+    approve = create_request_input_response(approval.id, {"result": approve_answer(revision)})
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
+
+    request = model.requests[-1]
+    assert _results_of(request.contents[-1], "plan")
+    result = _the_hand_back(request, "plan")
+    assert result["result"] == "The approved plan ran. Chart its frames and answer."
+    assert result["frames"]
+    _assert_one_result_per_call(request)
+
+
+async def test_a_hand_back_in_history_is_the_one_result_of_its_plan_call():
+    """A later request holds the plan's hand-back in its history, with the
+    agent's `ask_user` call and its answer after it. ADK pairs a call in
+    history with its last response, so the plan call still shows the
+    hand-back alone, and the question its answer alone."""
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service", asks=["Kenya's debt service"]),
+        call("ask_user", questions=[_CONGO]),
+        types.Part.from_text(text="Kenya's debt service could not be calculated."),
+    )
+    await open_session(runner)
+    pause = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
+    answer = create_request_input_response(pause.id, {"result": {"spec_id": "o1"}})
+    await run_turn(runner, types.Content(role="user", parts=[answer]))
+
+    request = model.requests[-1]
+    assert not _results_of(request.contents[-1], "plan")
+    assert _the_hand_back(request, "plan")["result"].startswith("The planner could not make a plan")
+    assert _the_hand_back(request, "ask_user")["result"].startswith(
+        "You asked the user: Which Congo?\nThe user chose: Republic of the Congo"
+    )
+    _assert_one_result_per_call(request)
+
+
+@pytest.mark.parametrize("answers", ["plan", "ask_user"])
+async def test_an_answer_no_call_waits_on_is_refused_and_not_read_as_a_seed(answers: str):
+    """A hand-back that answers a call finds no call of the agent's waiting
+    on it: `orchestrate` raises, and records no seed hand-back."""
+    orchestrate = orchestrate_node(
+        orchestrator=cast("Any", SimpleNamespace(name="dfo_orchestrator"))
+    )
+    ctx = SimpleNamespace(session=SimpleNamespace(events=[]), state={}, event_author="orchestrate")
+    hand_back = {"answers": answers, "status": "Reading", "text": "The approved plan ran."}
+
+    with pytest.raises(RuntimeError, match=f"no {answers} call"):
+        [_ async for _ in orchestrate(cast("Any", ctx), hand_back)]
+    assert ctx.state == {}
+
+
 async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_goes_on(caplog):
     runner, model = orchestrator_runner(
         call("search", query="Kenya's GDP?", parts=[{"variable": "GDP"}]),
@@ -1033,16 +1138,15 @@ async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent
     events = await run_turn(runner, types.Content(role="user", parts=[approve]))
 
     request = model.requests[-1]
-    after_plan = request_text(request)
-    assert "The approved plan ran. Chart its frames and answer." in after_plan
-    body = json.loads(after_plan.split("Chart its frames and answer.\n", 1)[1].split("\n", 1)[0])
+    (hand_back,) = [c for c in request.contents if _results_of(c, "plan")]
+    assert hand_back.role == "user"
+    (body,) = _results_of(hand_back, "plan")
+    assert body["result"] == "The approved plan ran. Chart its frames and answer."
     assert body["frames"] and all(f["frame"].startswith("f") for f in body["frames"])
     assert body["step_summaries"]
-    assert f"Plan {revision[:12]} (approved)" in after_plan
+    assert body["plan_record"].startswith(f"Plan {revision[:12]} (approved)")
     assert not carries_an_interrupt(request)
     assert not quotes_another_agent(request)
-    (hand_back,) = [c for c in request.contents if "The approved plan ran" in content_text(c)]
-    assert hand_back.role == "user"
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     assert set(session.state[ORCHESTRATOR_FRAMES_KEY]) == {f["frame"] for f in body["frames"]}
     assert not [e for e in events if e.error_code]
@@ -1052,6 +1156,55 @@ async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent
     assert not [e for e in follow_up if e.error_code]
     assert "The approved plan ran" in request_text(model.requests[-1])
     assert not carries_an_interrupt(model.requests[-1])
+
+
+async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADK's `State` deep-copies a dict or list on its first read
+    (`_take_snapshot`), which costs milliseconds per read for the frames,
+    spec blocks and readings a turn holds. A turn reads them through
+    `stored_mapping` and `stored_sequence`, which take no copy; the small
+    containers it reads through `State` are still copied, which shows the
+    spy sees ADK's reads."""
+    copied: list[str] = []
+    take_snapshot = State._take_snapshot
+
+    def spy(self: State, key: str, value: Any) -> None:
+        copied.append(key)
+        take_snapshot(self, key, value)
+
+    monkeypatch.setattr(State, "_take_snapshot", spy)
+    runner, _ = orchestrator_runner(
+        search_call("Kenya debt service", "debt service"),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
+        types.Part.from_text(text="Charted."),
+        planner=ScriptedPlannerModel(),
+        tool_surface=ScriptedSurface(),
+        executor=_describes,
+        resolver=CannedSearch(definite_envelope(sentence="Kenya debt service")),
+    )
+    large: dict[str, Any] = {
+        ORCHESTRATOR_FRAMES_KEY: {"f" + "0" * 30: {"ref": {}, "view": {"dimensions": []}}},
+        ORCHESTRATOR_READINGS_KEY: {_SCRIPTED_SPEC: ["sv/1"]},
+        ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [], "spec_ids": [], "warnings": {}},
+        ORCHESTRATOR_PLAN_RECORDS_KEY: [],
+    }
+    await open_session(runner, **large)
+
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
+    approve = create_request_input_response(
+        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
+    )
+    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
+
+    assert not [e for e in events if e.error_code]
+    assert ORCHESTRATOR_CALLS_KEY in copied
+    assert not {*copied} & {*large, ORCHESTRATOR_SPECS_KEY, ORCHESTRATOR_SEARCHES_KEY}
 
 
 @pytest.mark.parametrize("describes", [True, False])
