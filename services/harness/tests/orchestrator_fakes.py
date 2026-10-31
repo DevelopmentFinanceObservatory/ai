@@ -53,6 +53,7 @@ from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import StudioStore, make_recall_part
 from harness.studio_translate import _node_name
 from harness.tool_contracts import ResolverError, resolver_digest
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import STUDIO_FRAME_ADAPTER
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
@@ -232,7 +233,7 @@ def create_request_input_response(interrupt_id: str, response: dict[str, Any]) -
     """The user's answer to a pause, as ADK's `adk_request_input` tool reads it."""
     return types.Part(
         function_response=types.FunctionResponse(
-            id=interrupt_id, name="adk_request_input", response=response
+            id=interrupt_id, name=REQUEST_INPUT_FUNCTION_CALL_NAME, response=response
         )
     )
 
@@ -278,7 +279,9 @@ def quotes_another_agent(request: Any) -> bool:
 
 def carries_an_interrupt(request: Any) -> bool:
     """Whether `request` holds a pause's `adk_request_input` call, as a call or quoted."""
-    return "adk_request_input" in "\n".join(str(p) for c in request.contents for p in c.parts or [])
+    return REQUEST_INPUT_FUNCTION_CALL_NAME in "\n".join(
+        str(p) for c in request.contents for p in c.parts or []
+    )
 
 
 def handed_back(model: ScriptLlm) -> tuple[str, dict[str, Any]]:
@@ -356,7 +359,12 @@ async def run_turn(runner: Runner, message: types.Content, *, session_id: str = 
 
 def single_pause(events: list[Event]) -> types.FunctionCall:
     """The one `adk_request_input` call among `events`."""
-    calls = [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
+    calls = [
+        c
+        for e in events
+        for c in e.get_function_calls()
+        if c.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+    ]
     assert len(calls) == 1, [c.id for c in calls]
     return calls[0]
 

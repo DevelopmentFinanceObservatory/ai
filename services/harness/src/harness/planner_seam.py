@@ -220,9 +220,13 @@ _READINGS_BUDGET = 3_000
 _NO_READINGS = RenderedReadings("", ())
 
 # Every spec_id the executor refused since the session's last first-draft
-# entry, which no later amend or replan call shows the planner or lets it pin
-# without a fresh search (`_without_refused`). A first-draft entry clears it.
+# entry. Every later amend or replan call leaves them out of the pin sources
+# and names them in its brief's avoid sentence (`_avoid_sentence`). A
+# first-draft entry clears it.
 _REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
+# Why the avoid sentence says a spec in `_REFUSED_SPECS_STATE_KEY` was
+# refused, when this call's refusal does not name it.
+_REFUSED_EARLIER = "on an earlier run"
 
 # A decision's `description` and `rationale` are prose no validator compares,
 # so they are the two fields this render may shorten. Every other plan field
@@ -614,19 +618,21 @@ class PlannerSeam:
                     }
                 )
                 ctx.session.state[_REFUSED_SPECS_STATE_KEY] = excluded
-                shown = _without_refused(readings, excluded)
-                # Every spec_id the planner's brief shows it, written on every
-                # entry so `propose_plan` reads it (`PIN_SOURCES_STATE_KEY`). A
-                # pin of a shown one reuses its block, and one of a shown,
-                # settled measure gets the measure decision `propose_plan` writes.
-                ledger = _readings_ledger(shown)
+                # Every spec_id the planner's brief shows it, less the refused
+                # ones, written on every entry so `propose_plan` reads it
+                # (`PIN_SOURCES_STATE_KEY`). A pin of a shown one reuses its
+                # block, and one of a shown, settled measure gets the measure
+                # decision `propose_plan` writes. The readings render whole,
+                # refused ones included, and the brief's avoid sentence names
+                # every refused spec_id.
+                ledger = _readings_ledger(readings)
                 # An earlier turn's spec_id pins from the block its own turn
                 # stored; this turn's search of one replaces it.
                 prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
                 blocks = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
                 searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
                 sources = _reading_pin_sources(
-                    shown,
+                    readings,
                     ledger.spec_ids,
                     blocks=blocks,
                     earlier=_named(prior.get("readings", ())) - searched,
@@ -635,11 +641,13 @@ class PlannerSeam:
                         **(ctx.state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}),
                     },
                 )
+                sources = {k: v for k, v in sources.items() if k not in excluded}
                 save_pin_sources(cast(SessionState, ctx.session.state), sources)
                 message = self._message(
                     question=question,
                     prior_plan=_as_authored(seeded),
                     refusal=refusal,
+                    refused=excluded,
                     amendment=amendment,
                     pick=pick,
                     canvas_digest=canvas_digest,
@@ -866,14 +874,13 @@ class PlannerSeam:
 
         The planner's own tool loop is opaque to this call: `ctx.run_node`
         returns only once the whole turn has settled (ADK has no
-        streaming/async-generator variant of it). Progress, the stall watchdog's counting and its
-        early stop all happen from *inside* that one turn, through
-        `LlmAgent` callbacks that ADK runs synchronously as part of the
-        same `ctx.run_node` call: `after_tool_callback` fires right after
-        each tool call, and
-        `before_model_callback` on the planner substitutes a synthetic,
-        terminal `LlmResponse` once a stall is confirmed, ending the
-        run cleanly rather than mid-generation.
+        streaming/async-generator variant of it). Progress, the stall
+        watchdog's counting and its early stop all happen from *inside* that
+        one turn, through `LlmAgent` callbacks that ADK runs synchronously as
+        part of the same `ctx.run_node` call: `after_tool_callback` fires
+        right after each tool call, and `before_model_callback` on the
+        planner substitutes a synthetic, terminal `LlmResponse` once a stall
+        is confirmed, ending the run cleanly rather than mid-generation.
 
         The substitution is deliberately not a cancellation: it ends the
         planner's current turn the way a normal turn ends (a model
@@ -1333,6 +1340,7 @@ class PlannerSeam:
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
         ledger: RenderedReadings = _NO_READINGS,
+        refused: Sequence[str] = (),
         pick: DecisionPick | None = None,
         asks: Sequence[str] = (),
         ask_breakdowns: Sequence[AskBreakdown] = (),
@@ -1348,7 +1356,9 @@ class PlannerSeam:
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
         (`planner.plan.ASKS_STATE_KEY`), render numbered after the question,
         each with the parties `ask_breakdowns` says it breaks down by and
-        marked when `asks_across_years` numbers it.
+        marked when `asks_across_years` numbers it. `refused` is every spec_id
+        the executor refused since the entry's first draft, which the ask
+        names (`_ask_text`).
 
         The question is the user's own words. Nothing bounds its length on the
         wire, so it renders cut to `MAX_QUESTION_CHARS`
@@ -1367,24 +1377,34 @@ class PlannerSeam:
                 _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
                 _asks_section(asks, ask_breakdowns, asks_across_years),
-                _ask_text(amendment=amendment, refusal=refusal, pick=pick),
+                _ask_text(amendment=amendment, refusal=refusal, pick=pick, refused=refused),
             ]
         )
 
 
 def _ask_text(
-    *, amendment: str | None, refusal: dict[str, Any] | None, pick: DecisionPick | None
+    *,
+    amendment: str | None,
+    refusal: dict[str, Any] | None,
+    pick: DecisionPick | None,
+    refused: Sequence[str] = (),
 ) -> str:
     """What a call asks the planner for, closing its brief: the user's
     `amendment`, or else the `refusal` a replan answers, and then the option
     `pick` the user picked on the plan card, on a line of its own. Empty for
     a first draft.
 
+    One sentence names every spec the executor refused, the ones `refusal`
+    names and the earlier `refused` ones (`_avoid_sentence`). A replan's
+    sentence follows its refusal. Any other call with an earlier refused spec
+    states it on a line of its own after the amendment.
+
     The amendment is the user's own words and a refusal carries text from
     the run that failed. Each renders cut to `MAX_QUESTION_CHARS`
     (`planner.plan.cut_user_text`), except a refusal's errors, which render
     whole (`_refusal_text`).
     """
+    avoid = _avoid_sentence(_refused_with_earlier(refusal, refused))
     ask = ""
     if amendment:
         ask = (
@@ -1396,9 +1416,8 @@ def _ask_text(
             "it translated and compiled again.\n"
         )
     elif refusal:
-        avoid = (
-            _avoid_sentence(_refused_specs(refusal))
-            + _earned_decline_sentence(_earned_by_refusal(refusal))
+        repairs = (
+            _earned_decline_sentence(_earned_by_refusal(refusal))
             + _share_units_repair_sentence(refusal)
             + _facet_repair_sentence(refusal)
         )
@@ -1406,8 +1425,11 @@ def _ask_text(
         ask = (
             f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
             f"Refusal: {_refusal_text(stop)}\n"
-            f"Call {PROPOSE_PLAN} again with a plan that avoids it.{avoid}\n"
+            f"Call {PROPOSE_PLAN} again with a plan that avoids it.{avoid}{repairs}\n"
         )
+        avoid = ""
+    if avoid:
+        ask += f"\n{avoid.lstrip()}\n"
     if pick is not None:
         ask += (
             f"\nOn the plan card the user picked {pick.chosen!r} for decision "
@@ -1853,36 +1875,6 @@ def _ask_response(args: dict[str, Any]) -> LlmResponse:
             ],
         )
     )
-
-
-def _without_refused(
-    readings: Sequence[Mapping[str, Any]], refused: Collection[str]
-) -> list[Mapping[str, Any]]:
-    """`readings` less every spec_id in `refused`, each reading kept.
-
-    A reading whose own spec_id was refused keeps its words and the
-    candidates, other counts and other prices it offered, so those stay
-    shown and pinnable, and loses only its spec_id. Only the newest reading
-    of a refused spec_id stays, as `newest_per_spec_id` would keep it, since
-    without its spec_id nothing later folds the older ones away. A refused
-    candidate, other count or other prices leaves the reading that offered it.
-    """
-    if not refused:
-        return list(readings)
-    parsed_readings = [SearchReading.model_validate(reading) for reading in readings]
-    last = {parsed.spec_id: index for index, parsed in enumerate(parsed_readings)}
-    kept: list[Mapping[str, Any]] = []
-    for index, parsed in enumerate(parsed_readings):
-        if parsed.spec_id in refused and last[parsed.spec_id] != index:
-            continue
-        update: dict[str, Any] = {
-            field: tuple(c for c in getattr(parsed, field) if c.spec_id not in refused)
-            for field in ("candidates", "alternatives", "other_prices")
-        }
-        if parsed.spec_id in refused:
-            update["spec_id"] = None
-        kept.append(parsed.model_copy(update=update).model_dump(mode="json"))
-    return kept
 
 
 def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
@@ -2366,17 +2358,33 @@ def _one_refused_spec(payload: object) -> list[tuple[str, str]]:
     return [(spec_id, detail)]
 
 
+def _refused_with_earlier(
+    refusal: dict[str, Any] | None, earlier: Sequence[str]
+) -> list[tuple[str, str]]:
+    """Every spec the executor refused, and why: the ones `refusal` names
+    (`_refused_specs`), each once, then each spec_id in `earlier` it does
+    not name, refused on an earlier run of the entry."""
+    named = dict(_refused_specs(refusal))
+    return [
+        *named.items(),
+        *((spec_id, _REFUSED_EARLIER) for spec_id in earlier if spec_id not in named),
+    ]
+
+
 def _avoid_sentence(refused: list[tuple[str, str]]) -> str:
-    """The sentence naming every refused spec the planner must not propose again."""
+    """The sentence naming every spec the executor refused, which the planner
+    must not propose again."""
     if not refused:
         return ""
     if len(refused) == 1:
         spec_id, detail = refused[0]
         detail = cut_user_text(detail, MAX_QUESTION_CHARS)
-        return f" Do not propose {spec_id!r} as the source again -- it was just refused ({detail})."
+        return (
+            f" Do not propose {spec_id!r} as a source again -- the executor refused it ({detail})."
+        )
     named = "; ".join(f"{spec_id!r} ({detail})" for spec_id, detail in refused)
     named = cut_user_text(named, MAX_QUESTION_CHARS)
-    return f" Do not propose any of these sources again -- each was just refused: {named}."
+    return f" Do not propose any of these sources again -- the executor refused each: {named}."
 
 
 def _section(title: str, body: dict[str, Any] | None) -> str:
