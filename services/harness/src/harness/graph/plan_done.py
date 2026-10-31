@@ -10,6 +10,7 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Mapping,
+    Sequence,
 )
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, cast
@@ -40,6 +41,7 @@ from harness.graph.seams import (
 )
 from harness.graph.state import (
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
+    ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
@@ -385,16 +387,16 @@ def _partial_result(asks: list[dict[str, Any]] | None, *, frames: bool) -> str:
     return " ".join(sentences) or "Its result is not available."
 
 
-def _removed_asks(asks: list[dict[str, Any]] | None) -> str:
-    """The sentence a lead that reports asks as not computed closes its
-    account of them with: each ask the user's amendment removed (`dropped`),
-    kept out of the answer. Empty when no ask was removed.
+def _removed_asks(removed: Sequence[str]) -> str:
+    """The sentence every `plan_done` lead carries when the user's amendment
+    removed asks from the plan: each ask in `removed`, kept out of the
+    answer. Empty when no ask was removed.
 
-    The question the agent holds still asks a removed ask, and its own
-    search still names a source for it, so a lead that tells it to say what
-    remains unanswered would otherwise read the removed ask as unanswered
-    and fetch it."""
-    removed = [ask["ask"] for ask in asks or () if "dropped" in ask]
+    The agent never reads the amendment as a message of its own: the
+    question it holds still asks a removed ask, and its own search still
+    names a source for it. Without the sentence it reads the removed ask as
+    unanswered and fetches it, on a stopped run and on one whose charts
+    failed alike."""
     if not removed:
         return ""
     it, was = ("it", "it was") if len(removed) == 1 else ("them", "they were")
@@ -756,8 +758,10 @@ def plan_done_node(
         ask that earlier run computed in part with the part not computed and
         its reason. On the planner's refusal after a stopped run, each ask the
         user's amendment removed from the plan that run executed is listed
-        `dropped`. A lead that reports asks as not computed closes with the
-        asks removed, kept out of the answer (`_removed_asks`).
+        `dropped`. Every lead names the asks removed, kept out of the answer
+        (`_removed_asks`), and every hand-back of a plan the user amended
+        carries the user's words for each amendment, in order, under
+        `amendments` (`ORCHESTRATOR_AMENDMENTS_KEY`).
 
         A completed run's delivery is decided by its own final frames
         (`harness.graph.delivery.deliver`): once the session holds the
@@ -771,6 +775,13 @@ def plan_done_node(
         stopped_kept: dict[str, Any] | None = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY)
         kept = stopped_kept or {}
         ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
+        # The user's words for each amendment of this plan call's plan, which
+        # the agent reads nowhere else.
+        amendments = (
+            {"amendments": list(words)}
+            if (words := ctx.state.get(ORCHESTRATOR_AMENDMENTS_KEY))
+            else {}
+        )
         hand_back = HandBack(
             executor,
             summaries=[StepSummary.of(stored) for stored in node_input.get("step_summaries", [])],
@@ -840,7 +851,7 @@ def plan_done_node(
                         f"Every other ask {others}was not computed. "
                     )
                 if removed:
-                    computed += f"{_removed_asks(listing['asks'])} "
+                    computed += f"{_removed_asks([brief_asks[n] for n in sorted(removed)])} "
             refused = AgentHandBack(
                 answers="plan",
                 status=ORCHESTRATOR_PLAN_FAILED_STATUS,
@@ -850,7 +861,7 @@ def plan_done_node(
                 f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}Answer with search "
                 "and fetch where you can, and say plainly what could not be calculated."
                 + (" A brief that avoids the problem may be planned once more." if again else ""),
-                body=listing,
+                body={**listing, **amendments},
             )
             yield refused.model_dump(mode="json")
             return
@@ -881,6 +892,7 @@ def plan_done_node(
             delivery = await deliver(run_ledger, run["run_id"], read=read)
         unrecorded = unfinished and run.get("status") in ("unfinished", "not_started")
         record: dict[str, str] = {}
+        removed: list[str] = []
         if plan is not None:
             stopped = _stop_causes(plan, failed.get("step_id") if failed else None)
             plan_record = record_plan(
@@ -892,6 +904,7 @@ def plan_done_node(
             )
             failed = shown_failure(failed, plan, stopped)
             record["plan_record"] = plan_record.render(budget=_PLAN_RECORD_CHARS)
+            removed = [ask.ask for ask in plan_record.asks if ask.dropped]
             if plan_record.asks and not unrecorded:
                 asks = [_ask_status(ask, ran, failed, stopped) for ask in plan_record.asks]
         if (failed or unfinished) and asks:
@@ -918,8 +931,6 @@ def plan_done_node(
                 if failed.get(key)
             }
             partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
-            if removed_asks := _removed_asks(result.get("asks")):
-                partial += f" {removed_asks}"
             if missing_capability:
                 # No brief avoids a capability the question needs, so the
                 # plan call is not given back.
@@ -953,11 +964,13 @@ def plan_done_node(
             )
         else:
             lead = "The approved plan ran. Chart its frames and answer."
+        if removed:
+            lead += f" {_removed_asks(removed)}"
         ran_back = AgentHandBack(
             answers="plan",
             status=ORCHESTRATOR_PLAN_RAN_STATUS,
             text=lead,
-            body={**result, **record},
+            body={**result, **record, **amendments},
         )
         yield ran_back.model_dump(mode="json")
         if delivery is not None:

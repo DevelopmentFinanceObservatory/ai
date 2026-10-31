@@ -1285,9 +1285,10 @@ class _AmendedRefusingReplanner(_AmendedPlanner):
 
 @pytest.mark.parametrize("ending", ["ran", "stopped", "refused", "refused_after_computed"])
 async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed(ending: str):
-    """On a stopped run, and on the planner's refusal after one, the removed
-    ask is kept out of what the lead leaves unanswered, so the agent does not
-    report it as a failure or fetch it."""
+    """Whether the run ran, stopped, or stopped and the planner refused to
+    replan, the hand-back quotes the user's amendments in order and its lead
+    keeps the removed ask out of the answer, so the agent does not report it
+    as a failure or fetch it."""
     planner, surface = {
         "ran": (_AmendedPlanner(), ScriptedSurface()),
         "stopped": (_AmendedPlanner(), RefusingGetDataSurface("member_not_resolvable")),
@@ -1307,15 +1308,24 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
     )
     await open_session(runner)
 
+    amendments = ["Show each year.", "Drop Nigeria, just Ghana and Kenya."]
     approval = single_pause(await run_turn(runner, types.UserContent("ODA to three countries?")))
+    for words in amendments:
+        amend = create_request_input_response(
+            approval.id, {"result": {"approved": None, "amendment": words}}
+        )
+        approval = single_pause(await run_turn(runner, types.Content(role="user", parts=[amend])))
     approve = create_request_input_response(
         approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
     )
     await run_turn(runner, types.Content(role="user", parts=[approve]))
 
     after_plan, body = handed_back(model)
-    removed = 'The user removed from the plan "ODA to Nigeria": leave it out of the answer'
-    assert (removed in body["result"]) is (ending != "ran")
+    assert body["amendments"] == amendments
+    assert (
+        'The user removed from the plan "ODA to Nigeria": leave it out of the answer'
+        in (body["result"])
+    )
     if ending.startswith("refused"):
         assert body["result"].startswith("The planner could not make a plan")
         assert "Every other ask was not computed" not in body["result"]
