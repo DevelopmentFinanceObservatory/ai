@@ -771,6 +771,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
                 first_years=_first_years_on_record(requirements_after, shown=on_record, read=read),
+                # An ask whose answer the user's amendment removes is dropped,
+                # as the user asked, rather than left for the planner to
+                # account for with another step's answer.
+                by_user=amendment_entry(view.state),
             )
         elif question is None or answer_mode is None:
             missing = " and ".join(

@@ -1948,6 +1948,7 @@ def _check_asks_accounted(
     asks: Sequence[str],
     answered: Sequence[AskAnswer],
     declined: Sequence[Decline],
+    dropped: Sequence[int],
     requirements: Sequence[EvidenceRequirement],
 ) -> None:
     """Reject a plan that leaves an ask unaccounted for, or answers or declines one twice.
@@ -1955,7 +1956,8 @@ def _check_asks_accounted(
     Each ask the brief lists is answered by one `AskAnswer`, declined by one
     `Decline` whose `ask_ref` names it, or both: an answer for the part the
     plan computes and a decline naming, in `Decline.ask`, the part it does
-    not. An answer names any requirement the plan states, one another
+    not. An ask the user's amendment removed (`dropped`) is accounted for
+    by that alone, and an answer or decline of it is a repeat. An answer names any requirement the plan states, one another
     requirement reads included. `translator.mechanical.build_translation`
     makes each a terminal, so its result reaches the answer. A number past
     the asks listed is a malformed draft. A gap, two answers or two declines
@@ -1963,7 +1965,7 @@ def _check_asks_accounted(
     """
     answer_numbers = [answer.ask for answer in answered]
     decline_numbers = [decline.ask_ref for decline in declined if decline.ask_ref is not None]
-    numbers = answer_numbers + decline_numbers
+    numbers = answer_numbers + decline_numbers + list(dropped)
     unlisted = sorted(set(numbers) - set(range(len(asks))))
     if unlisted:
         listed = f"numbered 0 to {len(asks) - 1}" if asks else "none"
@@ -1978,7 +1980,9 @@ def _check_asks_accounted(
     repeated = [
         number
         for number in range(len(asks))
-        if answer_numbers.count(number) > 1 or decline_numbers.count(number) > 1
+        if answer_numbers.count(number) > 1
+        or decline_numbers.count(number) > 1
+        or (number in dropped and numbers.count(number) > 1)
     ]
     if uncovered or repeated:
         raise AsksUnaccountedError(asks=asks, uncovered=uncovered, repeated=repeated)
@@ -4315,6 +4319,15 @@ class Plan(StrictModel):
         max_length=MAX_PLAN_ASKS,
         description="The requirements that answer each ask this plan does not decline.",
     )
+    dropped_asks: Annotated[tuple[int, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=MAX_PLAN_ASKS,
+        exclude_if=lambda dropped: not dropped,
+        description=(
+            "The numbers of the asks the user's amendment removed from the plan: it "
+            "removed every requirement answering them (`Plan.amend`)."
+        ),
+    )
     ask_breakdowns: Annotated[tuple[AskBreakdown, ...], HASHED_WHEN_SET] = Field(
         default=(),
         max_length=MAX_PLAN_ASKS,
@@ -4503,7 +4516,9 @@ class Plan(StrictModel):
         decisions_by_slot = {decision.slot: decision for decision in self.decisions}
         _check_requirements_honour_their_decisions(self.evidence_requirements, decisions_by_slot)
         _check_population_claims_are_cited(self.evidence_requirements, decisions_by_slot)
-        _check_asks_accounted(self.asks, self.answered, self.declined, self.evidence_requirements)
+        _check_asks_accounted(
+            self.asks, self.answered, self.declined, self.dropped_asks, self.evidence_requirements
+        )
         _check_asks_keep_their_parties(self)
         check_wholes_span_their_totals(self)
         _check_asks_across_years(self.asks, self.asks_across_years)
@@ -4615,6 +4630,7 @@ class Plan(StrictModel):
         asks_across_years: Sequence[int] = (),
         answered: Sequence[AskAnswer] = (),
         first_years: Sequence[FirstYear] | None = None,
+        by_user: bool = False,
     ) -> Plan:
         """Return a new, incremented-version `Plan` with a patch applied.
 
@@ -4676,6 +4692,14 @@ class Plan(StrictModel):
                 its datasets' whole history from (`whole_history_split`).
                 Omitted, it keeps this plan's for the dataset requirements
                 it still states.
+            by_user: Whether the patch carries out the user's own amendment.
+                An ask the patch neither answers nor declines, whose every
+                answering requirement it removes, is then recorded in
+                `dropped_asks`: the user took it out of the plan. Otherwise
+                such an ask is answered by requirements the plan no longer
+                states, which validation rejects. An ask recorded there
+                stays until a patch answers or declines it, or replaces
+                the asks.
 
         Returns:
             A new `Plan`; `self` is unchanged.
@@ -4706,7 +4730,11 @@ class Plan(StrictModel):
                 "rolling_copies": (),
                 "first_years": tuple(first_years),
                 **_patched_accounts(
-                    self, answered=answered, declined=declined, same_asks=asks == self.asks
+                    self,
+                    answered=answered,
+                    declined=declined,
+                    same_asks=asks == self.asks,
+                    removed=set(removed_evidence_requirements) if by_user else set(),
                 ),
                 "asks": asks,
                 "ask_breakdowns": breakdowns,
@@ -5861,35 +5889,50 @@ def _patched_accounts(
     answered: Sequence[AskAnswer],
     declined: Sequence[Decline],
     same_asks: bool,
+    removed: Collection[str],
 ) -> dict[str, tuple[Any, ...]]:
-    """Apply a patch's answers and declines to `plan`'s.
+    """Apply a patch's answers and declines to `plan`'s, and its drops.
 
     An ask the patch answers or declines is accounted for by the patch alone:
-    whatever answered or declined it before is dropped. A decline naming no
-    ask replaces the one with its code, as `_patched` keys it. Unless
-    `same_asks`, the patch accounts for every ask: `plan`'s answers and the
-    declines naming an ask are numbered against a list that no longer holds.
+    whatever answered, declined or dropped it before is dropped. A decline
+    naming no ask replaces the one with its code, as `_patched` keys it.
+    A carried answer whose every output is in `removed`, the requirements
+    the user's amendment removes, moves its ask to `dropped_asks`, and a
+    carried decline of that ask goes with it. Unless
+    `same_asks`, the patch accounts for every ask: `plan`'s answers, drops
+    and the declines naming an ask are numbered against a list that no
+    longer holds.
     """
     restated = {answer.ask for answer in answered} | {
         decline.ask_ref for decline in declined if decline.ask_ref is not None
     }
     if not same_asks:
-        restated |= {answer.ask for answer in plan.answered} | {
-            decline.ask_ref for decline in plan.declined if decline.ask_ref is not None
-        }
+        restated |= (
+            {answer.ask for answer in plan.answered}
+            | {decline.ask_ref for decline in plan.declined if decline.ask_ref is not None}
+            | set(plan.dropped_asks)
+        )
+    carried = [answer for answer in plan.answered if answer.ask not in restated]
+    dropped = {answer.ask for answer in carried if set(answer.outputs) <= set(removed)}
+    dropped |= {number for number in plan.dropped_asks if number not in restated}
     return {
         "answered": _patched(
-            tuple(answer for answer in plan.answered if answer.ask not in restated),
+            tuple(answer for answer in carried if answer.ask not in dropped),
             answered,
             (),
             key="ask",
         ),
         "declined": _patched(
-            tuple(decline for decline in plan.declined if decline.ask_ref not in restated),
+            tuple(
+                decline
+                for decline in plan.declined
+                if decline.ask_ref not in restated and decline.ask_ref not in dropped
+            ),
             declined,
             (),
             key="key",
         ),
+        "dropped_asks": tuple(sorted(dropped)),
     }
 
 

@@ -271,7 +271,8 @@ def _ask_status(
     failed: Mapping[str, Any] | None,
     stopped: Mapping[str, str],
 ) -> dict[str, Any]:
-    """One ask as `plan_done` reports it: declined, with the plain reason, or
+    """One ask as `plan_done` reports it: removed by the user's amendment
+    (`dropped`), declined, with the plain reason, or
     each step answering it with its status, and for an ask answered in part
     the part not computed with its reason. `ran` holds each final step that
     produced a frame. `data` and `empty` name the frame, and `empty` means it
@@ -282,6 +283,8 @@ def _ask_status(
     otherwise: a step the run never reached, or a derived step whose frame
     is withheld because it is not published (`presentable_steps`), as on a
     stopped run or one whose publication is unfinished."""
+    if ask.dropped:
+        return {"ask": ask.ask, "dropped": _DROPPED}
     if ask.declined is not None and not ask.outputs:
         return {"ask": ask.ask, "declined": DECLINE_REASONS[ask.declined]}
 
@@ -310,6 +313,9 @@ def _ask_status(
         }
     return status
 
+
+# What `_ask_status` says of an ask the user's amendment removed.
+_DROPPED = "The user's amendment removed this ask from the plan; nothing computes it."
 
 # The `_ask_status` statuses of a step that produced no frame.
 _NOT_COMPUTED = frozenset({"failed", "not_run"})
@@ -702,8 +708,8 @@ def plan_done_node(
         run whose progress could not be recorded; a run's standing `run`
         names and `_unfinished_run_lead` tells), the step summaries, the
         notes on how the figures were computed (`totals`, `answer_notes`), what failed, each cut, and
-        each ask the brief listed with its outputs' status or its decline
-        (`_ask_status`), then the plan record
+        each ask the brief listed with its outputs' status, its decline, or
+        its removal by the user's amendment (`_ask_status`), then the plan record
         (`harness.turn_records.PlanRecord`), under `plan_record`. It is the
         result of the agent's `plan` call (`AgentHandBack`): a sentence that
         says what to do with it as the result's text, and the rest as its
@@ -713,7 +719,8 @@ def plan_done_node(
 
         When the plan call's last run stopped or did not complete, or the
         planner refused after a run stopped, each ask that run did not
-        compute but an earlier run of the call did is listed from that
+        compute but an earlier run of the call did, and the user's amendment
+        did not remove, is listed from that
         earlier run's kept frames (`ORCHESTRATOR_KEPT_ASKS_KEY`), marked
         `earlier_plan`, with their step summaries and those notes, and an
         ask that earlier run computed in part with the part not computed and
@@ -837,7 +844,7 @@ def plan_done_node(
         if (failed or unfinished) and asks:
             asks = [
                 await earlier(number, status["ask"])
-                if str(number) in kept and not _computed(status)
+                if str(number) in kept and not _computed(status) and "dropped" not in status
                 else status
                 for number, status in enumerate(asks)
             ]

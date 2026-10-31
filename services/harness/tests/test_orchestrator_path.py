@@ -1203,6 +1203,58 @@ async def test_the_hand_back_reports_each_ask_with_its_output_status_or_decline(
     ]
 
 
+class _AmendedPlanner(ScriptedPlannerModel):
+    """`ScriptedPlannerModel` whose plan answers each brief ask but the last
+    with its final step and records the last as removed by the user's
+    amendment, as `Plan.amend` does when the amendment removes its answer."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        plan = Plan.model_validate((await super().__call__(**kwargs))["plan"])
+        asks = load_asks(kwargs["ctx"].state)
+        final = plan.evidence_requirements[-1].id
+        plan = plan.model_copy(
+            update={
+                "asks": asks,
+                "answered": tuple(
+                    AskAnswer(ask=number, outputs=(final,)) for number in range(len(asks) - 1)
+                ),
+                "dropped_asks": (len(asks) - 1,),
+            }
+        )
+        return {"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}
+
+
+async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed():
+    runner, model = orchestrator_runner(
+        call(
+            "plan",
+            brief="ODA received by Ghana, Kenya and Nigeria",
+            asks=["ODA to Ghana", "ODA to Kenya", "ODA to Nigeria"],
+        ),
+        types.Part.from_text(text="Answered."),
+        planner=_AmendedPlanner(),
+        tool_surface=ScriptedSurface(),
+        executor=_describes,
+    )
+    await open_session(runner)
+
+    approval = single_pause(await run_turn(runner, types.UserContent("ODA to three countries?")))
+    approve = create_request_input_response(
+        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
+    )
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
+
+    after_plan = request_text(model.requests[-1])
+    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
+    ghana, kenya, nigeria = body["asks"]
+    assert [entry["status"] for entry in ghana["answered_by"] + kenya["answered_by"]] == [
+        "data",
+        "data",
+    ]
+    assert set(nigeria) == {"ask", "dropped"}
+    assert '- 2 "ODA to Nigeria": removed by the user\'s amendment' in after_plan.split("\n")
+
+
 class _BreakdownRefusingSurface(ScriptedSurface):
     """`ScriptedSurface` whose `get_data` refuses the breakdown it was asked for,
     as apis refuses a code system it cannot read."""

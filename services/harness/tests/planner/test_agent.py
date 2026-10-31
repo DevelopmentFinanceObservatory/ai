@@ -83,6 +83,7 @@ from planner.operations import (
 )
 from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role, role_party
 from planner.plan import (
+    AMENDMENT_ENTRY_STATE_KEY,
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -18244,3 +18245,46 @@ def test_no_brief_in_state_leaves_the_request_alone() -> None:
     prepend_brief(cast(Any, context), request)
 
     assert request.contents == [_QUESTION]
+
+
+@pytest.mark.parametrize("amendment", [True, False], ids=["users-amendment", "replan"])
+def test_an_amendment_removing_an_asks_answer_drops_the_ask_only_for_the_user(
+    decision: DecisionFactory, requirement: RequirementFactory, amendment: bool
+) -> None:
+    """The user's amendment removes Nigeria's requirement and restates only the
+    other answers: Nigeria's ask is dropped. Outside such an entry the ask
+    still needs an answer or a decline."""
+    countries = ("ghana", "kenya", "nigeria")
+    requirements = [
+        requirement(id=country, entities=[Entity(name=country.title(), role="debtor")])
+        for country in countries
+    ]
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = [f"ODA to {country.title()}" for country in countries]
+    propose = _tools_by_name()["propose_plan"].func
+    first = propose(
+        tool_context=ctx,
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision()]),
+        evidence_requirements=requirements,
+        answered=[AskAnswer(ask=n, outputs=(c,)) for n, c in enumerate(countries)],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = amendment
+
+    amended = propose(
+        tool_context=ctx,
+        removed_evidence_requirements=["nigeria"],
+        answered=[AskAnswer(ask=n, outputs=(c,)) for n, c in enumerate(countries[:2])],
+        amends_version=1,
+    )
+
+    if amendment:
+        assert amended["outcome"] == Outcome.OK.value, amended
+        plan = load_plan(ctx.state)
+        assert plan is not None
+        assert plan.dropped_asks == (2,)
+        assert [answer.ask for answer in plan.answered] == [0, 1]
+    else:
+        assert amended["code"] == ProblemCode.INVALID_PLAN.value, amended

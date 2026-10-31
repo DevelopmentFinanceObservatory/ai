@@ -275,13 +275,15 @@ class PlanAsk(StrictModel):
     `outputs` are the workflow steps whose results answer it. `declined` is
     the code a decline of it names and `not_computed` the part that decline
     leaves out, in the user's words. An ask carries outputs, a decline, or
-    both when the plan computes part of it.
+    both when the plan computes part of it, unless `dropped`: the user's
+    amendment removed it from the plan, and it carries neither.
     """
 
     ask: str
     outputs: tuple[str, ...] = ()
     declined: UnsupportedOperation | None = None
     not_computed: str | None = None
+    dropped: bool = Field(default=False, exclude_if=lambda dropped: not dropped)
 
 
 class PlanRecord(StrictModel):
@@ -539,6 +541,8 @@ class PlanRecord(StrictModel):
             if ask.declined is not None:
                 part = f' "{ask.not_computed}"' if ask.outputs and ask.not_computed else ""
                 accounts.append(f"not computed{part} [{ask.declined.value}]")
+            if ask.dropped:
+                accounts.append("removed by the user's amendment")
             yield f'- {number} "{ask.ask}": {"; ".join(accounts)}'
         if self.declined:
             yield "not computed, the system cannot do it:"
@@ -2128,6 +2132,7 @@ def _asks(plan: Plan) -> tuple[PlanAsk, ...]:
             outputs=tuple(cast("list[str]", row["answered_by"])),
             declined=cast("UnsupportedOperation | None", row["declined"]),
             not_computed=cast("str | None", row["not_computed"]),
+            dropped=bool(row["dropped"]),
         )
         for row in plan_display.ask_rows(plan)
     )
