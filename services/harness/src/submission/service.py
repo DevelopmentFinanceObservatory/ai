@@ -43,11 +43,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import itertools
 import logging
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
 from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast, get_args
@@ -206,6 +206,7 @@ from planner.plan import (
     scope_choice_slot,
     search_pin_slot,
     settle_decisions,
+    spec_searched_at,
     split_of,
     unaligned_requirement,
     unstated_period_reductions,
@@ -569,6 +570,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             outcome=Outcome.REFUSED,
         )
     user_spoke = pick is None and (previous is None or view.user_spoke_since(previous.version))
+    refused = refused_in_force(view.state, conversation_readings(view.state))
     blocked = (
         _across_years_unread(
             patch.across_years,
@@ -577,7 +579,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             reads_user_words=reads_user_words,
         )
         or _removed_asks_refused(patch, previous, view)
-        or _refused_spec_pinned(written, view)
+        or _refused_spec_pinned(written, refused)
         or _referral_unanswered(existing, referral, view)
         or _draft_unreferenced(
             patch,
@@ -852,7 +854,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 unknown, shown=on_record, read=read, definition_lookup=definition_lookup
             )
         return _invalid_data(exc, proposer)
-    blocked = _refused_spec_retrieved(plan, written, view) or _unrecordable(
+    blocked = _refused_spec_retrieved(plan, written, refused) or _unrecordable(
         plan,
         view,
         referral=referral,
@@ -1414,40 +1416,29 @@ def refused_in_force(state: SessionState, readings: Iterable[Mapping[str, Any]])
     """Every spec_id the executor refused since the entry's first draft that no later search lifted (`harness.turn_records.refusals_in_force`).
 
     A search settles a spec_id as a reading of the conversation (`readings`),
-    as the dataset Search settled on for an input the planner pinned none for
-    (`SearchedPin`), or as a compiled pin (`planner.plan.AlignedPin`), each
-    at the time it was made.
+    or as a Search call the planner made for a pin
+    (`planner.plan.spec_searched_at`), each at the time it was made.
     """
     refused = load_refused_specs(state)
     if not refused:
         return frozenset()
     return refusals_in_force(
         refused,
-        [
-            *settled_by_readings(readings),
-            *((pin.spec_id, pin.searched_at) for pin in searched_pins(state) if pin.spec_id),
-            *((pin.spec_id, pin.resolved_at) for pin in aligned_pins(state)),
-        ],
+        itertools.chain(settled_by_readings(readings), spec_searched_at(state).items()),
     )
 
 
-def _refused_in_force(view: SessionView) -> frozenset[str]:
-    """`refused_in_force` over `view`'s state and the conversation's readings."""
-    return refused_in_force(view.state, conversation_readings(view.state))
-
-
 def _refused_spec_pinned(
-    requirements: Sequence[EvidenceRequirement], view: SessionView
+    requirements: Sequence[EvidenceRequirement], refused: frozenset[str]
 ) -> dict[str, object] | None:
     """Return the `SOURCE_NOT_OFFERED` refusal of a requirement pinning a spec_id the executor refused, or `None`.
 
     `requirements` are those the plan states once the patch lands, carried
     ones included, with each pin as the planner states it. The executor's
     refusals since the entry's first draft that no later search lifted
-    (`_refused_in_force`) are left out of the pin sources and named in the
-    brief, so a pin of one would fail the same way again.
+    (`refused`, `refused_in_force`) are left out of the pin sources and named
+    in the brief, so a pin of one would fail the same way again.
     """
-    refused = _refused_in_force(view)
     for requirement in requirements:
         if (
             isinstance(requirement, DatasetRequirement)
@@ -1469,7 +1460,7 @@ def _refused_spec_pinned(
 
 
 def _refused_spec_retrieved(
-    plan: Plan, written: Sequence[EvidenceRequirement], view: SessionView
+    plan: Plan, written: Sequence[EvidenceRequirement], refused: frozenset[str]
 ) -> dict[str, object] | None:
     """Return the `SOURCE_NOT_OFFERED` refusal of a pin `plan` retrieves as a spec_id the executor refused, or `None`.
 
@@ -1485,8 +1476,8 @@ def _refused_spec_retrieved(
     names the requirement as the planner states it in `written`, a rolling
     copy by the requirement it copies, and the pin it states, which
     `_refused_spec_pinned` has already passed, or says it states none.
+    `refused` is as `_refused_spec_pinned` takes it.
     """
-    refused = _refused_in_force(view)
     if not refused:
         return None
     origins = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
@@ -4264,10 +4255,7 @@ class SearchedPin(StrictModel):
     the status Search answered the part with (`definite`, `ambiguous`,
     `candidates`, `no_data`), `refused` for a refusal that cannot succeed
     later, or `unreadable` for an answer holding no one part. `asked_roles` and `open_roles` are the parties the search named
-    and held open. `searched_at` is when the search was made, kept
-    unchanged when the invocation served its answer again
-    (`translator.discovery.answered_once_at`), and `None` for a search held
-    with no time.
+    and held open.
     """
 
     requirement_key: str
@@ -4276,7 +4264,6 @@ class SearchedPin(StrictModel):
     digest: dict[str, Any] | None = None
     asked_roles: tuple[str, ...] = ()
     open_roles: tuple[str, ...] = ()
-    searched_at: datetime | None = Field(default=None, exclude_if=lambda at: at is None)
 
 
 def searched_pins(state: SessionState) -> tuple[SearchedPin, ...]:

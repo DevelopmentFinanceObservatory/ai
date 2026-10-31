@@ -84,6 +84,7 @@ from planner.operations import (
 )
 from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role, role_party
 from planner.plan import (
+    ALIGNED_PINS_STATE_KEY,
     AMENDMENT_ENTRY_STATE_KEY,
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -95,9 +96,11 @@ from planner.plan import (
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
+    PIN_SOURCES_STATE_KEY,
     PLAN_ROUNDS_STATE_KEY,
     PLAN_STATE_KEY,
     REFUSED_SPECS_STATE_KEY,
+    SPEC_SEARCHED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
@@ -152,6 +155,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    save_refused_specs,
     scope_choice_slot,
     search_pin_slot,
     split_of,
@@ -4861,12 +4865,15 @@ def _refuse(
 ) -> None:
     """Hold each of `refused` as refused for `code` at `refused_at`, or as a bare
     spec_id when `code` is `None`."""
-    ctx.state[REFUSED_SPECS_STATE_KEY] = [
-        spec_id
-        if code is None
-        else RefusedSpec(spec_id=spec_id, code=code, refused_at=refused_at).model_dump(mode="json")
-        for spec_id in refused
-    ]
+    save_refused_specs(
+        ctx.state,
+        (
+            RefusedSpec(spec_id=spec_id)
+            if code is None
+            else RefusedSpec(spec_id=spec_id, code=code, refused_at=refused_at)
+            for spec_id in refused
+        ),
+    )
 
 
 def _refuse_then_search(
@@ -6188,14 +6195,25 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     assert load_plan(ctx.state) is None
 
 
+# The fields of each record stored under `SEARCHED_PINS_STATE_KEY` and
+# `ALIGNED_PINS_STATE_KEY` as a build reading only these reads them: its
+# models forbid any other, so a record carrying one would fail to load there.
+_BASE_SEARCHED_PIN_FIELDS = frozenset(
+    {"requirement_key", "status", "spec_id", "digest", "asked_roles", "open_roles"}
+)
+_BASE_ALIGNED_PIN_FIELDS = frozenset({"origin", "option_ids", "spec_id", "digest", "whole_axis"})
+
+
 @pytest.mark.parametrize(
-    ("code", "searched_first", "admitted"),
+    ("code", "compiled", "searched_first", "admitted"),
     [
-        (None, False, False),
-        ("open_role_unavailable", False, False),
-        ("open_role_unavailable", True, False),
-        ("upstream_version_changed", True, False),
-        ("upstream_version_changed", False, True),
+        (None, False, False, False),
+        ("open_role_unavailable", False, False, False),
+        ("open_role_unavailable", False, True, False),
+        ("upstream_version_changed", False, True, False),
+        ("upstream_version_changed", False, False, True),
+        ("upstream_version_changed", True, True, False),
+        ("upstream_version_changed", True, False, True),
     ],
     ids=[
         "stored-bare",
@@ -6203,23 +6221,37 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
         "permanent-searched-first",
         "served-from-before-refusal",
         "searched-after-refusal",
+        "compile-served-from-before-refusal",
+        "compiled-after-refusal",
     ],
 )
 async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_refused(
-    decision: DecisionFactory, code: str | None, searched_first: bool, admitted: bool
+    decision: DecisionFactory,
+    code: str | None,
+    compiled: bool,
+    searched_first: bool,
+    admitted: bool,
 ) -> None:
     """Search settles the unpinned US total on a spec_id the executor refused in
-    this entry. The plan is refused, saying the total states no pin and Search
+    this entry, or on a total the compile then moves to the health aid's gross
+    (`compiled`). The plan is refused, saying the total states no pin and Search
     settles it on the refused spec_id, with no stated pin in `detail`. A spec_id
     refused for a code a refreshed definition recovers from is admitted when
     Search is asked after the refusal, and refused when an earlier entry's
-    search from before the refusal (`searched_first`) is served instead."""
-    surface = BasisCompiles(
-        searched={
-            "status": "definite",
-            "spec": basis_block(TOTAL, narrow=False, active="measure_basis:gross"),
-        }
+    search and compile from before the refusal (`searched_first`) are served
+    instead. Every pin and refusal is stored in the shape a build reading only
+    the base fields loads."""
+    surface = (
+        BasisCompiles()
+        if compiled
+        else BasisCompiles(
+            searched={
+                "status": "definite",
+                "spec": basis_block(TOTAL, narrow=False, active="measure_basis:gross"),
+            }
+        )
     )
+    refused = TOTAL_GROSS if compiled else TOTAL
     propose = _tools_reading(surface)["propose_plan"].func
     ctx = _FakeToolContext()
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
@@ -6228,20 +6260,32 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
         _show_blocks(earlier, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
         first = await _share_of_health(propose, earlier, decision(), total=None)
         assert first["outcome"] == Outcome.OK.value, first
-        ctx.state[SEARCHED_PINS_STATE_KEY] = earlier.state[SEARCHED_PINS_STATE_KEY]
+        for key in (
+            PIN_SOURCES_STATE_KEY,
+            SEARCHED_PINS_STATE_KEY,
+            ALIGNED_PINS_STATE_KEY,
+            SPEC_SEARCHED_STATE_KEY,
+        ):
+            if key in earlier.state:
+                ctx.state[key] = earlier.state[key]
         surface.tools.clear()
-        _refuse(ctx, [TOTAL], code, datetime.now(UTC))
+        _refuse(ctx, [refused], code, datetime.now(UTC))
     else:
-        _refuse(ctx, [TOTAL], code, datetime.now(UTC) - timedelta(seconds=1))
+        _refuse(ctx, [refused], code, datetime.now(UTC) - timedelta(seconds=1))
 
     result = await _share_of_health(propose, ctx, decision(), total=None)
 
-    assert ("search" in surface.tools) is not searched_first
+    assert (surface.tools == []) is searched_first
+    assert all(isinstance(spec_id, str) for spec_id in ctx.state[REFUSED_SPECS_STATE_KEY])
+    for raw in ctx.state.get(SEARCHED_PINS_STATE_KEY) or ():
+        assert set(raw) <= _BASE_SEARCHED_PIN_FIELDS
+    for raw in ctx.state.get(ALIGNED_PINS_STATE_KEY) or ():
+        assert set(raw) <= _BASE_ALIGNED_PIN_FIELDS
     if admitted:
         assert result["outcome"] == Outcome.OK.value, result
         return
     assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
-    assert result["detail"] == {"requirement_id": "total", "retrieved": TOTAL}
+    assert result["detail"] == {"requirement_id": "total", "retrieved": refused}
     assert "'total' states no pin" in str(result["message"])
     assert load_plan(ctx.state) is None
 

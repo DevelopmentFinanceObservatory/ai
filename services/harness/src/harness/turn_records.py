@@ -980,7 +980,8 @@ def refusals_in_force(
 
     `settled` holds a spec_id Search settled on and when the search was made,
     `None` when no time is known (`settled_by_readings`,
-    `submission.service.refused_in_force`). A refusal whose code
+    `submission.service.refused_in_force`). It is read only when a refusal
+    could be lifted. A refusal whose code
     `executor.classify.RECOVERABLE_SPEC_CODES` names is lifted by a search
     settling on its spec_id made after it: Search answered the refreshed or
     re-registered definition. Any other refusal holds until the next first
@@ -992,6 +993,8 @@ def refusals_in_force(
         for spec in refused
         if spec.code in RECOVERABLE_SPEC_CODES and spec.refused_at is not None
     }
+    if not recoverable:
+        return frozenset(spec.spec_id for spec in refused)
     recovered = {
         spec_id
         for spec_id, at in settled

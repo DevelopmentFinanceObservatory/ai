@@ -134,11 +134,13 @@ from planner.plan import (
     full_histories,
     held_sources,
     load_plan,
+    load_refused_specs,
     pin_sources,
     plan_revision,
     rolls_from_its_start,
     save_pin_sources,
     save_plan,
+    save_refused_specs,
 )
 from planner.records import GroupBy, Reduction, RelativePeriod
 from planner.settings import (
@@ -1392,11 +1394,11 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
 # -- a replan's refusal ---------------------------------------------------
 
 
-def _rediscovery_refusal(spec_id: str) -> dict[str, Any]:
+def _rediscovery_refusal(spec_id: str, code: str = "over_ceiling") -> dict[str, Any]:
     """A `RediscoveryNeeded` replan payload, the shape `harness.graph.execute`'s
-    `_replan_refusal` builds for the `over_ceiling`/`member_cardinality`
-    reroute -- the one refusal shape that names a `spec_id` at the top
-    level today."""
+    `_replan_refusal` builds, refusing `spec_id` for `code` with the
+    `over_ceiling`/`member_cardinality` message -- the one refusal shape that
+    names a `spec_id` at the top level today."""
     return {
         "kind": "rediscovery_needed",
         "step_id": "malaria_kenya",
@@ -1404,7 +1406,7 @@ def _rediscovery_refusal(spec_id: str) -> dict[str, Any]:
         "requirement_id": "malaria_kenya",
         "spec_id": spec_id,
         "refusal": {
-            "code": "over_ceiling",
+            "code": code,
             "message": "resolved.stat_vars.member_count = 872 against a cap of 700",
             "retry_mode": "correct_and_retry",
             "fix": {"ceiling_kind": "member_cardinality"},
@@ -1651,13 +1653,14 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
         ORCHESTRATOR_SPEC_WARNINGS_KEY: {SPEC: [{"code": "role_scope_defaulted"}]},
     }
     if earlier is not None:
-        stored[REFUSED_SPECS_STATE_KEY] = [
-            SPEC
-            if earlier == SPEC
-            else RefusedSpec(spec_id=SPEC, code=earlier, refused_at=_REFUSED_BEFORE).model_dump(
-                mode="json"
-            )
-        ]
+        save_refused_specs(
+            cast(SessionState, stored),
+            [
+                RefusedSpec(spec_id=SPEC)
+                if earlier == SPEC
+                else RefusedSpec(spec_id=SPEC, code=earlier, refused_at=_REFUSED_BEFORE)
+            ],
+        )
     readings = _turn_readings()
     readings[0]["observed_at"] = _SEARCHED_AT.isoformat()
 
@@ -1681,6 +1684,71 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     }
     assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
     assert ("Do not propose" in text) is (SPEC not in kept)
+
+
+@pytest.mark.parametrize(
+    ("code", "observed", "between", "kept"),
+    [
+        ("definition_not_held", "after", None, True),
+        ("upstream_version_changed", "after", None, True),
+        ("definition_not_held", "before", None, False),
+        ("over_ceiling", "after", None, False),
+        ("upstream_version_changed", "after", "refused-again", False),
+        ("upstream_version_changed", "after", "resumed", True),
+    ],
+    ids=[
+        "re-registered",
+        "refreshed",
+        "searched-before-the-refusal",
+        "refused-for-good",
+        "refused-again-after-the-search",
+        "resume-keeps-the-refusal-time",
+    ],
+)
+async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lifts_it(
+    code: str, observed: str, between: str | None, kept: bool
+) -> None:
+    """A replan answers the executor refusing `SPEC` for `code`, which is held
+    as a bare spec_id with its code and the entry's time beside it. A later
+    amendment's readings settle on `SPEC`, observed before or after that
+    replan. A refusal a refreshed or re-registered definition recovers from is
+    lifted by a reading observed after it: `SPEC` is a pin source again and the
+    brief names nothing to avoid. One observed before it, or a refusal for
+    good, keeps `SPEC` out and named. Refused again after the reading
+    (`between`), `SPEC` is held from the second refusal; a resume of the
+    replan keeps the first refusal's time."""
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
+    seam._agent.model = llm
+    harness = _SeamHarness()
+    refusal = _rediscovery_refusal(SPEC, code)
+    before = datetime.now(UTC)
+
+    await harness.run(seam, question="aid to guatemala", readings=_turn_readings(), refusal=refusal)
+    state = await harness.state()
+    assert state[REFUSED_SPECS_STATE_KEY] == [SPEC]
+    (held,) = load_refused_specs(state)
+    assert held.code == code
+    assert held.refused_at is not None and held.refused_at >= before
+    after = datetime.now(UTC)
+    if between is not None:
+        await harness.run(
+            seam,
+            question="aid to guatemala",
+            readings=_turn_readings(),
+            refusal=refusal,
+            resume_inputs={"ask": {"result": "since 2015"}} if between == "resumed" else None,
+        )
+    readings = _turn_readings()
+    readings[0]["observed_at"] = (before if observed == "before" else after).isoformat()
+    calls = len(llm.captured_requests)
+    await harness.run(
+        seam, question="aid to guatemala", readings=readings, amendment="only since 2015"
+    )
+
+    state = await harness.state()
+    assert (SPEC in pin_sources(state)) is kept
+    assert ("Do not propose" in _prompt_text(llm.captured_requests[calls])) is not kept
 
 
 # A spec Search offered as another count of `SPEC`'s reading.

@@ -168,6 +168,7 @@ from planner.plan import (
     plan_revision,
     record_optional_decline,
     record_reduction_refused_asks,
+    record_spec_searched,
     record_unsupported,
     save_alignments,
     save_full_history,
@@ -1781,9 +1782,9 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                 option_ids=realignment.option_ids,
                 spec_id=spec_id,
                 digest=digest,
-                resolved_at=resolved_at,
             ),
         )
+        record_spec_searched(into, spec_id, resolved_at)
 
     return hold
 
@@ -1931,9 +1932,9 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
                 spec_id=spec_id,
                 digest=digest,
                 whole_axis=axis,
-                resolved_at=resolved_at,
             ),
         )
+        record_spec_searched(into, spec_id, resolved_at)
 
     return hold
 
@@ -2200,8 +2201,9 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
     shown to the planner as a source of its own
     (`planner.plan.save_pin_sources`) and held as a
-    `submission.service.SearchedPin` with its digest and the time the
-    search was made, so the next proposal
+    `submission.service.SearchedPin` with its digest, and the time the
+    search was made as one settling on its spec_id
+    (`planner.plan.record_spec_searched`), so the next proposal
     pins it and the planner seam stores it as a reading of the conversation
     (`harness.planner_seam.store_searched_pin_readings`). Any other answer is
     held as a search that settled on nothing, under Search's part status, or
@@ -2247,7 +2249,6 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
         else "unreadable",
         asked_roles=unpinned.asked_roles,
         open_roles=unpinned.open_roles,
-        searched_at=searched_at,
     )
     if not isinstance(spec_id, str) or not isinstance(envelope, dict):
         return lambda into: save_searched_pin(into, searched)
@@ -2264,6 +2265,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     def hold(into: SessionState) -> None:
         save_pin_sources(into, {**pin_sources(into), spec_id: shown})
         save_searched_pin(into, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
+        record_spec_searched(into, spec_id, searched_at)
 
     return hold
 

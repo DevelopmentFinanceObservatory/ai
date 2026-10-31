@@ -193,11 +193,24 @@ TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 REDUCTION_REFUSED_ASKS_STATE_KEY = "planner:reduction_refused_asks"
 
 # Every spec_id the executor refused since the session's last first-draft
-# entry, each a `RefusedSpec` with the refusal's code and time.
-# `harness.planner_seam.PlannerSeam` writes it on each entry and clears it on
-# a first draft, and admission refuses a plan pinning one still in force
-# (`submission.service.refused_in_force`, `submission.service.admit`).
+# entry, as a list of bare spec_ids. `harness.planner_seam.PlannerSeam` writes
+# it on each entry and clears it on a first draft, and admission refuses a plan
+# pinning one still in force (`submission.service.refused_in_force`,
+# `submission.service.admit`).
 REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
+# Each refused spec_id's `RefusedSpec`, its code and time, by spec_id. Kept
+# under a key of its own so `REFUSED_SPECS_STATE_KEY` keeps the shape a build
+# that reads only the ids expects; a spec_id with no entry here reads as
+# refused with no code or time (`load_refused_specs`).
+REFUSAL_DETAILS_STATE_KEY = "planner:refused_spec_details"
+# The time of the latest Search call made that settled on each spec_id, by
+# spec_id: the search for an input the planner pinned no dataset for
+# (`planner.agent.pin_by_search`) and each compile (`planner.agent.
+# compile_on_basis`, `compile_whole`). An answer served again keeps the time
+# of the call that made it (`translator.discovery.answered_once_at`), so it
+# moves nothing (`record_spec_searched`). Kept beside the pins, whose stored
+# shape it leaves as it was.
+SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
 
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
@@ -6336,11 +6349,6 @@ class AlignedPin(StrictModel):
     the part pinned to `origin` with its choice on `whole_axis` left open
     and every other choice on the part's options, and moves no option
     (`option_ids` empty, `submission.service.Realignment.whole_axis`).
-
-    `resolved_at` is when the `resolve_definition` call Search answered was
-    made, kept unchanged when the turn served its answer again
-    (`translator.discovery.answered_once_at`), and `None` for a pin held
-    with no time.
     """
 
     origin: str
@@ -6348,7 +6356,6 @@ class AlignedPin(StrictModel):
     spec_id: str
     digest: dict[str, Any]
     whole_axis: str | None = None
-    resolved_at: datetime | None = Field(default=None, exclude_if=lambda at: at is None)
 
     @property
     def key(self) -> tuple[str, tuple[str, ...], str | None]:
@@ -6822,8 +6829,9 @@ def record_reduction_refused_asks(state: SessionState, asks: Iterable[int]) -> N
 class RefusedSpec(StrictModel):
     """A spec_id the executor refused, with the refusal's `code` and the time the planner entry answering it began.
 
-    `code` and `refused_at` are `None` for an entry stored as a bare spec_id,
-    which `harness.turn_records.refusals_in_force` holds in force for good.
+    `code` and `refused_at` are `None` for a spec_id `REFUSAL_DETAILS_STATE_KEY`
+    holds nothing for, which `harness.turn_records.refusals_in_force` holds in
+    force for good.
     """
 
     spec_id: str
@@ -6832,21 +6840,50 @@ class RefusedSpec(StrictModel):
 
 
 def load_refused_specs(state: SessionState) -> tuple[RefusedSpec, ...]:
-    """Return every spec_id the executor refused since the session's last first-draft entry, as stored.
-
-    An entry stored as a bare spec_id reads as one with no code or time.
-    """
+    """Return every spec_id the executor refused since the session's last first-draft entry, with its code and time where held."""
+    details = state.get(REFUSAL_DETAILS_STATE_KEY) or {}
     return tuple(
-        RefusedSpec(spec_id=raw) if isinstance(raw, str) else RefusedSpec.model_validate(raw)
-        for raw in state.get(REFUSED_SPECS_STATE_KEY) or ()
+        RefusedSpec.model_validate(details[spec_id])
+        if spec_id in details
+        else RefusedSpec(spec_id=spec_id)
+        for spec_id in state.get(REFUSED_SPECS_STATE_KEY) or ()
     )
 
 
 def save_refused_specs(state: SessionState, refused: Iterable[RefusedSpec]) -> None:
-    """Hold `refused` as every spec_id the executor refused since the session's last first-draft entry."""
-    state[REFUSED_SPECS_STATE_KEY] = [
-        spec.model_dump(mode="json") for spec in sorted(refused, key=lambda spec: spec.spec_id)
-    ]
+    """Hold `refused` as every spec_id the executor refused since the session's last first-draft entry.
+
+    The ids go under `REFUSED_SPECS_STATE_KEY` and each one's code and time
+    under `REFUSAL_DETAILS_STATE_KEY`.
+    """
+    ordered = sorted(refused, key=lambda spec: spec.spec_id)
+    state[REFUSED_SPECS_STATE_KEY] = [spec.spec_id for spec in ordered]
+    state[REFUSAL_DETAILS_STATE_KEY] = {
+        spec.spec_id: spec.model_dump(mode="json")
+        for spec in ordered
+        if spec.code is not None or spec.refused_at is not None
+    }
+
+
+def spec_searched_at(state: SessionState) -> dict[str, datetime]:
+    """When a Search call made last settled on each spec_id (`SPEC_SEARCHED_STATE_KEY`)."""
+    return {
+        spec_id: datetime.fromisoformat(at)
+        for spec_id, at in (state.get(SPEC_SEARCHED_STATE_KEY) or {}).items()
+    }
+
+
+def record_spec_searched(state: SessionState, spec_id: str, at: datetime | None) -> None:
+    """Hold that a Search call made at `at` settled on `spec_id`, unless a later one is held; `None` holds nothing."""
+    if at is None:
+        return
+    held = spec_searched_at(state)
+    if spec_id in held and held[spec_id] >= at:
+        return
+    state[SPEC_SEARCHED_STATE_KEY] = {
+        **(state.get(SPEC_SEARCHED_STATE_KEY) or {}),
+        spec_id: at.isoformat(),
+    }
 
 
 def clear_unsupported(state: SessionState) -> None:

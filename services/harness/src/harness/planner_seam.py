@@ -85,7 +85,9 @@ from planner.plan import (
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
     REDUCTION_REFUSED_ASKS_STATE_KEY,
+    REFUSAL_DETAILS_STATE_KEY,
     REFUSED_SPECS_STATE_KEY,
+    SPEC_SEARCHED_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
@@ -612,7 +614,7 @@ class PlannerSeam:
                 # amendment of the new draft reads an input the old plan
                 # moved. The spec_ids the earlier plan's runs refused go too.
                 clear_plan(cast(SessionState, ctx.session.state))
-                ctx.session.state[REFUSED_SPECS_STATE_KEY] = []
+                save_refused_specs(cast(SessionState, ctx.session.state), ())
                 # The page texts an earlier plan read stay under their own
                 # keys, but nothing reads one once it leaves this index.
                 ctx.session.state[SKILLS_READ_STATE_KEY] = []
@@ -794,12 +796,14 @@ class PlannerSeam:
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
         # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
         # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY`,
-        # `SEARCHED_PINS_STATE_KEY`, `REFUSED_SPECS_STATE_KEY`,
+        # `SEARCHED_PINS_STATE_KEY`, `SPEC_SEARCHED_STATE_KEY`,
+        # `REFUSED_SPECS_STATE_KEY`, `REFUSAL_DETAILS_STATE_KEY`,
         # `SKILLS_READ_STATE_KEY` and `_SKILLS_BEFORE_ENTRY_STATE_KEY` too. The
         # declines an ask-the-user resume still owes or may make, the failures
         # it may repeat, the amendment or card pick that opened it, the pins
-        # compiled for its proposals, the spec_ids it may not pin and the skill
-        # pages its brief shows are this entry's own.
+        # compiled for its proposals and when Search settled on each, the
+        # spec_ids it may not pin and the skill pages its brief shows are this
+        # entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
@@ -810,7 +814,9 @@ class PlannerSeam:
             DECISION_PICK_STATE_KEY,
             ALIGNED_PINS_STATE_KEY,
             SEARCHED_PINS_STATE_KEY,
+            SPEC_SEARCHED_STATE_KEY,
             REFUSED_SPECS_STATE_KEY,
+            REFUSAL_DETAILS_STATE_KEY,
             SKILLS_READ_STATE_KEY,
             _SKILLS_BEFORE_ENTRY_STATE_KEY,
         ):
