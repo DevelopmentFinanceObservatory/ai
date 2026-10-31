@@ -286,7 +286,7 @@ def _ask_status(
     is withheld because it is not published (`presentable_steps`), as on a
     stopped run or one whose publication is unfinished."""
     if ask.dropped:
-        return {"ask": ask.ask, "dropped": _DROPPED}
+        return _dropped_status(ask.ask)
     if ask.declined is not None and not ask.outputs:
         return {"ask": ask.ask, "declined": DECLINE_REASONS[ask.declined]}
 
@@ -318,6 +318,12 @@ def _ask_status(
 
 # What `_ask_status` says of an ask the user's amendment removed.
 _DROPPED = "The user's amendment removed this ask from the plan; nothing computes it."
+
+
+def _dropped_status(ask: str) -> dict[str, Any]:
+    """`ask`, which the user's amendment removed, as `plan_done` reports it."""
+    return {"ask": ask, "dropped": _DROPPED}
+
 
 # The `_ask_status` statuses of a step that produced no frame.
 _NOT_COMPUTED = frozenset({"failed", "not_run"})
@@ -806,9 +812,12 @@ def plan_done_node(
             again = not node_input.get("final") and _give_plan_back(ctx)
             computed = ""
             listing: dict[str, Any] = {}
-            # A refusal never writes the plan, so after a stopped run of this
-            # call the stored plan is the one that run executed, and its
-            # removed asks are this call's.
+            # A run of this call stopped, and the stored plan is the one it
+            # executed: a replan proposal written since is pending approval,
+            # and a refusal while one is pending goes back to `approve`
+            # (`harness.graph.planning`), so it never reaches here. A plan
+            # this release cannot read routes here, but `readable_plan`
+            # clears it, so it names no removed ask.
             stopped_plan = (
                 readable_plan(ctx, ctx.state.get("plan")) if stopped_kept is not None else None
             )
@@ -816,19 +825,19 @@ def plan_done_node(
             numbers = sorted({*map(int, kept), *removed})
             if numbers:
                 brief_asks = load_asks(ctx.state)
-                listing = hand_back.listing(
-                    ctx.state,
-                    [
-                        {"ask": brief_asks[number], "dropped": _DROPPED}
-                        if number in removed
-                        else await earlier(number, brief_asks[number])
-                        for number in numbers
-                    ],
-                )
-                if kept.keys() - {str(number) for number in removed}:
+                entries: list[dict[str, Any]] = []
+                for number in numbers:
+                    if number in removed:
+                        entries.append(_dropped_status(brief_asks[number]))
+                    else:
+                        entries.append(await earlier(number, brief_asks[number]))
+                listing = hand_back.listing(ctx.state, entries)
+                if any(int(number) not in removed for number in kept):
+                    # "Every other ask" would cover a removed ask too.
+                    others = "the plan kept " if removed else ""
                     computed = (
                         f"{_partial_result(listing['asks'], frames=bool(listing['frames']))} "
-                        "Every other ask was not computed. "
+                        f"Every other ask {others}was not computed. "
                     )
                 if removed:
                     computed += f"{_removed_asks(listing['asks'])} "

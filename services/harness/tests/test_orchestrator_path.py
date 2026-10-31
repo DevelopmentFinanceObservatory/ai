@@ -1283,7 +1283,7 @@ class _AmendedRefusingReplanner(_AmendedPlanner):
         return {"refused": {"text": "no plan avoids the empty sum", "final": False}}
 
 
-@pytest.mark.parametrize("ending", ["ran", "stopped", "refused"])
+@pytest.mark.parametrize("ending", ["ran", "stopped", "refused", "refused_after_computed"])
 async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed(ending: str):
     """On a stopped run, and on the planner's refusal after one, the removed
     ask is kept out of what the lead leaves unanswered, so the agent does not
@@ -1292,6 +1292,7 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
         "ran": (_AmendedPlanner(), ScriptedSurface()),
         "stopped": (_AmendedPlanner(), RefusingGetDataSurface("member_not_resolvable")),
         "refused": (_AmendedRefusingReplanner(), _EmptyAggregateSurface()),
+        "refused_after_computed": (_RemovingRefusingReplanner(), _EmptyAggregateSurface()),
     }[ending]
     runner, model = orchestrator_runner(
         call(
@@ -1315,9 +1316,18 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
     after_plan, body = handed_back(model)
     removed = 'The user removed from the plan "ODA to Nigeria": leave it out of the answer'
     assert (removed in body["result"]) is (ending != "ran")
-    if ending == "refused":
+    if ending.startswith("refused"):
         assert body["result"].startswith("The planner could not make a plan")
-        assert body["asks"] == [{"ask": "ODA to Nigeria", "dropped": _DROPPED}]
+        assert "Every other ask was not computed" not in body["result"]
+        if ending == "refused":
+            assert body["asks"] == [{"ask": "ODA to Nigeria", "dropped": _DROPPED}]
+            return
+        ghana, nigeria = body["asks"]
+        assert ghana["ask"] == "ODA to Ghana"
+        assert ghana["earlier_plan"] is True
+        assert [entry["status"] for entry in ghana["answered_by"]] == ["data"]
+        assert nigeria == {"ask": "ODA to Nigeria", "dropped": _DROPPED}
+        assert "Every other ask the plan kept was not computed." in body["result"]
         return
     ghana, kenya, nigeria = body["asks"]
     status = "failed" if ending == "stopped" else "data"
@@ -2485,6 +2495,18 @@ class _RefusingReplanner(TwoAsksPlanner):
             return await super().__call__(**kwargs)
         self.refusals.append(kwargs["refusal"])
         return {"refused": {"text": "no plan avoids the empty mean", "final": False}}
+
+
+class _RemovingRefusingReplanner(_RefusingReplanner):
+    """`_RefusingReplanner` whose plan records the brief's third ask as removed
+    by the user's amendment, so a run that computes the first ask and stops
+    on the second leaves a computed ask, a failed one and a removed one."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        drafted = await super().__call__(**kwargs)
+        if "plan" in drafted:
+            drafted["plan"]["dropped_asks"] = [2]
+        return drafted
 
 
 class _RetrievalRefusingOnReplanSurface(_EmptyAggregateSurface):
