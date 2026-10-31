@@ -56,7 +56,7 @@ from executor.run import StepProgressCallback, execute_approved_plan
 from google.adk import Context
 from google.adk.events import Event, RequestInput
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, State
 from google.adk.workflow._errors import NodeInterruptedError
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
@@ -100,6 +100,8 @@ from harness.graph.state import (
     GraphState,
     frame_id_for,
     frame_store_ref,
+    stored_mapping,
+    stored_sequence,
 )
 from harness.graph.switch import (
     SCOPE_CHOICE_NOT_APPLIED,
@@ -5154,3 +5156,61 @@ async def test_closing_early_mints_cancels_the_calls_still_running(
     await early.aclose()
 
     assert sends.cancelled == 1
+
+
+# A dict and a list key, each with the accessor that reads it and an in-place
+# write into what a read hands out.
+_STORED_READS = [
+    pytest.param(
+        ORCHESTRATOR_SPECS_KEY,
+        {"spec_a": {"label": "a"}},
+        stored_mapping,
+        lambda held: held["spec_a"].update(label="b"),
+        id="mapping",
+    ),
+    pytest.param(
+        ORCHESTRATOR_SEARCHES_KEY,
+        [{"text": "a"}],
+        stored_sequence,
+        lambda held: held[0].update(text="b"),
+        id="sequence",
+    ),
+]
+
+
+@pytest.mark.parametrize(("key", "stored", "read", "write_into"), _STORED_READS)
+def test_a_stored_read_takes_no_copy_for_adk_to_track(
+    key: str, stored: Any, read: Callable[[Any, str], Any], write_into: Callable[[Any], None]
+) -> None:
+    """ADK's `State` copies a dict or list on its first read, which is what lets
+    it record a later write into it; a read through `stored_mapping` or
+    `stored_sequence` takes no copy, so the same write leaves no delta."""
+    tracked = State(value={key: copy.deepcopy(stored)}, delta={})
+    write_into(tracked.get(key))
+    assert tracked.has_delta()
+
+    untracked = State(value={key: copy.deepcopy(stored)}, delta={})
+    write_into(read(untracked, key))
+    assert not untracked.has_delta()
+
+
+@pytest.mark.parametrize(("key", "stored", "read", "write_into"), _STORED_READS)
+def test_a_stored_read_sees_the_pending_delta_first_as_state_get_does(
+    key: str, stored: Any, read: Callable[[Any, str], Any], write_into: Callable[[Any], None]
+) -> None:
+    del write_into
+    state = State(value={key: type(stored)()}, delta={key: stored})
+
+    assert list(read(state, key)) == list(state.to_dict()[key]) == list(stored)
+    assert list(read({key: stored}, key)) == list(stored)
+    assert not read({}, key)
+
+
+def test_a_stored_read_refuses_a_write_into_it() -> None:
+    state = State(value={ORCHESTRATOR_SPECS_KEY: {}, ORCHESTRATOR_SEARCHES_KEY: []}, delta={})
+
+    with pytest.raises(TypeError):
+        stored_mapping(state, ORCHESTRATOR_SPECS_KEY)["spec_a"] = {}  # ty: ignore[invalid-assignment]
+    with pytest.raises(AttributeError):
+        stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY).append({})  # ty: ignore[unresolved-attribute]
+    assert state.to_dict() == {ORCHESTRATOR_SPECS_KEY: {}, ORCHESTRATOR_SEARCHES_KEY: []}

@@ -5,7 +5,9 @@ The keys and statuses the workflow's nodes and the orchestrator's tools
 (`GraphState`), the one pending action the agent leaves for `route`, the
 tools' budgets, and the helpers more than one node reads: the stored plan
 (`readable_plan`), a JSON slot (`state_json`), the interrupt event
-(`interrupt_event`) and the answers to a clarify interrupt (`resume_answers`).
+(`interrupt_event`), the answers to a clarify interrupt (`resume_answers`),
+and the read-only reads of the large containers (`stored_mapping`,
+`stored_sequence`).
 """
 
 from __future__ import annotations
@@ -17,11 +19,13 @@ from collections.abc import (
     Sequence,
 )
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Annotated, Any, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
 from google.adk import Context, Event
 from google.adk.events import RequestInput
+from google.adk.sessions import State
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from planner.plan import AskBreakdown, SessionState, stored_plan
 from planner.plan import Plan as PlannerPlan
@@ -204,6 +208,39 @@ class PendingPlan(BaseModel):
     asks_across_years: list[int] = []
 
 
+def _stored(state: SessionState, key: str) -> Any:
+    """What `state` holds under `key`, as `State.get` reads it (the pending
+    delta first, then the session's value), without the copy ADK's `State`
+    takes of a dict or list on its first read to find writes made into it
+    later. `State.to_dict` merges the two layers without that copy."""
+    if isinstance(state, State):
+        return state.to_dict().get(key)
+    return state.get(key)
+
+
+def stored_mapping(state: SessionState, key: str) -> Mapping[str, Any]:
+    """The dict `state` holds under `key` as a read-only view, empty when
+    the key is unset.
+
+    For the large containers a turn reads many times (frames, spec blocks,
+    readings, the prior ledger): ADK's `State` deep-copies a dict on its
+    first read and compares it with that copy whenever the event's delta is
+    read, which costs milliseconds per read at their sizes. An assignment
+    through the view raises `TypeError`, as no write made through it would
+    reach the event's delta. Its entries are the stored objects, so a
+    change is built on a copy (`dict(view)`, `{**entry, ...}`) and assigned
+    to the key.
+    """
+    return MappingProxyType(_stored(state, key) or {})
+
+
+def stored_sequence(state: SessionState, key: str) -> tuple[Any, ...]:
+    """The list `state` holds under `key` as a tuple, empty when the key is
+    unset. Read without ADK's copy, as `stored_mapping` reads a dict, and
+    a tuple has no method that changes it in place."""
+    return tuple(_stored(state, key) or ())
+
+
 def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     """The `open_prices` entries of each reading of the turn whose prices are open,
     by its spec_id, each with its `prices`: the first the prices search read,
@@ -213,9 +250,9 @@ def open_parts(state: SessionState) -> dict[str, list[dict[str, Any]]]:
     `ORCHESTRATOR_SPECS_KEY`. Only code reads `prices`: the readings the model
     reads carry the entries without it (`store_search`).
     """
-    specs = state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     parts: dict[str, list[dict[str, Any]]] = {}
-    for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or ():
+    for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY):
         reading = SearchReading.model_validate(stored)
         block = specs.get(reading.spec_id) if reading.spec_id is not None else None
         if block is None or reading.spec_id is None:
@@ -452,7 +489,7 @@ def register_frames(
     after those calls is not refused for them. Synchronous, so no other tool
     call runs between the read of the frames and the writes.
     """
-    frames = dict(state.get(ORCHESTRATOR_FRAMES_KEY) or {})
+    frames = dict(stored_mapping(state, ORCHESTRATOR_FRAMES_KEY))
     added = False
     entries = []
     for ref, view, store_ref in described:
@@ -512,9 +549,9 @@ def store_search(
     with `open_prices`, the options of its prices question
     (`harness.turn_records.open_prices`).
     """
-    specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    specs = dict(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
-    searches = list(state.get(ORCHESTRATOR_SEARCHES_KEY) or [])
+    searches = list(stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY))
     skill_ids = [skill["id"] for skill in digest.get("skills") or []]
     observed_at = datetime.now(UTC)
     readings = []
@@ -564,8 +601,8 @@ def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
     earlier turns' (`ORCHESTRATOR_PRIOR_LEDGER_KEY`), then this turn's
     (`ORCHESTRATOR_SEARCHES_KEY`)."""
     return [
-        *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-        *(state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+        *stored_mapping(state, ORCHESTRATOR_PRIOR_LEDGER_KEY).get("readings", []),
+        *stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY),
     ]
 
 

@@ -24,11 +24,12 @@ is the graph's own authoritative record; `planner.plan.save_plan`/
 for the planner's own drafting state -- one store, two keys, not two stores
 kept in step.
 
-Every call renders the full brief: the search readings, the canvas and
-conversation digests, the plan being changed, the question, and the
-amendment or refusal ask that opened the call. ADK shows a `single_turn`
-run only the events on its own node path, so a call sees nothing an earlier
-call was sent, and an amend or replan needs the plan it changes in front of
+Every call renders the full brief: the search readings, the skill pages an
+earlier call for the same plan read, the canvas and conversation digests, the
+plan being changed, the question, and the amendment or refusal ask that
+opened the call. ADK shows a `single_turn` run only the events on its own node
+path, so a call sees nothing an earlier call was sent or read, and an amend or
+replan needs the plan it changes and the skills already read in front of
 it. `_propose` writes the brief to `planner.agent.BRIEF_STATE_KEY` and runs
 the planner with no node input, and `planner.agent.prepend_brief` shows it
 after the turn's question on every request of the run. A run resumed after
@@ -114,6 +115,7 @@ from planner.plan import (
 )
 from planner.records import Severity
 from planner.settings import AgentSettings
+from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key, skills_read
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
@@ -139,7 +141,10 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    conversation_readings,
     store_search,
+    stored_mapping,
+    stored_sequence,
 )
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
@@ -219,6 +224,20 @@ a spec_id or a source that neither these readings nor a referral has named.
 _READINGS_BUDGET = 3_000
 # The ledger `PlannerSeam._message` renders when its caller passes none.
 _NO_READINGS = RenderedReadings("", ())
+
+# How many of the skill pages the planner read for this plan
+# (`planner.skills.SKILLS_READ_STATE_KEY`) it read before the current entry.
+# A `single_turn` run sees only its own calls, so those pages render in the
+# brief (`_skills_section`); a page read in this entry is in the run's own
+# history already, a resume's included. Set on every entry, and a first draft
+# clears the pages themselves.
+_SKILLS_BEFORE_ENTRY_STATE_KEY = "planner:skills_before_entry"
+# The opening of the brief's section for those pages.
+_SKILLS_CONTEXT = """
+Skills you read on an earlier call for this plan, as data-mcp answered. A \
+skill loaded here is starred where the Skills named line lists it. Draft from \
+this text and do not read a page shown here again.
+"""
 
 # Every later amend or replan call leaves the spec_ids in
 # `REFUSED_SPECS_STATE_KEY` out of the pin sources and names them in its
@@ -588,6 +607,9 @@ class PlannerSeam:
                 # moved. The spec_ids the earlier plan's runs refused go too.
                 clear_plan(cast(SessionState, ctx.session.state))
                 ctx.session.state[REFUSED_SPECS_STATE_KEY] = []
+                # The page texts an earlier plan read stay under their own
+                # keys, but nothing reads one once it leaves this index.
+                ctx.session.state[SKILLS_READ_STATE_KEY] = []
                 # A first draft may decline an ask no requirement kind states,
                 # which no tool's answer could ever earn, except one a
                 # `period_reduction_unstated` refusal named
@@ -598,6 +620,9 @@ class PlannerSeam:
                     UnsupportedOperation.NO_OPERATION_COVERS,
                     terminal=True,
                 )
+            ctx.session.state[_SKILLS_BEFORE_ENTRY_STATE_KEY] = len(
+                skills_read(cast(SessionState, ctx.session.state))
+            )
         # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
         # cancelled on the way out (`translator.discovery.CutCalls`).
@@ -624,12 +649,26 @@ class PlannerSeam:
                 # decision `propose_plan` writes. The readings render whole,
                 # refused ones included, and the brief's avoid sentence names
                 # every refused spec_id.
-                ledger = _readings_ledger(readings)
+                # Each page read before this entry, with its text, which sits
+                # under a key of its own (`planner.skills.skill_page_key`).
+                skills = [
+                    {**page, "text": ctx.session.state[skill_page_key(page)]}
+                    for page in skills_read(cast(SessionState, ctx.session.state))[
+                        : ctx.session.state.get(_SKILLS_BEFORE_ENTRY_STATE_KEY, 0)
+                    ]
+                ]
+                ledger = _readings_ledger(
+                    readings,
+                    skills_read={page["skill_id"] for page in skills if page["path"] is None},
+                )
                 # An earlier turn's spec_id pins from the block its own turn
                 # stored; this turn's search of one replaces it.
-                prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
-                blocks = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
-                searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
+                prior = stored_mapping(ctx.state, ORCHESTRATOR_PRIOR_LEDGER_KEY)
+                blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
+                searched = {
+                    *_named(stored_sequence(ctx.state, ORCHESTRATOR_SEARCHES_KEY)),
+                    *blocks,
+                }
                 sources = _reading_pin_sources(
                     readings,
                     ledger.spec_ids,
@@ -652,6 +691,7 @@ class PlannerSeam:
                     canvas_digest=canvas_digest,
                     conversation_digest=conversation_digest,
                     ledger=ledger,
+                    skills=skills,
                     asks=load_asks(cast(SessionState, ctx.session.state)),
                     ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
                     asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
@@ -747,11 +787,12 @@ class PlannerSeam:
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
         # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
         # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY`,
-        # `SEARCHED_PINS_STATE_KEY` and `REFUSED_SPECS_STATE_KEY` too. The
+        # `SEARCHED_PINS_STATE_KEY`, `REFUSED_SPECS_STATE_KEY`,
+        # `SKILLS_READ_STATE_KEY` and `_SKILLS_BEFORE_ENTRY_STATE_KEY` too. The
         # declines an ask-the-user resume still owes or may make, the failures
         # it may repeat, the amendment or card pick that opened it, the pins
-        # compiled for its proposals and the spec_ids it may not pin are this
-        # entry's own.
+        # compiled for its proposals, the spec_ids it may not pin and the skill
+        # pages its brief shows are this entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
@@ -763,6 +804,8 @@ class PlannerSeam:
             ALIGNED_PINS_STATE_KEY,
             SEARCHED_PINS_STATE_KEY,
             REFUSED_SPECS_STATE_KEY,
+            SKILLS_READ_STATE_KEY,
+            _SKILLS_BEFORE_ENTRY_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
@@ -1340,6 +1383,7 @@ class PlannerSeam:
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
         ledger: RenderedReadings = _NO_READINGS,
+        skills: Sequence[Mapping[str, Any]] = (),
         refused: Sequence[str] = (),
         pick: DecisionPick | None = None,
         asks: Sequence[str] = (),
@@ -1347,12 +1391,15 @@ class PlannerSeam:
         asks_across_years: Sequence[int] = (),
         dropped: Sequence[int] = (),
     ) -> str:
-        """The brief for one `_propose` call: the search readings, the canvas
-        and conversation digests, the plan being changed, the question, the
-        asks, and then what the call asks for (`_ask_text`).
+        """The brief for one `_propose` call: the search readings, the skill
+        pages read on earlier calls for this plan, the canvas and conversation
+        digests, the plan being changed, the question, the asks, and then what
+        the call asks for (`_ask_text`).
 
         `ledger` is the rendered search readings (`_readings_ledger`), the
-        brief's opening section, and a compiled source of the plan being
+        brief's opening section. `skills` holds the skill pages read on
+        earlier calls (`planner.skills.SKILLS_READ_STATE_KEY`), which follow
+        it verbatim (`_skills_section`). A compiled source of the plan being
         changed states no measure choice the ledger already names
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
         (`planner.plan.ASKS_STATE_KEY`), render numbered after the question,
@@ -1374,6 +1421,7 @@ class PlannerSeam:
         return "".join(
             [
                 _READINGS_CONTEXT.format(readings=ledger.text),
+                _skills_section(skills),
                 _section("What is already on the user's canvas", canvas_digest),
                 _section("Earlier turns in this conversation", conversation_digest),
                 _plan_context(prior_plan, stated=ledger.other_counts),
@@ -1484,7 +1532,7 @@ def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
         for spec_id, held in held_sources(state).items()
         if (block := held.spec_block(spec_id)) is not None
     }
-    blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    blocks.update(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
     return blocks
 
 
@@ -1915,17 +1963,38 @@ def _ask_response(args: dict[str, Any]) -> LlmResponse:
     )
 
 
-def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
+def _readings_ledger(
+    readings: Sequence[Mapping[str, Any]], *, skills_read: Collection[str] = ()
+) -> RenderedReadings:
     """The conversation's search readings as the planner's brief renders
     them, each spec_id by its newest reading only, with the spec_ids
     that text names (`render_readings`). Over `_READINGS_BUDGET` the oldest
-    readings are folded, then dropped and counted."""
+    readings are folded, then dropped and counted. The skills named line
+    stars each id in `skills_read`."""
     if not readings:
         return RenderedReadings("(no search has run in this conversation)", ())
     return render_readings(
         newest_per_spec_id([SearchReading.model_validate(reading) for reading in readings]),
         budget=_READINGS_BUDGET,
+        skills_read=skills_read,
     )
+
+
+def _skills_section(pages: Sequence[Mapping[str, Any]]) -> str:
+    """The skill pages read on earlier calls for this plan, each under the
+    call that read it and in full, or nothing when there are none."""
+    if not pages:
+        return ""
+    rendered = []
+    for page in pages:
+        if page["path"] is None:
+            call = f"get_skill({page['skill_id']!r})"
+        else:
+            call = (
+                f"get_skill_file({page['skill_id']!r}, {page['path']!r}, offset={page['offset']})"
+            )
+        rendered.append(f"\n{call}:\n{page['text']}\n")
+    return _SKILLS_CONTEXT + "".join(rendered)
 
 
 def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> None:
@@ -1951,10 +2020,7 @@ def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> No
         return
     stored = {
         SearchReading.model_validate(reading).spec_id
-        for reading in (
-            *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-            *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
-        )
+        for reading in conversation_readings(ctx.state)
     }
     for found in searched:
         if found.spec_id in stored or found.digest is None:

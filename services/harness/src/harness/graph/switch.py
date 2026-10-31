@@ -125,6 +125,7 @@ from harness.graph.state import (
     conversation_readings,
     readable_plan,
     store_search,
+    stored_mapping,
 )
 from harness.plan_display import choice_id as row_choice_id
 from harness.plan_display import chosen_scope_decision, listed_together, pinned_choice_id
@@ -427,7 +428,7 @@ async def _switched_plan(
         raise SwitchFailedError(
             f"Search does not offer {label} for this source.", code=_OPTION_UNAVAILABLE
         )
-    specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    specs = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
     switched = await run_together(
         _resubmit(
             surface,
@@ -1020,7 +1021,7 @@ async def apply_stored_choice(
             entries=switch_entries(reading.scope, choice=choice, option_id=option_id),
             groups=_groups(
                 reading,
-                (ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
+                stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY).get(pin) or earlier_block(pin),
                 pin=pin,
             ),
             label=label,

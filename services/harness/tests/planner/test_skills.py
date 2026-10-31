@@ -1,13 +1,16 @@
 """Tests for `planner.skills`: the planner's `get_skill` and `get_skill_file`.
 
 Each tool calls data-mcp's tool of the same name through the surface it was
-built over and answers with data-mcp's text, a refusal's included.
+built over and answers with data-mcp's text, a refusal's included, and records
+each page read without an error in session state.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,7 +21,7 @@ from compiler.surface import (
 )
 from google.adk.tools.function_tool import FunctionTool
 from planner.agent import create_planner_agent
-from planner.skills import build_skill_tools
+from planner.skills import SKILLS_READ_STATE_KEY, build_skill_tools, skill_page_key
 from planner.workflow import ToolId
 
 
@@ -46,8 +49,13 @@ class _RecordingSurface:
         return self.answer
 
 
-def _tools(surface: _RecordingSurface) -> dict[str, Any]:
-    return {tool.name: tool.func for tool in build_skill_tools(surface)}
+def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Each tool's function, called with a tool context over `state`."""
+    tool_context = SimpleNamespace(state={} if state is None else state)
+    return {
+        tool.name: functools.partial(tool.func, tool_context=tool_context)
+        for tool in build_skill_tools(surface)
+    }
 
 
 _SKILL_TEXT = "---\nname: oda-concepts\n---\n\n# ODA concepts\n"
@@ -158,3 +166,39 @@ async def test_a_call_that_does_not_complete_answers_with_one_sentence(
         "planner get_skill({'skill_id': 'dfo-faq'}) did not complete; drafting without it: "
         "could not call 'get_skill'"
     )
+
+
+async def test_each_page_read_without_an_error_is_recorded_once_in_read_order() -> None:
+    state: dict[str, Any] = {}
+    tools = _tools(_RecordingSurface(ToolCallResult(is_error=False, text=_SKILL_TEXT)), state)
+
+    await tools["get_skill"](skill_id="oda-concepts")
+    await tools["get_skill_file"](skill_id="oda-concepts", path="references/core-oda.md")
+    await tools["get_skill"](skill_id="oda-concepts")
+
+    pages = [
+        {"skill_id": "oda-concepts", "path": None, "offset": 0},
+        {"skill_id": "oda-concepts", "path": "references/core-oda.md", "offset": 0},
+    ]
+    assert state == {
+        SKILLS_READ_STATE_KEY: pages,
+        **{skill_page_key(page): _SKILL_TEXT for page in pages},
+    }
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ToolCallResult(is_error=True, text="skill_not_found: no skill has that id."),
+        ToolSurfaceUnavailableError("could not call 'get_skill'"),
+    ],
+    ids=["refusal", "not-completed"],
+)
+async def test_a_read_that_returns_no_skill_is_not_recorded(
+    answer: ToolCallResult | Exception,
+) -> None:
+    state: dict[str, Any] = {}
+
+    await _tools(_RecordingSurface(answer), state)["get_skill"](skill_id="dfo-faq")
+
+    assert state == {}

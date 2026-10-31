@@ -53,6 +53,8 @@ from harness.graph.state import (
     frame_id_for,
     readable_plan,
     register_frames,
+    stored_mapping,
+    stored_sequence,
 )
 from harness.sentences import DECLINE_REASONS
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
@@ -630,7 +632,7 @@ def record_plan(
     without searching again. `run_id` is the run the plan executed as, which
     a later turn reads the record's status from.
     """
-    readings = dict(state.get(ORCHESTRATOR_READINGS_KEY) or {})
+    readings = dict(stored_mapping(state, ORCHESTRATOR_READINGS_KEY))
     unavailable = dict(state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})
     for row in plan_display.step_rows(plan):
         args = cast("dict[str, Any]", row["args"])
@@ -652,8 +654,8 @@ def record_plan(
         # A source an earlier turn's search returned is a searched one too,
         # and keeps its block in that turn's record.
         searched={
-            *(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
-            *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("spec_ids", []),
+            *stored_mapping(state, ORCHESTRATOR_SPECS_KEY),
+            *stored_mapping(state, ORCHESTRATOR_PRIOR_LEDGER_KEY).get("spec_ids", []),
         },
         failed_steps=frozenset(stopped.values()),
         run_id=run_id,
@@ -662,7 +664,7 @@ def record_plan(
         aligned_bases=_aligned_bases(state),
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
-        *(state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),
+        *stored_sequence(state, ORCHESTRATOR_PLAN_RECORDS_KEY),
         plan_record.model_dump(mode="json"),
     ]
     return plan_record

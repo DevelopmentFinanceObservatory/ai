@@ -68,7 +68,7 @@ from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from harness.graph.orchestrate import counts_chosen
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers, stored_mapping
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.scope_choices import (
     PROVIDER_AXIS,
@@ -1094,7 +1094,7 @@ def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     `tool_context.session` is the same live `Session` every other seam
     shares, `events` included.
     """
-    specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    specs = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
     elected: set[str] = set()
     for args, result in _answered_calls(tool_context):
         elected |= counts_chosen(_picks(result, _offered_candidates(args)), specs)
@@ -2795,6 +2795,11 @@ def create_planner_agent(
         # reads the turn's question and every event on this run's node path,
         # so `prepend_brief` finds the question to follow.
         include_contents="default",
+        # A stream cut off mid-response resumes from a continuation token, one
+        # extra hop instead of a full retry. google-genai defaults this to
+        # true; it is set so a change of that default cannot turn the resume
+        # off.
+        generate_content_config=types.GenerateContentConfig(automatic_continuation=True),
         # `AGENT_THINKING_CONFIG` (see `planner.settings`) pins every
         # generation to LOW thinking.
         planner=BuiltInPlanner(thinking_config=AGENT_THINKING_CONFIG),

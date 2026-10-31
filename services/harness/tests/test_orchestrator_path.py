@@ -25,7 +25,7 @@ from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
 from google.adk.events import EventActions
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, State
 from google.adk.workflow import START, Workflow
 from google.genai import types
 from harness import plan_display
@@ -1156,6 +1156,55 @@ async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent
     assert not [e for e in follow_up if e.error_code]
     assert "The approved plan ran" in request_text(model.requests[-1])
     assert not carries_an_interrupt(model.requests[-1])
+
+
+async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADK's `State` deep-copies a dict or list on its first read
+    (`_take_snapshot`), which costs milliseconds per read for the frames,
+    spec blocks and readings a turn holds. A turn reads them through
+    `stored_mapping` and `stored_sequence`, which take no copy; the small
+    containers it reads through `State` are still copied, which shows the
+    spy sees ADK's reads."""
+    copied: list[str] = []
+    take_snapshot = State._take_snapshot
+
+    def spy(self: State, key: str, value: Any) -> None:
+        copied.append(key)
+        take_snapshot(self, key, value)
+
+    monkeypatch.setattr(State, "_take_snapshot", spy)
+    runner, _ = orchestrator_runner(
+        search_call("Kenya debt service", "debt service"),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
+        types.Part.from_text(text="Charted."),
+        planner=ScriptedPlannerModel(),
+        tool_surface=ScriptedSurface(),
+        executor=_describes,
+        resolver=CannedSearch(definite_envelope(sentence="Kenya debt service")),
+    )
+    large: dict[str, Any] = {
+        ORCHESTRATOR_FRAMES_KEY: {"f" + "0" * 30: {"ref": {}, "view": {"dimensions": []}}},
+        ORCHESTRATOR_READINGS_KEY: {_SCRIPTED_SPEC: ["sv/1"]},
+        ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [], "spec_ids": [], "warnings": {}},
+        ORCHESTRATOR_PLAN_RECORDS_KEY: [],
+    }
+    await open_session(runner, **large)
+
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
+    approve = create_request_input_response(
+        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
+    )
+    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
+
+    assert not [e for e in events if e.error_code]
+    assert ORCHESTRATOR_CALLS_KEY in copied
+    assert not {*copied} & {*large, ORCHESTRATOR_SPECS_KEY, ORCHESTRATOR_SEARCHES_KEY}
 
 
 @pytest.mark.parametrize("describes", [True, False])
