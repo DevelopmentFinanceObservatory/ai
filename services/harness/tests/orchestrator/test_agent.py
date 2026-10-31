@@ -124,7 +124,7 @@ async def test_the_static_prefix_is_the_same_whatever_the_canvas(scripted_llm: A
 async def test_the_model_reads_the_instruction_without_the_identity_line_adk_appends(
     scripted_llm: Any,
 ):
-    # Fails when ADK stops appending its identity line or rewords it: the
+    # Fails when ADK stops appending its identity line or rewords it. The
     # orchestrator's removal of that line then needs revisiting.
     model = scripted_llm()
     built: list[Any] = []
