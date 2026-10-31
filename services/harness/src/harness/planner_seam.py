@@ -61,7 +61,7 @@ from typing import Any, NamedTuple, cast
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
-from executor.classify import ExecutorCode
+from executor.classify import RECOVERABLE_SPEC_CODES, ExecutorCode
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.base_llm import BaseLlm
@@ -2444,17 +2444,24 @@ def _record_refusal(state: SessionState, refusal: dict[str, Any] | None, *, resu
     """Hold each spec_id `refusal` names (`_refused_specs`) as refused now, with its code.
 
     One refused before is held from now, so a search earlier than this
-    refusal lifts it no longer. A `resumed` entry answers the refusal it
-    recorded when it began, and keeps the time held for each spec_id. Nothing
-    is written when `refusal` names no spec_id.
+    refusal lifts it no longer. A spec_id the refusal names more than once
+    takes a code outside `executor.classify.RECOVERABLE_SPEC_CODES` when any
+    of its codes is, so no search lifts it. A `resumed` entry answers
+    the refusal it recorded when it began, and keeps the time held for each
+    spec_id. Nothing is written when `refusal` names no spec_id.
     """
     held = {spec.spec_id: spec for spec in load_refused_specs(state)}
-    named = [spec for spec in _refused_specs(refusal) if not resumed or spec.spec_id not in held]
-    if not named:
+    codes: dict[str, str | None] = {}
+    for spec in _refused_specs(refusal):
+        if resumed and spec.spec_id in held:
+            continue
+        if spec.spec_id not in codes or codes[spec.spec_id] in RECOVERABLE_SPEC_CODES:
+            codes[spec.spec_id] = spec.code
+    if not codes:
         return
     now = datetime.now(UTC)
-    for spec in named:
-        held[spec.spec_id] = RefusedSpec(spec_id=spec.spec_id, code=spec.code, refused_at=now)
+    for spec_id, code in codes.items():
+        held[spec_id] = RefusedSpec(spec_id=spec_id, code=code, refused_at=now)
     save_refused_specs(state, held.values())
 
 

@@ -7484,21 +7484,37 @@ def _french(block: dict[str, Any]) -> dict[str, Any]:
     return json.loads(text)
 
 
-@pytest.mark.parametrize("compile_refused", [False, True], ids=["aligned", "compile-refused"])
+@pytest.mark.parametrize(
+    ("refused", "code", "admitted"),
+    [
+        (None, None, True),
+        ("health_inclusive", None, False),
+        ("whole_inclusive", "upstream_version_changed", True),
+        ("whole_inclusive", "open_role_unavailable", False),
+    ],
+    ids=["aligned", "compile-refused", "whole-compiled-after-refusal", "whole-refused-for-good"],
+)
 async def test_a_declared_whole_follows_its_part_when_another_calculation_realigns_it(
-    decision: DecisionFactory, compile_refused: bool
+    decision: DecisionFactory, refused: str | None, code: str | None, admitted: bool
 ) -> None:
     """US bilateral health aid as a share of a declared whole, and also compared with
     French health aid the user asked for with imputed multilateral flows. The
     comparison moves the part to the inclusive compile, so the whole is compiled from
     that final pin and the share divides an inclusive part by an inclusive total.
-    Where the executor refused that compile, the plan is refused, naming the part,
-    the pin it states and the compile."""
+    Where the executor refused that compile, held before this entry, the plan is
+    refused, naming the part, the pin it states and the compile. Where it refused
+    the whole's compile, the whole compiled again in this entry lifts a refusal for
+    a code a refreshed definition recovers from, and not one for good."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     inclusive = us_2023_block("health_inclusive")
-    if compile_refused:
-        ctx.state[REFUSED_SPECS_STATE_KEY] = [inclusive["spec_id"]]
+    if refused is not None:
+        _refuse(
+            ctx,
+            [us_2023_block(refused)["spec_id"]],
+            code,
+            datetime.now(UTC) - timedelta(seconds=1),
+        )
     stated = _stated_provider(_french(inclusive))
     _show_blocks(ctx, us_2023_block("health"), inclusive, stated)
     save_aligned_pin(
@@ -7536,7 +7552,11 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
         ],
     )
 
-    if compile_refused:
+    if refused == "whole_inclusive" and not admitted:
+        assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
+        assert result["detail"]["retrieved"] == us_2023_block(refused)["spec_id"]
+        return
+    if not admitted:
         assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
         assert result["detail"] == {
             "requirement_id": _PART,

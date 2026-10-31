@@ -1687,26 +1687,28 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
 
 
 @pytest.mark.parametrize(
-    ("code", "observed", "between", "kept"),
+    ("code", "also", "observed", "between", "kept"),
     [
-        ("definition_not_held", "after", None, True),
-        ("upstream_version_changed", "after", None, True),
-        ("definition_not_held", "before", None, False),
-        ("over_ceiling", "after", None, False),
-        ("upstream_version_changed", "after", "refused-again", False),
-        ("upstream_version_changed", "after", "resumed", True),
+        ("definition_not_held", None, "after", None, True),
+        ("upstream_version_changed", None, "after", None, True),
+        ("definition_not_held", None, "before", None, False),
+        ("over_ceiling", None, "after", None, False),
+        ("open_role_unavailable", "upstream_version_changed", "after", None, False),
+        ("upstream_version_changed", None, "after", "refused-again", False),
+        ("upstream_version_changed", None, "after", "resumed", True),
     ],
     ids=[
         "re-registered",
         "refreshed",
         "searched-before-the-refusal",
         "refused-for-good",
+        "refused-for-good-and-for-a-refresh",
         "refused-again-after-the-search",
         "resume-keeps-the-refusal-time",
     ],
 )
 async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lifts_it(
-    code: str, observed: str, between: str | None, kept: bool
+    code: str, also: str | None, observed: str, between: str | None, kept: bool
 ) -> None:
     """A replan answers the executor refusing `SPEC` for `code`, which is held
     as a bare spec_id with its code and the entry's time beside it. A later
@@ -1716,12 +1718,15 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
     brief names nothing to avoid. One observed before it, or a refusal for
     good, keeps `SPEC` out and named. Refused again after the reading
     (`between`), `SPEC` is held from the second refusal; a resume of the
-    replan keeps the first refusal's time."""
+    replan keeps the first refusal's time. A wave that also stops on `SPEC`
+    for another code (`also`) holds it for good when either code is."""
     seam = _seam()
     llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
     seam._agent.model = llm
     harness = _SeamHarness()
     refusal = _rediscovery_refusal(SPEC, code)
+    if also is not None:
+        refusal["also_stopped"] = [_rediscovery_refusal(SPEC, also)]
     before = datetime.now(UTC)
 
     await harness.run(seam, question="aid to guatemala", readings=_turn_readings(), refusal=refusal)
