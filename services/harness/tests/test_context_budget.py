@@ -223,7 +223,7 @@ SKILL_PAGE_CEILING = 40_800
 # A two-requirement plan is the wrong end of the range to size this from: the
 # seam's own docstring probe records the realistic upper end at nine
 # requirements, and the section that dominates it is the prior plan, re-sent on
-# every fresh render. `test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling`
+# every amend and replan call. `test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling`
 # measures that upper end, with readings at their whole budget: 11,131 chars for
 # a draft plan and 12,627 for a compiled one (the plan section alone is
 # 8,723 -> 6,942 raw-to-digest for the draft, 22,609 -> 8,438 for the compiled
@@ -866,7 +866,6 @@ def _nine_requirement_plan() -> Any:
 
 def _seam_brief(
     *,
-    fresh: bool,
     prior_plan: dict[str, Any] | None,
     readings: Sequence[Mapping[str, Any]] = (),
     canvas_digest: dict[str, Any] | None = None,
@@ -881,7 +880,6 @@ def _seam_brief(
         surface=FixtureSurface(schemas=[], responses={}),
     )
     return seam._message(
-        fresh=fresh,
         question=question,
         prior_plan=prior_plan,
         refusal=refusal,
@@ -909,7 +907,7 @@ def test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling() -> Non
     readings = _maximal_readings()
 
     for label, plan in (("draft", dumped), ("compiled", _compiled(draft))):
-        render = _seam_brief(fresh=True, readings=readings, prior_plan=plan)
+        render = _seam_brief(readings=readings, prior_plan=plan)
         assert len(render) <= SEAM_BRIEF_CEILING, (
             f"a nine-requirement {label} plan renders a {len(render)}-char seam brief, "
             f"past the {SEAM_BRIEF_CEILING} ceiling this test derives from that same case"
@@ -1241,7 +1239,7 @@ READINGS_SECTION_CEILING = len(_READINGS_CONTEXT.format(readings="")) + _READING
 
 
 def _readings_section(readings: Sequence[Mapping[str, Any]]) -> str:
-    """The readings section `PlannerSeam._message` opens a fresh brief with."""
+    """The readings section `PlannerSeam._message` opens every brief with."""
     return _READINGS_CONTEXT.format(readings=_readings_ledger(readings).text)
 
 
@@ -1483,15 +1481,19 @@ def _ask_kwargs(ask: str) -> dict[str, Any]:
     return {"amendment": _BRIEF_AMENDMENT}
 
 
+def _ask_only(ask: str) -> str:
+    """The amendment ask or the refusal ask a brief closes on, alone."""
+    asked = {"amendment": None, "refusal": None, **_ask_kwargs(ask)}
+    return planner_seam._ask_text(pick=None, **asked)
+
+
 def _maximal_brief_parts(ask: str) -> dict[str, str]:
     """Every section of the largest brief `PlannerSeam._message` builds, apart.
 
     The parts are rendered by the functions `_message` calls, so the sum of
     their lengths can be checked against the whole. The question is the cut
-    the seam makes of a 100,000-character one, and the ask is what a continuing
-    `_message` renders for the amendment or the refusal: an ask stands in for
-    the one the fresh brief ends with, and a fresh brief carries one or the
-    other.
+    the seam makes of a 100,000-character one, and the ask is the amendment
+    or refusal ask the brief closes on (`planner_seam._ask_text`).
     """
     cut_question = _BRIEF_QUESTION[: MAX_QUESTION_CHARS - len(CUT_MARKER)] + CUT_MARKER
     return {
@@ -1500,13 +1502,13 @@ def _maximal_brief_parts(ask: str) -> dict[str, str]:
         "conversation digest": _section(_CONVERSATION_TITLE, _conversation_digest()),
         "plan": _plan_context(_legal_maximum_plan_record()),
         "question": f"\nQuestion: {cut_question}\n",
-        "ask": _seam_brief(fresh=False, prior_plan=None, **_ask_kwargs(ask)),
+        "ask": _ask_only(ask),
     }
 
 
-def _continuing_chars(**kwargs: Any) -> int:
-    """Characters of the continuing message for `kwargs`, an ask and nothing else."""
-    return len(_seam_brief(fresh=False, prior_plan=None, **kwargs))
+def _ask_chars(*, amendment: str | None = None, refusal: dict[str, Any] | None = None) -> int:
+    """Characters of the ask a brief closes on (`planner_seam._ask_text`)."""
+    return len(planner_seam._ask_text(amendment=amendment, refusal=refusal, pick=None))
 
 
 def _refused_sentence_ceiling(sentence: Callable[[list[tuple[str, str]]], str]) -> int:
@@ -1533,7 +1535,7 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
     cut is measured from the renderer.
     """
     if ask == "refusal":
-        framing = _continuing_chars(refusal={"kind": "x"}) - len(json.dumps({"kind": "x"}))
+        framing = _ask_chars(refusal={"kind": "x"}) - len(json.dumps({"kind": "x"}))
         ask_ceiling = (
             framing
             + MAX_QUESTION_CHARS
@@ -1543,7 +1545,7 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
             + _share_units_repair_ceiling()
         )
     else:
-        ask_ceiling = _continuing_chars(amendment="x") - 1 + MAX_QUESTION_CHARS
+        ask_ceiling = _ask_chars(amendment="x") - 1 + MAX_QUESTION_CHARS
     return {
         "readings": READINGS_SECTION_CEILING,
         "canvas digest": CANVAS_SECTION_CEILING,
@@ -1560,7 +1562,7 @@ LEGAL_MAXIMUM_BRIEF_CEILING = max(sum(_maximal_brief_ceilings(ask).values()) for
 
 @pytest.mark.parametrize("ask", _ASKS)
 def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str) -> None:
-    """Every section of the fresh brief at its maximum at once, held to the sum.
+    """Every section of the brief at its maximum at once, held to the sum.
 
     Readings far past their budget, the two digests through their own functions, the
     largest legal plan, a question and the amendment or refusal ask, rendered by
@@ -1570,7 +1572,6 @@ def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str)
     parts = _maximal_brief_parts(ask)
     ceilings = _maximal_brief_ceilings(ask)
     brief = _seam_brief(
-        fresh=True,
         readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
         canvas_digest=_largest_canvas_digest(),
@@ -1600,7 +1601,6 @@ def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str)
 def test_the_brief_ceiling_fails_when_a_part_is_inflated() -> None:
     """The control for the composed ceiling: one inflated part puts the brief over it."""
     brief = _seam_brief(
-        fresh=True,
         readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
         canvas_digest={"blocks": [{"title": "x" * LEGAL_MAXIMUM_BRIEF_CEILING}]},
@@ -1619,8 +1619,8 @@ def test_the_question_and_ask_ceilings_fail_when_the_seam_stops_cutting(
     monkeypatch.setattr(planner_seam, "cut_user_text", lambda text, cap: text)
     ceilings = _maximal_brief_ceilings(ask)
 
-    question = _seam_brief(fresh=True, prior_plan=None, question=_BRIEF_QUESTION)
-    asked = _seam_brief(fresh=False, prior_plan=None, **_ask_kwargs(ask))
+    question = _seam_brief(prior_plan=None, question=_BRIEF_QUESTION)
+    asked = _ask_only(ask)
 
     assert len(question) > ceilings["question"]
     assert len(asked) > ceilings["ask"]

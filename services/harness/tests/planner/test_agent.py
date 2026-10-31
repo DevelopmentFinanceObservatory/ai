@@ -44,6 +44,7 @@ from google.adk.events import Event, EventActions, RequestInput
 from google.adk.features import FeatureName
 from google.adk.features._feature_registry import temporary_feature_override
 from google.adk.models.google_llm import Gemini
+from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
@@ -64,11 +65,13 @@ from harness.tool_contracts import reading_facts
 from harness.turn_records import RecordedIdentity, _periods
 from planner import agent as planner_agent
 from planner.agent import (
+    BRIEF_STATE_KEY,
     ToolContextSession,
     build_planner_tools,
     create_planner_agent,
     declare_ready,
     planner_instruction,
+    prepend_brief,
     read_full_history,
     with_source_reads,
 )
@@ -18183,3 +18186,61 @@ def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_the
     else:
         assert result["detail"]["basis"]["step_id"] == _SUM
         assert load_plan(ctx.state) is None
+
+
+def _user_text(text: str) -> types.Content:
+    return types.Content(role="user", parts=[types.Part(text=text)])
+
+
+_QUESTION = _user_text("kenya debt?")
+_ASK_CALL = types.Content(
+    role="model",
+    parts=[types.Part(function_call=types.FunctionCall(name="adk_request_input", args={}))],
+)
+_ANSWER = types.Content(
+    role="user",
+    parts=[
+        types.Part(function_response=types.FunctionResponse(name="adk_request_input", response={}))
+    ],
+)
+
+
+@pytest.mark.parametrize(
+    ("contents", "at"),
+    [
+        # Another content ahead of the question: the brief still follows the question.
+        ([_user_text("today is 2026-10-31"), _QUESTION, _ASK_CALL, _ANSWER], 2),
+        # A request without the question: the brief opens it.
+        ([_ASK_CALL, _ANSWER], 0),
+    ],
+    ids=["after-the-question", "no-question"],
+)
+def test_the_brief_follows_the_turns_question_found_by_what_it_is(
+    contents: list[types.Content], at: int
+) -> None:
+    """The question is the latest user message with no node path that is not a
+    function response, so the user's answer to an ask, the latest user event
+    on a resume, is passed over."""
+    events = [
+        Event(author="user", content=_QUESTION),
+        Event(author="dfo_planner", content=_ASK_CALL),
+        Event(author="user", content=_ANSWER),
+    ]
+    context = SimpleNamespace(
+        state={BRIEF_STATE_KEY: "the brief"}, session=SimpleNamespace(events=events)
+    )
+    request = LlmRequest(contents=[content.model_copy() for content in contents])
+
+    prepend_brief(cast(Any, context), request)
+
+    assert request.contents[at] == _user_text("the brief")
+    assert len(request.contents) == len(contents) + 1
+
+
+def test_no_brief_in_state_leaves_the_request_alone() -> None:
+    context = SimpleNamespace(state={}, session=SimpleNamespace(events=[]))
+    request = LlmRequest(contents=[_QUESTION])
+
+    prepend_brief(cast(Any, context), request)
+
+    assert request.contents == [_QUESTION]
