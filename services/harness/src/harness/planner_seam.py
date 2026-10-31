@@ -29,7 +29,8 @@ earlier call for the same plan read, the canvas and conversation digests, the
 plan being changed, the question, and the amendment or refusal ask that
 opened the call. ADK shows a `single_turn` run only the events on its own node
 path, so a call sees nothing an earlier call was sent or read, and an amend or
-replan needs the plan it changes and the skills already read in front of it. `_propose` writes the brief to `planner.agent.BRIEF_STATE_KEY` and runs
+replan needs the plan it changes and the skills already read in front of
+it. `_propose` writes the brief to `planner.agent.BRIEF_STATE_KEY` and runs
 the planner with no node input, and `planner.agent.prepend_brief` shows it
 after the turn's question on every request of the run. A run resumed after
 a planner-side ask gets it too, since the planner node reruns on resume and

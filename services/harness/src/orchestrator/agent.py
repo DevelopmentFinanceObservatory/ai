@@ -434,8 +434,9 @@ def create_orchestrator_agent(
         before_model_callback=[_without_adk_identity(AGENT_NAME), prepend_digests],
         # Thought summaries are requested for the traces. The studio stream
         # does not carry them. A stream cut off mid-response resumes from a
-        # continuation token, one extra hop instead of a full retry;
-        # google-genai's docs and code disagree on the default, so it is set.
+        # continuation token, one extra hop instead of a full retry.
+        # google-genai defaults this to true; it is set so a change of that
+        # default cannot turn the resume off.
         generate_content_config=types.GenerateContentConfig(
             automatic_continuation=True,
             thinking_config=types.ThinkingConfig(

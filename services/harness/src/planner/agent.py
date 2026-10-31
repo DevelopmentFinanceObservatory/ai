@@ -2788,8 +2788,9 @@ def create_planner_agent(
         # so `prepend_brief` finds the question to follow.
         include_contents="default",
         # A stream cut off mid-response resumes from a continuation token, one
-        # extra hop instead of a full retry; google-genai's docs and code
-        # disagree on the default, so it is set.
+        # extra hop instead of a full retry. google-genai defaults this to
+        # true; it is set so a change of that default cannot turn the resume
+        # off.
         generate_content_config=types.GenerateContentConfig(automatic_continuation=True),
         # `AGENT_THINKING_CONFIG` (see `planner.settings`) pins every
         # generation to LOW thinking.
