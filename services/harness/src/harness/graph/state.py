@@ -338,7 +338,7 @@ def ask_candidates(
     under its own spec_id, so a pick returns it, and any other answer under
     `o{n}`, its place in the question's list. An option of `priced`, by
     place, carries its `part` and `prices`, which the planner reads off the
-    answered interrupt (`planner.agent._prices_chosen`)."""
+    answered interrupt (`planner.call.prices_chosen`)."""
     priced = priced or {}
     return [
         {

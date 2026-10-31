@@ -136,8 +136,6 @@ from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import CodeNode
 from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.tool_context import ToolContext
 from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
@@ -1131,9 +1129,9 @@ def described_sources(sources: Sequence[SelectedSource]) -> list[dict[str, objec
     return described
 
 
-def current_draft(tool_context: ToolContext) -> Plan | dict[str, object]:
+def current_draft(state: SessionState) -> Plan | dict[str, object]:
     """Return the draft plan in session state, or the typed problem a tool answers with."""
-    plan = load_plan(tool_context.state)
+    plan = load_plan(state)
     if plan is None:
         return problem(
             ProblemCode.PLAN_MISSING,
@@ -1949,7 +1947,7 @@ async def fetch_code_paths(
 
 
 def _ready_to_search(
-    tool_context: ToolContext, requirement_id: str, reservations: _Reservations
+    state: SessionState, requirement_id: str, reservations: _Reservations
 ) -> tuple[Plan, DatasetRequirement, str, str] | dict[str, object]:
     """Return the draft plan, the requirement to search for, its revision, and its key; or the problem.
 
@@ -1959,7 +1957,7 @@ def _ready_to_search(
     committed log so two concurrent calls cannot both pass for the same
     slot.
     """
-    plan = current_draft(tool_context)
+    plan = current_draft(state)
     if isinstance(plan, dict):
         return plan
     requirement = _dataset_requirement(plan, requirement_id)
@@ -1967,7 +1965,7 @@ def _ready_to_search(
         return requirement
     revision = plan_revision(plan)
     key = requirement_revision(requirement)
-    log = load_log(tool_context.state)
+    log = load_log(state)
     blocked = _budget_error(log, revision, requirement_id, reservations)
     if blocked is not None:
         return blocked
@@ -1978,7 +1976,7 @@ def _ready_to_search(
 
 
 async def _record_search(
-    tool_context: ToolContext,
+    state: SessionState,
     record: DiscoveryRecord,
     sources: Sequence[SelectedSource] = (),
     *,
@@ -1998,10 +1996,10 @@ async def _record_search(
     The `BaseException` path, where nothing is ever recorded, releases alone
     under the lock instead of calling this function.
     """
-    async with discovery_lock(tool_context.state):
-        log = load_log(tool_context.state)
+    async with discovery_lock(state):
+        log = load_log(state)
         log = log.with_record(record, sources)
-        save_log(tool_context.state, log)
+        save_log(state, log)
         reservations.release(revision, requirement_id)
     return log
 
@@ -2485,7 +2483,7 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
 
 
 async def _recorded_source(
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     requirement: DatasetRequirement,
     first_year: int | None,
@@ -2513,11 +2511,11 @@ async def _recorded_source(
     back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
-    recorded = windowed_pins(tool_context.state).get(spec_id) or identity_on_record(
+    recorded = windowed_pins(state).get(spec_id) or identity_on_record(
         spec_id,
-        shown=held_sources(tool_context.state),
+        shown=held_sources(state),
         end_open=True,
-        definition_lookup=load_log(tool_context.state).recorded_definition,
+        definition_lookup=load_log(state).recorded_definition,
     )
     identity = recorded.identity if recorded is not None else None
     if (
@@ -2556,7 +2554,7 @@ async def _recorded_source(
 
 
 def _resolve_pin_block(
-    tool_context: ToolContext, *, plan: Plan, requirement: DatasetRequirement
+    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
 ) -> Mapping[str, object] | None:
     """The spec block of the dataset `requirement` pins, when the planner was shown it or admission compiled it, else `None`.
 
@@ -2578,11 +2576,11 @@ def _resolve_pin_block(
     pin = requirement.source_spec_id
     if pin is None:
         return None
-    shown = pin_sources(tool_context.state)
-    held = alignments(tool_context.state)
+    shown = pin_sources(state)
+    held = alignments(state)
     entry = aligned_entry(requirement, held)
     if entry is not None:
-        compiled = compiled_pin(tool_context.state, entry)
+        compiled = compiled_pin(state, entry)
         origin = shown.get(entry.stated_pin or "")
         if compiled is None or (
             origin is not None and BLOCKING_WARNING_CODES.intersection(origin.warnings)
@@ -2605,10 +2603,10 @@ def _resolve_pin_block(
 
 
 def _block_source(
-    tool_context: ToolContext, *, plan: Plan, requirement: DatasetRequirement
+    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
 ) -> SelectedSource | None:
     """The source of the pinned dataset's block as the planner was shown it, when it covers `requirement.period` exactly; `None` otherwise."""
-    block = _resolve_pin_block(tool_context, plan=plan, requirement=requirement)
+    block = _resolve_pin_block(state, plan=plan, requirement=requirement)
     if block is None:
         return None
     try:
@@ -2621,7 +2619,7 @@ def _block_source(
 
 
 async def _source_from_resolve_pin(
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     plan: Plan,
     requirement: DatasetRequirement,
@@ -2675,7 +2673,7 @@ async def _source_from_resolve_pin(
     the window of the search that found it.
     """
     read = await _pin_source(
-        tool_context,
+        state,
         plan=plan,
         requirement=requirement,
         first_year=split_of(plan).whole_history.get(requirement.id),
@@ -2702,13 +2700,11 @@ async def _source_from_resolve_pin(
             variable_sent=requirement.measure,
             detail=f"set aside: {reason}",
         )
-        async with discovery_lock(tool_context.state):
-            log = load_log(tool_context.state)
-            save_log(tool_context.state, log.with_record(set_aside, (source,)))
+        async with discovery_lock(state):
+            log = load_log(state)
+            save_log(state, log.with_record(set_aside, (source,)))
         return None
-    log = await _record_honoured_pin(
-        tool_context, plan=plan, requirement=requirement, source=source
-    )
+    log = await _record_honoured_pin(state, plan=plan, requirement=requirement, source=source)
     return ok(
         requirement_id=requirement_id,
         status=DiscoveryStatus.DEFINITE.value,
@@ -2721,7 +2717,7 @@ async def _source_from_resolve_pin(
 
 
 async def _pin_source(
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     plan: Plan,
     requirement: DatasetRequirement,
@@ -2743,11 +2739,11 @@ async def _pin_source(
     source; a problem a reader met is returned as it is.
     """
     source: SelectedSource | dict[str, object] | None = _block_source(
-        tool_context, plan=plan, requirement=requirement
+        state, plan=plan, requirement=requirement
     )
     if source is None:
         source = await _recorded_source(
-            tool_context,
+            state,
             requirement=requirement,
             first_year=first_year,
             surface=surface,
@@ -2756,7 +2752,7 @@ async def _pin_source(
         return source
     honoured = source is not None
     if source is None and requirement.source_spec_id is not None:
-        source = load_log(tool_context.state).recorded_source(requirement.source_spec_id)
+        source = load_log(state).recorded_source(requirement.source_spec_id)
     if source is None:
         return None
     if (
@@ -2777,7 +2773,7 @@ def _holds_closed(requirement: DatasetRequirement, source: SelectedSource) -> bo
 
 
 async def _record_honoured_pin(
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     plan: Plan,
     requirement: DatasetRequirement,
@@ -2793,9 +2789,9 @@ async def _record_honoured_pin(
         spec_ids=(source.spec_id,),
         variable_sent=requirement.measure,
     )
-    async with discovery_lock(tool_context.state):
-        log = load_log(tool_context.state).with_record(record, (source,))
-        save_log(tool_context.state, log)
+    async with discovery_lock(state):
+        log = load_log(state).with_record(record, (source,))
+        save_log(state, log)
     return log
 
 
@@ -2808,7 +2804,7 @@ class NamedGroup(NamedTuple):
 
 
 async def name_pinned_groups(
-    tool_context: ToolContext, *, surface: ToolSurface
+    state: SessionState, *, surface: ToolSurface
 ) -> tuple[NamedGroup, ...]:
     """Name the group a pin holds a requirement's `across` side to, in place of that `across` word, on the draft.
 
@@ -2856,7 +2852,7 @@ async def name_pinned_groups(
     reads the copy's pin as it reads any other. Returns each group named,
     in the plan's order; empty when there is no draft or nothing to name.
     """
-    plan = current_draft(tool_context)
+    plan = current_draft(state)
     if isinstance(plan, dict):
         return ()
     whole_history = split_of(plan).whole_history
@@ -2867,7 +2863,7 @@ async def name_pinned_groups(
         if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
             continue
         found = await _groups_named(
-            tool_context,
+            state,
             plan=written,
             requirement=requirement,
             first_year=whole_history.get(requirement.id),
@@ -2892,9 +2888,9 @@ async def name_pinned_groups(
             honoured.append((rewritten, source))
     if not named:
         return ()
-    save_plan(tool_context.state, plan)
+    save_plan(state, plan)
     for requirement, source in honoured:
-        await _record_honoured_pin(tool_context, plan=plan, requirement=requirement, source=source)
+        await _record_honoured_pin(state, plan=plan, requirement=requirement, source=source)
     return tuple(named)
 
 
@@ -3100,7 +3096,7 @@ def _with_groups_named(
 
 
 async def _groups_named(
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     plan: Plan,
     requirement: DatasetRequirement,
@@ -3135,7 +3131,7 @@ async def _groups_named(
     if not roles:
         return None
     read = await _pin_source(
-        tool_context, plan=plan, requirement=requirement, first_year=first_year, surface=surface
+        state, plan=plan, requirement=requirement, first_year=first_year, surface=surface
     )
     if read is None or isinstance(read, dict):
         return None
@@ -3155,7 +3151,7 @@ async def _groups_named(
 
 
 async def _discovery_start(
-    tool_context: ToolContext,
+    state: SessionState,
     requirement_id: str,
     reservations: _Reservations,
     *,
@@ -3173,14 +3169,14 @@ async def _discovery_start(
     `search` is needed: two concurrent calls' checks must never both pass
     for the same slot. The `search` call itself runs with the lock released.
     """
-    plan = current_draft(tool_context)
+    plan = current_draft(state)
     if isinstance(plan, dict):
         return plan
     requirement = _dataset_requirement(plan, requirement_id)
     if isinstance(requirement, dict):
         return requirement
     pinned = await _source_from_resolve_pin(
-        tool_context,
+        state,
         plan=plan,
         requirement=requirement,
         requirement_id=requirement_id,
@@ -3188,8 +3184,8 @@ async def _discovery_start(
     )
     if pinned is not None:
         return pinned
-    async with discovery_lock(tool_context.state):
-        ready = _ready_to_search(tool_context, requirement_id, reservations)
+    async with discovery_lock(state):
+        ready = _ready_to_search(state, requirement_id, reservations)
         if isinstance(ready, dict):
             return ready
         plan, requirement, revision, key = ready
@@ -3278,12 +3274,12 @@ def _ask_not_understood(
     )
 
 
-def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
-    """Build the one discovery tool, closing over `surface` for the call."""
+def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[dict[str, object]]]:
+    """Build `discover_source`, closing over `surface` for the call."""
 
     async def discover_source(
         requirement_id: str,
-        tool_context: ToolContext,
+        state: SessionState,
     ) -> dict[str, object]:
         """Find what data exists for one dataset requirement.
 
@@ -3310,16 +3306,14 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             The answer's status, the sources it names, and how many discovery
             calls this plan revision has left; or the problem that stopped it.
         """
-        reservations = _reservations(tool_context.state)
-        started = await _discovery_start(
-            tool_context, requirement_id, reservations, surface=surface
-        )
+        reservations = _reservations(state)
+        started = await _discovery_start(state, requirement_id, reservations, surface=surface)
         if isinstance(started, dict):
             return started
         plan, requirement, revision, key = started
 
         variable = requirement.measure
-        held = load_log(tool_context.state).named_open_pin(requirement)
+        held = load_log(state).named_open_pin(requirement)
         part = search_part(
             requirement,
             variable,
@@ -3335,7 +3329,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             to this call, the same three for every record this call may write.
             """
             return await _record_search(
-                tool_context,
+                state,
                 record,
                 sources,
                 reservations=reservations,
@@ -3349,9 +3343,9 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             if isinstance(exc, NoTimeLeftError):
                 # Never issued, so nothing is spent: no record, and the
                 # reservation is released alone, under the lock.
-                async with discovery_lock(tool_context.state):
+                async with discovery_lock(state):
                     reservations.release(revision, requirement_id)
-                    log = load_log(tool_context.state)
+                    log = load_log(state)
             else:
                 # A timeout still spends the call: recorded, so it counts
                 # against the budget exactly like an answer, and marked
@@ -3381,7 +3375,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             # either, or a following call would be refused for a budget
             # nothing was actually spent from. There is no record to commit
             # here, so this releases alone, under the lock.
-            async with discovery_lock(tool_context.state):
+            async with discovery_lock(state):
                 reservations.release(revision, requirement_id)
             raise
 
@@ -3575,4 +3569,4 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             fields["action"] = action.model_dump(mode="json", exclude_none=True)
         return ok(**fields)
 
-    return [FunctionTool(discover_source)]
+    return discover_source

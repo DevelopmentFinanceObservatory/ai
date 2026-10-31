@@ -1655,7 +1655,7 @@ def switchable_decision(decision: Decision) -> bool:
     is switchable. A switch of it replans with the user's pick held. So is
     the prices the user chose for a part (`DecisionFixes.prices`): a switch
     of it is a new answer to the part's prices question
-    (`planner.agent._prices_chosen`). The other decisions `propose_plan`
+    (`planner.call.prices_chosen`). The other decisions `propose_plan`
     writes (`planner.plan.is_code_written`) are not: a search pin's measure
     and a scope choice switch through Search (`choice_id`), and one
     qualifying the answer (`Decision.caveat`) reaches the card only as a

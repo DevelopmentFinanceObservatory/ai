@@ -50,7 +50,7 @@ from planner.plan import (
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import SelectedSource, ToolId, Workflow
 from submission.service import COMBINE_OPTION
-from translator.discovery import build_discovery_tools, load_log
+from translator.discovery import build_discover_source, load_log
 from translator.mechanical import build_translation
 from translator.referral import Referral, ReferralKind, save_referral
 
@@ -205,14 +205,10 @@ async def _compiled(ctx: _FakeToolContext) -> Workflow:
     plan = load_plan(ctx.state)
     assert plan is not None
     refused = _SearchRefused()
-    (discover_source,) = [
-        t
-        for t in build_discovery_tools(surface=cast(ToolSurface, refused))
-        if t.name == "discover_source"
-    ]
+    discover_source = build_discover_source(surface=cast(ToolSurface, refused))
     pins = {rid: pin for rid, pin in _pins(ctx) if pin is not None}
     for requirement_id in pins:
-        found = await discover_source.func(requirement_id=requirement_id, tool_context=ctx)
+        found = await discover_source(requirement_id=requirement_id, state=ctx.state)
         assert found["status"] == "definite", (requirement_id, found)
     assert refused.calls == []
     recorded = load_log(ctx.state).sources

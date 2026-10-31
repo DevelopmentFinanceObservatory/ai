@@ -33,7 +33,7 @@ The chain reads the session through a `SessionView`: the state slots
 `planner.plan` and the translator keep, what the user answered and was asked
 (read off the session's history by whatever implements the view), and the
 two writes the chain makes, an `unsupported` answer and the admitted plan.
-`planner.agent.ToolContextSession` is the view over an ADK tool call.
+`planner.call.CallSession` is the view over a planner tool call.
 
 Every refusal is `planner.tool_results`' typed `problem`. Translation is the
 caller's.

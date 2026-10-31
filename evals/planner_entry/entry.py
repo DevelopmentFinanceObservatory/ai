@@ -84,6 +84,7 @@ from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
 from planner.agent import read_full_history
+from planner.call import PlannerCall
 from planner.plan import (
     Plan,
     SessionState,
@@ -705,11 +706,11 @@ class Probe:
     # The requests the current turn budget had sent before the call in flight.
     _requests_before: int | None = None
 
-    async def translate(self, tool_context: Any) -> dict[str, object]:
-        self.plan = load_plan(tool_context.state)
-        self.plan_call = tool_context.function_call_id
+    async def translate(self, call: PlannerCall) -> dict[str, object]:
+        self.plan = load_plan(call.state)
+        self.plan_call = call.call_id
         if self.translator is not None:
-            self.translation = await self.translator(tool_context)
+            self.translation = await self.translator(call)
         raise PlanRecorded
 
     def watch(self, seam: PlannerModel) -> PlannerModel:

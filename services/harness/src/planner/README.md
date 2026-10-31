@@ -26,8 +26,9 @@ Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 | `reject_plan`       | Marks the current plan `REJECTED`, which blocks a declaration of readiness until a new version                      |
 
 A `propose_plan` whose translation compiles declares the plan ready for the
-user's answer in code (`declare_ready`), adds the approval summary to its
-answer under `summary`, and ends the planner's run, so no model call follows.
+user's answer in code (`declare_ready`) and adds the approval summary to its
+answer under `summary`. `end_run_when_ready` ends the planner's run on that
+answer, so no model call follows.
 
 The planner reaches the translator directly. `create_planner_agent` takes
 `translator.tool`'s `build_translate` function as `translate`, which
@@ -519,7 +520,7 @@ decision with its citations, unless another requirement citing it still rests
 on it, which is refused as `shared_decision_contradicted`
 (`_contradicted_carried_decisions`). Until the user says something after the
 plan was recorded (an answer, an amendment, a message, or a new turn:
-`planner.agent._user_spoke_since_recorded`), each of their decisions stands as
+`planner.call.user_spoke_since_recorded`), each of their decisions stands as
 they made it (`_user_decision_refused`). A patch removing one or leaving no
 requirement citing it is refused as `user_decision_dropped`, and one changing
 its `chosen`, `resolved_by` or `fixes`, or citing it from a requirement that

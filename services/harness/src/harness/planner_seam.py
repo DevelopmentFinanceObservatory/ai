@@ -72,10 +72,11 @@ from google.genai import types
 from planner.agent import (
     BRIEF_STATE_KEY,
     PROPOSE_PLAN,
-    ToolContextSession,
-    declare_ready,
+    AdkCall,
+    end_run_when_ready,
     with_source_reads,
 )
+from planner.call import CallSession
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
@@ -416,7 +417,7 @@ ModelResponseCallback = Callable[[CallbackContext, LlmResponse], LlmResponse | N
 
 
 @dataclass(frozen=True)
-class _RevisionSession(ToolContextSession):
+class _RevisionSession(CallSession):
     """The session a revision's proposal is checked against (`PlannerSeam.revise`).
 
     The user has spoken since the plan it amends was recorded: their switch
@@ -879,7 +880,8 @@ class PlannerSeam:
         prior = Plan.model_validate(prior_plan)
         save_plan(state, prior)
         save_plan_rounds(state, 0)
-        view = _RevisionSession(tool_context=ctx, inherits=dict(inherits))
+        call = AdkCall(ctx)
+        view = _RevisionSession(call=call, inherits=dict(inherits))
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
         )
@@ -897,7 +899,7 @@ class PlannerSeam:
         store_searched_pin_readings(ctx, state)
         if recorded.get("outcome") != Outcome.OK.value:
             return self._revision_refused(recorded, words=plan_display.plan_words(prior))
-        translation = await self._translate(ctx)
+        translation = await self._translate(call)
         referral = PlannerSeam._referral_dict(translation)
         if referral is not None:
             return self._revision_refused(
@@ -906,7 +908,7 @@ class PlannerSeam:
                 or _not_ready(referral),
                 words=_revision_words(load_plan(state), prior, state=state),
             )
-        answer = declare_ready({**recorded, "translation": translation}, ctx)
+        answer = end_run_when_ready({**recorded, "translation": translation}, call)
         plan = load_plan(state)
         if "summary" not in answer or plan is None:
             blocked = answer.get("submission") or answer.get("translation")
@@ -1096,7 +1098,7 @@ class PlannerSeam:
         candidates (`_pinnable_candidates`), since no model call is left to
         compose it. `populate_client_function_call_id` gives the call an id,
         so the resume pairs with the user's answer the way a model-issued ask
-        does (`planner.agent._elected_spec_ids`), and the answer arrives in a
+        does (`planner.call.elected_spec_ids`), and the answer arrives in a
         request of its own, with a fresh budget. With nothing pinnable (no
         referral, or a `no_data` referral, whose nearest-series candidates
         carry no `spec_id`) the closing text stands: the tracker refuses on
@@ -1959,7 +1961,7 @@ def _ask_response(args: dict[str, Any]) -> LlmResponse:
 
     `populate_client_function_call_id` gives the call an id, so the resume
     pairs with the user's answer the way a model-issued ask does
-    (`planner.agent._elected_spec_ids`).
+    (`planner.call.elected_spec_ids`).
     """
     return LlmResponse(
         content=types.Content(

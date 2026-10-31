@@ -48,7 +48,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from enum import StrEnum
-from typing import assert_never, cast
+from typing import TYPE_CHECKING, assert_never, cast
 
 from common.telemetry import record_event
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult, compile_plan
@@ -64,7 +64,6 @@ from executor.outcomes import (
     stop_cause,
 )
 from executor.run import AnchorRead, HeldAnchor, read_anchors
-from google.adk.tools.tool_context import ToolContext
 from planner.operations import Translation
 from planner.plan import (
     DatasetRequirement,
@@ -102,7 +101,7 @@ from translator.discovery import (
     DiscoveryLog,
     ResolveEntities,
     apply_definitions,
-    build_discovery_tools,
+    build_discover_source,
     compact_source,
     current_draft,
     dataset_keys,
@@ -130,11 +129,14 @@ from translator.referral import (
     save_referral,
 )
 
+if TYPE_CHECKING:
+    from planner.call import PlannerCall
+
 logger = logging.getLogger(__name__)
 
-# What `build_translate` builds: the planner's tool context in, the verdict
+# What `build_translate` builds: the planner's call in, the verdict
 # `propose_plan` answers under `translation` out.
-type Translate = Callable[[ToolContext], Awaitable[dict[str, object]]]
+type Translate = Callable[[PlannerCall], Awaitable[dict[str, object]]]
 
 # The newest-year read of a compiled workflow's rolling steps, as
 # `read_within_entry` makes it: `None` when it was skipped.
@@ -571,7 +573,7 @@ def _earned_decline(issues: Sequence[CompileIssue]) -> UnsupportedOperation | No
 
 
 def _not_compiled(
-    result: CompileResult, translation: Translation, tool_context: ToolContext
+    result: CompileResult, translation: Translation, state: SessionState
 ) -> dict[str, object]:
     """The `COMPILE_FAILED` problem for `result`'s issues, with the action that moves past them.
 
@@ -579,7 +581,7 @@ def _not_compiled(
     optional, for the rest of the planner entry.
     """
     if (declinable := _earned_decline(result.issues)) is not None:
-        record_optional_decline(tool_context.state, declinable)
+        record_optional_decline(state, declinable)
     return problem(
         ProblemCode.COMPILE_FAILED,
         f"This translation did not compile: {len(result.issues)} issue(s) found.",
@@ -798,7 +800,7 @@ def _rule_refusal(exc: ValueError) -> str:
     return str(exc)
 
 
-def _translatable_draft(tool_context: ToolContext) -> Plan | dict[str, object]:
+def _translatable_draft(state: SessionState) -> Plan | dict[str, object]:
     """Return the draft plan `propose_operations` may compile, or the problem that stops it.
 
     Needs a draft plan with no referral pending on it and at least one
@@ -806,10 +808,10 @@ def _translatable_draft(tool_context: ToolContext) -> Plan | dict[str, object]:
     referral, so there is no action to point at. The planner reads it and
     proposes or rejects.
     """
-    plan = current_draft(tool_context)
+    plan = current_draft(state)
     if isinstance(plan, dict):
         return plan
-    pending = load_referral(tool_context.state)
+    pending = load_referral(state)
     if pending is not None:
         return problem(
             ProblemCode.REFERRAL_PENDING,
@@ -936,7 +938,7 @@ def build_translator_core(
         result: CompileResult,
         *,
         compiled: Callable[[Plan, Translation], CompileResult],
-        tool_context: ToolContext,
+        state: SessionState,
     ) -> tuple[Plan, Translation, CompileResult] | dict[str, object]:
         """`plan`, `translation` and `result`, its compiled workflow, with each group's rolling years stated from the newest year the data holds.
 
@@ -970,10 +972,10 @@ def build_translator_core(
             workflow,
             plan,
             surface=surface,
-            held=held_anchor_reads(tool_context.state),
+            held=held_anchor_reads(state),
         )
         if isinstance(answered, tuple):
-            save_anchor_reads(tool_context.state, answered)
+            save_anchor_reads(state, answered)
         read = _groups_read(answered)
         if isinstance(read, Refused):
             return _run_would_stop(read, workflow=workflow, translation=translation)
@@ -981,20 +983,20 @@ def build_translator_core(
             return plan, translation, result
         restated = restated_to_the_data(plan, translation, workflow, read)
         if isinstance(restated, CompileResult):
-            return _not_compiled(restated, translation, tool_context)
+            return _not_compiled(restated, translation, state)
         moved_plan, moved_translation = restated
         recompiled = compiled(moved_plan, moved_translation)
         if recompiled.workflow is None:
             return _not_compiled(
                 _restatement_not_compiled(recompiled, moved_translation, workflow, read),
                 moved_translation,
-                tool_context,
+                state,
             )
         return moved_plan, moved_translation, recompiled
 
     async def propose_operations(
         translation: Translation,
-        tool_context: ToolContext,
+        state: SessionState,
         schemas: Sequence[ToolSchema] | None = None,
     ) -> dict[str, object]:
         """Compile `translation` against the recorded draft, the sources discovery
@@ -1010,7 +1012,7 @@ def build_translator_core(
         planner entry. `schemas` are the surface's tools as the caller
         listed them (`translator.mechanical._propose_until_settled`), or,
         when `None`, as this call lists them."""
-        plan = _translatable_draft(tool_context)
+        plan = _translatable_draft(state)
         if isinstance(plan, dict):
             return plan
         if schemas is None:
@@ -1033,8 +1035,8 @@ def build_translator_core(
         # the same discipline `discover_source`'s own body follows; the
         # `describe` round trip `fetch_definitions` runs does not, so the
         # lock is released for it and re-taken only to apply what it found.
-        async with discovery_lock(tool_context.state):
-            log = load_log(tool_context.state)
+        async with discovery_lock(state):
+            log = load_log(state)
             discovered = settled(log)
             definite_ids = log.definite_source_ids(requirement_keys=requirement_keys, pinned=pinned)
             definite_sources = {
@@ -1050,7 +1052,7 @@ def build_translator_core(
                 requirement_keys=requirement_keys,
                 sources=definite_sources,
             )
-            log = await apply_definitions(tool_context.state, pairs)
+            log = await apply_definitions(state, pairs)
             discovered = settled(log)
         datasets = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
         resolved = await resolve_entity_refs(
@@ -1062,7 +1064,7 @@ def build_translator_core(
             sources=discovered,
         )
         if resolved:
-            log = await apply_definitions(tool_context.state, resolved)
+            log = await apply_definitions(state, resolved)
             discovered = settled(log)
         climbed = await fetch_code_paths(
             revision=plan_revision(plan),
@@ -1072,7 +1074,7 @@ def build_translator_core(
             describe_nodes=describe_nodes,
         )
         if climbed:
-            log = await apply_definitions(tool_context.state, climbed)
+            log = await apply_definitions(state, climbed)
             discovered = settled(log)
         # A node door that did not answer is transient, so the breakdown it
         # leaves without a level is not refused as a source that cannot serve.
@@ -1092,13 +1094,13 @@ def build_translator_core(
 
         result = compiled(plan, translation)
         if result.workflow is None:
-            return _not_compiled(result, translation, tool_context)
+            return _not_compiled(result, translation, state)
         stated = await stated_from_the_data(
             plan,
             translation,
             result,
             compiled=compiled,
-            tool_context=tool_context,
+            state=state,
         )
         if isinstance(stated, dict):
             return stated
@@ -1108,7 +1110,7 @@ def build_translator_core(
         warnings = [warning.model_dump(mode="json") for warning in result.warnings]
 
         plan = plan.with_translation(translation=translation, workflow=result.workflow)
-        save_plan(tool_context.state, plan)
+        save_plan(state, plan)
         return ok(
             **_restated_answer(restated),
             status=plan.status.value,
@@ -1128,7 +1130,7 @@ def build_translator_core(
     def return_to_planner(
         kind: ReferralKind,
         reason: str,
-        tool_context: ToolContext,
+        state: SessionState,
         requirement_id: str | None = None,
         constraint: str | None = None,
         repair: str | None = None,
@@ -1161,7 +1163,7 @@ def build_translator_core(
             kind = ReferralKind(kind)
         # A draft, not any plan: a plan a successful compile already moved to
         # PENDING_APPROVAL cannot have a referral written over it.
-        plan = current_draft(tool_context)
+        plan = current_draft(state)
         if isinstance(plan, dict):
             return plan
         requirement: DatasetRequirement | None = None
@@ -1184,7 +1186,7 @@ def build_translator_core(
         no_data_reason: str | None = None
         if kind in MAY_CARRY_CANDIDATES and requirement_id is not None and requirement is not None:
             key = requirement_revision(requirement)
-            log = load_log(tool_context.state)
+            log = load_log(state)
             if kind is ReferralKind.NO_DATA:
                 candidates = log.nearest_for(key, requirement_id)
                 no_data_reason = log.no_data_reason(key, requirement_id)
@@ -1220,7 +1222,7 @@ def build_translator_core(
             and requirement is not None
         ):
             key = requirement_revision(requirement)
-            log = load_log(tool_context.state)
+            log = load_log(state)
             matching = [
                 record
                 for record in log.records
@@ -1260,12 +1262,11 @@ def build_translator_core(
                 f"This referral does not have the shape a referral needs: {exc}",
                 outcome=Outcome.INVALID_INPUT,
             )
-        save_referral(tool_context.state, referral)
+        save_referral(state, referral)
         return referred(_referral_payload(referral))
 
-    (discover_source_tool,) = build_discovery_tools(surface=surface)
     return TranslatorCore(
-        discover_source=discover_source_tool.func,
+        discover_source=build_discover_source(surface=surface),
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
         list_tools=surface.list_tools,
@@ -1406,7 +1407,7 @@ def build_translate(
         describe_nodes=describe_nodes,
     )
 
-    async def translate(tool_context: ToolContext) -> dict[str, object]:
+    async def translate(call: PlannerCall) -> dict[str, object]:
         """Find the data the recorded plan needs and compile the workflow the user approves.
 
         First names, on the recorded draft, each group a pin holds a
@@ -1432,13 +1433,14 @@ def build_translate(
         A translation that reaches a compile lists the surface once, however
         many rounds it proposes (`translator.mechanical._propose_until_settled`).
         """
-        with resolving_once(tool_context.state, keep_retryable=True):
-            named = await name_pinned_groups(tool_context, surface=surface)
-            answer = _planner_answer(await run_translate(tool_context, core=core))
+        state = call.state
+        with resolving_once(state, keep_retryable=True):
+            named = await name_pinned_groups(state, surface=surface)
+            answer = _planner_answer(await run_translate(state, core=core))
         if answer.get("outcome") == Outcome.UNSUPPORTED.value:
             # Every kind `OUTCOME_OF` maps to `unsupported` is an
             # `UnsupportedOperation`, so the plan has to decline it.
-            record_unsupported(tool_context.state, UnsupportedOperation(answer["kind"]))
+            record_unsupported(state, UnsupportedOperation(answer["kind"]))
         if named:
             answer = answer | {
                 "named_in_place_of_across": [
@@ -1450,7 +1452,7 @@ def build_translate(
                     for group in named
                 ]
             }
-        plan = load_plan(tool_context.state)
+        plan = load_plan(state)
         return answer if plan is None else authored_answer(answer, split_of(plan))
 
     return translate

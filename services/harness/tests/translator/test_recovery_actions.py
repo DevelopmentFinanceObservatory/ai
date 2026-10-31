@@ -152,7 +152,7 @@ async def _replay_action(
     kwargs = dict(action.get("arguments") or {})
     for name in action.get("needs", ()):
         kwargs[name] = needs_values[name]
-    return core.return_to_planner(tool_context=context, **kwargs)
+    return core.return_to_planner(state=context.state, **kwargs)
 
 
 async def test_budget_exhausted_action_refers(
@@ -164,10 +164,10 @@ async def test_budget_exhausted_action_refers(
     core = _core(surface)
     for _ in range(DISCOVERY_CALL_BUDGET_PER_REQUIREMENT):
         result = await core.discover_source(
-            requirement_id="annual_debt_service", tool_context=context
+            requirement_id="annual_debt_service", state=context.state
         )
         assert result["outcome"] == "ok"
-    blocked = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    blocked = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     assert blocked["code"] == "budget_exhausted"
 
     referred = await _replay_action(core, blocked["action"], context)
@@ -191,7 +191,7 @@ async def test_ask_not_understood_action_refers(
         )
     )
     core = _core(surface)
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     assert result["code"] == "ask_not_understood"
 
     referred = await _replay_action(core, result["action"], context)
@@ -212,7 +212,7 @@ async def test_source_ambiguous_action_refers(
         )
     )
     core = _core(surface)
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     assert result["action"]["arguments"]["kind"] == "source_ambiguous"
 
     referred = await _replay_action(core, result["action"], context)
@@ -232,7 +232,7 @@ async def test_no_data_action_refers(
         draft(evidence_requirements=[requirement(measure="unicorn horns"), derived_requirement()])
     )
     core = _core(surface)
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     assert result["action"]["arguments"]["kind"] == "no_data"
 
     referred = await _replay_action(core, result["action"], context)
@@ -251,7 +251,7 @@ async def test_unsupported_ask_action_refers(
         draft(evidence_requirements=[requirement(measure="unsupported ask"), derived_requirement()])
     )
     core = _core(surface)
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     assert result["action"]["arguments"]["kind"] == "unsupported_ask"
 
     referred = await _replay_action(core, result["action"], context)
@@ -275,7 +275,7 @@ async def test_pinned_source_not_found_action_refers(
         )
     )
     core = _core(surface)
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     assert result["action"]["arguments"]["kind"] == "pinned_source_not_found"
 
     referred = await _replay_action(core, result["action"], context)
@@ -317,8 +317,8 @@ async def test_pinned_source_not_found_carries_every_stale_pin_of_the_revision(
         )
     )
     core = _core(surface)
-    await core.discover_source(requirement_id="second_debt_service", tool_context=context)
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    await core.discover_source(requirement_id="second_debt_service", state=context.state)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
 
     referred = await _replay_action(core, result["action"], context)
 
@@ -350,7 +350,7 @@ async def test_pinned_source_not_found_action_carries_the_logs_candidates(
         )
     )
     core = _core(surface)
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     assert result["action"]["arguments"]["kind"] == "pinned_source_not_found"
 
     referred = await _replay_action(core, result["action"], context)
@@ -451,7 +451,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
         save_log(context.state, log)
     core = _core(McpSurface(sources={"data-mcp": _every_recipient_server()}))
 
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     referred = await _replay_action(core, result["action"], context)
 
     referral = referred["referral"]
@@ -655,7 +655,7 @@ async def test_a_pin_leaving_open_a_named_side_keeps_its_closed_sides_on_the_sea
     searched: list[Any] = []
     core = _core(McpSurface(sources={"data-mcp": _answering_server(answer, searched)}))
 
-    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", state=context.state)
     referred = await _replay_action(core, result["action"], context)
 
     ((part,),) = searched
@@ -733,7 +733,7 @@ async def test_a_share_whole_pinned_to_its_numerators_donor_keeps_no_donor_on_th
     searched: list[Any] = []
     core = _core(McpSurface(sources={"data-mcp": _answering_server(donor_open, searched)}))
 
-    result = await core.discover_source(requirement_id="oda", tool_context=context)
+    result = await core.discover_source(requirement_id="oda", state=context.state)
     referred = await _replay_action(core, result["action"], context)
 
     ((part,),) = searched
@@ -874,7 +874,7 @@ async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the
     save_pin_sources(context.state, {dac_total: PinSource(block=pin, settled=True)})
     core = _core(McpSurface(sources={"data-mcp": _donor_open_server()}))
 
-    result = await core.discover_source(requirement_id="oda", tool_context=context)
+    result = await core.discover_source(requirement_id="oda", state=context.state)
     referred = await _replay_action(core, result["action"], context)
 
     referral = referred["referral"]
@@ -1028,7 +1028,7 @@ async def test_a_pin_on_the_whole_gives_way_only_where_it_holds_the_numerators_m
     save_pin_sources(context.state, {spec_id: PinSource(block=pin, settled=True)})
     core = _core(McpSurface(sources={"data-mcp": _donor_open_server()}))
 
-    result = await core.discover_source(requirement_id="oda", tool_context=context)
+    result = await core.discover_source(requirement_id="oda", state=context.state)
     referred = await _replay_action(core, result["action"], context)
 
     referral = referred["referral"]
@@ -1065,7 +1065,7 @@ async def test_requirement_unmeetable_action_refers(
     core = _core(FixtureSurface(schemas=real_schemas))
 
     result = await core.propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
     assert result["action"]["arguments"]["kind"] == "requirement_unmeetable"
 
@@ -1117,7 +1117,7 @@ async def test_a_node_door_that_does_not_answer_is_transient(
     core = build_translator_core(surface=FixtureSurface(schemas=real_schemas), describe_nodes=down)
 
     result = await core.propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert (result["outcome"], result["code"]) == ("refused", ProblemCode.SURFACE_UNAVAILABLE)
@@ -1149,7 +1149,7 @@ async def test_a_code_climb_the_entrys_time_cuts_short_is_transient(
     try:
         async with asyncio.timeout(5):
             result = await core.propose_operations(
-                translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+                translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
             )
     finally:
         current_discovery_time_left.reset(token)
@@ -1196,7 +1196,7 @@ async def test_a_code_the_graph_holds_no_path_to_leaves_the_source_unusable(
     core = _core(FixtureSurface(schemas=real_schemas))
 
     result = await core.propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["code"] == ProblemCode.COMPILE_FAILED
@@ -1227,7 +1227,7 @@ async def test_no_operation_covers_action_refers(
     monkeypatch.setattr("translator.tool.compile_plan", _compile_with_no_capabilities)
 
     result = await core.propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
     assert result["action"]["arguments"]["kind"] == "no_operation_covers"
     assert "needs" not in result["action"]

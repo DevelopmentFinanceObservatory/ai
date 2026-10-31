@@ -86,7 +86,8 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn
 from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import _elected_spec_ids
+from planner.agent import AdkCall
+from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     ALIGNMENTS_STATE_KEY,
@@ -393,8 +394,8 @@ class _SeamHarness:
         return cast(SessionState, session.state)
 
     async def events(self) -> list[Event]:
-        """This session's own event history -- what `planner.agent.
-        _elected_spec_ids` reads to find what the user actually chose
+        """This session's own event history -- what `planner.call.
+        elected_spec_ids` reads to find what the user actually chose
         answering `adk_request_input`, and what `ctx.run_node`'s own
         pause-and-resume depends on surviving (`harness.planner_seam`'s
         module docstring)."""
@@ -1099,7 +1100,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     seam node itself resolves no output. The call's own function-call
     event is still on record afterward, in the session's own event history
     rather than a state key this seam has to keep in step
-    (`planner.agent._elected_spec_ids`'s own docstring): it is built and
+    (`planner.agent._session_steps`'s own docstring): it is built and
     appended regardless of the pause, since it is the model's turn, not the
     tool's (deferred, here never built at all) response. But an offer is
     not an election: with no matching `FunctionResponse` on record, nothing
@@ -1131,7 +1132,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
     events = await harness.events()
     fake_tool_context = SimpleNamespace(state={}, session=SimpleNamespace(events=events))
-    assert _elected_spec_ids(fake_tool_context) == frozenset()
+    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset()
 
 
 async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for_an_ask(
@@ -3317,8 +3318,8 @@ async def test_the_planner_runs_on_the_model_and_translation_the_seam_is_given(
 ) -> None:
     translated: list[Plan | None] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        translated.append(load_plan(tool_context.state))
+    async def translate(call: Any) -> dict[str, object]:
+        translated.append(load_plan(call.state))
         return {"translated_by": "the caller"}
 
     proposal = {
@@ -4912,7 +4913,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     candidates ends the entry the way the planner's own `ask_user` does: a
     long-running `adk_request_input` pause, built from the referral's own
     candidates with no model call. The user's answer resumes the run in a
-    request of its own and pairs by id (`planner.agent._elected_spec_ids`).
+    request of its own and pairs by id (`planner.call.elected_spec_ids`).
 
     The cap allows one model call: it proposes the plan again, and its
     translation records a `source_ambiguous` referral naming `SPEC` and
@@ -4970,7 +4971,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     fake_tool_context = SimpleNamespace(
         state={}, session=SimpleNamespace(events=await harness.events())
     )
-    assert _elected_spec_ids(fake_tool_context) == frozenset({SPEC_B})
+    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset({SPEC_B})
 
 
 async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(
@@ -5323,13 +5324,13 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
     )
     drafted: list[Plan] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        draft = load_plan(tool_context.state)
+    async def translate(call: Any) -> dict[str, object]:
+        draft = load_plan(call.state)
         assert draft is not None
         drafted.append(draft)
         assert translated.translation is not None and translated.workflow is not None
         save_plan(
-            tool_context.state,
+            call.state,
             draft.with_translation(
                 translation=translated.translation, workflow=translated.workflow
             ),
@@ -5446,8 +5447,8 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
     )
     drafted: list[Plan] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        draft = load_plan(tool_context.state)
+    async def translate(call: Any) -> dict[str, object]:
+        draft = load_plan(call.state)
         assert draft is not None
         drafted.append(draft)
         assert translated.translation is not None and translated.workflow is not None
@@ -5455,7 +5456,7 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
             r.id for r in translated.evidence_requirements
         }:
             save_plan(
-                tool_context.state,
+                call.state,
                 draft.with_translation(
                     translation=translated.translation, workflow=translated.workflow
                 ),
@@ -5619,8 +5620,8 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
         }
     )
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {
             "kind": kind.value,
             "outcome": outcome,
@@ -5814,8 +5815,8 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
         ],
     )
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {"outcome": "ok"}
 
     surface = BasisCompiles()
@@ -6003,8 +6004,8 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         if total_pin is not None or block["spec_id"] != TOTAL
     }
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {"outcome": "ok"}
 
     surface = BasisCompiles()
@@ -6195,13 +6196,13 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
         ],
     )
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {"outcome": "ok"}
 
     # Each revision is offered as recorded: what it compiles is not this test's.
     monkeypatch.setattr(
-        planner_seam, "declare_ready", lambda answer, ctx: {**answer, "summary": {}}
+        planner_seam, "end_run_when_ready", lambda answer, ctx: {**answer, "summary": {}}
     )
     compiles = fake()
     seam = PlannerSeam(

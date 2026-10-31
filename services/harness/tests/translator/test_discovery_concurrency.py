@@ -48,7 +48,7 @@ from translator.discovery import (
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
     SEARCH,
     DiscoveryRecord,
-    build_discovery_tools,
+    build_discover_source,
     fetch_definitions,
     load_log,
     requirement_revision,
@@ -165,7 +165,7 @@ def _plan(requirement_ids: list[str]) -> Plan:
 
 
 def _discover_source(surface: McpSurface) -> Any:
-    return {t.name: t for t in build_discovery_tools(surface=surface)}["discover_source"].func
+    return build_discover_source(surface=surface)
 
 
 def _never_answers_server() -> FastMCP:
@@ -230,7 +230,7 @@ async def test_concurrent_discovery_keeps_the_budget(context_holding: ContextHol
     results = await asyncio.gather(
         *[
             discover_source(
-                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], tool_context=context
+                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], state=context.state
             )
             for i in range(N_CONCURRENT)
         ]
@@ -255,7 +255,7 @@ async def test_concurrent_discovery_keeps_every_record(context_holding: ContextH
     await asyncio.gather(
         *[
             discover_source(
-                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], tool_context=context
+                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], state=context.state
             )
             for i in range(N_CONCURRENT)
         ]
@@ -280,7 +280,7 @@ async def test_concurrent_discovery_across_distinct_requirements_all_land(
 
     await asyncio.gather(
         *[
-            discover_source(requirement_id=requirement_id, tool_context=context)
+            discover_source(requirement_id=requirement_id, state=context.state)
             for requirement_id in requirement_ids
         ]
     )
@@ -308,7 +308,7 @@ async def test_concurrent_searches_overlap_within_the_budget(
     await asyncio.gather(
         *[
             discover_source(
-                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], tool_context=context
+                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], state=context.state
             )
             for i in range(N_CONCURRENT)
         ]
@@ -374,7 +374,7 @@ async def test_a_concurrent_search_and_fetch_definitions_both_land_in_the_log(
             save_log(context.state, log)
 
     await asyncio.gather(
-        discover_source(requirement_id="annual_debt_service", tool_context=context),
+        discover_source(requirement_id="annual_debt_service", state=context.state),
         _describe_already_found(),
     )
 
@@ -432,11 +432,11 @@ async def test_a_reservation_is_released_when_the_search_raises(
 
     for _ in range(DISCOVERY_CALL_BUDGET_PER_REQUIREMENT):
         with pytest.raises(RuntimeError, match="boom"):
-            await discover_source(requirement_id="annual_debt_service", tool_context=context)
+            await discover_source(requirement_id="annual_debt_service", state=context.state)
 
     assert load_log(context.state).records == ()
 
-    result = await discover_source(requirement_id="annual_debt_service", tool_context=context)
+    result = await discover_source(requirement_id="annual_debt_service", state=context.state)
 
     assert result["outcome"] == "ok"
 
@@ -505,8 +505,8 @@ async def test_the_adk_merge_of_two_concurrent_calls_keeps_both_records() -> Non
     discover_source = _discover_source(surface)
 
     await asyncio.gather(
-        discover_source(requirement_id="req_a", tool_context=context_a),
-        discover_source(requirement_id="req_b", tool_context=context_b),
+        discover_source(requirement_id="req_a", state=context_a.state),
+        discover_source(requirement_id="req_b", state=context_b.state),
     )
 
     merged: dict[str, Any] = deep_merge_dicts(deep_merge_dicts({}, delta_a), delta_b)
@@ -580,7 +580,7 @@ async def test_a_timed_out_search_is_counted_against_the_budget(
     key = requirement_revision(requirement)
 
     results = [
-        await discover_source(requirement_id="annual_debt_service", tool_context=context)
+        await discover_source(requirement_id="annual_debt_service", state=context.state)
         for _ in range(DISCOVERY_CALL_BUDGET_PER_REQUIREMENT + 2)
     ]
 
@@ -618,7 +618,7 @@ async def test_fetch_definitions_records_a_timed_out_describe_without_raising(
     assert isinstance(requirement, DatasetRequirement)
     key = requirement_revision(requirement)
 
-    await discover_source(requirement_id="annual_debt_service", tool_context=context)
+    await discover_source(requirement_id="annual_debt_service", state=context.state)
     log = load_log(context.state)
     source = log.sources["annual_debt_service"][SPEC]
 
@@ -672,19 +672,19 @@ async def test_a_sibling_check_between_release_and_commit_cannot_overspend_the_b
     fired = {"done": False}
 
     async def _record_search_with_sibling_first(
-        tool_context: Any, record: Any, sources: Any = (), **kwargs: Any
+        state: Any, record: Any, sources: Any = (), **kwargs: Any
     ) -> Any:
         if not fired["done"]:
             fired["done"] = True
-            await discover_source(requirement_id=_FOUR_REQUIREMENTS[0], tool_context=tool_context)
-        return await original(tool_context, record, sources, **kwargs)
+            await discover_source(requirement_id=_FOUR_REQUIREMENTS[0], state=state)
+        return await original(state, record, sources, **kwargs)
 
     monkeypatch.setattr(discovery_module, "_record_search", _record_search_with_sibling_first)
 
     await asyncio.gather(
         *[
             discover_source(
-                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], tool_context=context
+                requirement_id=_FOUR_REQUIREMENTS[i % len(_FOUR_REQUIREMENTS)], state=context.state
             )
             for i in range(DISCOVERY_CALL_BUDGET)
         ]
