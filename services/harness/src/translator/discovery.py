@@ -100,6 +100,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal, NamedTuple, cast
 from weakref import WeakValueDictionary
@@ -2166,6 +2167,10 @@ def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
 # stopped keeps them: `harness.graph.switch._restore` puts back the drafting
 # state without them, so the parts Search answered meanwhile stay.
 RESOLVED_STATE_PREFIX = "translator:resolved:"
+# Where the time the call answering a part under `RESOLVED_STATE_PREFIX` was
+# made is kept, under the same sha256, and kept by a failed switch the same
+# way. A part stored with no time reads as answered at no known time.
+RESOLVED_AT_STATE_PREFIX = "translator:resolved_at:"
 
 
 def _answered_part(answer: ToolCallResult) -> Mapping[str, Any] | None:
@@ -2193,7 +2198,7 @@ class _Invocation:
     """
 
     def __init__(self) -> None:
-        self.answers: dict[_CallKey, ToolCallResult] = {}
+        self.answers: dict[_CallKey, Answered] = {}
         self.locks: dict[_CallKey, asyncio.Lock] = {}
 
 
@@ -2204,7 +2209,7 @@ class _Resolving(NamedTuple):
 
     invocation: _Invocation
     state: SessionState | None
-    retryable: dict[_CallKey, ToolCallResult] | None
+    retryable: dict[_CallKey, Answered] | None
 
 
 _current_resolving: ContextVar[_Resolving | None] = ContextVar("resolving", default=None)
@@ -2251,6 +2256,18 @@ def _resolved_key(arguments: Mapping[str, object]) -> str:
     return RESOLVED_STATE_PREFIX + hashlib.sha256(rfc8785.dumps(dict(arguments))).hexdigest()
 
 
+def _resolved_at_key(stored_key: str) -> str:
+    """The session state key the time of the call answering the part under `stored_key` is kept under."""
+    return RESOLVED_AT_STATE_PREFIX + stored_key.removeprefix(RESOLVED_STATE_PREFIX)
+
+
+class Answered(NamedTuple):
+    """A call's answer and the time the call was made, `None` when no time is known."""
+
+    answer: ToolCallResult
+    at: datetime | None
+
+
 async def answered_once(
     tool: ToolId, arguments: Mapping[str, object], call: Callable[[], Awaitable[ToolCallResult]]
 ) -> ToolCallResult:
@@ -2258,9 +2275,21 @@ async def answered_once(
 
     Outside `resolving_once` the call is made.
     """
+    return (await answered_once_at(tool, arguments, call)).answer
+
+
+async def answered_once_at(
+    tool: ToolId, arguments: Mapping[str, object], call: Callable[[], Awaitable[ToolCallResult]]
+) -> Answered:
+    """`answered_once`, with the time the call answering it was made.
+
+    An answer the turn holds keeps the time its call was made, and a part
+    stored with no time answers with none.
+    """
     resolving = _current_resolving.get()
     if resolving is None:
-        return await call()
+        at = datetime.now(UTC)
+        return Answered(await call(), at)
     invocation, state, retryable = resolving
     key = (tool, rfc8785.dumps(dict(arguments)))
     stored_key = _resolved_key(arguments) if tool == RESOLVE_DEFINITION else None
@@ -2272,14 +2301,21 @@ async def answered_once(
             return kept
         stored = state.get(stored_key) if state is not None and stored_key is not None else None
         if isinstance(stored, Mapping):
-            return ToolCallResult(
-                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [stored]}}
+            assert state is not None and stored_key is not None
+            stored_at = state.get(_resolved_at_key(stored_key))
+            return Answered(
+                ToolCallResult(
+                    is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [stored]}}
+                ),
+                datetime.fromisoformat(stored_at) if isinstance(stored_at, str) else None,
             )
-        answer = await call()
+        at = datetime.now(UTC)
+        answered = Answered(await call(), at)
+        answer = answered.answer
         if not (answer.is_error and refusal_retryable(answer)):
-            invocation.answers[key] = answer
+            invocation.answers[key] = answered
         elif stored_key is not None and retryable is not None:
-            retryable[key] = answer
+            retryable[key] = answered
         part = None if answer.is_error else _answered_part(answer)
         if (
             state is not None
@@ -2288,7 +2324,8 @@ async def answered_once(
             and part.get("status") == "definite"
         ):
             state[stored_key] = part
-        return answer
+            state[_resolved_at_key(stored_key)] = at.isoformat()
+        return answered
 
 
 def refusal_retryable(answer: ToolCallResult) -> bool:
@@ -2309,7 +2346,22 @@ async def resolve_definition(
     groups: Sequence[ResolvedGroup] = (),
     scope_entries: Sequence[Mapping[str, Any]] = (),
 ) -> Mapping[str, Any]:
-    """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`.
+    """The part the Search API resolves `identity` to now (`resolve_definition_at`)."""
+    part, _ = await resolve_definition_at(
+        surface, spec_id=spec_id, identity=identity, groups=groups, scope_entries=scope_entries
+    )
+    return part
+
+
+async def resolve_definition_at(
+    surface: ToolSurface,
+    *,
+    spec_id: str,
+    identity: Mapping[str, Any],
+    groups: Sequence[ResolvedGroup] = (),
+    scope_entries: Sequence[Mapping[str, Any]] = (),
+) -> tuple[Mapping[str, Any], datetime | None]:
+    """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`, and the time that call was made.
 
     Inside `resolving_once` a call the turn already made is served its
     answer.
@@ -2331,7 +2383,8 @@ async def resolve_definition(
     data-mcp stores the definition the part carries, on the service `surface`
     reaches, which is the one whose `get_data` retrieves it. The part is
     Search's own, and `resolved_spec` judges whether it is the dataset
-    `spec_id` names.
+    `spec_id` names. A part the turn holds keeps the time its call was made
+    (`answered_once_at`).
 
     Raises:
         DefinitionNotResolvedError: If the call did not complete, data-mcp
@@ -2349,7 +2402,7 @@ async def resolve_definition(
         )
 
     try:
-        answer = await answered_once(RESOLVE_DEFINITION, arguments, call)
+        answer, at = await answered_once_at(RESOLVE_DEFINITION, arguments, call)
     except ToolSurfaceUnavailableError as exc:
         raise DefinitionNotResolvedError(
             str(exc), retryable=True, not_issued=isinstance(exc, NoTimeLeftError)
@@ -2371,7 +2424,7 @@ async def resolve_definition(
     part = _answered_part(answer)
     if part is None:
         raise DefinitionNotResolvedError("Search returns nothing for it", retryable=False)
-    return part
+    return part, at
 
 
 class PartFault(StrEnum):

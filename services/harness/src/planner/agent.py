@@ -125,11 +125,12 @@ from translator.discovery import (
     SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
-    answered_once,
+    answered_once_at,
     call_within_entry,
     load_log,
     refusal_retryable,
     resolve_definition,
+    resolve_definition_at,
     resolved_spec,
 )
 from translator.referral import (
@@ -1748,7 +1749,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
         )
     try:
-        part = await resolve_definition(
+        part, resolved_at = await resolve_definition_at(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
@@ -1780,6 +1781,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                 option_ids=realignment.option_ids,
                 spec_id=spec_id,
                 digest=digest,
+                resolved_at=resolved_at,
             ),
         )
 
@@ -1886,7 +1888,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         for choice in choices
     ]
     try:
-        part = await resolve_definition(
+        part, resolved_at = await resolve_definition_at(
             surface,
             spec_id=spec_id_for(canonicalize(identity)),
             identity=identity,
@@ -1924,7 +1926,12 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         save_aligned_pin(
             into,
             AlignedPin(
-                origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis
+                origin=part_pin,
+                option_ids=(),
+                spec_id=spec_id,
+                digest=digest,
+                whole_axis=axis,
+                resolved_at=resolved_at,
             ),
         )
 
@@ -2193,7 +2200,8 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
     shown to the planner as a source of its own
     (`planner.plan.save_pin_sources`) and held as a
-    `submission.service.SearchedPin` with its digest, so the next proposal
+    `submission.service.SearchedPin` with its digest and the time the
+    search was made, so the next proposal
     pins it and the planner seam stores it as a reading of the conversation
     (`harness.planner_seam.store_searched_pin_readings`). Any other answer is
     held as a search that settled on nothing, under Search's part status, or
@@ -2201,7 +2209,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     (`submission.service._aligned_bases`). The search takes the time the
     translator's own discovery gives one
     (`translator.discovery.call_within_entry`), and is made once an
-    invocation (`translator.discovery.answered_once`), so a read the
+    invocation (`translator.discovery.answered_once_at`), so a read the
     proposal's other refused search discarded (`with_source_reads`) is not
     repeated.
 
@@ -2213,7 +2221,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     """
     arguments = {"parts": [unpinned.part]}
     try:
-        answer = await answered_once(
+        answer, searched_at = await answered_once_at(
             SEARCH,
             arguments,
             lambda: call_within_entry(surface, tool=SEARCH, arguments=arguments),
@@ -2239,6 +2247,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
         else "unreadable",
         asked_roles=unpinned.asked_roles,
         open_roles=unpinned.open_roles,
+        searched_at=searched_at,
     )
     if not isinstance(spec_id, str) or not isinstance(envelope, dict):
         return lambda into: save_searched_pin(into, searched)

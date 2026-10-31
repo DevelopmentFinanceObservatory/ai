@@ -25,6 +25,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -117,6 +118,7 @@ from planner.plan import (
     Plan,
     PlanStatus,
     QuotientRequirement,
+    RefusedSpec,
     RequirementSide,
     ResolvedBy,
     SessionState,
@@ -1604,32 +1606,67 @@ async def test_the_orchestrator_planner_first_request_carries_every_search_readi
     assert list(pin_sources(state)) == [SPEC, SPEC_B, SPEC_C]
 
 
+# When `SPEC`'s definite reading was observed, and a day before.
+_SEARCHED_AT = datetime(2000, 1, 2, tzinfo=UTC)
+_REFUSED_BEFORE = datetime(2000, 1, 1, tzinfo=UTC)
+
+
 @pytest.mark.parametrize(
-    ("refusal", "kept"),
-    [(None, [SPEC, SPEC_B, SPEC_C]), (_rediscovery_refusal(SPEC), [SPEC_B, SPEC_C])],
-    ids=["no_refusal", "executor_refused_spec"],
+    ("refusal", "earlier", "kept"),
+    [
+        (None, None, [SPEC, SPEC_B, SPEC_C]),
+        (_rediscovery_refusal(SPEC), None, [SPEC_B, SPEC_C]),
+        (None, SPEC, [SPEC_B, SPEC_C]),
+        (None, "open_role_unavailable", [SPEC_B, SPEC_C]),
+        (None, "upstream_version_changed", [SPEC, SPEC_B, SPEC_C]),
+    ],
+    ids=[
+        "no_refusal",
+        "executor_refused_spec",
+        "stored_bare",
+        "refused_for_good",
+        "refreshed_since",
+    ],
 )
 async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
     refusal: dict[str, Any] | None,
+    earlier: str | None,
     kept: list[str],
 ) -> None:
     """The definite and the fetched chosen reading settle their own ids; an id
     only offered as a candidate is shown unsettled. Each carries the block and
     warning codes `search` stored for it, and the parties its settling reading asked
-    for. A spec the executor refused is left out."""
+    for. A spec the executor refused is left out and named in the brief's avoid
+    sentence. `earlier` is `SPEC` refused before its definite reading was
+    observed, stored bare or for a code, answered by an amendment: one refused
+    for a code a refreshed definition recovers from is kept and named nowhere."""
     plan = _translated_plan(decision, requirement, derived_requirement)
-    stored = {
+    stored: dict[str, Any] = {
         ORCHESTRATOR_SPECS_KEY: {
             spec_id: {"spec_id": spec_id} for spec_id in (SPEC, SPEC_B, SPEC_C)
         },
         ORCHESTRATOR_SPEC_WARNINGS_KEY: {SPEC: [{"code": "role_scope_defaulted"}]},
     }
+    if earlier is not None:
+        stored[REFUSED_SPECS_STATE_KEY] = [
+            SPEC
+            if earlier == SPEC
+            else RefusedSpec(spec_id=SPEC, code=earlier, refused_at=_REFUSED_BEFORE).model_dump(
+                mode="json"
+            )
+        ]
+    readings = _turn_readings()
+    readings[0]["observed_at"] = _SEARCHED_AT.isoformat()
 
-    _, state = await _first_request_with_readings(
-        _turn_readings(), plan=plan, stored=stored, refusal=refusal
+    text, state = await _first_request_with_readings(
+        readings,
+        plan=plan,
+        stored=stored,
+        refusal=refusal,
+        amendment="only since 2015" if earlier is not None else None,
     )
 
     expected = {
@@ -1643,6 +1680,7 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
         SPEC_C: PinSource(block={"spec_id": SPEC_C}, settled=True),
     }
     assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
+    assert ("Do not propose" in text) is (SPEC not in kept)
 
 
 # A spec Search offered as another count of `SPEC`'s reading.

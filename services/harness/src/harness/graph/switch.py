@@ -108,6 +108,7 @@ from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
 from submission.service import part_scope, statement
 from translator.discovery import (
+    RESOLVED_AT_STATE_PREFIX,
     RESOLVED_STATE_PREFIX,
     DefinitionNotResolvedError,
     requirement_parties,
@@ -161,7 +162,8 @@ _RETRYABLE_REVISION_CODES = frozenset(
 
 # The state the planner seam and the translator keep while drafting, which a
 # revision that fails leaves as it found. The parts Search answered this turn
-# (`RESOLVED_STATE_PREFIX`) are not drafting state. Each holds whatever the
+# (`RESOLVED_STATE_PREFIX`) and the times they were answered
+# (`RESOLVED_AT_STATE_PREFIX`) are not drafting state. Each holds whatever the
 # switch's outcome, so a failed switch keeps them.
 _DRAFTING_PREFIXES = ("planner:", "translator:")
 # The other state a revision writes, which a switch that fails or is stopped
@@ -934,7 +936,7 @@ def _pin_source(
 
 def _restorable_state(ctx: Context) -> dict[str, Any]:
     """A copy of the state a switch that fails, is stopped or raises puts back:
-    the drafting state (`_DRAFTING_PREFIXES`, less `RESOLVED_STATE_PREFIX`) and
+    the drafting state (`_DRAFTING_PREFIXES`, less the resolved parts and their times) and
     `_RESTORED_KEYS`."""
     state = ctx.state.to_dict()
     kept = {key: value for key, value in state.items() if _drafting(key)}
@@ -953,7 +955,9 @@ def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
 
 def _drafting(key: str) -> bool:
     """Whether `key` is drafting state a failed switch puts back (`_DRAFTING_PREFIXES`)."""
-    return key.startswith(_DRAFTING_PREFIXES) and not key.startswith(RESOLVED_STATE_PREFIX)
+    return key.startswith(_DRAFTING_PREFIXES) and not key.startswith(
+        (RESOLVED_STATE_PREFIX, RESOLVED_AT_STATE_PREFIX)
+    )
 
 
 async def apply_stored_choice(

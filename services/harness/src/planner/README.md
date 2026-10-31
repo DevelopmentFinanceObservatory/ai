@@ -179,7 +179,13 @@ withheld source. The planner makes the referral's `repair` or asks the user.
 
 `propose_plan` refuses as `source_not_offered` a plan that retrieves a
 spec_id the executor refused since the session's last first draft
-(`planner.plan.REFUSED_SPECS_STATE_KEY`). The rule covers the pin a
+(`planner.plan.REFUSED_SPECS_STATE_KEY`), unless the refusal's code is one
+a refreshed or re-registered definition recovers from
+(`executor.classify.RECOVERABLE_SPEC_CODES`) and a Search call made after the
+refusal settled on that spec_id: a reading of the conversation, the search
+for an input the planner pinned nothing for, or a compile
+(`submission.service.refused_in_force`). An answer the turn served from
+before the refusal keeps its own time. The rule covers the pin a
 requirement it states or carries names
 (`submission.service._refused_spec_pinned`), and the pin the plan records
 for it. That is the copy over the requirement's period that `_window_pins`

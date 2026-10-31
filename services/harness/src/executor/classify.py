@@ -141,6 +141,19 @@ REDISCOVERY_CODES = frozenset(
     {"upstream_version_changed", "definition_not_held", "open_role_unavailable"}
 )
 
+# The `REDISCOVERY_CODES` whose refused spec_id can serve again once Search
+# answers it. A spec_id hashes a definition's content, so a refreshed or
+# re-registered definition keeps it, and a later Search answer settling on it
+# (`submission.service.refused_in_force`) shows it held again:
+# - `upstream_version_changed`: the upstream refreshed while the run read it;
+#   a later read meets the refreshed version.
+# - `definition_not_held`: the definition left the store; data-mcp stores the
+#   definition of every spec_id Search answers, so one answered after the
+#   refusal is held again.
+# `open_role_unavailable` is left out: the StatVars its identity elects declare
+# no role on the open axis, so the same spec_id refuses every time.
+RECOVERABLE_SPEC_CODES = frozenset({"upstream_version_changed", "definition_not_held"})
+
 TRANSIENT_CODES = frozenset(
     {
         "upstream_error",

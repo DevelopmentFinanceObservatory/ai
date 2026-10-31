@@ -47,6 +47,7 @@ import logging
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast, get_args
@@ -68,6 +69,7 @@ from compiler.sources import (
 )
 from data_mcp.scope import ChoiceOrigin, ScopeAxis
 from data_mcp.settings import Settings as DataMcpSettings
+from harness.graph.state import conversation_readings
 from harness.plan_display import plan_words
 from harness.scope_choices import (
     ANY_REPORTERS,
@@ -90,6 +92,7 @@ from harness.scope_choices import (
 )
 from harness.sentences import PlanWords
 from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_records import refusals_in_force, settled_by_readings
 from planner.parties import (
     PARTY_ROLES,
     FlowSide,
@@ -1407,6 +1410,32 @@ def _removed_asks_refused(
     return None
 
 
+def refused_in_force(state: SessionState, readings: Iterable[Mapping[str, Any]]) -> frozenset[str]:
+    """Every spec_id the executor refused since the entry's first draft that no later search lifted (`harness.turn_records.refusals_in_force`).
+
+    A search settles a spec_id as a reading of the conversation (`readings`),
+    as the dataset Search settled on for an input the planner pinned none for
+    (`SearchedPin`), or as a compiled pin (`planner.plan.AlignedPin`), each
+    at the time it was made.
+    """
+    refused = load_refused_specs(state)
+    if not refused:
+        return frozenset()
+    return refusals_in_force(
+        refused,
+        [
+            *settled_by_readings(readings),
+            *((pin.spec_id, pin.searched_at) for pin in searched_pins(state) if pin.spec_id),
+            *((pin.spec_id, pin.resolved_at) for pin in aligned_pins(state)),
+        ],
+    )
+
+
+def _refused_in_force(view: SessionView) -> frozenset[str]:
+    """`refused_in_force` over `view`'s state and the conversation's readings."""
+    return refused_in_force(view.state, conversation_readings(view.state))
+
+
 def _refused_spec_pinned(
     requirements: Sequence[EvidenceRequirement], view: SessionView
 ) -> dict[str, object] | None:
@@ -1414,11 +1443,11 @@ def _refused_spec_pinned(
 
     `requirements` are those the plan states once the patch lands, carried
     ones included, with each pin as the planner states it. The executor's
-    refusals since the entry's first draft (`load_refused_specs`) are left
-    out of the pin sources and named in the brief, so a pin of one would
-    fail the same way again.
+    refusals since the entry's first draft that no later search lifted
+    (`_refused_in_force`) are left out of the pin sources and named in the
+    brief, so a pin of one would fail the same way again.
     """
-    refused = load_refused_specs(view.state)
+    refused = _refused_in_force(view)
     for requirement in requirements:
         if (
             isinstance(requirement, DatasetRequirement)
@@ -1457,7 +1486,7 @@ def _refused_spec_retrieved(
     copy by the requirement it copies, and the pin it states, which
     `_refused_spec_pinned` has already passed, or says it states none.
     """
-    refused = load_refused_specs(view.state)
+    refused = _refused_in_force(view)
     if not refused:
         return None
     origins = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
@@ -4235,7 +4264,10 @@ class SearchedPin(StrictModel):
     the status Search answered the part with (`definite`, `ambiguous`,
     `candidates`, `no_data`), `refused` for a refusal that cannot succeed
     later, or `unreadable` for an answer holding no one part. `asked_roles` and `open_roles` are the parties the search named
-    and held open.
+    and held open. `searched_at` is when the search was made, kept
+    unchanged when the invocation served its answer again
+    (`translator.discovery.answered_once_at`), and `None` for a search held
+    with no time.
     """
 
     requirement_key: str
@@ -4244,6 +4276,7 @@ class SearchedPin(StrictModel):
     digest: dict[str, Any] | None = None
     asked_roles: tuple[str, ...] = ()
     open_roles: tuple[str, ...] = ()
+    searched_at: datetime | None = Field(default=None, exclude_if=lambda at: at is None)
 
 
 def searched_pins(state: SessionState) -> tuple[SearchedPin, ...]:

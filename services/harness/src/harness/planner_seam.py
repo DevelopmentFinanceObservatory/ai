@@ -55,7 +55,8 @@ import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import Any, NamedTuple, cast
 
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
@@ -91,6 +92,7 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    RefusedSpec,
     SessionState,
     UnsupportedOperation,
     clear_plan,
@@ -104,6 +106,7 @@ from planner.plan import (
     load_asks_across_years,
     load_plan,
     load_plan_rounds,
+    load_refused_specs,
     record_optional_decline,
     record_unsupported,
     save_amendment_entry,
@@ -111,6 +114,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    save_refused_specs,
     windowed_pins,
 )
 from planner.records import Severity
@@ -124,6 +128,7 @@ from submission.service import (
     Proposal,
     SourceReadings,
     pinned_sources,
+    refused_in_force,
     searched_pins,
     submit,
 )
@@ -240,8 +245,9 @@ this text and do not read a page shown here again.
 """
 
 # Every later amend or replan call leaves the spec_ids in
-# `REFUSED_SPECS_STATE_KEY` out of the pin sources and names them in its
-# brief's avoid sentence (`_avoid_sentence`). This is why that sentence says
+# `REFUSED_SPECS_STATE_KEY` that no later search lifted
+# (`submission.service.refused_in_force`) out of the pin sources and names
+# them in its brief's avoid sentence (`_avoid_sentence`). This is why that sentence says
 # a spec in `REFUSED_SPECS_STATE_KEY` was refused, when this call's refusal
 # does not name it.
 _REFUSED_EARLIER = "on an earlier run"
@@ -633,15 +639,16 @@ class PlannerSeam:
         with resolving_once(cast(SessionState, ctx.state)):
             try:
                 # The executor's refusals accumulate across the replans after
-                # a first draft. A resume passes this call's refusal again,
-                # which adds nothing.
-                excluded = sorted(
-                    {
-                        *ctx.session.state.get(REFUSED_SPECS_STATE_KEY, ()),
-                        *(spec_id for spec_id, _ in _refused_specs(refusal)),
-                    }
+                # a first draft, each with its code and the time this entry
+                # began, and the ones no later search lifted stay out of the
+                # pins (`submission.service.refused_in_force`). A resume
+                # passes this call's refusal again, which adds nothing.
+                _record_refusal(
+                    cast(SessionState, ctx.session.state),
+                    refusal,
+                    resumed=bool(ctx.resume_inputs),
                 )
-                ctx.session.state[REFUSED_SPECS_STATE_KEY] = excluded
+                excluded = sorted(refused_in_force(cast(SessionState, ctx.session.state), readings))
                 # Every spec_id the planner's brief shows it, less the refused
                 # ones, written on every entry so `propose_plan` reads it
                 # (`PIN_SOURCES_STATE_KEY`). A pin of a shown one reuses its
@@ -1406,8 +1413,8 @@ class PlannerSeam:
         each with the parties `ask_breakdowns` says it breaks down by and
         marked when `asks_across_years` numbers it or `dropped`, the plan
         being changed's `planner.plan.Plan.dropped_asks`, does. `refused` is
-        every spec_id the executor refused since the entry's first draft,
-        which the ask names (`_ask_text`).
+        every spec_id the executor refused since the entry's first draft
+        that no later search lifted, which the ask names (`_ask_text`).
 
         The question is the user's own words. Nothing bounds its length on the
         wire, so it renders cut to `MAX_QUESTION_CHARS`
@@ -2427,7 +2434,33 @@ def _earned_decline_sentence(earned: Collection[UnsupportedOperation]) -> str:
     )
 
 
-def _refused_specs(refusal: dict[str, Any] | None) -> list[tuple[str, str]]:
+def _record_refusal(state: SessionState, refusal: dict[str, Any] | None, *, resumed: bool) -> None:
+    """Hold each spec_id `refusal` names (`_refused_specs`) as refused now, with its code.
+
+    One refused before is held from now, so a search earlier than this
+    refusal lifts it no longer. A `resumed` entry answers the refusal it
+    recorded when it began, and keeps the time held for each spec_id. Nothing
+    is written when `refusal` names no spec_id.
+    """
+    held = {spec.spec_id: spec for spec in load_refused_specs(state)}
+    named = [spec for spec in _refused_specs(refusal) if not resumed or spec.spec_id not in held]
+    if not named:
+        return
+    now = datetime.now(UTC)
+    for spec in named:
+        held[spec.spec_id] = RefusedSpec(spec_id=spec.spec_id, code=spec.code, refused_at=now)
+    save_refused_specs(state, held.values())
+
+
+class _RefusedSource(NamedTuple):
+    """A spec_id a refusal names as refused, its code, and why in the refusal's own words."""
+
+    spec_id: str
+    code: str | None
+    detail: str
+
+
+def _refused_specs(refusal: dict[str, Any] | None) -> list[_RefusedSource]:
     """Every `spec_id` a refusal names as refused, and why: the primary's own,
     then each of its `also_stopped` siblings' (`harness.graph.execute`'s `_replan_refusal`),
     in that order.
@@ -2451,17 +2484,18 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[tuple[str, str]]:
     return [spec for payload in payloads for spec in _one_refused_spec(payload)]
 
 
-def _one_refused_spec(payload: object) -> list[tuple[str, str]]:
-    """The `(spec_id, why)` one refusal payload names as refused, if any."""
+def _one_refused_spec(payload: object) -> list[_RefusedSource]:
+    """The spec one refusal payload names as refused, if any."""
     if not isinstance(payload, dict):
         return []
     spec_id = payload.get("spec_id")
     if not isinstance(spec_id, str) or not spec_id:
         return []
     nested = payload.get("refusal")
+    code = nested.get("code") if isinstance(nested, dict) else None
     message = nested.get("message") if isinstance(nested, dict) else None
     detail = message if isinstance(message, str) and message else "refused"
-    return [(spec_id, detail)]
+    return [_RefusedSource(spec_id, code if isinstance(code, str) and code else None, detail)]
 
 
 def _refused_with_earlier(
@@ -2470,7 +2504,7 @@ def _refused_with_earlier(
     """Every spec the executor refused, and why: the ones `refusal` names
     (`_refused_specs`), each once, then each spec_id in `earlier` it does
     not name, refused on an earlier run of the entry."""
-    named = dict(_refused_specs(refusal))
+    named = {spec.spec_id: spec.detail for spec in _refused_specs(refusal)}
     return [
         *named.items(),
         *((spec_id, _REFUSED_EARLIER) for spec_id in earlier if spec_id not in named),

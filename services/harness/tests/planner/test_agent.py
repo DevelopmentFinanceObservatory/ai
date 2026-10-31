@@ -24,7 +24,7 @@ import inspect
 import json
 import logging
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -53,7 +53,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import _api_client, errors, types
-from harness.graph.state import APPROVE_INTERRUPT, store_search
+from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
@@ -63,7 +63,7 @@ from harness.sentences import PlanWords, refusal_reason, refusal_sentence
 from harness.studio_state import _turn_identities
 from harness.tool_contracts import reading_facts
 from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
-from harness.turn_records import RecordedIdentity, _periods
+from harness.turn_records import RecordedIdentity, SearchReading, _periods
 from planner import agent as planner_agent
 from planner.agent import (
     BRIEF_STATE_KEY,
@@ -121,6 +121,7 @@ from planner.plan import (
     PlanStatus,
     QuotientRequirement,
     RankRequirement,
+    RefusedSpec,
     RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
@@ -190,6 +191,7 @@ from submission.prices_choice import PRICES_OPTIONS, Parts, PricesChoice, prices
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    SEARCHED_PINS_STATE_KEY,
     AlignedPin,
     Realignment,
     SourceReadings,
@@ -4847,6 +4849,42 @@ def test_a_scope_decision_moved_to_a_copy_over_another_period_keeps_its_choice()
 # --- a calculation's inputs on one measure basis ---
 
 
+# The time each refusal `_refuse_then_search` holds was recorded, a day before
+# the search reading it stores, and a day after.
+_SEARCHED_AT = datetime(2026, 1, 2, tzinfo=UTC)
+_REFUSED_BEFORE = datetime(2026, 1, 1, tzinfo=UTC)
+_REFUSED_AFTER = datetime(2026, 1, 3, tzinfo=UTC)
+
+
+def _refuse(
+    ctx: _FakeToolContext, refused: Sequence[str], code: str | None, refused_at: datetime
+) -> None:
+    """Hold each of `refused` as refused for `code` at `refused_at`, or as a bare
+    spec_id when `code` is `None`."""
+    ctx.state[REFUSED_SPECS_STATE_KEY] = [
+        spec_id
+        if code is None
+        else RefusedSpec(spec_id=spec_id, code=code, refused_at=refused_at).model_dump(mode="json")
+        for spec_id in refused
+    ]
+
+
+def _refuse_then_search(
+    ctx: _FakeToolContext,
+    refused: Sequence[str],
+    code: str | None,
+    refused_at: datetime = _REFUSED_BEFORE,
+) -> None:
+    """`_refuse`, and a search reading settling on each of `refused` at `_SEARCHED_AT`."""
+    _refuse(ctx, refused, code, refused_at)
+    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
+        SearchReading(
+            text="aid", status="definite", spec_id=spec_id, observed_at=_SEARCHED_AT
+        ).model_dump(mode="json")
+        for spec_id in refused
+    ]
+
+
 def _share_of_health(
     propose: Callable[..., Any],
     ctx: _FakeToolContext,
@@ -6150,29 +6188,61 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     assert load_plan(ctx.state) is None
 
 
+@pytest.mark.parametrize(
+    ("code", "searched_first", "admitted"),
+    [
+        (None, False, False),
+        ("open_role_unavailable", False, False),
+        ("open_role_unavailable", True, False),
+        ("upstream_version_changed", True, False),
+        ("upstream_version_changed", False, True),
+    ],
+    ids=[
+        "stored-bare",
+        "permanent",
+        "permanent-searched-first",
+        "served-from-before-refusal",
+        "searched-after-refusal",
+    ],
+)
 async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_refused(
-    decision: DecisionFactory,
+    decision: DecisionFactory, code: str | None, searched_first: bool, admitted: bool
 ) -> None:
     """Search settles the unpinned US total on a spec_id the executor refused in
     this entry. The plan is refused, saying the total states no pin and Search
-    settles it on the refused spec_id, with no stated pin in `detail`."""
+    settles it on the refused spec_id, with no stated pin in `detail`. A spec_id
+    refused for a code a refreshed definition recovers from is admitted when
+    Search is asked after the refusal, and refused when an earlier entry's
+    search from before the refusal (`searched_first`) is served instead."""
     surface = BasisCompiles(
         searched={
             "status": "definite",
             "spec": basis_block(TOTAL, narrow=False, active="measure_basis:gross"),
         }
     )
+    propose = _tools_reading(surface)["propose_plan"].func
     ctx = _FakeToolContext()
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
-    ctx.state[REFUSED_SPECS_STATE_KEY] = [TOTAL]
+    if searched_first:
+        earlier = _FakeToolContext()
+        _show_blocks(earlier, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+        first = await _share_of_health(propose, earlier, decision(), total=None)
+        assert first["outcome"] == Outcome.OK.value, first
+        ctx.state[SEARCHED_PINS_STATE_KEY] = earlier.state[SEARCHED_PINS_STATE_KEY]
+        surface.tools.clear()
+        _refuse(ctx, [TOTAL], code, datetime.now(UTC))
+    else:
+        _refuse(ctx, [TOTAL], code, datetime.now(UTC) - timedelta(seconds=1))
 
-    refused = await _share_of_health(
-        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
-    )
+    result = await _share_of_health(propose, ctx, decision(), total=None)
 
-    assert refused["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, refused
-    assert refused["detail"] == {"requirement_id": "total", "retrieved": TOTAL}
-    assert "'total' states no pin" in str(refused["message"])
+    assert ("search" in surface.tools) is not searched_first
+    if admitted:
+        assert result["outcome"] == Outcome.OK.value, result
+        return
+    assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
+    assert result["detail"] == {"requirement_id": "total", "retrieved": TOTAL}
+    assert "'total' states no pin" in str(result["message"])
     assert load_plan(ctx.state) is None
 
 
@@ -18511,32 +18581,46 @@ def test_a_dropped_ask_comes_back_only_by_the_users_amendment(
 
 @pytest.mark.usefixtures("aid_on_record")
 @pytest.mark.parametrize(
-    ("pin", "refused", "detail"),
+    ("pin", "refused", "code", "detail"),
     [
-        (SPEC, (), None),
-        (SPEC, (SPEC,), {"spec_id": SPEC}),
-        (_AID_SPEC, (), None),
+        (SPEC, (), None, None),
+        (SPEC, (SPEC,), None, {"spec_id": SPEC}),
+        (SPEC, (SPEC,), "open_role_unavailable", {"spec_id": SPEC}),
+        (SPEC, (SPEC,), "upstream_version_changed", None),
+        (_AID_SPEC, (), None, None),
         (
             _AID_SPEC,
             (_AID_2020_2024_SPEC,),
+            None,
             {"spec_id": _AID_SPEC, "retrieved": _AID_2020_2024_SPEC},
         ),
+        (_AID_SPEC, (_AID_2020_2024_SPEC,), "definition_not_held", None),
     ],
-    ids=["shown", "executor-refused", "windowed", "windowed-copy-refused"],
+    ids=[
+        "shown",
+        "executor-refused",
+        "refused-for-good",
+        "refreshed",
+        "windowed",
+        "windowed-copy-refused",
+        "windowed-copy-re-registered",
+    ],
 )
 def test_a_carried_pin_the_executor_refused_is_refused(
     decision: DecisionFactory,
     requirements: RequirementPair,
     pin: str,
     refused: tuple[str, ...],
+    code: str | None,
     detail: dict[str, str] | None,
 ) -> None:
     """A replan that leaves a requirement pinned to a spec_id the executor
-    refused in this entry is refused, naming the requirement and the spec_id.
-    A pin recorded over other years retrieves its copy over the requirement's
-    2020 to 2024, and a refused copy is refused the same way, naming the pin
-    the planner states and the copy. With no refusal on record the same patch
-    is recorded."""
+    refused in this entry is refused, naming the requirement and the spec_id,
+    though a search settled on it after the refusal. A pin recorded over other
+    years retrieves its copy over the requirement's 2020 to 2024, and a refused
+    copy is refused the same way, naming the pin the planner states and the
+    copy. With no refusal on record, or one for a code a refreshed or
+    re-registered definition recovers from, the same patch is recorded."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     dataset, derived = requirements
@@ -18547,7 +18631,7 @@ def test_a_carried_pin_the_executor_refused_is_refused(
         tools, ctx, decision(fixes=DecisionFixes(source_spec_id=pin)), [pinned, derived]
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.state[REFUSED_SPECS_STATE_KEY] = list(refused)
+    _refuse_then_search(ctx, refused, code)
 
     replan = _propose(
         tools,
