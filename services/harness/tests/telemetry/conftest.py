@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import sys
 import threading
 from collections.abc import Iterator
@@ -106,7 +107,12 @@ def _rebind_adk_tracers(replaced: list[tuple[Any, str, Any]]) -> None:
 
 @pytest.fixture
 def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    for var in (*telemetry._LANGFUSE_ENV_VARS, "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_SDK_DISABLED"):
+    for var in (
+        *telemetry._LANGFUSE_ENV_VARS,
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_SDK_DISABLED",
+        telemetry._CAPTURE_MESSAGE_CONTENT_VAR,
+    ):
         monkeypatch.delenv(var, raising=False)
     saved_provider = trace._TRACER_PROVIDER
     saved_once = trace._TRACER_PROVIDER_SET_ONCE
@@ -120,6 +126,9 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         yield
     finally:
         LangfuseResourceManager.reset()
+        # `init_telemetry` sets this variable when it was unset, which
+        # `monkeypatch` does not record; a value it removed above it restores.
+        os.environ.pop(telemetry._CAPTURE_MESSAGE_CONTENT_VAR, None)
         trace._TRACER_PROVIDER = saved_provider
         trace._TRACER_PROVIDER_SET_ONCE = saved_once
         _rebind_adk_tracers(replaced_tracers)

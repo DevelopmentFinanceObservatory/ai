@@ -41,6 +41,10 @@ from ..orchestrator_fakes import orchestrator_app, plan_call
 CONVERSATION = "conv_trace_export_01"
 AUTH = {"Authorization": "Bearer test"}
 QUESTION = "comprehensive overview of life expectancy in Kenya"
+ANSWER = "Life expectancy in Kenya rose."
+# The name of the stand-in for an ADK model call span in the tests that drive
+# `_sse_stream` with a scripted segment.
+MODEL_CALL = "generate_content gemini-x"
 
 
 def _attribute(span: Span, key: str) -> str | int | float | bool | None:
@@ -52,6 +56,12 @@ def _attribute(span: Span, key: str) -> str | int | float | bool | None:
 
 def _attribute_keys(span: Span) -> set[str]:
     return {attribute.key for attribute in span.attributes}
+
+
+def _message_parts(span: Span, key: str) -> list[dict[str, Any]]:
+    """The parts of every message in the GenAI messages attribute `key`."""
+    messages = json.loads(str(_attribute(span, key)))
+    return [part for message in messages for part in message["parts"]]
 
 
 def _spans_with_an_unexported_parent(spans: list[Span]) -> list[Span]:
@@ -108,8 +118,8 @@ async def _abandon_a_response_at_its_second_frame(
     second `yield`; nothing here closes it, so the event loop does."""
 
     async def segment() -> AsyncGenerator[MessageDelta]:
-        with trace.get_tracer("test.segment").start_as_current_span("call_llm") as span:
-            span.set_attribute("gen_ai.system", "test")
+        with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
+            span.set_attribute("gen_ai.operation.name", "generate_content")
         yield MessageDelta(event="message.delta", seq=0, text="one")
         conversation.close_turn(final_text="one")
         yield MessageDelta(event="message.delta", seq=1, text="two")
@@ -179,7 +189,7 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
 
     spans = fake_langfuse.spans()
     (turn,) = [span for span in spans if span.name == "turn"]
-    (call,) = [span for span in spans if span.name == "call_llm"]
+    (call,) = [span for span in spans if span.name == MODEL_CALL]
     assert turn.end_time_unix_nano > 0
     assert call.parent_span_id == turn.span_id
     assert conversation.cancel_event is None
@@ -194,7 +204,7 @@ def _planned_app() -> Any:
     planner, then answers once the approved plan is handed back."""
     app, _model = orchestrator_app(
         plan_call(QUESTION),
-        types.Part.from_text(text="Life expectancy in Kenya rose."),
+        types.Part.from_text(text=ANSWER),
         executor=ScriptedExecutor(),
         tool_surface=ScriptedSurface(),
     )
@@ -211,15 +221,9 @@ async def _stream(client: httpx2.AsyncClient, path: str, body: dict[str, Any]) -
         ]
 
 
-async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
-    fake_langfuse: Any,
-) -> None:
-    """Both segments of a turn run ADK's real workflow. Every span on
-    the wire has its parent on the wire too, except `turn`, whose parent is the
-    synthetic one the SDK creates for a seeded trace id; ADK's two `invocation`
-    spans are exported, and nothing else without attributes is. `turn` carries
-    the question and the answer as its input and output."""
-    init_telemetry(service_name="harness")
+async def _approve_a_planned_turn() -> list[dict]:
+    """Ask the planned studio `QUESTION`, approve the plan it proposes, and
+    return the frames of the approval's stream."""
     app = _planned_app()
     base = {"schema_version": 1, "conversation_id": CONVERSATION}
     async with httpx2.AsyncClient(
@@ -247,28 +251,60 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
             },
         )
     assert second[-1]["event"] == "done"
+    return second
+
+
+async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
+    fake_langfuse: Any,
+) -> None:
+    """Both segments of a turn run ADK's real workflow. Each segment's
+    `invoke_workflow` span is a child of `turn`, and every span on the wire has
+    its parent on the wire too, except `turn`, whose parent is the synthetic one
+    the SDK creates for a seeded trace id. Every exported span is the SDK's own
+    or carries `gen_ai.*` attributes. `turn` carries the question and the
+    answer as its input and output."""
+    init_telemetry(service_name="harness")
+    second = await _approve_a_planned_turn()
 
     scoped = fake_langfuse.scoped_spans()
     spans = [span for _, span in scoped]
     (turn,) = [span for span in spans if span.name == "turn"]
     assert turn.trace_id.hex() == Langfuse.create_trace_id(seed=second[-1]["trace_id"])
     assert {span.trace_id for span in spans} == {turn.trace_id}
-    invocations = [span for span in spans if span.name == "invocation"]
     workflows = [span for span in spans if span.name.startswith("invoke_workflow")]
-    assert len(invocations) == len(workflows) == 2
-    assert {span.parent_span_id for span in invocations} == {turn.span_id}
-    assert {span.parent_span_id for span in workflows} == {span.span_id for span in invocations}
+    assert len(workflows) == 2
+    assert {span.parent_span_id for span in workflows} == {turn.span_id}
     assert _spans_with_an_unexported_parent(spans) == [turn]
     # The turn's question and answer are the trace's overall input and output.
     assert _attribute(turn, "langfuse.observation.input") == QUESTION
     assert _attribute(turn, "langfuse.observation.output")
-    # The filter drops attribute-less spans other than ADK's `invocation`.
     for scope, span in scoped:
-        assert (
-            scope == "langfuse-sdk"
-            or span.name == "invocation"
-            or any(key.startswith("gen_ai") for key in _attribute_keys(span))
+        assert scope == "langfuse-sdk" or any(
+            key.startswith("gen_ai") for key in _attribute_keys(span)
         ), (scope, span.name)
+
+
+async def test_a_model_call_exports_its_prompt_and_response(fake_langfuse: Any) -> None:
+    """With no content setting in the environment, the `generate_content` span
+    of the orchestrator's first call carries the user's question in its input
+    messages and the `plan` call it made in its output messages, and the span
+    of its last call carries the answer, so Langfuse shows each generation's
+    prompt and response."""
+    init_telemetry(service_name="harness")
+    await _approve_a_planned_turn()
+
+    calls = sorted(
+        (span for span in fake_langfuse.spans() if span.name.startswith("generate_content")),
+        key=lambda span: span.start_time_unix_nano,
+    )
+    assert len(calls) >= 2
+    assert {"type": "text", "content": QUESTION} in _message_parts(
+        calls[0], "gen_ai.input.messages"
+    )
+    assert [part["name"] for part in _message_parts(calls[0], "gen_ai.output.messages")] == ["plan"]
+    assert {"type": "text", "content": ANSWER} in _message_parts(
+        calls[-1], "gen_ai.output.messages"
+    )
 
 
 # --- a client that leaves while the turn waits for the next frame -----------------
@@ -435,8 +471,8 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_ca
     running = asyncio.Event()
 
     async def segment() -> AsyncGenerator[MessageDelta]:
-        with trace.get_tracer("test.segment").start_as_current_span("call_llm") as span:
-            span.set_attribute("gen_ai.system", "test")
+        with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
+            span.set_attribute("gen_ai.operation.name", "generate_content")
         yield MessageDelta(event="message.delta", seq=0, text="one")
         running.set()
         await asyncio.Event().wait()  # a slow tool call
@@ -456,7 +492,7 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_ca
 
     spans = fake_langfuse.spans()
     (turn,) = [span for span in spans if span.name == "turn"]
-    (call,) = [span for span in spans if span.name == "call_llm"]
+    (call,) = [span for span in spans if span.name == MODEL_CALL]
     assert turn.end_time_unix_nano > 0
     assert call.parent_span_id == turn.span_id
     assert conversation.turn_recorded

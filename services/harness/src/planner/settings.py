@@ -52,9 +52,11 @@ def drop_thought_parts(
 ) -> LlmResponse | None:
     """Strip a generation's thought-summary parts before they become session history.
 
-    ADK traces the raw response (`google.adk.telemetry.tracing.trace_call_llm`)
-    before any `after_model_callback` runs, so the trace already has whatever
-    `AGENT_THINKING_CONFIG`'s `include_thoughts=True` put on the response;
+    ADK traces the raw response on the `generate_content` span
+    (`google.adk.telemetry.tracing.trace_inference_result`) before any
+    `after_model_callback` runs, so the trace already has whatever
+    `AGENT_THINKING_CONFIG`'s `include_thoughts=True` put on the response,
+    the thought summary written as a plain text part with no thought flag;
     this callback only controls what the session event ADK builds from it
     afterward.
 

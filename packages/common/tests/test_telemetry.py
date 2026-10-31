@@ -1,6 +1,7 @@
 import asyncio
 import contextvars
 import logging
+import os
 import threading
 from unittest.mock import MagicMock, call
 
@@ -287,17 +288,52 @@ def test_otel_sdk_disabled_leaves_the_backend_on_unless_it_is_true(
     assert backend() == "langfuse"
 
 
-def test_the_langfuse_client_is_built_with_the_span_filter_mask_and_a_redacting_exporter(
+def test_the_langfuse_client_is_built_with_a_redacting_exporter_and_the_default_filter(
     langfuse_env, langfuse_client
 ):
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
     (kwargs,) = langfuse_client.built_with
-    assert kwargs.keys() == {"should_export_span", "span_exporter", "mask_otel_spans"}
-    assert kwargs["should_export_span"] is telemetry._should_export_span
-    assert kwargs["mask_otel_spans"] is telemetry._mask_otel_spans
+    assert kwargs.keys() == {"span_exporter"}
     assert isinstance(kwargs["span_exporter"], UriRedactingExporter)
+
+
+@pytest.mark.parametrize("backend_env", ["langfuse", "otel"])
+def test_a_backend_that_comes_up_turns_on_message_content_on_spans(
+    langfuse_client, monkeypatch, backend_env
+):
+    if backend_env == "langfuse":
+        for var in telemetry._LANGFUSE_ENV_VARS:
+            monkeypatch.setenv(var, "https://example.invalid")
+    else:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+        monkeypatch.setattr(telemetry, "_init_otel", lambda *, service_name: None)
+
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    assert backend() == backend_env
+    assert os.environ[telemetry._CAPTURE_MESSAGE_CONTENT_VAR] == "SPAN_ONLY"
+
+
+@pytest.mark.parametrize("value", ["NO_CONTENT", ""])
+def test_message_content_set_in_the_environment_is_left_as_it_is(
+    langfuse_env, langfuse_client, monkeypatch, value
+):
+    monkeypatch.setenv(telemetry._CAPTURE_MESSAGE_CONTENT_VAR, value)
+
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    assert os.environ[telemetry._CAPTURE_MESSAGE_CONTENT_VAR] == value
+
+
+def test_no_backend_leaves_message_content_unset():
+    init_telemetry(service_name="harness")
+
+    assert backend() == "off"
+    assert telemetry._CAPTURE_MESSAGE_CONTENT_VAR not in os.environ
 
 
 def test_an_existing_langfuse_client_is_reported_and_startup_continues(
@@ -328,35 +364,9 @@ def test_the_client_registry_decides_whether_a_langfuse_client_exists(monkeypatc
     assert telemetry._langfuse_client_exists() is True
 
 
-def _span(scope: str, name: str, **attributes):
+def _span(scope: str, name: str):
     """A live SDK span, which is a `ReadableSpan`, from a tracer of `scope`."""
-    tracer = TracerProvider().get_tracer(scope)
-    return tracer.start_span(name, attributes=attributes or None)
-
-
-@pytest.mark.parametrize(
-    ("scope", "name", "attributes", "exported"),
-    [
-        ("gcp.vertex.agent", "invocation", {}, True),
-        ("gcp.vertex.agent", "invoke_workflow x", {"gen_ai.operation.name": "w"}, True),
-        ("langfuse-sdk", "turn", {}, True),
-        ("gcp.vertex.agent", "other_bare_span", {}, False),
-        ("some.other.library", "invocation", {}, False),
-        ("some.other.library", "bare", {}, False),
-        ("some.other.library", "call_llm", {"gen_ai.system": "x"}, True),
-    ],
-)
-def test_the_span_filter_adds_only_adks_invocation_span_to_the_default(
-    scope, name, attributes, exported
-):
-    assert telemetry._should_export_span(_span(scope, name, **attributes)) is exported
-
-
-def test_the_span_filter_does_not_raise_without_an_instrumentation_scope():
-    span = MagicMock(instrumentation_scope=None, attributes=None)
-    span.name = "invocation"
-
-    assert telemetry._should_export_span(span) is False
+    return TracerProvider().get_tracer(scope).start_span(name)
 
 
 def test_a_failed_auth_check_thread_start_warns_and_leaves_langfuse_active(
