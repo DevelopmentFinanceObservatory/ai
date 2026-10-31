@@ -34,6 +34,7 @@ from harness.graph import execute as execute_module
 from harness.graph import plan_done as plan_done_module
 from harness.graph.orchestrate import orchestrate_node
 from harness.graph.plan_done import (
+    _DROPPED,
     HandBack,
     StepSummary,
     _ask_status,
@@ -1252,6 +1253,104 @@ async def test_the_hand_back_reports_each_ask_with_its_output_status_or_decline(
     ]
 
 
+class _AmendedPlanner(ScriptedPlannerModel):
+    """`ScriptedPlannerModel` whose plan answers each brief ask but the last
+    with its final step and records the last as removed by the user's
+    amendment, as `Plan.amend` does when the amendment removes its answer."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        plan = Plan.model_validate((await super().__call__(**kwargs))["plan"])
+        asks = load_asks(kwargs["ctx"].state)
+        final = plan.evidence_requirements[-1].id
+        plan = plan.model_copy(
+            update={
+                "asks": asks,
+                "answered": tuple(
+                    AskAnswer(ask=number, outputs=(final,)) for number in range(len(asks) - 1)
+                ),
+                "dropped_asks": (len(asks) - 1,),
+            }
+        )
+        return {"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}
+
+
+class _AmendedRefusingReplanner(_AmendedPlanner):
+    """`_AmendedPlanner` that refuses to draft again once a run has stopped."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("refusal") is None:
+            return await super().__call__(**kwargs)
+        return {"refused": {"text": "no plan avoids the empty sum", "final": False}}
+
+
+@pytest.mark.parametrize("ending", ["ran", "stopped", "refused", "refused_after_computed"])
+async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed(ending: str):
+    """Whether the run ran, stopped, or stopped and the planner refused to
+    replan, the hand-back quotes the user's amendments in order and its lead
+    keeps the removed ask out of the answer, so the agent does not report it
+    as a failure or fetch it."""
+    planner, surface = {
+        "ran": (_AmendedPlanner(), ScriptedSurface()),
+        "stopped": (_AmendedPlanner(), RefusingGetDataSurface("member_not_resolvable")),
+        "refused": (_AmendedRefusingReplanner(), _EmptyAggregateSurface()),
+        "refused_after_computed": (_RemovingRefusingReplanner(), _EmptyAggregateSurface()),
+    }[ending]
+    runner, model = orchestrator_runner(
+        call(
+            "plan",
+            brief="ODA received by Ghana, Kenya and Nigeria",
+            asks=["ODA to Ghana", "ODA to Kenya", "ODA to Nigeria"],
+        ),
+        types.Part.from_text(text="Answered."),
+        planner=planner,
+        tool_surface=surface,
+        executor=_describes,
+    )
+    await open_session(runner)
+
+    amendments = ["Show each year.", "Drop Nigeria, just Ghana and Kenya."]
+    approval = single_pause(await run_turn(runner, types.UserContent("ODA to three countries?")))
+    for words in amendments:
+        amend = create_request_input_response(
+            approval.id, {"result": {"approved": None, "amendment": words}}
+        )
+        approval = single_pause(await run_turn(runner, types.Content(role="user", parts=[amend])))
+    approve = create_request_input_response(
+        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
+    )
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
+
+    after_plan, body = handed_back(model)
+    assert body["amendments"] == amendments
+    assert (
+        'The user removed from the plan "ODA to Nigeria": leave it out of the answer'
+        in (body["result"])
+    )
+    if ending.startswith("refused"):
+        assert body["result"].startswith("The planner could not make a plan")
+        assert "Every other ask was not computed" not in body["result"]
+        if ending == "refused":
+            assert body["asks"] == [{"ask": "ODA to Nigeria", "dropped": _DROPPED}]
+            return
+        ghana, nigeria = body["asks"]
+        assert ghana["ask"] == "ODA to Ghana"
+        assert ghana["earlier_plan"] is True
+        assert [entry["status"] for entry in ghana["answered_by"]] == ["data"]
+        assert nigeria == {"ask": "ODA to Nigeria", "dropped": _DROPPED}
+        assert "Every other ask the plan kept was not computed." in body["result"]
+        return
+    ghana, kenya, nigeria = body["asks"]
+    status = "failed" if ending == "stopped" else "data"
+    assert [entry["status"] for entry in ghana["answered_by"] + kenya["answered_by"]] == [
+        status,
+        status,
+    ]
+    assert set(nigeria) == {"ask", "dropped"}
+    assert '- 2 "ODA to Nigeria": removed by the user\'s amendment' in after_plan.split("\n")
+    if ending == "stopped":
+        assert 'Not computed: "ODA to Ghana"; "ODA to Kenya".' in body["result"]
+
+
 class _BreakdownRefusingSurface(ScriptedSurface):
     """`ScriptedSurface` whose `get_data` refuses the breakdown it was asked for,
     as apis refuses a code system it cannot read."""
@@ -2406,6 +2505,18 @@ class _RefusingReplanner(TwoAsksPlanner):
             return await super().__call__(**kwargs)
         self.refusals.append(kwargs["refusal"])
         return {"refused": {"text": "no plan avoids the empty mean", "final": False}}
+
+
+class _RemovingRefusingReplanner(_RefusingReplanner):
+    """`_RefusingReplanner` whose plan records the brief's third ask as removed
+    by the user's amendment, so a run that computes the first ask and stops
+    on the second leaves a computed ask, a failed one and a removed one."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        drafted = await super().__call__(**kwargs)
+        if "plan" in drafted:
+            drafted["plan"]["dropped_asks"] = [2]
+        return drafted
 
 
 class _RetrievalRefusingOnReplanSurface(_EmptyAggregateSurface):

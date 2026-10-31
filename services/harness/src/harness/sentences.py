@@ -7,7 +7,8 @@ sentence fails `tests/test_sentences.py`:
 - `COMPILE_REASONS`, per `compiler.compile.CompileIssueCode`, which a
   `requirement_needs_repair` referral names as its `constraint`;
 - `DECLINE_REASONS`, per `planner.plan.UnsupportedOperation`, the reason the
-  plan card and `harness.graph.plan_done` give for an ask the plan declines;
+  plan card and `harness.graph.plan_done` give for an ask the plan declines,
+  and `DROPPED_REASON`, the card's for an ask the user's amendment removed;
 - `SEAM_REASONS`, per `SeamCode` and `planner.tool_results.ProblemCode`: why
   a revision in code was refused and nothing more, which
   `harness.graph.switch` shows under the choice a switch did not apply to;
@@ -228,6 +229,10 @@ DECLINE_REASONS: Mapping[UnsupportedOperation, str] = {
     UnsupportedOperation.UNSUPPORTED_ASK: _CANNOT_ANSWER,
     UnsupportedOperation.BREAKDOWN_NOT_KEPT: _NO_BREAKDOWN,
 }
+
+# The reason the plan card gives for an ask the user's amendment removed
+# (`planner.plan.Plan.dropped_asks`), in `DECLINE_REASONS`' form.
+DROPPED_REASON = "you removed it from the plan"
 
 # A problem the planner's model repairs within its entry, which ends a
 # revision in code (`harness.planner_seam.PlannerSeam.revise`), where no model

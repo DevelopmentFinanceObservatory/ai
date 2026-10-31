@@ -125,11 +125,12 @@ from translator.discovery import (
     SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
-    answered_once,
+    answered_once_at,
     call_within_entry,
     load_log,
     refusal_retryable,
     resolve_definition,
+    resolve_definition_at,
     resolved_spec,
 )
 from translator.referral import (
@@ -167,6 +168,7 @@ from planner.plan import (
     plan_revision,
     record_optional_decline,
     record_reduction_refused_asks,
+    record_spec_searched,
     record_unsupported,
     save_alignments,
     save_full_history,
@@ -711,6 +713,7 @@ _PATCH_ARGUMENTS = (
     "removed_evidence_requirements",
     "declined",
     "answered",
+    "removed_asks",
 )
 
 
@@ -1510,7 +1513,12 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "When the brief lists asks, the requirements that answer each one, "
         "keyed by `ask`. Every ask is answered here or declined in `declined` "
         "with its number as `ask_ref`, exactly once, or both when the plan "
-        "computes part of it."
+        "computes part of it, unless `removed_asks` names it."
+    ),
+    "removed_asks": (
+        "The number of each ask the user's amendment removes from the plan. Leave it out "
+        "of `answered` and `declined`, and narrow or remove what answered it. Only the "
+        "user's amendment removes an ask, and only a later one restores it, by answering it."
     ),
     "across_years": (
         "The `id` of each step that combines its years, an `aggregate` whose `group_by` "
@@ -1742,7 +1750,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
             f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
         )
     try:
-        part = await resolve_definition(
+        part, resolved_at = await resolve_definition_at(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
@@ -1776,6 +1784,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                 digest=digest,
             ),
         )
+        record_spec_searched(into, spec_id, resolved_at)
 
     return hold
 
@@ -1880,7 +1889,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         for choice in choices
     ]
     try:
-        part = await resolve_definition(
+        part, resolved_at = await resolve_definition_at(
             surface,
             spec_id=spec_id_for(canonicalize(identity)),
             identity=identity,
@@ -1918,9 +1927,14 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
         save_aligned_pin(
             into,
             AlignedPin(
-                origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis
+                origin=part_pin,
+                option_ids=(),
+                spec_id=spec_id,
+                digest=digest,
+                whole_axis=axis,
             ),
         )
+        record_spec_searched(into, spec_id, resolved_at)
 
     return hold
 
@@ -2187,7 +2201,9 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
     shown to the planner as a source of its own
     (`planner.plan.save_pin_sources`) and held as a
-    `submission.service.SearchedPin` with its digest, so the next proposal
+    `submission.service.SearchedPin` with its digest, and the time the
+    search was made as one settling on its spec_id
+    (`planner.plan.record_spec_searched`), so the next proposal
     pins it and the planner seam stores it as a reading of the conversation
     (`harness.planner_seam.store_searched_pin_readings`). Any other answer is
     held as a search that settled on nothing, under Search's part status, or
@@ -2195,7 +2211,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     (`submission.service._aligned_bases`). The search takes the time the
     translator's own discovery gives one
     (`translator.discovery.call_within_entry`), and is made once an
-    invocation (`translator.discovery.answered_once`), so a read the
+    invocation (`translator.discovery.answered_once_at`), so a read the
     proposal's other refused search discarded (`with_source_reads`) is not
     repeated.
 
@@ -2207,7 +2223,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     """
     arguments = {"parts": [unpinned.part]}
     try:
-        answer = await answered_once(
+        answer, searched_at = await answered_once_at(
             SEARCH,
             arguments,
             lambda: call_within_entry(surface, tool=SEARCH, arguments=arguments),
@@ -2249,6 +2265,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     def hold(into: SessionState) -> None:
         save_pin_sources(into, {**pin_sources(into), spec_id: shown})
         save_searched_pin(into, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
+        record_spec_searched(into, spec_id, searched_at)
 
     return hold
 
@@ -2566,6 +2583,7 @@ def build_planner_tools(
         removed_evidence_requirements: list[str] = [],  # noqa: B006
         declined: list[Decline] = [],  # noqa: B006
         answered: list[AskAnswer] = [],  # noqa: B006
+        removed_asks: list[int] = [],  # noqa: B006
         across_years: list[str] = [],  # noqa: B006
         amends_version: int | None = None,
         starts_new_plan: bool = False,
@@ -2587,6 +2605,7 @@ def build_planner_tools(
                 removed_evidence_requirements=removed_evidence_requirements,
                 declined=declined,
                 answered=answered,
+                removed_asks=removed_asks,
                 across_years=across_years,
                 amends_version=amends_version,
                 starts_new_plan=starts_new_plan,

@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ from translator.discovery import (
     DiscoveryRecord,
     PartFault,
     PartNotResolvedError,
+    _resolved_key,
     build_discovery_tools,
     compact_source,
     current_cut_calls,
@@ -84,6 +86,7 @@ from translator.discovery import (
     load_log,
     requirement_revision,
     resolve_definition,
+    resolve_definition_at,
     resolve_entity_refs,
     resolved_spec,
     resolving_once,
@@ -2407,6 +2410,7 @@ _UNAVAILABLE = ToolCallResult(is_error=True, structured_content={"retry_mode": "
     ("answer", "invocations", "keep_retryable", "calls"),
     [
         (_DEFINITE, (("t1", 1), ("t1", 1)), False, 1),
+        (_DEFINITE, (("stored", 1), ("stored", 1)), False, 0),
         (_DEFINITE, (("t1", 1), ("t2", 1)), False, 2),
         (_REFUSED, (("t1", 2),), False, 1),
         (_REFUSED, (("t1", 1), ("t1", 1)), False, 2),
@@ -2416,6 +2420,7 @@ _UNAVAILABLE = ToolCallResult(is_error=True, structured_content={"retry_mode": "
     ],
     ids=[
         "answer-kept-for-the-turn",
+        "answer-stored-with-no-time",
         "another-turn-asks-again",
         "refusal-kept-for-the-invocation",
         "next-invocation-asks-a-refusal-again",
@@ -2434,9 +2439,14 @@ async def test_a_turn_asks_search_once_per_resolve_unless_it_can_answer_otherwis
     answer is kept in the turn's session state for every later invocation of it, and
     a refusal for the rest of its invocation. One the same call can escape later is
     asked again, unless the block is a translation's, which keeps it for the rest of
-    the block. Another turn, a session of its own, asks again."""
+    the block. Another turn, a session of its own, asks again. A kept answer keeps
+    the time its call was made, and one stored with no time (`stored`) has none."""
     surface = _Answering(answer)
-    states: dict[str, dict[str, Any]] = {}
+    part = (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY, {}).get("parts", [None])[0]
+    states: dict[str, dict[str, Any]] = {
+        "stored": {_resolved_key({"spec_id": SPEC_KENYA, "identity": {}}): part}
+    }
+    times: dict[str, set[datetime | None]] = {}
 
     for turn, made in invocations:
         with resolving_once(states.setdefault(turn, {}), keep_retryable=keep_retryable):
@@ -2445,9 +2455,13 @@ async def test_a_turn_asks_search_once_per_resolve_unless_it_can_answer_otherwis
                     with pytest.raises(DefinitionNotResolvedError):
                         await resolve_definition(surface, spec_id=SPEC_KENYA, identity={})
                 else:
-                    await resolve_definition(surface, spec_id=SPEC_KENYA, identity={})
+                    _, at = await resolve_definition_at(surface, spec_id=SPEC_KENYA, identity={})
+                    times.setdefault(turn, set()).add(at)
 
     assert surface.calls == calls
+    for turn, answered in times.items():
+        (at,) = answered
+        assert (at is None) is (turn == "stored")
 
 
 async def test_a_retryable_refusal_is_kept_for_its_translation_alone() -> None:

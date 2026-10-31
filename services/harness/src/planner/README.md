@@ -177,6 +177,27 @@ refuses the requirement unpinned with its `entities` and `across` unchanged
 (`source_not_offered`): the translator's fresh search would settle on a
 withheld source. The planner makes the referral's `repair` or asks the user.
 
+`propose_plan` refuses as `source_not_offered` a plan that retrieves a
+spec_id the executor refused since the session's last first draft
+(`planner.plan.REFUSED_SPECS_STATE_KEY`), unless the refusal's code is one
+a refreshed or re-registered definition recovers from
+(`executor.classify.RECOVERABLE_SPEC_CODES`) and a Search call made after the
+refusal settled on that spec_id: a reading of the conversation, the search
+for an input the planner pinned nothing for, or a compile
+(`submission.service.refused_in_force`). An answer the turn served from
+before the refusal keeps its own time. The rule covers the pin a
+requirement it states or carries names
+(`submission.service._refused_spec_pinned`), and the pin the plan records
+for it. That is the copy over the requirement's period that `_window_pins`
+makes, the pin the compile alignment moves it to, and the one dataset Search
+settles on for a calculation input the planner pins nothing for
+(`_refused_spec_retrieved`). Search answers one dataset the harness cannot
+steer, so the same words settle on the refused spec_id again. The planner
+pins another source or changes what the input asks for. `detail` names the
+requirement as the planner states it and any pin it states, and for a
+recorded pin adds that pin as `retrieved`. `harness.planner_seam` leaves
+those spec_ids out of the pin sources and names them in the brief.
+
 An entity's words can name more than one graph node, as "Congo" names both
 the Republic of the Congo and the Democratic Republic of the Congo. Search
 then answers an `entity_name_ambiguous` referral. Each reading in its
@@ -399,9 +420,20 @@ source the requirement states. A requirement the next proposal pins to the one
 the user picked, answering an ask raised after the referral, drops its stated
 `source`, so the compiler accepts the source they chose. A pin the planner chose
 keeps the stated source, and the compiler refuses it again. The amended plan
-passes through the same validators as a first draft. `starts_new_plan` begins a
-plan at version 1 instead. The wording of `question` plays no part in that
-choice, so a reworded question cannot be read as a new plan.
+passes through the same validators as a first draft. In an entry the user's
+amendment at the approval card opened (`planner.plan.amendment_entry`), the
+patch names each ask the user removed in `removed_asks` and narrows or removes
+the requirements that answered it. The ask moves to `Plan.dropped_asks`. It
+counts as accounted for, the plan card gives "you removed it from the plan" as
+its reason, and `plan_done` reports it as removed. Admission refuses
+`removed_asks` in any other entry and an ask the same patch answers or
+declines. A dropped ask stays dropped through later patches. A replan's brief
+marks it "(removed by the user)", and admission refuses a replan that answers
+or declines it. Only a later amendment of the user's restores it, by
+answering it. An ask left out with nothing naming it is unaccounted for.
+`starts_new_plan` begins a plan at version 1 instead. The wording of
+`question` plays no part in that choice, so a reworded question cannot be
+read as a new plan.
 
 **`question_fixed` holds the turn's question against a restart.**
 `create_planner_agent(..., question_fixed=True)`. The harness's planner

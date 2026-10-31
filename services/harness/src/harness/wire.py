@@ -1289,9 +1289,10 @@ class PlanOperation(_WireModel):
 class PlanAsk(_WireModel):
     """One output the user asked for and how the plan accounts for it:
     `answered_by` names the `PlanStep` ids whose results answer it, and
-    `declined` says in words why the plan does not compute it. An ask
-    answered in part carries both, with `not_computed` naming the part
-    declined in the user's words."""
+    `declined` says in words why the plan does not compute it, the user's
+    amendment having removed it included. An ask answered in part carries
+    both, with `not_computed` naming the part declined in the user's
+    words."""
 
     ask: str
     answered_by: list[str] = []

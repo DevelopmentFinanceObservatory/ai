@@ -179,20 +179,20 @@ _REGENERATE = "just context-baseline"
 # behaviour a sentence at a time.
 PLANNER_SYSTEM_INSTRUCTION_CEILING = 20_150
 
-# Every planner tool declaration together measures 40,856 (`propose_plan` 36,803 and
-# 4,053 across the smaller ones). The margin is 1.9%.
-PLANNER_DECLARATIONS_TOTAL_CEILING = 41_640
+# Every planner tool declaration together measures 41,324 (`propose_plan` 37,293 and
+# 4,031 across the smaller ones). The margin is 1.6%.
+PLANNER_DECLARATIONS_TOTAL_CEILING = 42_000
 
 # `propose_plan`'s own declaration: the `DecisionDraft` and `EvidenceRequirement`
 # schemas with their `$defs` tree, and the patch, decline, answer and intent
-# arguments. Measured 36,803, with every field that refers to a definition holding a
+# arguments. Measured 37,293, with every field that refers to a definition holding a
 # copy of it under the field's own description. It sits in the static prefix every planner call
 # repeats, which Gemini's implicit cache can serve. Its field descriptions are what
 # the planner writes a plan from. The margin is 1.1%.
-PROPOSE_PLAN_DECLARATION_CEILING = 37_220
+PROPOSE_PLAN_DECLARATION_CEILING = 37_700
 
 # The smaller planner declarations at once: `adk_request_input`,
-# `get_skill_file`, `get_skill` and `reject_plan`, measured 4,053 together.
+# `get_skill_file`, `get_skill` and `reject_plan`, measured 4,031 together.
 MINOR_DECLARATIONS_TOTAL_CEILING = 5_070
 
 # The planner's `contents` history on its largest captured generation, less
@@ -1464,9 +1464,11 @@ def _share_units_repair_ceiling() -> int:
 def _failed_run_ceiling() -> int:
     """The most the sentence on what a failed run computed adds to the one for a plan held to no asks.
 
-    The seam cuts its list of ask numbers at `MAX_QUESTION_CHARS`.
+    The seam cuts its list of ask numbers at `MAX_QUESTION_CHARS`, and the
+    sentence is longest when the asks section marks an ask the user removed.
     """
-    listed = len(planner_seam._failed_run_sentence([0])) - len("0") + MAX_QUESTION_CHARS
+    one = planner_seam._failed_run_sentence([0], removed=True)
+    listed = len(one) - len("0") + MAX_QUESTION_CHARS
     return listed - len(planner_seam._failed_run_sentence(None))
 
 

@@ -107,6 +107,11 @@ ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
 ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
+# The user's words for each amendment of this plan call's plan that the
+# planner drafted, in order, each cut to `planner.plan.MAX_QUESTION_CHARS`.
+# Written by the `planner` node, cleared by `plan_start`, and handed to the
+# agent by `plan_done`, since the amendment reaches the planner alone.
+ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
 # The state a planner entry replanning for a pick on the plan card puts back
 # when the replan does not land (`harness.graph.planning`), written when the
 # replan pauses on a planner-side ask and cleared when the entry ends, so it

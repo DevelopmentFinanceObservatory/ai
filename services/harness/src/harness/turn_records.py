@@ -23,7 +23,7 @@ still over budget after the last level is cut with
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, NamedTuple, cast
 
@@ -31,6 +31,7 @@ from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
 from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count
 from data_mcp.scope import ScopeAxis, ScopeEntry, TextOrigin
+from executor.classify import RECOVERABLE_SPEC_CODES
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles, party_role
 from planner.plan import (
@@ -39,6 +40,7 @@ from planner.plan import (
     FilterRequirement,
     Plan,
     PlanStatus,
+    RefusedSpec,
     ResolvedBy,
     UnsupportedOperation,
     cut_user_text,
@@ -275,13 +277,15 @@ class PlanAsk(StrictModel):
     `outputs` are the workflow steps whose results answer it. `declined` is
     the code a decline of it names and `not_computed` the part that decline
     leaves out, in the user's words. An ask carries outputs, a decline, or
-    both when the plan computes part of it.
+    both when the plan computes part of it. A `dropped` ask is one the
+    user's amendment removed from the plan, and it carries neither.
     """
 
     ask: str
     outputs: tuple[str, ...] = ()
     declined: UnsupportedOperation | None = None
     not_computed: str | None = None
+    dropped: bool = Field(default=False, exclude_if=lambda dropped: not dropped)
 
 
 class PlanRecord(StrictModel):
@@ -539,6 +543,8 @@ class PlanRecord(StrictModel):
             if ask.declined is not None:
                 part = f' "{ask.not_computed}"' if ask.outputs and ask.not_computed else ""
                 accounts.append(f"not computed{part} [{ask.declined.value}]")
+            if ask.dropped:
+                accounts.append("removed by the user's amendment")
             yield f'- {number} "{ask.ask}": {"; ".join(accounts)}'
         if self.declined:
             yield "not computed, the system cannot do it:"
@@ -965,6 +971,48 @@ def newest_per_spec_id(readings: Sequence[SearchReading]) -> list[SearchReading]
         for index, reading in enumerate(readings)
         if reading.spec_id is None or last[reading.spec_id] == index
     ]
+
+
+def refusals_in_force(
+    refused: Iterable[RefusedSpec], settled: Iterable[tuple[str, datetime | None]]
+) -> frozenset[str]:
+    """Every refused spec_id the planner may not pin, given when Search settled on each spec_id.
+
+    `settled` holds a spec_id Search settled on and when the search was made,
+    `None` when no time is known (`settled_by_readings`,
+    `submission.service.refused_in_force`). It is read only when a refusal
+    could be lifted. A refusal whose code
+    `executor.classify.RECOVERABLE_SPEC_CODES` names is lifted by a search
+    settling on its spec_id made after it: Search answered the refreshed or
+    re-registered definition. Any other refusal holds until the next first
+    draft, as does one stored with no code or time.
+    """
+    refused = tuple(refused)
+    recoverable = {
+        spec.spec_id: spec.refused_at
+        for spec in refused
+        if spec.code in RECOVERABLE_SPEC_CODES and spec.refused_at is not None
+    }
+    if not recoverable:
+        return frozenset(spec.spec_id for spec in refused)
+    recovered = {
+        spec_id
+        for spec_id, at in settled
+        if at is not None
+        and (refused_at := recoverable.get(spec_id)) is not None
+        and at > refused_at
+    }
+    return frozenset(spec.spec_id for spec in refused if spec.spec_id not in recovered)
+
+
+def settled_by_readings(
+    readings: Iterable[Mapping[str, Any]],
+) -> Iterator[tuple[str, datetime | None]]:
+    """Each spec_id a search reading settles on (`SETTLED_STATUSES`), with when it was observed."""
+    for raw in readings:
+        reading = SearchReading.model_validate(raw)
+        if reading.spec_id is not None and reading.status in SETTLED_STATUSES:
+            yield reading.spec_id, reading.observed_at
 
 
 # How `open_prices` words the prices search read, and the prices it offers
@@ -2128,6 +2176,7 @@ def _asks(plan: Plan) -> tuple[PlanAsk, ...]:
             outputs=tuple(cast("list[str]", row["answered_by"])),
             declined=cast("UnsupportedOperation | None", row["declined"]),
             not_computed=cast("str | None", row["not_computed"]),
+            dropped=bool(row["dropped"]),
         )
         for row in plan_display.ask_rows(plan)
     )

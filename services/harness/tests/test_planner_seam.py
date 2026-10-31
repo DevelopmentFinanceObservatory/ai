@@ -25,6 +25,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -96,12 +97,14 @@ from planner.plan import (
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
+    REFUSED_SPECS_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AlignedInput,
     AnswerMode,
+    AskAnswer,
     AskBreakdown,
     DatasetRequirement,
     Decision,
@@ -115,6 +118,7 @@ from planner.plan import (
     Plan,
     PlanStatus,
     QuotientRequirement,
+    RefusedSpec,
     RequirementSide,
     ResolvedBy,
     SessionState,
@@ -130,11 +134,13 @@ from planner.plan import (
     full_histories,
     held_sources,
     load_plan,
+    load_refused_specs,
     pin_sources,
     plan_revision,
     rolls_from_its_start,
     save_pin_sources,
     save_plan,
+    save_refused_specs,
 )
 from planner.records import GroupBy, Reduction, RelativePeriod
 from planner.settings import (
@@ -704,7 +710,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
-        planner_seam._REFUSED_SPECS_STATE_KEY: [SPEC],
+        REFUSED_SPECS_STATE_KEY: [SPEC],
     }
     harness = _SeamHarness(state=stale)
     seam = _seam()
@@ -730,7 +736,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         COMPILE_FAILURES_STATE_KEY: [],
-        planner_seam._REFUSED_SPECS_STATE_KEY: [] if entry == "first-draft" else [SPEC],
+        REFUSED_SPECS_STATE_KEY: [] if entry == "first-draft" else [SPEC],
     }
     assert kept == (stale if resumed else fresh)
 
@@ -1388,11 +1394,11 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
 # -- a replan's refusal ---------------------------------------------------
 
 
-def _rediscovery_refusal(spec_id: str) -> dict[str, Any]:
+def _rediscovery_refusal(spec_id: str, code: str = "over_ceiling") -> dict[str, Any]:
     """A `RediscoveryNeeded` replan payload, the shape `harness.graph.execute`'s
-    `_replan_refusal` builds for the `over_ceiling`/`member_cardinality`
-    reroute -- the one refusal shape that names a `spec_id` at the top
-    level today."""
+    `_replan_refusal` builds, refusing `spec_id` for `code` with the
+    `over_ceiling`/`member_cardinality` message -- the one refusal shape that
+    names a `spec_id` at the top level today."""
     return {
         "kind": "rediscovery_needed",
         "step_id": "malaria_kenya",
@@ -1400,7 +1406,7 @@ def _rediscovery_refusal(spec_id: str) -> dict[str, Any]:
         "requirement_id": "malaria_kenya",
         "spec_id": spec_id,
         "refusal": {
-            "code": "over_ceiling",
+            "code": code,
             "message": "resolved.stat_vars.member_count = 872 against a cap of 700",
             "retry_mode": "correct_and_retry",
             "fix": {"ceiling_kind": "member_cardinality"},
@@ -1449,6 +1455,72 @@ def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
     assert "computed_asks" not in message
 
 
+@pytest.mark.parametrize(
+    ("entry", "dropped", "said", "unsaid"),
+    [
+        (
+            "replan",
+            [1],
+            [
+                "leave it out of `answered` and `declined`",
+                "still answers every ask not marked (removed by the user).",
+            ],
+            ["to put it back"],
+        ),
+        (
+            "amendment",
+            [1],
+            ["unless the user's change asks for it again; answer it in `answered` to put it back"],
+            ["leave it out of `answered`"],
+        ),
+        ("replan_nothing_removed", [], ["still answers every ask."], ["(removed by the user)"]),
+    ],
+    ids=["replan", "amendment", "replan-nothing-removed"],
+)
+async def test_the_brief_words_each_ask_the_user_removed_for_its_entry(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    entry: str,
+    dropped: list[int],
+    said: list[str],
+    unsaid: list[str],
+) -> None:
+    """The asks section marks the ask the user's amendment removed, and no
+    other. A replan leaves it out, and its failed-run sentence holds the new
+    plan to the asks left unmarked. The user's next amendment may put it back
+    by answering it. With no ask removed, the failed-run sentence names no mark."""
+    asks = ["Kenya's debt totals", "Uganda's debt totals"]
+    plan = Plan.model_validate(
+        {
+            **_translated_plan(decision, requirement, derived_requirement).model_dump(),
+            "asks": asks,
+            "answered": [
+                AskAnswer(ask=number, outputs=("annual_totals",))
+                for number in range(len(asks))
+                if number not in dropped
+            ],
+            "dropped_asks": dropped,
+        }
+    )
+    replan = entry != "amendment"
+
+    text, _ = await _first_request_with_readings(
+        _turn_readings(),
+        plan=plan,
+        stored={ASKS_STATE_KEY: asks},
+        refusal={**_rediscovery_refusal(SPEC), "computed_asks": [0]} if replan else None,
+        amendment=None if replan else "add Uganda back",
+    )
+
+    marked = [line for line in text.splitlines() if line.endswith("(removed by the user)")]
+    assert marked == (["1. Uganda's debt totals (removed by the user)"] if dropped else [])
+    for clause in said:
+        assert clause in text
+    for clause in unsaid:
+        assert clause not in text
+
+
 # -- the conversation's search readings ------------------------------------
 
 SPEC_C = "spec_" + "c" * 32
@@ -1493,9 +1565,11 @@ async def _first_request_with_readings(
     plan: Plan,
     stored: Mapping[str, Any] | None = None,
     refusal: dict[str, Any] | None = None,
+    amendment: str | None = None,
 ) -> tuple[str, SessionState]:
     """Run one fresh orchestrator entry over `readings`, with `stored` (the
-    blocks and warnings `search` keeps) already in session state."""
+    blocks and warnings `search` keeps) already in session state, answering
+    `refusal` or the user's `amendment`."""
     seam = _seam()
     llm = ScriptedPlannerLlm(script=[_DECLARE])
     use_compiled_proposals(seam._agent)
@@ -1507,6 +1581,7 @@ async def _first_request_with_readings(
         prior_plan=plan.model_dump(mode="json"),
         readings=readings,
         refusal=refusal,
+        amendment=amendment,
     )
     return _prompt_text(llm.captured_requests[0]), await harness.state()
 
@@ -1533,32 +1608,68 @@ async def test_the_orchestrator_planner_first_request_carries_every_search_readi
     assert list(pin_sources(state)) == [SPEC, SPEC_B, SPEC_C]
 
 
+# When `SPEC`'s definite reading was observed, and a day before.
+_SEARCHED_AT = datetime(2000, 1, 2, tzinfo=UTC)
+_REFUSED_BEFORE = datetime(2000, 1, 1, tzinfo=UTC)
+
+
 @pytest.mark.parametrize(
-    ("refusal", "kept"),
-    [(None, [SPEC, SPEC_B, SPEC_C]), (_rediscovery_refusal(SPEC), [SPEC_B, SPEC_C])],
-    ids=["no_refusal", "executor_refused_spec"],
+    ("refusal", "earlier", "kept"),
+    [
+        (None, None, [SPEC, SPEC_B, SPEC_C]),
+        (_rediscovery_refusal(SPEC), None, [SPEC_B, SPEC_C]),
+        (None, SPEC, [SPEC_B, SPEC_C]),
+        (None, "open_role_unavailable", [SPEC_B, SPEC_C]),
+        (None, "upstream_version_changed", [SPEC, SPEC_B, SPEC_C]),
+    ],
+    ids=[
+        "no_refusal",
+        "executor_refused_spec",
+        "stored_bare",
+        "refused_for_good",
+        "refreshed_since",
+    ],
 )
 async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
     refusal: dict[str, Any] | None,
+    earlier: str | None,
     kept: list[str],
 ) -> None:
     """The definite and the fetched chosen reading settle their own ids; an id
     only offered as a candidate is shown unsettled. Each carries the block and
     warning codes `search` stored for it, and the parties its settling reading asked
-    for. A spec the executor refused is left out."""
+    for. A spec the executor refused is left out and named in the brief's avoid
+    sentence. `earlier` is `SPEC` refused before its definite reading was
+    observed, stored bare or for a code, answered by an amendment: one refused
+    for a code a refreshed definition recovers from is kept and named nowhere."""
     plan = _translated_plan(decision, requirement, derived_requirement)
-    stored = {
+    stored: dict[str, Any] = {
         ORCHESTRATOR_SPECS_KEY: {
             spec_id: {"spec_id": spec_id} for spec_id in (SPEC, SPEC_B, SPEC_C)
         },
         ORCHESTRATOR_SPEC_WARNINGS_KEY: {SPEC: [{"code": "role_scope_defaulted"}]},
     }
+    if earlier is not None:
+        save_refused_specs(
+            cast(SessionState, stored),
+            [
+                RefusedSpec(spec_id=SPEC)
+                if earlier == SPEC
+                else RefusedSpec(spec_id=SPEC, code=earlier, refused_at=_REFUSED_BEFORE)
+            ],
+        )
+    readings = _turn_readings()
+    readings[0]["observed_at"] = _SEARCHED_AT.isoformat()
 
-    _, state = await _first_request_with_readings(
-        _turn_readings(), plan=plan, stored=stored, refusal=refusal
+    text, state = await _first_request_with_readings(
+        readings,
+        plan=plan,
+        stored=stored,
+        refusal=refusal,
+        amendment="only since 2015" if earlier is not None else None,
     )
 
     expected = {
@@ -1572,6 +1683,77 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
         SPEC_C: PinSource(block={"spec_id": SPEC_C}, settled=True),
     }
     assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
+    assert ("Do not propose" in text) is (SPEC not in kept)
+
+
+@pytest.mark.parametrize(
+    ("code", "also", "observed", "between", "kept"),
+    [
+        ("definition_not_held", None, "after", None, True),
+        ("upstream_version_changed", None, "after", None, True),
+        ("definition_not_held", None, "before", None, False),
+        ("over_ceiling", None, "after", None, False),
+        ("open_role_unavailable", "upstream_version_changed", "after", None, False),
+        ("upstream_version_changed", None, "after", "refused-again", False),
+        ("upstream_version_changed", None, "after", "resumed", True),
+    ],
+    ids=[
+        "re-registered",
+        "refreshed",
+        "searched-before-the-refusal",
+        "refused-for-good",
+        "refused-for-good-and-for-a-refresh",
+        "refused-again-after-the-search",
+        "resume-keeps-the-refusal-time",
+    ],
+)
+async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lifts_it(
+    code: str, also: str | None, observed: str, between: str | None, kept: bool
+) -> None:
+    """A replan answers the executor refusing `SPEC` for `code`, which is held
+    as a bare spec_id with its code and the entry's time beside it. A later
+    amendment's readings settle on `SPEC`, observed before or after that
+    replan. A refusal a refreshed or re-registered definition recovers from is
+    lifted by a reading observed after it: `SPEC` is a pin source again and the
+    brief names nothing to avoid. One observed before it, or a refusal for
+    good, keeps `SPEC` out and named. Refused again after the reading
+    (`between`), `SPEC` is held from the second refusal; a resume of the
+    replan keeps the first refusal's time. A wave that also stops on `SPEC`
+    for another code (`also`) holds it for good when either code is."""
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
+    seam._agent.model = llm
+    harness = _SeamHarness()
+    refusal = _rediscovery_refusal(SPEC, code)
+    if also is not None:
+        refusal["also_stopped"] = [_rediscovery_refusal(SPEC, also)]
+    before = datetime.now(UTC)
+
+    await harness.run(seam, question="aid to guatemala", readings=_turn_readings(), refusal=refusal)
+    state = await harness.state()
+    assert state[REFUSED_SPECS_STATE_KEY] == [SPEC]
+    (held,) = load_refused_specs(state)
+    assert held.code == code
+    assert held.refused_at is not None and held.refused_at >= before
+    after = datetime.now(UTC)
+    if between is not None:
+        await harness.run(
+            seam,
+            question="aid to guatemala",
+            readings=_turn_readings(),
+            refusal=refusal,
+            resume_inputs={"ask": {"result": "since 2015"}} if between == "resumed" else None,
+        )
+    readings = _turn_readings()
+    readings[0]["observed_at"] = (before if observed == "before" else after).isoformat()
+    calls = len(llm.captured_requests)
+    await harness.run(
+        seam, question="aid to guatemala", readings=readings, amendment="only since 2015"
+    )
+
+    state = await harness.state()
+    assert (SPEC in pin_sources(state)) is kept
+    assert ("Do not propose" in _prompt_text(llm.captured_requests[calls])) is not kept
 
 
 # A spec Search offered as another count of `SPEC`'s reading.

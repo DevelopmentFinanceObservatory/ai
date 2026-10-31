@@ -24,7 +24,7 @@ import inspect
 import json
 import logging
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -53,7 +53,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import _api_client, errors, types
-from harness.graph.state import APPROVE_INTERRUPT, store_search
+from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
@@ -63,7 +63,7 @@ from harness.sentences import PlanWords, refusal_reason, refusal_sentence
 from harness.studio_state import _turn_identities
 from harness.tool_contracts import reading_facts
 from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
-from harness.turn_records import RecordedIdentity, _periods
+from harness.turn_records import RecordedIdentity, SearchReading, _periods
 from planner import agent as planner_agent
 from planner.agent import (
     BRIEF_STATE_KEY,
@@ -84,6 +84,8 @@ from planner.operations import (
 )
 from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role, role_party
 from planner.plan import (
+    ALIGNED_PINS_STATE_KEY,
+    AMENDMENT_ENTRY_STATE_KEY,
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -94,8 +96,11 @@ from planner.plan import (
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
+    PIN_SOURCES_STATE_KEY,
     PLAN_ROUNDS_STATE_KEY,
     PLAN_STATE_KEY,
+    REFUSED_SPECS_STATE_KEY,
+    SPEC_SEARCHED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
@@ -119,6 +124,7 @@ from planner.plan import (
     PlanStatus,
     QuotientRequirement,
     RankRequirement,
+    RefusedSpec,
     RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
@@ -149,6 +155,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    save_refused_specs,
     scope_choice_slot,
     search_pin_slot,
     split_of,
@@ -188,6 +195,7 @@ from submission.prices_choice import PRICES_OPTIONS, Parts, PricesChoice, prices
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    SEARCHED_PINS_STATE_KEY,
     AlignedPin,
     Realignment,
     SourceReadings,
@@ -4845,6 +4853,45 @@ def test_a_scope_decision_moved_to_a_copy_over_another_period_keeps_its_choice()
 # --- a calculation's inputs on one measure basis ---
 
 
+# The time each refusal `_refuse_then_search` holds was recorded, a day before
+# the search reading it stores, and a day after.
+_SEARCHED_AT = datetime(2026, 1, 2, tzinfo=UTC)
+_REFUSED_BEFORE = datetime(2026, 1, 1, tzinfo=UTC)
+_REFUSED_AFTER = datetime(2026, 1, 3, tzinfo=UTC)
+
+
+def _refuse(
+    ctx: _FakeToolContext, refused: Sequence[str], code: str | None, refused_at: datetime
+) -> None:
+    """Hold each of `refused` as refused for `code` at `refused_at`, or as a bare
+    spec_id when `code` is `None`."""
+    save_refused_specs(
+        ctx.state,
+        (
+            RefusedSpec(spec_id=spec_id)
+            if code is None
+            else RefusedSpec(spec_id=spec_id, code=code, refused_at=refused_at)
+            for spec_id in refused
+        ),
+    )
+
+
+def _refuse_then_search(
+    ctx: _FakeToolContext,
+    refused: Sequence[str],
+    code: str | None,
+    refused_at: datetime = _REFUSED_BEFORE,
+) -> None:
+    """`_refuse`, and a search reading settling on each of `refused` at `_SEARCHED_AT`."""
+    _refuse(ctx, refused, code, refused_at)
+    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
+        SearchReading(
+            text="aid", status="definite", spec_id=spec_id, observed_at=_SEARCHED_AT
+        ).model_dump(mode="json")
+        for spec_id in refused
+    ]
+
+
 def _share_of_health(
     propose: Callable[..., Any],
     ctx: _FakeToolContext,
@@ -6148,6 +6195,101 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     assert load_plan(ctx.state) is None
 
 
+# The fields of each record stored under `SEARCHED_PINS_STATE_KEY` and
+# `ALIGNED_PINS_STATE_KEY` as a build reading only these reads them: its
+# models forbid any other, so a record carrying one would fail to load there.
+_BASE_SEARCHED_PIN_FIELDS = frozenset(
+    {"requirement_key", "status", "spec_id", "digest", "asked_roles", "open_roles"}
+)
+_BASE_ALIGNED_PIN_FIELDS = frozenset({"origin", "option_ids", "spec_id", "digest", "whole_axis"})
+
+
+@pytest.mark.parametrize(
+    ("code", "compiled", "searched_first", "admitted"),
+    [
+        (None, False, False, False),
+        ("open_role_unavailable", False, False, False),
+        ("open_role_unavailable", False, True, False),
+        ("upstream_version_changed", False, True, False),
+        ("upstream_version_changed", False, False, True),
+        ("upstream_version_changed", True, True, False),
+        ("upstream_version_changed", True, False, True),
+    ],
+    ids=[
+        "stored-bare",
+        "permanent",
+        "permanent-searched-first",
+        "served-from-before-refusal",
+        "searched-after-refusal",
+        "compile-served-from-before-refusal",
+        "compiled-after-refusal",
+    ],
+)
+async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_refused(
+    decision: DecisionFactory,
+    code: str | None,
+    compiled: bool,
+    searched_first: bool,
+    admitted: bool,
+) -> None:
+    """Search settles the unpinned US total on a spec_id the executor refused in
+    this entry, or on a total the compile then moves to the health aid's gross
+    (`compiled`). The plan is refused, saying the total states no pin and Search
+    settles it on the refused spec_id, with no stated pin in `detail`. A spec_id
+    refused for a code a refreshed definition recovers from is admitted when
+    Search is asked after the refusal, and refused when an earlier entry's
+    search and compile from before the refusal (`searched_first`) are served
+    instead. Every pin and refusal is stored in the shape a build reading only
+    the base fields loads."""
+    surface = (
+        BasisCompiles()
+        if compiled
+        else BasisCompiles(
+            searched={
+                "status": "definite",
+                "spec": basis_block(TOTAL, narrow=False, active="measure_basis:gross"),
+            }
+        )
+    )
+    refused = TOTAL_GROSS if compiled else TOTAL
+    propose = _tools_reading(surface)["propose_plan"].func
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+    if searched_first:
+        earlier = _FakeToolContext()
+        _show_blocks(earlier, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+        first = await _share_of_health(propose, earlier, decision(), total=None)
+        assert first["outcome"] == Outcome.OK.value, first
+        for key in (
+            PIN_SOURCES_STATE_KEY,
+            SEARCHED_PINS_STATE_KEY,
+            ALIGNED_PINS_STATE_KEY,
+            SPEC_SEARCHED_STATE_KEY,
+        ):
+            if key in earlier.state:
+                ctx.state[key] = earlier.state[key]
+        surface.tools.clear()
+        _refuse(ctx, [refused], code, datetime.now(UTC))
+    else:
+        _refuse(ctx, [refused], code, datetime.now(UTC) - timedelta(seconds=1))
+
+    result = await _share_of_health(propose, ctx, decision(), total=None)
+
+    assert (surface.tools == []) is searched_first
+    assert all(isinstance(spec_id, str) for spec_id in ctx.state[REFUSED_SPECS_STATE_KEY])
+    for raw in ctx.state.get(SEARCHED_PINS_STATE_KEY) or ():
+        assert set(raw) <= _BASE_SEARCHED_PIN_FIELDS
+    for raw in ctx.state.get(ALIGNED_PINS_STATE_KEY) or ():
+        assert set(raw) <= _BASE_ALIGNED_PIN_FIELDS
+    if admitted:
+        assert result["outcome"] == Outcome.OK.value, result
+        return
+    assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
+    assert result["detail"] == {"requirement_id": "total", "retrieved": refused}
+    assert "'total' states no pin" in str(result["message"])
+    assert load_plan(ctx.state) is None
+
+
 @pytest.mark.parametrize(
     ("retry_mode", "code", "held"),
     [
@@ -7342,16 +7484,37 @@ def _french(block: dict[str, Any]) -> dict[str, Any]:
     return json.loads(text)
 
 
+@pytest.mark.parametrize(
+    ("refused", "code", "admitted"),
+    [
+        (None, None, True),
+        ("health_inclusive", None, False),
+        ("whole_inclusive", "upstream_version_changed", True),
+        ("whole_inclusive", "open_role_unavailable", False),
+    ],
+    ids=["aligned", "compile-refused", "whole-compiled-after-refusal", "whole-refused-for-good"],
+)
 async def test_a_declared_whole_follows_its_part_when_another_calculation_realigns_it(
-    decision: DecisionFactory,
+    decision: DecisionFactory, refused: str | None, code: str | None, admitted: bool
 ) -> None:
     """US bilateral health aid as a share of a declared whole, and also compared with
     French health aid the user asked for with imputed multilateral flows. The
     comparison moves the part to the inclusive compile, so the whole is compiled from
-    that final pin and the share divides an inclusive part by an inclusive total."""
+    that final pin and the share divides an inclusive part by an inclusive total.
+    Where the executor refused that compile, held before this entry, the plan is
+    refused, naming the part, the pin it states and the compile. Where it refused
+    the whole's compile, the whole compiled again in this entry lifts a refusal for
+    a code a refreshed definition recovers from, and not one for good."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     inclusive = us_2023_block("health_inclusive")
+    if refused is not None:
+        _refuse(
+            ctx,
+            [us_2023_block(refused)["spec_id"]],
+            code,
+            datetime.now(UTC) - timedelta(seconds=1),
+        )
     stated = _stated_provider(_french(inclusive))
     _show_blocks(ctx, us_2023_block("health"), inclusive, stated)
     save_aligned_pin(
@@ -7389,6 +7552,18 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
         ],
     )
 
+    if refused == "whole_inclusive" and not admitted:
+        assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
+        assert result["detail"]["retrieved"] == us_2023_block(refused)["spec_id"]
+        return
+    if not admitted:
+        assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
+        assert result["detail"] == {
+            "requirement_id": _PART,
+            "spec_id": us_2023_block("health")["spec_id"],
+            "retrieved": inclusive["spec_id"],
+        }
+        return
     assert result["outcome"] == Outcome.OK.value, result
     (call,) = surface.calls
     assert [e["option_id"] for e in call["scope_entries"] if e["axis"] == "provider"] == [
@@ -18247,3 +18422,290 @@ def test_no_brief_in_state_leaves_the_request_alone() -> None:
     prepend_brief(cast(Any, context), request)
 
     assert request.contents == [_QUESTION]
+
+
+_COUNTRIES = ("ghana", "kenya", "nigeria")
+
+
+def _country_entities(*countries: str) -> list[Entity]:
+    return [Entity(name=country.title(), role="debtor") for country in countries]
+
+
+def _three_country_plan(
+    decision: DecisionFactory, requirement: RequirementFactory, *, shared: bool = False
+) -> tuple[_FakeToolContext, Callable[..., dict[str, object]]]:
+    """A recorded plan whose three asks, ODA to each of `_COUNTRIES`, are
+    answered by each country's own requirement, or, when `shared`, all by one
+    requirement over the three."""
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = [f"ODA to {country.title()}" for country in _COUNTRIES]
+    propose = _tools_by_name()["propose_plan"].func
+    if shared:
+        requirements = [requirement(id="all", entities=_country_entities(*_COUNTRIES))]
+        outputs = ["all"] * len(_COUNTRIES)
+    else:
+        requirements = [
+            requirement(id=country, entities=_country_entities(country)) for country in _COUNTRIES
+        ]
+        outputs = list(_COUNTRIES)
+    first = propose(
+        tool_context=ctx,
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision()]),
+        evidence_requirements=requirements,
+        answered=[AskAnswer(ask=n, outputs=(output,)) for n, output in enumerate(outputs)],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    return ctx, propose
+
+
+_NIGERIA_DECLINE = Decline(
+    ask="ODA to Nigeria", code=UnsupportedOperation.UNSUPPORTED_ASK, ask_ref=2
+)
+
+
+@pytest.mark.parametrize(
+    ("amendment", "removed_asks", "answers", "declines", "code"),
+    [
+        (True, [2], 2, False, None),
+        (False, [2], 2, False, ProblemCode.INVALID_PLAN),
+        (True, [3], 2, False, ProblemCode.INVALID_PLAN),
+        (True, [2], 3, False, ProblemCode.INVALID_PLAN),
+        (True, [2], 2, True, ProblemCode.INVALID_PLAN),
+        (True, [], 2, False, ProblemCode.INVALID_PLAN),
+        (True, [], 2, True, ProblemCode.DECLINE_UNEARNED),
+        (False, [], 2, True, ProblemCode.DECLINE_UNEARNED),
+    ],
+    ids=[
+        "users-amendment",
+        "replan",
+        "out-of-range",
+        "answers-it",
+        "declines-it",
+        "leaves-it-out",
+        "amendment-declines-it",
+        "replan-declines-it",
+    ],
+)
+def test_only_the_users_amendment_removes_an_ask_and_it_names_it(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    amendment: bool,
+    removed_asks: list[int],
+    answers: int,
+    declines: bool,
+    code: ProblemCode | None,
+) -> None:
+    """The patch removes Nigeria's requirement and answers the first `answers`
+    asks with their own. Naming ask 2 in `removed_asks` in the user's
+    amendment drops it. Elsewhere `removed_asks` is refused, as are a number
+    past the asks and an ask the patch also answers or declines. An ask left
+    out with nothing removing it is answered by a requirement the plan no
+    longer states. A decline nothing earned is refused, and in the user's
+    amendment the refusal points at `removed_asks`."""
+    ctx, propose = _three_country_plan(decision, requirement)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = amendment
+    answered = [
+        AskAnswer(ask=n, outputs=(c if n < 2 else "kenya",))
+        for n, c in enumerate(_COUNTRIES[:answers])
+    ]
+
+    amended = propose(
+        tool_context=ctx,
+        removed_evidence_requirements=["nigeria"],
+        answered=answered,
+        declined=[_NIGERIA_DECLINE] if declines else [],
+        removed_asks=removed_asks,
+        amends_version=1,
+    )
+
+    if code is None:
+        assert amended["outcome"] == Outcome.OK.value, amended
+        plan = load_plan(ctx.state)
+        assert plan is not None
+        assert plan.dropped_asks == (2,)
+        assert [answer.ask for answer in plan.answered] == [0, 1]
+        return
+    assert amended["code"] == code.value, amended
+    if code is ProblemCode.DECLINE_UNEARNED:
+        assert ("`removed_asks`" in str(amended["message"])) is amendment
+
+
+def test_a_planner_slip_in_the_users_amendment_is_not_read_as_a_removal(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """In the user's amendment the patch replaces `nigeria` with `nigeria2`
+    and leaves ask 2's answer on the removed requirement. Nothing names ask 2
+    in `removed_asks`, so the plan is refused, not recorded with ask 2 dropped."""
+    ctx, propose = _three_country_plan(decision, requirement)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+
+    amended = propose(
+        tool_context=ctx,
+        evidence_requirements=[requirement(id="nigeria2", entities=_country_entities("nigeria"))],
+        removed_evidence_requirements=["nigeria"],
+        amends_version=1,
+    )
+
+    assert amended["code"] == ProblemCode.INVALID_PLAN.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert (plan.version, plan.dropped_asks) == (1, ())
+
+
+def test_an_amendment_removes_one_ask_of_a_shared_requirement(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """One requirement answers all three asks. The user's amendment drops
+    Nigeria: the patch narrows that requirement and names ask 2 in
+    `removed_asks`, and the other two asks keep their answers."""
+    ctx, propose = _three_country_plan(decision, requirement, shared=True)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+
+    amended = propose(
+        tool_context=ctx,
+        evidence_requirements=[requirement(id="all", entities=_country_entities("ghana", "kenya"))],
+        removed_asks=[2],
+        amends_version=1,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.dropped_asks == (2,)
+    assert [(answer.ask, answer.outputs) for answer in plan.answered] == [
+        (0, ("all",)),
+        (1, ("all",)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("amendment", "accounts", "code", "dropped"),
+    [
+        (False, "answers", ProblemCode.INVALID_PLAN, (2,)),
+        (False, "declines", ProblemCode.INVALID_PLAN, (2,)),
+        (False, "leaves", None, (2,)),
+        (False, "names", ProblemCode.INVALID_PLAN, (2,)),
+        (True, "answers", None, ()),
+    ],
+    ids=[
+        "replan-answers",
+        "replan-declines",
+        "replan-leaves-it",
+        "replan-names-it",
+        "users-amendment-answers",
+    ],
+)
+def test_a_dropped_ask_comes_back_only_by_the_users_amendment(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    amendment: bool,
+    accounts: str,
+    code: ProblemCode | None,
+    dropped: tuple[int, ...],
+) -> None:
+    """After the user's amendment drops ask 2, a replan that answers or
+    declines it is refused, and one that leaves it out carries the drop. A
+    replan naming it in `removed_asks` is told to leave it with nothing
+    naming it. A later amendment of the user's restores it by answering it."""
+    ctx, propose = _three_country_plan(decision, requirement)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+    first = propose(
+        tool_context=ctx,
+        removed_evidence_requirements=["nigeria"],
+        removed_asks=[2],
+        amends_version=1,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = amendment
+    nigeria = requirement(id="nigeria", entities=_country_entities("nigeria"))
+    patch: dict[str, Any] = {
+        "answers": {
+            "evidence_requirements": [nigeria],
+            "answered": [AskAnswer(ask=2, outputs=("nigeria",))],
+        },
+        "declines": {"declined": [_NIGERIA_DECLINE]},
+        "leaves": {"evidence_requirements": [nigeria]},
+        "names": {"evidence_requirements": [nigeria], "removed_asks": [2]},
+    }[accounts]
+
+    again = propose(tool_context=ctx, amends_version=2, **patch)
+
+    if code is None:
+        assert again["outcome"] == Outcome.OK.value, again
+    else:
+        assert again["code"] == code.value, again
+    if accounts == "names":
+        assert "stays removed with nothing naming it" in str(again["message"])
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.dropped_asks == dropped
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("pin", "refused", "code", "detail"),
+    [
+        (SPEC, (), None, None),
+        (SPEC, (SPEC,), None, {"spec_id": SPEC}),
+        (SPEC, (SPEC,), "open_role_unavailable", {"spec_id": SPEC}),
+        (SPEC, (SPEC,), "upstream_version_changed", None),
+        (_AID_SPEC, (), None, None),
+        (
+            _AID_SPEC,
+            (_AID_2020_2024_SPEC,),
+            None,
+            {"spec_id": _AID_SPEC, "retrieved": _AID_2020_2024_SPEC},
+        ),
+        (_AID_SPEC, (_AID_2020_2024_SPEC,), "definition_not_held", None),
+    ],
+    ids=[
+        "shown",
+        "executor-refused",
+        "refused-for-good",
+        "refreshed",
+        "windowed",
+        "windowed-copy-refused",
+        "windowed-copy-re-registered",
+    ],
+)
+def test_a_carried_pin_the_executor_refused_is_refused(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    pin: str,
+    refused: tuple[str, ...],
+    code: str | None,
+    detail: dict[str, str] | None,
+) -> None:
+    """A replan that leaves a requirement pinned to a spec_id the executor
+    refused in this entry is refused, naming the requirement and the spec_id,
+    though a search settled on it after the refusal. A pin recorded over other
+    years retrieves its copy over the requirement's 2020 to 2024, and a refused
+    copy is refused the same way, naming the pin the planner states and the
+    copy. With no refusal on record, or one for a code a refreshed or
+    re-registered definition recovers from, the same patch is recorded."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    dataset, derived = requirements
+    pinned = dataset.model_copy(
+        update={"source_spec_id": pin, "period": Period(start=2020, end=2024)}
+    )
+    first = _propose(
+        tools, ctx, decision(fixes=DecisionFixes(source_spec_id=pin)), [pinned, derived]
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    _refuse_then_search(ctx, refused, code)
+
+    replan = _propose(
+        tools,
+        ctx,
+        decision(rationale="Reconsidered.", fixes=DecisionFixes(source_spec_id=pin)),
+        (),
+    )
+
+    if detail is not None:
+        assert replan["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, replan
+        assert replan["detail"] == {"requirement_id": dataset.id, **detail}
+    else:
+        assert replan["outcome"] == Outcome.OK.value, replan
