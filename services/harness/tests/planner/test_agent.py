@@ -7344,16 +7344,21 @@ def _french(block: dict[str, Any]) -> dict[str, Any]:
     return json.loads(text)
 
 
+@pytest.mark.parametrize("compile_refused", [False, True], ids=["aligned", "compile-refused"])
 async def test_a_declared_whole_follows_its_part_when_another_calculation_realigns_it(
-    decision: DecisionFactory,
+    decision: DecisionFactory, compile_refused: bool
 ) -> None:
     """US bilateral health aid as a share of a declared whole, and also compared with
     French health aid the user asked for with imputed multilateral flows. The
     comparison moves the part to the inclusive compile, so the whole is compiled from
-    that final pin and the share divides an inclusive part by an inclusive total."""
+    that final pin and the share divides an inclusive part by an inclusive total.
+    Where the executor refused that compile, the plan is refused, naming the part,
+    the pin it states and the compile."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     inclusive = us_2023_block("health_inclusive")
+    if compile_refused:
+        ctx.state[REFUSED_SPECS_STATE_KEY] = [inclusive["spec_id"]]
     stated = _stated_provider(_french(inclusive))
     _show_blocks(ctx, us_2023_block("health"), inclusive, stated)
     save_aligned_pin(
@@ -7391,6 +7396,14 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
         ],
     )
 
+    if compile_refused:
+        assert result["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, result
+        assert result["detail"] == {
+            "requirement_id": _PART,
+            "spec_id": us_2023_block("health")["spec_id"],
+            "retrieved": inclusive["spec_id"],
+        }
+        return
     assert result["outcome"] == Outcome.OK.value, result
     (call,) = surface.calls
     assert [e["option_id"] for e in call["scope_entries"] if e["axis"] == "provider"] == [
@@ -18413,9 +18426,16 @@ def test_an_amendment_removes_one_ask_of_a_shared_requirement(
         (False, "answers", ProblemCode.INVALID_PLAN, (2,)),
         (False, "declines", ProblemCode.INVALID_PLAN, (2,)),
         (False, "leaves", None, (2,)),
+        (False, "names", ProblemCode.INVALID_PLAN, (2,)),
         (True, "answers", None, ()),
     ],
-    ids=["replan-answers", "replan-declines", "replan-leaves-it", "users-amendment-answers"],
+    ids=[
+        "replan-answers",
+        "replan-declines",
+        "replan-leaves-it",
+        "replan-names-it",
+        "users-amendment-answers",
+    ],
 )
 def test_a_dropped_ask_comes_back_only_by_the_users_amendment(
     decision: DecisionFactory,
@@ -18427,7 +18447,8 @@ def test_a_dropped_ask_comes_back_only_by_the_users_amendment(
 ) -> None:
     """After the user's amendment drops ask 2, a replan that answers or
     declines it is refused, and one that leaves it out carries the drop. A
-    later amendment of the user's restores it by answering it."""
+    replan naming it in `removed_asks` is told to leave it with nothing
+    naming it. A later amendment of the user's restores it by answering it."""
     ctx, propose = _three_country_plan(decision, requirement)
     ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
     first = propose(
@@ -18446,6 +18467,7 @@ def test_a_dropped_ask_comes_back_only_by_the_users_amendment(
         },
         "declines": {"declined": [_NIGERIA_DECLINE]},
         "leaves": {"evidence_requirements": [nigeria]},
+        "names": {"evidence_requirements": [nigeria], "removed_asks": [2]},
     }[accounts]
 
     again = propose(tool_context=ctx, amends_version=2, **patch)
@@ -18454,38 +18476,62 @@ def test_a_dropped_ask_comes_back_only_by_the_users_amendment(
         assert again["outcome"] == Outcome.OK.value, again
     else:
         assert again["code"] == code.value, again
+    if accounts == "names":
+        assert "stays removed with nothing naming it" in str(again["message"])
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.dropped_asks == dropped
 
 
-@pytest.mark.parametrize("refused", [False, True], ids=["shown", "executor-refused"])
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("pin", "refused", "detail"),
+    [
+        (SPEC, (), None),
+        (SPEC, (SPEC,), {"spec_id": SPEC}),
+        (_AID_SPEC, (), None),
+        (
+            _AID_SPEC,
+            (_AID_2020_2024_SPEC,),
+            {"spec_id": _AID_SPEC, "retrieved": _AID_2020_2024_SPEC},
+        ),
+    ],
+    ids=["shown", "executor-refused", "windowed", "windowed-copy-refused"],
+)
 def test_a_carried_pin_the_executor_refused_is_refused(
-    decision: DecisionFactory, requirements: RequirementPair, refused: bool
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    pin: str,
+    refused: tuple[str, ...],
+    detail: dict[str, str] | None,
 ) -> None:
     """A replan that leaves a requirement pinned to a spec_id the executor
     refused in this entry is refused, naming the requirement and the spec_id.
-    With no refusal on record the same patch is recorded."""
+    A pin recorded over other years retrieves its copy over the requirement's
+    2020 to 2024, and a refused copy is refused the same way, naming the pin
+    the planner states and the copy. With no refusal on record the same patch
+    is recorded."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     dataset, derived = requirements
-    pinned = dataset.model_copy(update={"source_spec_id": SPEC})
+    pinned = dataset.model_copy(
+        update={"source_spec_id": pin, "period": Period(start=2020, end=2024)}
+    )
     first = _propose(
-        tools, ctx, decision(fixes=DecisionFixes(source_spec_id=SPEC)), [pinned, derived]
+        tools, ctx, decision(fixes=DecisionFixes(source_spec_id=pin)), [pinned, derived]
     )
     assert first["outcome"] == Outcome.OK.value, first
-    if refused:
-        ctx.state[REFUSED_SPECS_STATE_KEY] = [SPEC]
+    ctx.state[REFUSED_SPECS_STATE_KEY] = list(refused)
 
     replan = _propose(
         tools,
         ctx,
-        decision(rationale="Reconsidered.", fixes=DecisionFixes(source_spec_id=SPEC)),
+        decision(rationale="Reconsidered.", fixes=DecisionFixes(source_spec_id=pin)),
         (),
     )
 
-    if refused:
+    if detail is not None:
         assert replan["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, replan
-        assert replan["detail"] == {"requirement_id": dataset.id, "spec_id": SPEC}
+        assert replan["detail"] == {"requirement_id": dataset.id, **detail}
     else:
         assert replan["outcome"] == Outcome.OK.value, replan

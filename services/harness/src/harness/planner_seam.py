@@ -1378,8 +1378,16 @@ class PlannerSeam:
                 _section("Earlier turns in this conversation", conversation_digest),
                 _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
-                _asks_section(asks, ask_breakdowns, asks_across_years, dropped),
-                _ask_text(amendment=amendment, refusal=refusal, pick=pick, refused=refused),
+                _asks_section(
+                    asks, ask_breakdowns, asks_across_years, dropped, amending=bool(amendment)
+                ),
+                _ask_text(
+                    amendment=amendment,
+                    refusal=refusal,
+                    pick=pick,
+                    refused=refused,
+                    removed=bool(asks) and bool(dropped),
+                ),
             ]
         )
 
@@ -1390,11 +1398,14 @@ def _ask_text(
     refusal: dict[str, Any] | None,
     pick: DecisionPick | None,
     refused: Sequence[str] = (),
+    removed: bool = False,
 ) -> str:
     """What a call asks the planner for, closing its brief: the user's
     `amendment`, or else the `refusal` a replan answers, and then the option
     `pick` the user picked on the plan card, on a line of its own. Empty for
-    a first draft.
+    a first draft. `removed` says the asks section marks an ask the user
+    removed, which a replan's failed-run sentence then names
+    (`_failed_run_sentence`).
 
     One sentence names every spec the executor refused, the ones `refusal`
     names and the earlier `refused` ones (`_avoid_sentence`). A replan's
@@ -1425,7 +1436,7 @@ def _ask_text(
         )
         stop = {key: value for key, value in refusal.items() if key != "computed_asks"}
         ask = (
-            f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
+            f"\n{_failed_run_sentence(refusal.get('computed_asks'), removed=removed)} "
             f"Refusal: {_refusal_text(stop)}\n"
             f"Call {PROPOSE_PLAN} again with a plan that avoids it.{avoid}{repairs}\n"
         )
@@ -1663,20 +1674,22 @@ def _issues_shown(split: _Split, *, warnings: bool, errors: bool = True) -> dict
     return shown
 
 
-def _failed_run_sentence(computed: Sequence[int] | None) -> str:
+def _failed_run_sentence(computed: Sequence[int] | None, *, removed: bool = False) -> str:
     """What a replan's failed run computed: the asks its finished terminal
     steps answer (`harness.graph.execute._computed_asks`), by number, or `None` for
     a plan held to no asks. The new plan runs from the start, so it still
-    answers every ask the user kept (`_asks_section`). The list of numbers is
-    cut at `MAX_QUESTION_CHARS`."""
+    answers every ask the user kept (`_asks_section`), which the sentence
+    words as every ask not marked removed when `removed` says the asks
+    section marks one. The list of numbers is cut at `MAX_QUESTION_CHARS`."""
     if computed is None:
         return "Executing the approved plan failed, and the new plan runs from the start."
     if not computed:
         return "Executing the approved plan failed before it computed any ask."
     numbers = cut_user_text(", ".join(str(number) for number in computed), MAX_QUESTION_CHARS)
+    kept = f"every ask not marked{_REMOVED_MARK}" if removed else "every ask"
     return (
         f"Executing the approved plan failed after it computed asks {numbers}. The new plan "
-        "runs from the start, so it still answers every ask not marked (removed by the user)."
+        f"runs from the start, so it still answers {kept}."
     )
 
 
@@ -1685,6 +1698,8 @@ def _asks_section(
     breakdowns: Sequence[AskBreakdown] = (),
     across_years: Sequence[int] = (),
     dropped: Sequence[int] = (),
+    *,
+    amending: bool = False,
 ) -> str:
     """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none.
 
@@ -1695,7 +1710,9 @@ def _asks_section(
     An ask in `across_years` is marked as one figure over its years taken
     together, and the section then says no other ask is. An ask in
     `dropped`, the plan being changed's `planner.plan.Plan.dropped_asks`, is
-    marked as removed by the user, and the section then says to leave it out.
+    marked as removed by the user. In the user's amendment (`amending`) the
+    section says it stays out unless the change asks for it again, and that
+    answering it puts it back; in any other entry it says to leave it out.
     """
     if not asks:
         return ""
@@ -1730,7 +1747,12 @@ def _asks_section(
             "years taken together. No other ask does: its answer keeps each year or reads "
             "one year.\n"
         )
-    if dropped:
+    if dropped and amending:
+        rule += (
+            f"An ask marked{_REMOVED_MARK} stays out of the plan unless the user's change "
+            "asks for it again; answer it in `answered` to put it back.\n"
+        )
+    elif dropped:
         rule += (
             f"An ask marked{_REMOVED_MARK} was taken out of the plan by the user's "
             "amendment: leave it out of `answered` and `declined`.\n"

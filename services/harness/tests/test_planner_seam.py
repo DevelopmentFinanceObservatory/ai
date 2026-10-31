@@ -96,6 +96,7 @@ from planner.plan import (
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
+    REFUSED_SPECS_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
@@ -705,7 +706,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
-        planner_seam._REFUSED_SPECS_STATE_KEY: [SPEC],
+        REFUSED_SPECS_STATE_KEY: [SPEC],
     }
     harness = _SeamHarness(state=stale)
     seam = _seam()
@@ -731,7 +732,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         COMPILE_FAILURES_STATE_KEY: [],
-        planner_seam._REFUSED_SPECS_STATE_KEY: [] if entry == "first-draft" else [SPEC],
+        REFUSED_SPECS_STATE_KEY: [] if entry == "first-draft" else [SPEC],
     }
     assert kept == (stale if resumed else fresh)
 
@@ -1450,32 +1451,70 @@ def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
     assert "computed_asks" not in message
 
 
-async def test_a_replan_brief_marks_each_ask_the_user_removed(
-    decision: Any, requirement: Any, derived_requirement: Any
+@pytest.mark.parametrize(
+    ("entry", "dropped", "said", "unsaid"),
+    [
+        (
+            "replan",
+            [1],
+            [
+                "leave it out of `answered` and `declined`",
+                "still answers every ask not marked (removed by the user).",
+            ],
+            ["to put it back"],
+        ),
+        (
+            "amendment",
+            [1],
+            ["unless the user's change asks for it again; answer it in `answered` to put it back"],
+            ["leave it out of `answered`"],
+        ),
+        ("replan_nothing_removed", [], ["still answers every ask."], ["(removed by the user)"]),
+    ],
+    ids=["replan", "amendment", "replan-nothing-removed"],
+)
+async def test_the_brief_words_each_ask_the_user_removed_for_its_entry(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    entry: str,
+    dropped: list[int],
+    said: list[str],
+    unsaid: list[str],
 ) -> None:
-    """A replan of a plan whose ask 1 the user's amendment removed marks that
-    ask alone in the asks section, and the failed run's sentence holds the
-    new plan to the asks left unmarked."""
+    """The asks section marks the ask the user's amendment removed, and no
+    other. A replan leaves it out, and its failed-run sentence holds the new
+    plan to the asks left unmarked. The user's next amendment may put it back
+    by answering it. With no ask removed, the failed-run sentence names no mark."""
     asks = ["Kenya's debt totals", "Uganda's debt totals"]
     plan = Plan.model_validate(
         {
             **_translated_plan(decision, requirement, derived_requirement).model_dump(),
             "asks": asks,
-            "answered": [AskAnswer(ask=0, outputs=("annual_totals",))],
-            "dropped_asks": [1],
+            "answered": [
+                AskAnswer(ask=number, outputs=("annual_totals",))
+                for number in range(len(asks))
+                if number not in dropped
+            ],
+            "dropped_asks": dropped,
         }
     )
+    replan = entry != "amendment"
 
     text, _ = await _first_request_with_readings(
         _turn_readings(),
         plan=plan,
         stored={ASKS_STATE_KEY: asks},
-        refusal={**_rediscovery_refusal(SPEC), "computed_asks": [0]},
+        refusal={**_rediscovery_refusal(SPEC), "computed_asks": [0]} if replan else None,
+        amendment=None if replan else "add Uganda back",
     )
 
     marked = [line for line in text.splitlines() if line.endswith("(removed by the user)")]
-    assert marked == ["1. Uganda's debt totals (removed by the user)"]
-    assert "every ask not marked (removed by the user)" in text
+    assert marked == (["1. Uganda's debt totals (removed by the user)"] if dropped else [])
+    for clause in said:
+        assert clause in text
+    for clause in unsaid:
+        assert clause not in text
 
 
 # -- the conversation's search readings ------------------------------------
@@ -1522,9 +1561,11 @@ async def _first_request_with_readings(
     plan: Plan,
     stored: Mapping[str, Any] | None = None,
     refusal: dict[str, Any] | None = None,
+    amendment: str | None = None,
 ) -> tuple[str, SessionState]:
     """Run one fresh orchestrator entry over `readings`, with `stored` (the
-    blocks and warnings `search` keeps) already in session state."""
+    blocks and warnings `search` keeps) already in session state, answering
+    `refusal` or the user's `amendment`."""
     seam = _seam()
     llm = ScriptedPlannerLlm(script=[_DECLARE])
     use_compiled_proposals(seam._agent)
@@ -1536,6 +1577,7 @@ async def _first_request_with_readings(
         prior_plan=plan.model_dump(mode="json"),
         readings=readings,
         refusal=refusal,
+        amendment=amendment,
     )
     return _prompt_text(llm.captured_requests[0]), await harness.state()
 

@@ -177,12 +177,16 @@ refuses the requirement unpinned with its `entities` and `across` unchanged
 (`source_not_offered`): the translator's fresh search would settle on a
 withheld source. The planner makes the referral's `repair` or asks the user.
 
-`propose_plan` refuses as `source_not_offered` a plan that pins, in a
-requirement it states or carries, a spec_id the executor refused since the
-session's last first draft (`planner.plan.REFUSED_SPECS_STATE_KEY`,
-`submission.service._refused_spec_pinned`), with the requirement and the
-spec_id in `detail`. `harness.planner_seam` leaves those spec_ids out of the
-pin sources and names them in the brief.
+`propose_plan` refuses as `source_not_offered` a plan that retrieves a
+spec_id the executor refused since the session's last first draft
+(`planner.plan.REFUSED_SPECS_STATE_KEY`). The rule covers the pin a
+requirement it states or carries names (`submission.service._refused_spec_pinned`),
+and the pin the plan records for it: the copy over the requirement's period
+that `_window_pins` makes, and the compile alignment moves it to
+(`_refused_spec_retrieved`). `detail` names the requirement as the planner
+states it and the pin it states, and for a recorded pin adds that pin as
+`retrieved`. `harness.planner_seam` leaves those spec_ids out of the pin
+sources and names them in the brief.
 
 An entity's words can name more than one graph node, as "Congo" names both
 the Republic of the Congo and the Democratic Republic of the Congo. Search

@@ -1464,9 +1464,11 @@ def _share_units_repair_ceiling() -> int:
 def _failed_run_ceiling() -> int:
     """The most the sentence on what a failed run computed adds to the one for a plan held to no asks.
 
-    The seam cuts its list of ask numbers at `MAX_QUESTION_CHARS`.
+    The seam cuts its list of ask numbers at `MAX_QUESTION_CHARS`, and the
+    sentence is longest when the asks section marks an ask the user removed.
     """
-    listed = len(planner_seam._failed_run_sentence([0])) - len("0") + MAX_QUESTION_CHARS
+    one = planner_seam._failed_run_sentence([0], removed=True)
+    listed = len(one) - len("0") + MAX_QUESTION_CHARS
     return listed - len(planner_seam._failed_run_sentence(None))
 
 

@@ -849,7 +849,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 unknown, shown=on_record, read=read, definition_lookup=definition_lookup
             )
         return _invalid_data(exc, proposer)
-    blocked = _unrecordable(
+    blocked = _refused_spec_retrieved(plan, written, view) or _unrecordable(
         plan,
         view,
         referral=referral,
@@ -1368,12 +1368,23 @@ def _removed_asks_refused(
     accounted = {answer.ask for answer in patch.answered} | {
         decline.ask_ref for decline in patch.declined if decline.ask_ref is not None
     }
-    if not amendment_entry(view.state) or previous is None:
+    amending = amendment_entry(view.state)
+    if not amending or previous is None:
         if patch.removed_asks:
+            why = (
+                "the user amended nothing in this entry"
+                if not amending
+                else "this entry records no plan to remove them from"
+            )
+            rest = (
+                ": an ask marked (removed by the user) stays removed with nothing naming it, "
+                "and every other ask is answered or declined."
+                if previous is not None and previous.dropped_asks
+                else ", and answer or decline each ask."
+            )
             return _invalid_plan(
-                "`removed_asks` names the asks the user's own amendment of the plan removes, "
-                "and the user amended nothing in this entry. Leave it empty, and answer or "
-                "decline each ask."
+                "`removed_asks` names the asks the user's own amendment of a recorded plan "
+                f"removes, and {why}. Leave it empty{rest}"
             )
         restored = sorted(
             accounted & set(previous.dropped_asks)
@@ -1425,6 +1436,47 @@ def _refused_spec_pinned(
                     "spec_id": requirement.source_spec_id,
                 },
             )
+    return None
+
+
+def _refused_spec_retrieved(
+    plan: Plan, written: Sequence[EvidenceRequirement], view: SessionView
+) -> dict[str, object] | None:
+    """Return the `SOURCE_NOT_OFFERED` refusal of a pin `plan` retrieves as a spec_id the executor refused, or `None`.
+
+    `plan` is the plan as it would be recorded. A pin moves there to its
+    windowed copy over the requirement's period (`_window_pins`) or to the
+    compile alignment pins it to (`_aligned_requirements`), and that recorded
+    pin is the spec_id an executor refusal names. Both moves are pure
+    functions of the stated pin and what the requirement reads, so a refused
+    one comes back unless the requirement changes. The refusal names the
+    requirement as the planner states it in `written`, a rolling copy by the
+    requirement it copies, and the pin it states, which `_refused_spec_pinned`
+    has already passed.
+    """
+    refused = load_refused_specs(view.state)
+    if not refused:
+        return None
+    origins = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
+    stated = {requirement.id: requirement for requirement in written}
+    for requirement in plan.evidence_requirements:
+        retrieved = (
+            requirement.source_spec_id if isinstance(requirement, DatasetRequirement) else None
+        )
+        if retrieved is None or retrieved not in refused:
+            continue
+        requirement_id = origins.get(requirement.id, requirement.id)
+        own = stated.get(requirement_id)
+        pin = own.source_spec_id if isinstance(own, DatasetRequirement) else None
+        return problem(
+            ProblemCode.SOURCE_NOT_OFFERED,
+            f"{requirement_id!r} pins {pin!r}, which this plan retrieves over the "
+            f"requirement's period and alignment as {retrieved!r}, and the executor refused "
+            f"{retrieved!r} on an earlier run of this plan. Change the requirement's period "
+            "or what it reads, or pin another source the readings show.",
+            outcome=Outcome.REFUSED,
+            detail={"requirement_id": requirement_id, "spec_id": pin, "retrieved": retrieved},
+        )
     return None
 
 
