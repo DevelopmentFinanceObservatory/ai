@@ -206,10 +206,19 @@ proxy-level metrics do not dilute the agent traces.
 A deployed service with the Langfuse variables set sends Langfuse Cloud (EU
 region) the text of each Studio question and the assistant's replies; the
 orchestrator and planner prompts, which include the canvas and conversation
-digests (ADK's `call_llm` spans carry them); tool arguments and results at digest
-level; and refusal codes with the refusal fields recorded on the trace events
-below. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE` and a
-Langfuse `mask` function limit it.
+digests, and each model response, on ADK's `generate_content` spans; tool
+arguments and results at digest level, on its `execute_tool` spans; and
+refusal codes with the refusal fields recorded on the trace events below.
+`common.telemetry.init_telemetry` sets
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY` when the
+environment leaves it unset, which is what puts prompts, responses and tool
+content on those spans; `NO_CONTENT` keeps them off. A streamed response
+appears as one output message per chunk, and a thought summary appears as
+unlabelled text. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE`
+and a Langfuse `mask` function limit it.
+`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` returns ADK to its v1
+span layout, under which Langfuse prices each model call twice and shows each
+`invoke_workflow` span without its parent.
 
 One studio turn is one trace. `ConversationState.begin_turn` opens a `turn`
 span whose trace id is derived from the turn's wire `trace_id`, and
