@@ -566,7 +566,7 @@ async def test_a_resumed_run_whose_frames_stay_unread_is_listed_no_more_past_the
     """Publication completes the run on the next turn, but its frames are
     never described: each turn lists it undelivered until the delivery
     bound, whose turn says it is not listed again, and no later turn lists
-    it."""
+    it. Each later turn has a session of its own, as in Studio."""
     publisher = _FlakyPublisher()
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     runner, model = orchestrator_runner(
@@ -593,8 +593,9 @@ async def test_a_resumed_run_whose_frames_stay_unread_is_listed_no_more_past_the
     publisher.fixed = True
 
     standings = []
-    for _ in range(MAX_DELIVERY_ATTEMPTS):
-        await run_turn(runner, types.UserContent("Is it ready?"))
+    for turn in range(MAX_DELIVERY_ATTEMPTS):
+        await open_session(runner, session_id=f"s#t{turn}")
+        await run_turn(runner, types.UserContent("Is it ready?"), session_id=f"s#t{turn}")
         (standing,) = _runs(request_text(model.requests[-1]))
         standings.append(standing)
 
@@ -604,11 +605,10 @@ async def test_a_resumed_run_whose_frames_stay_unread_is_listed_no_more_past_the
     ) + [True]
     assert await ledger.unfinished() == ()
 
-    await run_turn(runner, types.UserContent("And now?"))
+    await open_session(runner, session_id="s#last")
+    await run_turn(runner, types.UserContent("And now?"), session_id="s#last")
 
-    # Each turn that carries a run on adds one hand-back to the history.
-    listed = request_text(model.requests[-1]).count('{"runs"')
-    assert listed == MAX_DELIVERY_ATTEMPTS
+    assert _runs(request_text(model.requests[-1])) == []
 
 
 async def test_a_run_carried_on_after_a_restart_keeps_its_frames_provenance() -> None:

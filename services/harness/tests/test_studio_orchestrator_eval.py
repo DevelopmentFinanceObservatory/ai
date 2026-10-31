@@ -142,7 +142,17 @@ def _card(*asks: dict[str, Any]) -> list[list[dict[str, Any]]]:
 
 
 def _hand_back(*asks: dict[str, Any]) -> dict[str, Any]:
-    return _request("orchestrator", "The approved plan ran.\n" + json.dumps({"asks": list(asks)}))
+    """A request showing the plan's hand-back, the result of its `plan` call."""
+    response = {
+        "name": "plan",
+        "response": {"result": "The approved plan ran.", "asks": list(asks)},
+    }
+    return {
+        "kind": "request",
+        "agent": "orchestrator",
+        "system": "",
+        "contents": [{"role": "user", "parts": [{"function_response": response}]}],
+    }
 
 
 ANSWERED = {"ask": "A", "answered_by": ["s1"]}

@@ -193,7 +193,8 @@ _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
-# action; the Studio stream holds back later text only after one of these.
+# action; the Studio stream holds back later text only after one of these,
+# and `harness.graph.orchestrate` answers the call whose last result holds it.
 HANDED_OFF = "handed_off"
 # The identity member each `get_data` scope member replaces.
 _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets": "facets"}
@@ -1483,7 +1484,9 @@ def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[s
     """Record `action` as the turn's pending action, unless one is pending.
 
     A recorded action skips the model call that would only end the turn: the
-    workflow's `route` node acts on it once the turn ends. The refusal of a
+    workflow's `route` node acts on it once the turn ends. The record stands
+    as the call's result until the hand-back replaces it, a later response
+    under the call's id (`harness.graph.orchestrate`). The refusal of a
     second hand-off goes back to the model.
     """
     pending = pending_action(tool_context.state)
@@ -1496,7 +1499,7 @@ def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[s
     tool_context.state[ORCHESTRATOR_PENDING_KEY] = action.model_dump(mode="json")
     tool_context.actions.skip_summarization = True
     return {
-        "status": "Recorded. End your turn now; the result comes back as the next message.",
+        "status": "Recorded. End your turn now; the result replaces this record.",
         HANDED_OFF: action.kind,
     }
 
@@ -2531,8 +2534,8 @@ def build_orchestrator_tools(
         carries the spec_id the result gives it, and the answer names that
         spec_id when the user picks it. A prices question names its part in
         `prices_of`, and its options are filled in. Each spec_id goes on one option. End
-        your turn after calling ask_user. Every answer comes back as the next
-        message.
+        your turn after calling ask_user. Every answer comes back as this
+        call's result.
         """
         parts = open_parts(tool_context.state)
         questions = [prices_question(question, parts) for question in questions]
@@ -2570,8 +2573,8 @@ def build_orchestrator_tools(
         Each ask is `{"text", "by", "over", "across_years"}`. Every party a
         search this turn held open goes in some ask's `by` or `over`, and the
         plan keeps the parties each ask lists in `by` together in one output.
-        End your turn after calling it; the plan's result comes back as the
-        next message.
+        End your turn after calling it; the plan's result comes back as this
+        call's result.
         """
         texts = [ask.text for ask in asks]
         refused = _asks_refusal(texts) or _breakdowns_missing(tool_context, asks)

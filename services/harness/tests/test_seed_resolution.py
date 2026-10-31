@@ -839,7 +839,8 @@ async def test_a_seeded_turn_takes_its_seeds_once_across_a_pause(
 ) -> None:
     """A seeded turn that pauses on `ask_user` or on a plan's approval resumes
     without running `seed` again: one hand-back and one set of its steps
-    across the turn, which then completes."""
+    across the turn, which then completes. The hand-back follows the user's
+    question in every request, the resumed one included."""
     del definition_store
     pausing_call, answer = _PAUSES[pausing]
     steps = _Describes()
@@ -860,6 +861,9 @@ async def test_a_seeded_turn_takes_its_seeds_once_across_a_pause(
     assert "seed" not in visited_nodes(resumed)
     assert [step for tool, step in steps.recorded if tool == SEED_STEP_TOOL] == ["seeds"]
     assert request_text(model.requests[-1]).count(_SEEDED) == 1
+    for request in (model.requests[0], model.requests[-1]):
+        texts = ["".join(p.text or "" for p in c.parts or []) for c in request.contents]
+        assert _SEEDED in texts[texts.index(_QUESTION) + 1]
     assert not [e for e in resumed if e.error_code]
     assert not [c for e in resumed for c in e.get_function_calls() if c.name == "adk_request_input"]
     assert model.script == []

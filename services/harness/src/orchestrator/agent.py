@@ -28,6 +28,10 @@ AGENT_NAME = "dfo_orchestrator"
 # keeps it out of persisted session state and past `harness.graph.state.GraphState`,
 # which validates unprefixed keys only.
 TODAY_STATE_KEY = "temp:today"
+# The hand-back the `seed` node gave the turn (`harness.graph.orchestrate`),
+# which answers none of the agent's calls: `prepend_digests` shows it after
+# the user's message on every request of the turn.
+SEEDED_STATE_KEY = "orchestrator:seeded"
 
 # The session-state keys the content `prepend_digests` adds is built from, and
 # the label each line opens with: the date `_stamp_today` writes, then the
@@ -304,13 +308,23 @@ the plan chose as a choice made, with its reason.
 
 def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
     """Open the request's contents with today's UTC date and the turn's
-    canvas and conversation digests, as one user content.
+    canvas and conversation digests, as one user content, and show the
+    turn's seed hand-back (`SEEDED_STATE_KEY`) as its own user content after
+    the user's message (`_turn_question`), or first when the request holds
+    no such message.
 
     They change from turn to turn, so they travel in the contents and the
     system instruction stays the same on every call, served from a shared
     cache (`harness.prefix_cache`). Adds nothing when state holds none of
     them.
     """
+    if seeded := callback_context.state.get(SEEDED_STATE_KEY):
+        at = 0
+        if (question := _turn_question(callback_context)) is not None:
+            for place, content in enumerate(llm_request.contents):
+                if content.role == "user" and content.parts == question.parts:
+                    at = place + 1
+        llm_request.contents.insert(at, types.Content(role="user", parts=[types.Part(text=seeded)]))
     lines = [
         f"{label}: {digest}"
         for key, label in _DIGESTS
@@ -320,6 +334,24 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
         llm_request.contents.insert(
             0, types.Content(role="user", parts=[types.Part(text="\n\n".join(lines))])
         )
+
+
+def _turn_question(callback_context: CallbackContext) -> types.Content | None:
+    """The message the user opened the turn with: the invocation's event
+    the user wrote outside any workflow node. A resume's answer to a pause
+    is a user event too, but it carries no text."""
+    return next(
+        (
+            event.content
+            for event in callback_context.session.events
+            if event.invocation_id == callback_context.invocation_id
+            and event.author == "user"
+            and not (event.node_info and event.node_info.path)
+            and event.content is not None
+            and any(part.text for part in event.content.parts or ())
+        ),
+        None,
+    )
 
 
 def _retrying(
@@ -389,6 +421,12 @@ def create_orchestrator_agent(
         # agent on its own branch, so "default" is the turn so far without
         # the planner's internal events.
         include_contents="default",
+        # Chat mode: each run of the agent reads its branch's earlier runs,
+        # its own calls and their results included, which in Studio are the
+        # turn's alone, since each turn has a session of its own. A
+        # single_turn node run reads only the events on its own node path,
+        # which leaves out every hand-back (`harness.graph.orchestrate`).
+        mode="chat",
         before_model_callback=prepend_digests,
         # Thought summaries are requested for the traces. The studio stream
         # does not carry them.

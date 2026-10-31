@@ -18,6 +18,17 @@ presentation-mcp as FastMCP ASGI sub-apps inside its own process,
 reachable over streamable HTTP at in-container loopback paths
 (`/mcp/data`, `/mcp/analysis`, `/mcp/presentation`).
 
+The agent runs in ADK's chat mode, so each of its runs in a turn reads its
+own earlier calls and their results. Its `plan` and `ask_user` tools record
+a hand-off and end its run; when the workflow comes back, the `orchestrate`
+node (`harness.graph.orchestrate`) answers the open call with a function
+response under the call's id, and ADK pairs a call with its last response.
+The agent reads a plan's frames, step summaries, asks and plan record, or
+the user's answers, as that call's result. The `seed` node's hand-back, the
+runs and datasets a turn opens with, answers no call: it waits in session
+state and `orchestrator.agent.prepend_digests` shows it after the user's
+message on every request.
+
 **`services/harness/src/planner`** is the Planner Agent: an ADK agent that
 drafts a methodological plan for a question, recording each decision it makes,
 the alternatives it considered, and the evidence an acceptable answer rests on.

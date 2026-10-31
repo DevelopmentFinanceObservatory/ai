@@ -3344,7 +3344,8 @@ async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
     assert [step["id"] for step in record["steps"] if step["failed"]] == list(
         dict.fromkeys(failed.values())
     )
-    result = json.loads(handed["text"].split("\n")[1])
+    assert handed["answers"] == "plan"
+    result = handed["body"]
     assert result["failed_step"]["step_id"] == "last_five"
     assert [
         (entry["step"], entry["status"], entry.get("failed_at"))

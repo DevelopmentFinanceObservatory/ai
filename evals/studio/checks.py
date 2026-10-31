@@ -1675,18 +1675,17 @@ def _listed_asks(evidence: Evidence) -> list[str]:
 
 
 def _handed_back_asks(evidence: Evidence) -> dict[str, dict[str, Any]]:
-    """Each ask a plan's hand-back to the orchestrator reports, by its text."""
+    """Each ask a plan's hand-back to the orchestrator reports, by its text:
+    the hand-back is the result of the orchestrator's `plan` call."""
     reported: dict[str, dict[str, Any]] = {}
     for request in _requests(evidence, agent="orchestrator"):
         for content in request["contents"]:
             for part in content.get("parts", []):
-                for line in (part.get("text") or "").split("\n"):
-                    try:
-                        body = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(body, dict):
-                        reported.update({ask["ask"]: ask for ask in body.get("asks", [])})
+                response = part.get("function_response")
+                if not response or response["name"] != "plan":
+                    continue
+                asks = (response.get("response") or {}).get("asks", [])
+                reported.update({ask["ask"]: ask for ask in asks})
     return reported
 
 
