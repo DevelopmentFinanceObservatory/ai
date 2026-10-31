@@ -704,6 +704,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
+        planner_seam._REFUSED_SPECS_STATE_KEY: [SPEC],
     }
     harness = _SeamHarness(state=stale)
     seam = _seam()
@@ -729,6 +730,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         COMPILE_FAILURES_STATE_KEY: [],
+        planner_seam._REFUSED_SPECS_STATE_KEY: [] if entry == "first-draft" else [SPEC],
     }
     assert kept == (stale if resumed else fresh)
 
