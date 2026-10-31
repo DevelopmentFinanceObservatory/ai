@@ -347,8 +347,8 @@ class _SeamHarness:
                 # descendants included -- to this node's own path, not just
                 # this node's direct interrupt. So the planner's own ask
                 # does resolve into this node's `ctx.resume_inputs` on a
-                # real resume (see `test_a_resumed_ask_gets_the_continuation_
-                # not_the_full_brief`, which drives one for real). Setting
+                # real resume (see `test_a_resumed_ask_and_the_amend_after_it_
+                # each_carry_the_brief_once`, which drives one for real). Setting
                 # it directly here is only for a test that needs the OTHER
                 # resume condition -- "has `__call__` already been through
                 # this session once" -- without paying for a real interrupt
@@ -640,6 +640,32 @@ async def test_a_planner_tool_that_raises_ends_the_entry_on_a_final_refusal(
     ]
     assert record.exc_info is not None and record.exc_info[0] is RuntimeError
     assert record.args is not None and record.args[:2] == ("get_skill", "RuntimeError")
+
+
+def test_a_cancelled_planner_tool_call_records_no_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ADK runs `on_tool_error_callback` for cleanup when a tool call is
+    cancelled (a Stop, a cut request). A cancellation is no tool failure, so
+    the entry is left to end the way the cancellation ends it."""
+    seam = _seam()
+    (tool,) = [t for t in seam._agent.tools if isinstance(t, BaseTool) and t.name == "get_skill"]
+    tracker = _RunTracker()
+    token = planner_seam._active_call.set(
+        planner_seam._CallState(tracker=tracker, on_progress=None)
+    )
+    tool_context = SimpleNamespace(session=SimpleNamespace(id="s"), invocation_id="i")
+    try:
+        with caplog.at_level(logging.ERROR, logger=planner_seam.logger.name):
+            answer = seam._on_planner_tool_error(
+                tool, {"skill_id": "aid"}, tool_context, asyncio.CancelledError()
+            )
+    finally:
+        planner_seam._active_call.reset(token)
+
+    assert answer is None
+    assert tracker.refused is None and not tracker.ready_to_break
+    assert not [r for r in caplog.records if r.name == planner_seam.logger.name]
 
 
 async def test_an_unknown_tool_name_keeps_adks_answer_listing_the_tools(
@@ -1270,32 +1296,31 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     assert [report["tools"] for report in reports] == [["adk_request_input"], ["propose_plan"]]
 
 
-async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
+_BRIEF_MARKER = "Context for this question."
+
+
+def _brief_follows_the_question(request: Any) -> str:
+    """The one brief in `request`, after checking it directly follows the
+    turn's question: the latest "probe", the message `_SeamHarness` opens
+    every run on."""
+    texts = [
+        "".join(part.text or "" for part in content.parts or []) for content in request.contents
+    ]
+    (at,) = [i for i, text in enumerate(texts) if _BRIEF_MARKER in text]
+    question = max(i for i, text in enumerate(texts) if text == "probe")
+    assert at == question + 1, f"the brief does not follow the question: {texts}"
+    return texts[at]
+
+
+async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """`ctx.run_node(self._agent, ...)`'s dynamic child matches the *same*
-    node path on a resume, so the round that answers a pending
-    `adk_request_input` directly continues that already-open model turn --
-    confirmed here by inspection (`captured_requests` after the resume
-    round carries only the interrupt's own `FunctionResponse`, never a new
-    `content`); whatever `_message` built for that round never reaches the
-    model at all, fresh-vs-continuing included. `_BRIEFED_STATE_KEY`'s own
-    durability has to be checked on the *next* call that opens a genuinely
-    new dynamic child run instead -- the `amend` edge a real approval round
-    would take next -- which is a fresh `ctx.run_node` call, not a replay,
-    so whatever `_message` builds for it does reach the model
-    (`test_a_sixth_amendment_turn_still_records_its_own_version` already
-    proves a fresh call's own content lands, across separate `harness.run()`
-    calls on one session, the same shape this test reuses).
-
-    Unfixed, `_BRIEFED_STATE_KEY` is written only through
-    `ctx.session.state` -- visible in-process, never captured in an event's
-    `state_delta` -- so the fresh `get_session()` copy the amend call's own
-    `Runner.run_async` fetches reads it back `False`, `fresh` recomputes
-    `True`, and that call renders the ~10,000-character brief a second time
-    alongside the amendment ask, instead of `_message`'s `fresh=False`
-    contract: the amendment ask alone, no `_READINGS_CONTEXT` block.
-    """
+    """ADK hands a node its input only on a live run, so a planner-side ask's
+    resume would send the model no brief if the brief travelled as node
+    input. `planner.agent.prepend_brief` puts it back from state after the
+    turn's question on every request: the first request after the answer,
+    and the amend call's, which renders the plan it changes and the
+    amendment after the readings. No request carries a brief twice."""
     plan = _translated_plan(decision, requirement, derived_requirement)
     seam = _seam()
     llm = ScriptedPlannerLlm(
@@ -1322,6 +1347,7 @@ async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
         seam, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
     )
     assert paused is None, "the ask should pause this call, not resolve it"
+    asked = len(llm.captured_requests)
 
     interrupt_id = _pending_ask_interrupt_id(await harness.events())
     resume_message = types.Content(
@@ -1338,14 +1364,12 @@ async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
     assert resumed is not None, "a real answer should let the same turn finish"
     assert resumed["plan"]["version"] == plan.version
 
-    # The next call this session ever makes: a fresh `ctx.run_node`, not a
-    # resume of anything -- the `amend` edge's own shape
-    # (`approve_n -> planner_n`). `_message`'s own contract says this
-    # renders `fresh=False`: the amendment ask alone, never
-    # `_READINGS_CONTEXT`'s block, since this session was already briefed
-    # once, in the very first call above.
+    answered = llm.captured_requests[asked]
+    assert "FR:adk_request_input" in _call_and_response_names(answered)
+    assert f"Question: {plan.question}" in _brief_follows_the_question(answered)
+
     llm.script = [["noted, but not done yet"]]
-    generations_before = len(llm.captured_requests)
+    amending = len(llm.captured_requests)
     await harness.run(
         seam,
         question=plan.question,
@@ -1354,17 +1378,9 @@ async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
         amendment="add a caveat about revisions",
     )
 
-    amend_request = llm.captured_requests[generations_before]
-    amend_prompt = _prompt_text(amend_request)
-    assert "add a caveat about revisions" in amend_prompt, "the amend call's own ask should land"
-    brief_mentions = amend_prompt.count("Context for this question.")
-    assert brief_mentions == 0, (
-        f"the amend call, on an already-briefed session, should render `fresh=False`'s "
-        f"continuing message -- the amendment ask alone, no readings section -- but saw "
-        f"{brief_mentions} occurrence(s) of the full brief's own marker text, so the seam "
-        "re-sent the full brief because `_BRIEFED_STATE_KEY` did not survive the earlier "
-        "ask-and-resume"
-    )
+    brief = _brief_follows_the_question(llm.captured_requests[amending])
+    assert brief.index(f"Question: {plan.question}") < brief.index("add a caveat about revisions")
+    assert f"version {plan.version}" in brief, "the amend brief should show the plan it changes"
 
 
 # -- a replan's refusal ---------------------------------------------------
@@ -1400,7 +1416,6 @@ def test_a_wave_with_two_refused_specs_names_both() -> None:
     refusal["also_stopped"] = [_rediscovery_refusal(SPEC_B)]
 
     message = seam._message(
-        fresh=False,
         question="malaria grants and population for kenya",
         prior_plan=None,
         refusal=refusal,
@@ -1420,7 +1435,6 @@ def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
     refusal = {**_rediscovery_refusal(SPEC), "computed_asks": [0, 2]}
 
     message = _seam()._message(
-        fresh=False,
         question="malaria grants for kenya",
         prior_plan=None,
         refusal=refusal,
@@ -1556,6 +1570,48 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
         SPEC_C: PinSource(block={"spec_id": SPEC_C}, settled=True),
     }
     assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
+
+
+async def test_a_spec_an_earlier_replan_refused_stays_out_until_the_next_first_draft() -> None:
+    """Two replans after one first draft, each refusing a different spec: the
+    second still neither shows nor lets the planner pin the first one's. The
+    next first-draft entry starts clean."""
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 8)
+    seam._agent.model = llm
+    readings = _turn_readings()
+    calls: list[dict[str, Any]] = [
+        {},
+        {"refusal": _rediscovery_refusal(SPEC)},
+        {"refusal": _rediscovery_refusal(SPEC_C)},
+        {},
+    ]
+    pinnable: list[list[str]] = []
+    briefs: list[str] = []
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        for call in calls:
+            before = len(llm.captured_requests)
+            await seam(ctx=ctx, question="aid to guatemala", readings=readings, **call)
+            pinnable.append(list(pin_sources(cast(SessionState, ctx.session.state))))
+            briefs.append(_brief_follows_the_question(llm.captured_requests[before]))
+
+    wf = Workflow(
+        name="seam_test_wf",
+        edges=[(START, node(_node, name="seam_under_test", rerun_on_resume=True))],
+    )
+    sessions = InMemorySessionService()
+    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    content = types.Content(role="user", parts=[types.Part(text="probe")])
+    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+        pass
+
+    assert pinnable == [[SPEC, SPEC_B, SPEC_C], [SPEC_B, SPEC_C], [SPEC_B], [SPEC, SPEC_B, SPEC_C]]
+    assert f"definite {SPEC}" not in briefs[2] and f"chosen {SPEC_C}" not in briefs[2]
+    assert f"candidate {SPEC_B}" in briefs[2]
+    assert f"definite {SPEC}" in briefs[3]
 
 
 async def test_the_shown_ids_are_exactly_the_ids_the_readings_text_names(
@@ -1830,7 +1886,6 @@ def test_the_digest_carries_what_an_amendment_has_to_preserve() -> None:
     seam = _seam()
     plan = _distinct_plan()
     message = seam._message(
-        fresh=True,
         question="QUESTION_TEXT",
         prior_plan=plan,
         refusal=None,
@@ -1897,7 +1952,6 @@ def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
     stored = stored_split_plan(decision)
 
     message = _seam()._message(
-        fresh=True,
         question="QUESTION_TEXT",
         prior_plan=planner_seam._as_authored(stored),
         refusal=None,
@@ -2021,11 +2075,10 @@ _FRANCE_KENYA = json.loads(
 )
 
 
-async def test_a_continuing_amend_call_shows_the_other_count_and_the_plan_pins_it(
+async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
     decision: Any, requirement: Any
 ) -> None:
-    """ "Use net disbursements" arrives on a continuing call, whose message is
-    the amendment alone. The fresh brief in its history named the net
+    """ "Use net disbursements" arrives on an amend call, whose brief names the net
     sibling's spec_id beside the gross reading, so the model pins it and the
     measure decision follows the pin."""
     (part,) = resolver_digest(_FRANCE_KENYA)["part_digests"]
@@ -2235,46 +2288,37 @@ async def test_an_amendment_still_works_through_the_seam(
     assert amended.previous_version == 5
 
 
-def test_a_continuing_message_omits_the_readings_and_digests_but_keeps_the_ask() -> None:
-    """A `fresh=False` render -- an `amend`/`replan` re-entry into a session this seam has already briefed -- drops the
-    search readings, both digests and the question, and carries the new thing (the
-    amendment or refusal ask) verbatim.
-    """
+@pytest.mark.parametrize(
+    "ask",
+    [{"amendment": "only since 2015"}, {"refusal": _rediscovery_refusal(SPEC)}],
+    ids=["amend", "replan"],
+)
+def test_an_amend_or_replan_brief_is_the_first_draft_brief_then_its_ask(
+    ask: dict[str, Any],
+) -> None:
+    """An amend or replan call renders the whole brief, readings, digests and
+    question as a first draft renders them, and closes on its ask, so the
+    model sees the ask in context and the brief's text up to the ask is the
+    same on every call of a turn."""
     seam = _seam()
-    canvas_digest = {"blocks": ["a block"]}
-    conversation_digest = {"turns": ["an earlier turn"]}
-
-    amend_message = seam._message(
-        fresh=False,
-        question="gdp guatemala",
-        prior_plan=None,
-        refusal=None,
-        amendment="only since 2015",
-        canvas_digest=canvas_digest,
-        conversation_digest=conversation_digest,
+    brief = {
+        "question": "gdp guatemala",
+        "prior_plan": None,
+        "canvas_digest": {"blocks": ["a block"]},
+        "conversation_digest": {"turns": ["an earlier turn"]},
+        "ledger": planner_seam._readings_ledger([]),
+    }
+    first_draft = seam._message(**brief, refusal=None, amendment=None)
+    closing = planner_seam._ask_text(
+        amendment=ask.get("amendment"), refusal=ask.get("refusal"), pick=None
     )
-    assert "only since 2015" in amend_message
-    assert SPEC not in amend_message
-    assert "Context for this question" not in amend_message
-    assert "already on the user's canvas" not in amend_message
-    assert "Earlier turns in this conversation" not in amend_message
-    assert "Question:" not in amend_message
 
-    refusal_message = seam._message(
-        fresh=False,
-        question="gdp guatemala",
-        prior_plan=None,
-        refusal=_rediscovery_refusal(SPEC),
-        amendment=None,
-        canvas_digest=canvas_digest,
-        conversation_digest=conversation_digest,
-    )
-    assert "Executing the approved plan failed" in refusal_message
-    assert "resolved.stat_vars.member_count = 872" in refusal_message
-    assert "Context for this question" not in refusal_message
-    assert "already on the user's canvas" not in refusal_message
-    assert "Earlier turns in this conversation" not in refusal_message
-    assert "Question:" not in refusal_message
+    message = seam._message(**brief, refusal=ask.get("refusal"), amendment=ask.get("amendment"))
+
+    assert message == first_draft + closing
+    assert closing and "Question: gdp guatemala" not in closing
+    for shown in ("Context for this question", "already on the user's canvas", "Earlier turns"):
+        assert shown in first_draft
 
 
 def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_invalid_plan() -> None:
@@ -2294,10 +2338,9 @@ def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_inv
 # -- user text in the brief is cut at the question cap ---------------------------
 
 
-def _render(seam: PlannerSeam, *, fresh: bool, **overrides: Any) -> str:
+def _render(seam: PlannerSeam, **overrides: Any) -> str:
     """One `_message` render with no readings, with `overrides` for what a test varies."""
     arguments: dict[str, Any] = {
-        "fresh": fresh,
         "question": "gdp guatemala",
         "prior_plan": None,
         "refusal": None,
@@ -2310,7 +2353,7 @@ def _render(seam: PlannerSeam, *, fresh: bool, **overrides: Any) -> str:
 
 def test_a_question_past_the_cap_is_cut_in_the_brief_and_says_so() -> None:
     """`TurnRequest.message` has no length limit, and a clarify reply lengthens the question."""
-    message = _render(_seam(), fresh=True, question="q" * 1_000_000)
+    message = _render(_seam(), question="q" * 1_000_000)
 
     (line,) = [line for line in message.splitlines() if line.startswith("Question: ")]
     assert line == "Question: " + "q" * (MAX_QUESTION_CHARS - len(CUT_MARKER)) + CUT_MARKER
@@ -2320,15 +2363,14 @@ def test_a_question_past_the_cap_is_cut_in_the_brief_and_says_so() -> None:
 def test_a_question_at_the_cap_is_rendered_whole() -> None:
     question = "q" * MAX_QUESTION_CHARS
 
-    message = _render(_seam(), fresh=True, question=question)
+    message = _render(_seam(), question=question)
 
     assert f"Question: {question}\n" in message
     assert CUT_MARKER not in message
 
 
-@pytest.mark.parametrize("fresh", [True, False])
-def test_an_amendment_past_the_cap_is_cut_and_says_so(fresh: bool) -> None:
-    message = _render(_seam(), fresh=fresh, amendment="a" * 1_000_000)
+def test_an_amendment_past_the_cap_is_cut_and_says_so() -> None:
+    message = _render(_seam(), amendment="a" * 1_000_000)
 
     (line,) = [
         line
@@ -2339,13 +2381,12 @@ def test_an_amendment_past_the_cap_is_cut_and_says_so(fresh: bool) -> None:
     assert asked == "a" * (MAX_QUESTION_CHARS - len(CUT_MARKER)) + CUT_MARKER
 
 
-@pytest.mark.parametrize("fresh", [True, False])
-def test_a_refusal_past_the_cap_is_cut_and_says_so(fresh: bool) -> None:
+def test_a_refusal_past_the_cap_is_cut_and_says_so() -> None:
     refusal = _rediscovery_refusal(SPEC)
     refusal["refusal"]["message"] = "m" * 1_000_000
     refusal["also_stopped"] = [_rediscovery_refusal(SPEC_B) for _ in range(1_000)]
 
-    message = _render(_seam(), fresh=fresh, refusal=refusal)
+    message = _render(_seam(), refusal=refusal)
 
     assert "Executing the approved plan failed" in message
     assert message.count(CUT_MARKER) >= 1
@@ -2420,7 +2461,7 @@ def test_a_refusal_shows_the_planner_every_error_before_its_warnings() -> None:
     """Four `window_short` warnings listed ahead of the entity errors would fill the cap
     and cut the errors off. Every error reaches the planner, and the warnings that do
     not fit are counted by code."""
-    message = _render(_seam(), fresh=False, refusal=_entities_unmet_refusal())
+    message = _render(_seam(), refusal=_entities_unmet_refusal())
 
     shown, listed = _refusal_shown(message)
     errors = [*shown["issues"], *listed]
@@ -2434,7 +2475,7 @@ def test_a_refusal_lists_its_errors_before_its_warnings_when_all_fit() -> None:
     refusal = _entities_unmet_refusal()
     refusal["issues"] = [*refusal["issues"][:2], refusal["issues"][4]]
 
-    shown, listed = _refusal_shown(_render(_seam(), fresh=False, refusal=refusal))
+    shown, listed = _refusal_shown(_render(_seam(), refusal=refusal))
 
     assert [issue["code"] for issue in shown["issues"]] == [
         "entity_missing",
@@ -2492,7 +2533,7 @@ def test_errors_past_the_cap_follow_the_cut_refusal(
     for issue in errors[: len(_DONORS)]:
         issue["found"] = ["a donor label"] * 1_000
 
-    message = _render(_seam(), fresh=False, refusal=refusal)
+    message = _render(_seam(), refusal=refusal)
 
     cut, _, listed = message.partition("\nErrors: ")
     shown, counted = _errors_and_left_out(listed)
@@ -2529,7 +2570,7 @@ def test_a_refusal_of_thousands_of_errors_renders_as_its_small_counterpart() -> 
             _Uncomparable(issue)
             for issue in [*refusal["issues"], *(_grain_ambiguous("gdp", n) for n in range(series))]
         ]
-        return _render(_seam(), fresh=False, refusal=refusal)
+        return _render(_seam(), refusal=refusal)
 
     small, large = rendered(300), rendered(12_000)
 
@@ -2543,7 +2584,7 @@ def test_a_refusal_of_thousands_of_errors_renders_as_its_small_counterpart() -> 
 
 
 def test_a_short_refusal_is_rendered_whole() -> None:
-    message = _render(_seam(), fresh=False, refusal=_rediscovery_refusal(SPEC))
+    message = _render(_seam(), refusal=_rediscovery_refusal(SPEC))
 
     assert CUT_MARKER not in message
     assert "resolved.stat_vars.member_count = 872" in message
@@ -3053,8 +3094,8 @@ async def test_a_later_entry_carries_the_earlier_tool_calls(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """A later entry on the same session (the `amend` edge) sends only the
-    amendment (`_message`'s `fresh=False`), so its first generation has to
-    read the first entry's tool calls from history. Run as a
+    full brief, and its first generation reads the first entry's tool calls
+    from history, since both run on the same node path here. Run as a
     workflow node with no explicit `include_contents`, ADK defaults the
     planner to `'none'`, which builds every request from the latest user
     event onwards (`_get_current_turn_contents`,
@@ -3864,11 +3905,7 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     # `propose_plan` itself left behind is what this test is about.
     await harness.run(seam, question="kenya oda 2023", readings=[])
 
-    # The second call's own generation was rendered fresh -- the full
-    # brief, "Question: kenya oda 2023" line included -- not a continuing
-    # message, which a session already marked briefed would have gotten
-    # instead (see `test_the_full_brief_a_second_call_inherits_is_byte_
-    # identical_to_the_first`, which proves the other side of that split).
+    # The second call's own generation carries its own question.
     brief = _prompt_text(second_llm.captured_requests[0])
     assert "Question: kenya oda 2023" in brief
 
@@ -3956,35 +3993,13 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
     assert version == 6
 
 
-async def test_the_full_brief_a_second_call_inherits_is_byte_identical_to_the_first() -> None:
-    """The fresh/continuing split rests on one assumption: `question`,
-    `readings`, `canvas_digest` and `conversation_digest` never change
-    mid-turn, so a continuing call can safely drop them because the
-    session's own history already carries exactly what a fresh call would
-    have rendered.
-
-    This drives two `PlannerSeam.__call__`s through the *same* `ctx`,
-    inside one node function -- the shape an `amend`/`replan` edge actually
-    produces in the real graph, one continuous `Runner.run_async` for the
-    whole turn, `planner_n` re-entered as an internal node transition, not
-    two separate top-level runs. That distinction matters here:
-    `_BRIEFED_STATE_KEY` is a direct, non-delta-tracked write to
-    `ctx.session.state` (see the module docstring on why), and such a write
-    is only guaranteed visible to a later read within the same
-    `Runner.run_async` invocation (`_SeamHarness`'s own `seed_state`
-    docstring already says as much for `prior_plan`'s reseed) -- two
-    separate `_SeamHarness.run()` calls would not reliably carry it
-    forward, and would not exercise what this test is about.
-
-    With the two calls sharing one `ctx`, the second call's own generation
-    sees the first call's full brief already in its history (via
-    `include_contents="default"`, see the module docstring) -- asserting
-    that text is byte-identical to what a fresh render of the *second*
-    call's own arguments would produce is exactly the invariant the
-    fresh/continuing split rests on: if a future change ever let this seam
-    render one of these fields differently between two calls passed the
-    same values, this test would catch it before a continuing message went
-    stale on the strength of a false assumption.
+async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
+    """Two calls in one node, the shape the graph's `amend` and `replan` edges
+    take inside one `Runner.run_async`. Each call's requests carry its own
+    brief once, after the turn's question. The second brief opens with the
+    first byte for byte, since `question`, `readings`, `canvas_digest` and
+    `conversation_digest` do not change mid-turn, and only the ask is added
+    after them.
     """
     question = "kenya debt"
     readings: list[dict[str, Any]] = []
@@ -3996,7 +4011,6 @@ async def test_the_full_brief_a_second_call_inherits_is_byte_identical_to_the_fi
     second_llm = ScriptedPlannerLlm(script=["still nothing"] * 4)
 
     expected_first_message = seam._message(
-        fresh=True,
         question=question,
         prior_plan=None,
         refusal=None,
@@ -4035,14 +4049,11 @@ async def test_the_full_brief_a_second_call_inherits_is_byte_identical_to_the_fi
     async for event in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
         assert isinstance(event, Event)
 
-    seen_user_texts = [
-        part.text
-        for request_content in second_llm.captured_requests[0].contents
-        if request_content.role == "user"
-        for part in request_content.parts or []
-        if part.text is not None
-    ]
-    assert expected_first_message in seen_user_texts
+    assert _brief_follows_the_question(first_llm.captured_requests[0]) == expected_first_message
+    second = _brief_follows_the_question(second_llm.captured_requests[0])
+    assert second == expected_first_message + planner_seam._ask_text(
+        amendment="only since 2015", refusal=None, pick=None
+    )
 
 
 async def test_a_turn_that_loops_past_the_round_cap_is_refused_not_raised(

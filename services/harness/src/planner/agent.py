@@ -59,12 +59,16 @@ from data_mcp.definition_writes import windowed_identity
 from data_mcp.scope import ChoiceOrigin, ScopeEntry
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.events.event import Event
 from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
+from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
+from google.genai import types
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
@@ -2685,6 +2689,55 @@ def build_planner_tools(
     ]
 
 
+# The brief for the planner's current run, which `prepend_brief` shows the model.
+# `harness.planner_seam.PlannerSeam` renders it before every run, a resume
+# included, so a `temp:` key that is never persisted is enough.
+BRIEF_STATE_KEY = "temp:planner_brief"
+
+
+def prepend_brief(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
+    """Show the model the run's brief (`BRIEF_STATE_KEY`) right after the turn's question.
+
+    Every request of the run carries it, the first request after a resume
+    included, since ADK hands a node its input only on a live run. The brief
+    sits ahead of the run's own calls and responses, so each request extends
+    the one before it. Adds nothing when state holds no brief.
+    """
+    brief = callback_context.state.get(BRIEF_STATE_KEY)
+    if not brief:
+        return
+    llm_request.contents.insert(
+        _after_question(callback_context.session.events, llm_request.contents),
+        types.Content(role="user", parts=[types.Part(text=brief)]),
+    )
+
+
+def _after_question(events: Sequence[Event], contents: Sequence[types.Content]) -> int:
+    """The position just past the turn's question in `contents`, or 0 when they lack it.
+
+    The question is the latest user message with no node path that is not a
+    function response: the message the turn opened on, which ADK shows every
+    node of the workflow. A user's answer to an ask is a function response.
+    """
+    question = next(
+        (
+            event.content
+            for event in reversed(events)
+            if event.author == "user"
+            and not event.node_info.path
+            and event.content is not None
+            and not event.get_function_responses()
+        ),
+        None,
+    )
+    if question is None:
+        return 0
+    return next(
+        (len(contents) - i for i, content in enumerate(reversed(contents)) if content == question),
+        0,
+    )
+
+
 def create_planner_agent(
     *,
     model_name: str,
@@ -2754,18 +2807,12 @@ def create_planner_agent(
             ),
         ],
         # Run as a workflow node (`harness.planner_seam.PlannerSeam._propose`'s
-        # `ctx.run_node`), ADK defaults an agent with no explicit `mode` to
-        # `single_turn`, and a `single_turn` agent with no explicit
-        # `include_contents` to `'none'` (`run_llm_agent_as_node`,
-        # `google.adk.workflow._llm_agent_wrapper`). `'none'` builds every
-        # request from `_get_current_turn_contents`, which slices the session
-        # from the latest `author='user'` event. Every `_propose` call opens
-        # on a user message of its own, and a continuing one (a correction
-        # round, an amendment, a replan) carries only what is new, so that
-        # slice would drop the brief and every earlier tool call the
-        # continuing message relies on. Pinning `'default'` here uses
-        # `_get_contents` instead, which reads the whole history on this
-        # agent's branch.
+        # `ctx.run_node`), ADK runs an agent with no explicit `mode` as
+        # `single_turn`. `'none'` would build every request from
+        # `_get_current_turn_contents`, which slices the session from the
+        # latest turn-starting event. `'default'` uses `_get_contents`, which
+        # reads the turn's question and every event on this run's node path,
+        # so `prepend_brief` finds the question to follow.
         include_contents="default",
         # `AGENT_THINKING_CONFIG` (see `planner.settings`) pins every
         # generation to LOW thinking.
@@ -2774,4 +2821,5 @@ def create_planner_agent(
         # them, so `include_contents="default"` above never replays one into
         # a later request of the same turn. See `drop_thought_parts`.
         after_model_callback=drop_thought_parts,
+        before_model_callback=prepend_brief,
     )
