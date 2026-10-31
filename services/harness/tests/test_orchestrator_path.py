@@ -34,6 +34,7 @@ from harness.graph import execute as execute_module
 from harness.graph import plan_done as plan_done_module
 from harness.graph.orchestrate import orchestrate_node
 from harness.graph.plan_done import (
+    _DROPPED,
     HandBack,
     StepSummary,
     _ask_status,
@@ -1273,7 +1274,25 @@ class _AmendedPlanner(ScriptedPlannerModel):
         return {"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}
 
 
-async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed():
+class _AmendedRefusingReplanner(_AmendedPlanner):
+    """`_AmendedPlanner` that refuses to draft again once a run has stopped."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("refusal") is None:
+            return await super().__call__(**kwargs)
+        return {"refused": {"text": "no plan avoids the empty sum", "final": False}}
+
+
+@pytest.mark.parametrize("ending", ["ran", "stopped", "refused"])
+async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed(ending: str):
+    """On a stopped run, and on the planner's refusal after one, the removed
+    ask is kept out of what the lead leaves unanswered, so the agent does not
+    report it as a failure or fetch it."""
+    planner, surface = {
+        "ran": (_AmendedPlanner(), ScriptedSurface()),
+        "stopped": (_AmendedPlanner(), RefusingGetDataSurface("member_not_resolvable")),
+        "refused": (_AmendedRefusingReplanner(), _EmptyAggregateSurface()),
+    }[ending]
     runner, model = orchestrator_runner(
         call(
             "plan",
@@ -1281,8 +1300,8 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
             asks=["ODA to Ghana", "ODA to Kenya", "ODA to Nigeria"],
         ),
         types.Part.from_text(text="Answered."),
-        planner=_AmendedPlanner(),
-        tool_surface=ScriptedSurface(),
+        planner=planner,
+        tool_surface=surface,
         executor=_describes,
     )
     await open_session(runner)
@@ -1293,15 +1312,23 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
     )
     await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    after_plan = request_text(model.requests[-1])
-    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
+    after_plan, body = handed_back(model)
+    removed = 'The user removed from the plan "ODA to Nigeria": leave it out of the answer'
+    assert (removed in body["result"]) is (ending != "ran")
+    if ending == "refused":
+        assert body["result"].startswith("The planner could not make a plan")
+        assert body["asks"] == [{"ask": "ODA to Nigeria", "dropped": _DROPPED}]
+        return
     ghana, kenya, nigeria = body["asks"]
+    status = "failed" if ending == "stopped" else "data"
     assert [entry["status"] for entry in ghana["answered_by"] + kenya["answered_by"]] == [
-        "data",
-        "data",
+        status,
+        status,
     ]
     assert set(nigeria) == {"ask", "dropped"}
     assert '- 2 "ODA to Nigeria": removed by the user\'s amendment' in after_plan.split("\n")
+    if ending == "stopped":
+        assert 'Not computed: "ODA to Ghana"; "ODA to Kenya".' in body["result"]
 
 
 class _BreakdownRefusingSurface(ScriptedSurface):

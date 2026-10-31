@@ -379,6 +379,28 @@ def _partial_result(asks: list[dict[str, Any]] | None, *, frames: bool) -> str:
     return " ".join(sentences) or "Its result is not available."
 
 
+def _removed_asks(asks: list[dict[str, Any]] | None) -> str:
+    """The sentence a lead that reports asks as not computed closes its
+    account of them with: each ask the user's amendment removed (`dropped`),
+    kept out of the answer. Empty when no ask was removed.
+
+    The question the agent holds still asks a removed ask, and its own
+    search still names a source for it, so a lead that tells it to say what
+    remains unanswered would otherwise read the removed ask as unanswered
+    and fetch it."""
+    removed = [ask["ask"] for ask in asks or () if "dropped" in ask]
+    if not removed:
+        return ""
+    it, was = ("it", "it was") if len(removed) == 1 else ("them", "they were")
+    return (
+        "The user removed from the plan "
+        + "; ".join(json.dumps(ask) for ask in removed)
+        + f": leave {it} out of the answer, fetch and state no figure for {it}, and do not "
+        f"report {it} as not computed or failed. Say only that {was} removed at the "
+        "user's request."
+    )
+
+
 # The fields of a run's report that name a step or a requirement, or carry
 # prose about them, at any depth. Inside a tool's `fix` that maps `remedy`,
 # `detail` and a nested refusal's `message`. Every other field (a spec_id, a
@@ -726,7 +748,10 @@ def plan_done_node(
         earlier run's kept frames (`ORCHESTRATOR_KEPT_ASKS_KEY`), marked
         `earlier_plan`, with their step summaries and those notes, and an
         ask that earlier run computed in part with the part not computed and
-        its reason.
+        its reason. On the planner's refusal after a stopped run, each ask the
+        user's amendment removed from the plan that run executed is listed
+        `dropped`. A lead that reports asks as not computed closes with the
+        asks removed, kept out of the answer (`_removed_asks`).
 
         A completed run's delivery is decided by its own final frames
         (`harness.graph.delivery.deliver`): once the session holds the
@@ -734,7 +759,11 @@ def plan_done_node(
         were all read is recorded delivered; one with a frame left unread is
         recorded undelivered, says so in its standing, and the next turn
         lists it again (`harness.graph.resume`)."""
-        kept: dict[str, Any] = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY) or {}
+        # `execute` writes the kept asks when a run of this plan call stops,
+        # and `plan_start` clears them, so a mapping here, even an empty one,
+        # says a run of this call stopped.
+        stopped_kept: dict[str, Any] | None = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY)
+        kept = stopped_kept or {}
         ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
         hand_back = HandBack(
             executor,
@@ -777,19 +806,32 @@ def plan_done_node(
             again = not node_input.get("final") and _give_plan_back(ctx)
             computed = ""
             listing: dict[str, Any] = {}
-            if kept:
+            # A refusal never writes the plan, so after a stopped run of this
+            # call the stored plan is the one that run executed, and its
+            # removed asks are this call's.
+            stopped_plan = (
+                readable_plan(ctx, ctx.state.get("plan")) if stopped_kept is not None else None
+            )
+            removed = set(stopped_plan.dropped_asks) if stopped_plan is not None else set()
+            numbers = sorted({*map(int, kept), *removed})
+            if numbers:
                 brief_asks = load_asks(ctx.state)
                 listing = hand_back.listing(
                     ctx.state,
                     [
-                        await earlier(int(number), brief_asks[int(number)])
-                        for number in sorted(kept, key=int)
+                        {"ask": brief_asks[number], "dropped": _DROPPED}
+                        if number in removed
+                        else await earlier(number, brief_asks[number])
+                        for number in numbers
                     ],
                 )
-                computed = (
-                    f"{_partial_result(listing['asks'], frames=bool(listing['frames']))} "
-                    "Every other ask was not computed. "
-                )
+                if kept.keys() - {str(number) for number in removed}:
+                    computed = (
+                        f"{_partial_result(listing['asks'], frames=bool(listing['frames']))} "
+                        "Every other ask was not computed. "
+                    )
+                if removed:
+                    computed += f"{_removed_asks(listing['asks'])} "
             refused = AgentHandBack(
                 answers="plan",
                 status=ORCHESTRATOR_PLAN_FAILED_STATUS,
@@ -867,6 +909,8 @@ def plan_done_node(
                 if failed.get(key)
             }
             partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
+            if removed_asks := _removed_asks(result.get("asks")):
+                partial += f" {removed_asks}"
             if missing_capability:
                 # No brief avoids a capability the question needs, so the
                 # plan call is not given back.
@@ -880,11 +924,11 @@ def plan_done_node(
             else:
                 lead = (
                     f"The approved plan stopped at the step marked failed. {partial} Some "
-                    "other parts of the question may still be retrievable on their own with "
-                    "fetch, by the spec_id a step names: show what can be shown, labelled as "
-                    "what it is, never as the derived result; do not repeat the failed "
-                    "request unchanged; and say plainly what remains unanswered and why, in "
-                    "the user's terms."
+                    "other parts of the asks the plan kept may still be retrievable on their "
+                    "own with fetch, by the spec_id a step names: show what can be shown, "
+                    "labelled as what it is, never as the derived result; do not repeat the "
+                    "failed request unchanged; and say plainly what remains unanswered and "
+                    "why, in the user's terms."
                 )
                 if _give_plan_back(ctx):
                     lead += " A brief that avoids the failure may be planned once more."
