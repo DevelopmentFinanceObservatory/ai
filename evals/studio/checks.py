@@ -1675,8 +1675,8 @@ def _listed_asks(evidence: Evidence) -> list[str]:
 
 
 def _handed_back_asks(evidence: Evidence) -> dict[str, dict[str, Any]]:
-    """Each ask a plan's hand-back to the orchestrator reports, by its text:
-    the hand-back is the result of the orchestrator's `plan` call."""
+    """Each ask a plan's hand-back to the orchestrator reports, by its text.
+    The hand-back is the result of the orchestrator's `plan` call."""
     reported: dict[str, dict[str, Any]] = {}
     for request in _requests(evidence, agent="orchestrator"):
         for content in request["contents"]:

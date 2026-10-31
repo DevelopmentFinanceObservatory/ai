@@ -343,11 +343,8 @@ def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], 
     `INSTRUCTION` as it is. ADK has no setting to leave the line out.
 
     On gemini-3.8-flash the line alone switches the orchestrator's first call
-    into thinking. In replays of that call it flipped 6 of 6: with the line,
-    98 to 703 reasoning tokens and 7 to 12 s a call; without it, 0 tokens and
-    about 2.5 s a call. Across a whole planned turn of the e2e scenario H3,
-    the orchestrator's model time was about 79 s with the line against 25 s
-    without, and its reasoning 7.6k tokens against 0.
+    into thinking: 98 to 703 reasoning tokens and 7 to 12 s a call with it, 0
+    tokens and about 2.5 s a call without.
 
     It runs before the model is called, so the shared prefix cache
     (`harness.prefix_cache`) holds the instruction without it."""

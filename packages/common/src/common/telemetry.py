@@ -29,8 +29,8 @@ streamed response as its own output message and thought summaries as plain
 text parts.
 
 The spans follow ADK's telemetry schema v2, its default.
-`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` brings back schema
-v1, which this module does not adapt for Langfuse: each model call is priced
+`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` selects schema v1,
+whose spans reach Langfuse as ADK writes them: each model call is priced
 twice, on `call_llm` and on `generate_content`, and Langfuse's default span
 filter drops ADK's attribute-less `invocation` spans, so the `invoke_workflow`
 spans under them lose their parent.
@@ -202,7 +202,7 @@ def _capture_message_content() -> None:
     ADK's telemetry schema v2 puts a model call's messages on its
     `generate_content` span and a tool's arguments and result on its
     `execute_tool` span only when `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
-    is `SPAN_ONLY` or `SPAN_AND_EVENT`; unset, the spans carry none. ADK reads
+    is `SPAN_ONLY` or `SPAN_AND_EVENT`. Unset, the spans carry none. ADK reads
     the variable each time it builds a telemetry config, which it does per
     model and tool call, so setting it here, before the first run, reaches
     every call. A value already set, even an empty one, is left as it is.
@@ -243,10 +243,10 @@ def _init_langfuse(*, service_name: str) -> None:
 
     The client is built with `_langfuse_exporter` and the SDK's default span
     filter, which exports its own spans and every span with a `gen_ai.*`
-    attribute, so every span ADK opens. The SDK keeps the first client built in a process and ignores the arguments
-    of a later one, and `get_client()` returns that first client, so this has
-    to run before anything else builds one; a client that already exists is
-    reported.
+    attribute, so every span ADK opens. The SDK keeps the first client built
+    in a process and ignores the arguments of a later one, and `get_client()`
+    returns that first client, so this has to run before anything else builds
+    one. A client that already exists is reported.
 
     Once the client exists, spans are exported whatever the check finds, so the
     backend is recorded then and the check only reports.
@@ -675,8 +675,8 @@ def use_request_span(name: str) -> Iterator[RequestSpan]:
     already the request's and nothing opens: a second span would split
     fastmcp's one SERVER span per request in two. Langfuse's default span
     filter exports only its own spans and those with `gen_ai.*` attributes,
-    which fastmcp's lack, so under Langfuse the block gets an observation named `name` from the Langfuse client, in the
-    same trace. With no valid span current (no tracer provider, or the SDK
+    which fastmcp's lack, so under Langfuse the block gets an observation
+    named `name` from the Langfuse client, in the same trace. With no valid span current (no tracer provider, or the SDK
     disabled), a non-recording span with fresh random ids is made current, so
     every `current_trace_id` in the block still names one id. A span that
     fails to open leaves the block as it was; it never fails the request.

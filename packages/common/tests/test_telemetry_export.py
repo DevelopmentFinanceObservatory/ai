@@ -418,7 +418,7 @@ async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
     fake_langfuse: FakeLangfuse,
 ) -> None:
     """ADK's schema v2 spans carry `gen_ai.*` attributes, so the Langfuse
-    default filter exports them, `invoke_workflow` as a child of `turn`; a span
+    default filter exports them, `invoke_workflow` as a child of `turn`. A span
     with no such attribute, from ADK's scope or any other, is dropped."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()

@@ -18211,9 +18211,9 @@ _ANSWER = types.Content(
 @pytest.mark.parametrize(
     ("contents", "at"),
     [
-        # Another content ahead of the question: the brief still follows the question.
+        # With another content ahead of the question, the brief still follows the question.
         ([_user_text("today is 2026-10-31"), _QUESTION, _ASK_CALL, _ANSWER], 2),
-        # A request without the question: the brief opens it.
+        # In a request without the question, the brief opens it.
         ([_ASK_CALL, _ANSWER], 0),
     ],
     ids=["after-the-question", "no-question"],

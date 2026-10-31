@@ -59,7 +59,8 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     finally:
         LangfuseResourceManager.reset()
         # `init_telemetry` sets this variable when it was unset, which
-        # `monkeypatch` does not record; a value it removed above it restores.
+        # `monkeypatch` does not record. `monkeypatch` restores a value it
+        # removed above.
         os.environ.pop(telemetry._CAPTURE_MESSAGE_CONTENT_VAR, None)
         trace._TRACER_PROVIDER = saved_provider
         trace._TRACER_PROVIDER_SET_ONCE = saved_once

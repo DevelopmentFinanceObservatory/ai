@@ -96,8 +96,8 @@ def orchestrate_node(*, orchestrator: LlmAgent) -> Callable[[Context, Any], Asyn
 
     async def orchestrate(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
         """The orchestrator's turn: the agent runs with its tools on its own
-        branch, in chat mode, so each run sees the turn so far -- the user's
-        message, its own calls and their results -- and none of the
+        branch, in chat mode, so each run sees the turn so far (the user's
+        message, its own calls and their results) and none of the
         planner's internal events. Reached from START with the user's
         message (already in the session) and, when `seed` hands it
         something, an `AgentHandBack`; and again after `ask` and `plan_done`
