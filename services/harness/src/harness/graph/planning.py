@@ -44,12 +44,11 @@ from harness.graph.state import (
     APPROVE_INTERRUPT,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
-    ORCHESTRATOR_PRIOR_LEDGER_KEY,
-    ORCHESTRATOR_SEARCHES_KEY,
     PICK_REPLAN_KEY,
     PLANNER_STARTED_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
+    conversation_readings,
     interrupt_event,
     readable_plan,
     state_json,
@@ -247,10 +246,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         drafting = planner(
             ctx=ctx,
             question=question,
-            readings=[
-                *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-                *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
-            ],
+            readings=conversation_readings(ctx.state),
             prior_plan=(
                 None if is_first_draft else (existing.model_dump(mode="json") if existing else None)
             ),

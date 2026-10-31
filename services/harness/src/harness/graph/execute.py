@@ -66,6 +66,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     STEP_PROGRESS_KEY,
     readable_plan,
+    stored_sequence,
 )
 from harness.scope_choices import served_facts
 from harness.turn_records import SearchReading
@@ -116,7 +117,7 @@ def record_served_scopes(
         }
     readings = [
         SearchReading.model_validate(stored)
-        for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or []
+        for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)
     ]
     updated = [
         reading.with_served(served[reading.spec_id]) if reading.spec_id in served else reading
