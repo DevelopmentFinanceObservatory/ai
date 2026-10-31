@@ -1,0 +1,217 @@
+{
+  "messages": [
+    {
+      "parts": [
+        {
+          "content": "How much ODA did Ghana receive in 2023?",
+          "timestamp": "2026-10-31T18:27:33.611846Z",
+          "part_kind": "user-prompt"
+        }
+      ],
+      "timestamp": "2026-10-31T18:27:33.612159Z",
+      "instructions": "You are the planner. Propose a plan, then wait for approval.",
+      "kind": "request",
+      "run_id": "01a19337-8c58-7558-a6d1-ff79132067dc",
+      "conversation_id": "01a19337-8c58-7558-a6d1-ff7acf18a5cb",
+      "metadata": null,
+      "state": "complete"
+    },
+    {
+      "parts": [
+        {
+          "content": "Find ODA series for Ghana, then ask the user to confirm.",
+          "id": null,
+          "signature": null,
+          "provider_name": "google-gla",
+          "provider_details": {
+            "thought_signature": "b3BhcXVlLXNpZ25hdHVyZS1ieXRlcy10aGluay0x"
+          },
+          "part_kind": "thinking"
+        },
+        {
+          "tool_name": "search",
+          "args": {
+            "query": "ODA to Ghana"
+          },
+          "tool_call_id": "call-search",
+          "tool_kind": null,
+          "id": null,
+          "provider_name": "google-gla",
+          "provider_details": {
+            "thought_signature": "b3BhcXVlLXNpZ25hdHVyZS1ieXRlcy1jYWxsLTE="
+          },
+          "part_kind": "tool-call"
+        }
+      ],
+      "usage": {
+        "input_tokens": 120,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 45,
+        "output_reasoning_tokens": 0,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "audio_seconds": 0.0,
+        "details": {},
+        "cost": null
+      },
+      "model_name": "function:planner_model:",
+      "timestamp": "2026-10-31T18:27:33.613276Z",
+      "kind": "response",
+      "provider_name": "google-gla",
+      "provider_url": "https://generativelanguage.googleapis.com/",
+      "provider_details": {
+        "finish_reason": "STOP",
+        "timestamp": "2026-10-30T09:00:00Z"
+      },
+      "provider_response_id": "resp-1",
+      "finish_reason": "stop",
+      "run_id": "01a19337-8c58-7558-a6d1-ff79132067dc",
+      "conversation_id": "01a19337-8c58-7558-a6d1-ff7acf18a5cb",
+      "metadata": null,
+      "workspace_ref": null,
+      "history_digest": null,
+      "failed_attempts": null,
+      "state": "complete"
+    },
+    {
+      "parts": [
+        {
+          "tool_name": "search",
+          "content": {
+            "hits": [
+              {
+                "spec_id": "series-oda-ghana",
+                "title": "ODA to Ghana"
+              }
+            ]
+          },
+          "tool_call_id": "call-search",
+          "tool_kind": null,
+          "metadata": null,
+          "timestamp": "2026-10-31T18:27:33.616032Z",
+          "outcome": "success",
+          "part_kind": "tool-return"
+        }
+      ],
+      "timestamp": "2026-10-31T18:27:33.616541Z",
+      "instructions": "You are the planner. Propose a plan, then wait for approval.",
+      "kind": "request",
+      "run_id": "01a19337-8c58-7558-a6d1-ff79132067dc",
+      "conversation_id": "01a19337-8c58-7558-a6d1-ff7acf18a5cb",
+      "metadata": null,
+      "state": "complete"
+    },
+    {
+      "parts": [
+        {
+          "content": "One series fits. Propose it and wait for confirmation.",
+          "id": null,
+          "signature": null,
+          "provider_name": "google-gla",
+          "provider_details": {
+            "thought_signature": "b3BhcXVlLXNpZ25hdHVyZS1ieXRlcy10aGluay0y"
+          },
+          "part_kind": "thinking"
+        },
+        {
+          "content": "I found one series; confirming before I fetch.",
+          "id": null,
+          "provider_name": null,
+          "provider_details": null,
+          "part_kind": "text"
+        },
+        {
+          "tool_name": "confirm_plan",
+          "args": {
+            "spec_id": "series-oda-ghana"
+          },
+          "tool_call_id": "call-confirm",
+          "tool_kind": null,
+          "id": null,
+          "provider_name": "google-gla",
+          "provider_details": {
+            "thought_signature": "b3BhcXVlLXNpZ25hdHVyZS1ieXRlcy1jYWxsLTI="
+          },
+          "part_kind": "tool-call"
+        }
+      ],
+      "usage": {
+        "input_tokens": 260,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 70,
+        "output_reasoning_tokens": 0,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "audio_seconds": 0.0,
+        "details": {},
+        "cost": null
+      },
+      "model_name": "function:planner_model:",
+      "timestamp": "2026-10-31T18:27:33.617100Z",
+      "kind": "response",
+      "provider_name": "google-gla",
+      "provider_url": "https://generativelanguage.googleapis.com/",
+      "provider_details": {
+        "finish_reason": "STOP",
+        "timestamp": "2026-10-30T09:00:00Z"
+      },
+      "provider_response_id": "resp-2",
+      "finish_reason": "stop",
+      "run_id": "01a19337-8c58-7558-a6d1-ff79132067dc",
+      "conversation_id": "01a19337-8c58-7558-a6d1-ff7acf18a5cb",
+      "metadata": null,
+      "workspace_ref": null,
+      "history_digest": null,
+      "failed_attempts": null,
+      "state": "complete"
+    }
+  ],
+  "usage": {
+    "input_tokens": 380,
+    "cache_write_tokens": 0,
+    "cache_write_1h_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 115,
+    "output_reasoning_tokens": 0,
+    "input_audio_tokens": 0,
+    "cache_audio_read_tokens": 0,
+    "output_audio_tokens": 0,
+    "audio_seconds": 0.0,
+    "details": {},
+    "cost": null,
+    "requests": 2,
+    "tool_calls": 1
+  },
+  "conversation_id": "01a19337-8c58-7558-a6d1-ff7acf18a5cb",
+  "deferred_tool_requests": {
+    "calls": [
+      {
+        "tool_name": "confirm_plan",
+        "args": {
+          "spec_id": "series-oda-ghana"
+        },
+        "tool_call_id": "call-confirm",
+        "tool_kind": null,
+        "id": null,
+        "provider_name": "google-gla",
+        "provider_details": {
+          "thought_signature": "b3BhcXVlLXNpZ25hdHVyZS1ieXRlcy1jYWxsLTI="
+        },
+        "part_kind": "tool-call"
+      }
+    ],
+    "approvals": [],
+    "metadata": {
+      "call-confirm": {
+        "spec_id": "series-oda-ghana",
+        "reason": "needs user"
+      }
+    }
+  }
+}

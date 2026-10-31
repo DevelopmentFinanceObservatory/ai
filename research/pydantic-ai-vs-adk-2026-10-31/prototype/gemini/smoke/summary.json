@@ -1,0 +1,189 @@
+{
+  "arms": {
+    "pai-validated": {
+      "runs": 2,
+      "scored_runs": 1,
+      "first_ok": 0,
+      "kind_pass": 1,
+      "kind_pass_tasks": 1,
+      "kind_tasks": 1,
+      "refusal_runs": 1,
+      "expected_ending": 0,
+      "unit_stated": 0,
+      "datasets": 1,
+      "mean_calls": 4.0,
+      "usage_unknown": 0,
+      "mean_input_tokens": 64210.0,
+      "mean_cached_tokens": 54868.0,
+      "mean_output_tokens": 822.0,
+      "mean_thinking_tokens": 0.0,
+      "mean_wall_s": 15.021,
+      "p90_wall_s": 16.6786,
+      "max_wall_s": 17.093,
+      "budget_closed": 0,
+      "budget_closures": {},
+      "stops": {
+        "accepted": 1,
+        "asked_user": 1
+      },
+      "first_refusals": {
+        "invalid_plan rule": 1
+      }
+    },
+    "pai-like-adk": {
+      "runs": 2,
+      "scored_runs": 1,
+      "first_ok": 0,
+      "kind_pass": 1,
+      "kind_pass_tasks": 1,
+      "kind_tasks": 1,
+      "refusal_runs": 1,
+      "expected_ending": 1,
+      "unit_stated": 0,
+      "datasets": 1,
+      "mean_calls": 3.5,
+      "usage_unknown": 0,
+      "mean_input_tokens": 55131.0,
+      "mean_cached_tokens": 48009.5,
+      "mean_output_tokens": 744.0,
+      "mean_thinking_tokens": 0.0,
+      "mean_wall_s": 12.338000000000001,
+      "p90_wall_s": 13.27,
+      "max_wall_s": 13.503,
+      "budget_closed": 0,
+      "budget_closures": {},
+      "stops": {
+        "accepted": 1,
+        "asked_user": 1
+      },
+      "first_refusals": {
+        "invalid_plan rule": 1
+      }
+    }
+  },
+  "attempts": {
+    "pai-like-adk": 2,
+    "pai-validated": 2
+  },
+  "left_out": {
+    "pai-validated": {
+      "errored": {},
+      "missed the recording": {}
+    },
+    "pai-like-adk": {
+      "errored": {},
+      "missed the recording": {}
+    }
+  },
+  "changed_inputs": [],
+  "paired": {
+    "First proposal accepted": {
+      "tasks": 1,
+      "better": 0,
+      "worse": 0,
+      "same": 1,
+      "mean": 0.0,
+      "low": 0.0,
+      "high": 0.0,
+      "p": 1.0
+    },
+    "Kind pass": {
+      "tasks": 1,
+      "better": 0,
+      "worse": 0,
+      "same": 1,
+      "mean": 0.0,
+      "low": 0.0,
+      "high": 0.0,
+      "p": 1.0
+    },
+    "Model calls": {
+      "tasks": 2,
+      "better": 0,
+      "worse": 1,
+      "same": 1,
+      "mean": -0.5,
+      "low": -1.0,
+      "high": 0.0,
+      "p": 1.0
+    },
+    "Input tokens": {
+      "tasks": 2,
+      "better": 1,
+      "worse": 1,
+      "same": 0,
+      "mean": -9079.0,
+      "low": -18201.0,
+      "high": 43.0,
+      "p": 1.0
+    },
+    "Output tokens": {
+      "tasks": 2,
+      "better": 1,
+      "worse": 1,
+      "same": 0,
+      "mean": -78.0,
+      "low": -230.0,
+      "high": 74.0,
+      "p": 1.0
+    },
+    "Thinking tokens": {
+      "tasks": 2,
+      "better": 0,
+      "worse": 0,
+      "same": 2,
+      "mean": 0.0,
+      "low": 0.0,
+      "high": 0.0,
+      "p": 1.0
+    },
+    "Wall s": {
+      "tasks": 2,
+      "better": 0,
+      "worse": 2,
+      "same": 0,
+      "mean": -2.683,
+      "low": -3.59,
+      "high": -1.7759999999999998,
+      "p": 0.5
+    }
+  },
+  "triggers": [
+    {
+      "trigger": "First-proposal acceptance down 5% or more, interval below zero",
+      "fired": false,
+      "numbers": "+0.0% [+0.0%, +0.0%]"
+    },
+    {
+      "trigger": "Kind pass down 2 or more tasks",
+      "fired": false,
+      "numbers": "1 against 1 of 1 shared tasks"
+    },
+    {
+      "trigger": "p90 wall time up 10 s or more",
+      "fired": false,
+      "numbers": "13.3 s against 16.7 s"
+    },
+    {
+      "trigger": "More runs closed by the turn budget than the baseline",
+      "fired": false,
+      "numbers": "0 of 2 runs against 0 of 2"
+    }
+  ],
+  "budget_alarm": {
+    "pai-validated": 0,
+    "pai-like-adk": 0
+  },
+  "tasks_per_kind": {
+    "dataset": 0,
+    "aggregate": 1,
+    "growth": 0,
+    "comparison": 0,
+    "sum_of": 1,
+    "rank": 0,
+    "share_of": 0,
+    "quotient_of": 0,
+    "join": 0,
+    "filter": 0
+  }
+}

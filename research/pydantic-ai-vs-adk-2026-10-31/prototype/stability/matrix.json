@@ -1,0 +1,3106 @@
+{
+  "writers": [
+    "2.55.0",
+    "2.56.0",
+    "2.57.0",
+    "2.58.0",
+    "2.59.0",
+    "2.60.0",
+    "2.61.0",
+    "2.62.0",
+    "2.63.0",
+    "2.64.0"
+  ],
+  "readers": [
+    "2.55.0",
+    "2.56.0",
+    "2.57.0",
+    "2.58.0",
+    "2.59.0",
+    "2.60.0",
+    "2.61.0",
+    "2.62.0",
+    "2.63.0",
+    "2.64.0"
+  ],
+  "cells": {
+    "2.55.0": {
+      "2.55.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.56.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.57.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.58.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.55.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      }
+    },
+    "2.56.0": {
+      "2.55.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.56.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.57.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.58.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.56.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      }
+    },
+    "2.57.0": {
+      "2.55.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.56.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.57.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.58.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.57.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[1].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "messages[3].usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.cache_write_1h_tokens",
+            "kind": "added",
+            "after": 0
+          },
+          {
+            "path": "usage.output_reasoning_tokens",
+            "kind": "added",
+            "after": 0
+          }
+        ]
+      }
+    },
+    "2.58.0": {
+      "2.55.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.56.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.57.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.58.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.59.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.60.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.58.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      }
+    },
+    "2.59.0": {
+      "2.55.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.56.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.57.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.58.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.59.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.60.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.59.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      }
+    },
+    "2.60.0": {
+      "2.55.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.56.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.57.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.58.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.61.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.60.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      }
+    },
+    "2.61.0": {
+      "2.55.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.56.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.57.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.58.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.62.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.63.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.61.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      }
+    },
+    "2.62.0": {
+      "2.55.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.56.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.57.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.58.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.62.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.63.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.62.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      }
+    },
+    "2.63.0": {
+      "2.55.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.56.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.57.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.58.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      },
+      "2.64.0": {
+        "record": "2.63.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].model_id",
+            "kind": "added",
+            "after": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "added",
+            "after": null
+          }
+        ]
+      }
+    },
+    "2.64.0": {
+      "2.55.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.56.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.57.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].history_digest",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.58.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.59.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[2].parts[0].retry",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.60.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].parts[1].citations",
+            "kind": "removed",
+            "before": null
+          }
+        ]
+      },
+      "2.61.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          }
+        ]
+      },
+      "2.62.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].canonical_system",
+            "kind": "removed",
+            "before": null
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          }
+        ]
+      },
+      "2.63.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": false,
+        "diff": [
+          {
+            "path": "messages[1].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          },
+          {
+            "path": "messages[3].model_id",
+            "kind": "removed",
+            "before": "function:function:planner_model:"
+          }
+        ]
+      },
+      "2.64.0": {
+        "record": "2.64.0.json",
+        "loaded": true,
+        "load_error": null,
+        "resumed": true,
+        "resume_error": null,
+        "round_trip_equal": true,
+        "diff": []
+      }
+    }
+  },
+  "controls": {
+    "corrupt-part-kind.json": {
+      "2.55.0": true,
+      "2.56.0": true,
+      "2.57.0": true,
+      "2.58.0": true,
+      "2.59.0": true,
+      "2.60.0": true,
+      "2.61.0": true,
+      "2.62.0": true,
+      "2.63.0": true,
+      "2.64.0": true
+    },
+    "unknown-field.json": {
+      "2.55.0": true,
+      "2.56.0": true,
+      "2.57.0": true,
+      "2.58.0": true,
+      "2.59.0": true,
+      "2.60.0": true,
+      "2.61.0": true,
+      "2.62.0": true,
+      "2.63.0": true,
+      "2.64.0": true
+    },
+    "no-pending-request.json": {
+      "2.55.0": true,
+      "2.56.0": true,
+      "2.57.0": true,
+      "2.58.0": true,
+      "2.59.0": true,
+      "2.60.0": true,
+      "2.61.0": true,
+      "2.62.0": true,
+      "2.63.0": true,
+      "2.64.0": true
+    }
+  }
+}
