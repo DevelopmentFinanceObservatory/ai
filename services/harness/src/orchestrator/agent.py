@@ -15,6 +15,7 @@ from google.genai import types
 from harness.prefix_cache import gemini_model_name
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
 from harness.turn_budget import BoundedGemini
+from harness.turn_events import after_turn_question
 
 from orchestrator.tool_failures import answering_tool_failures
 
@@ -310,7 +311,7 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
     """Open the request's contents with today's UTC date and the turn's
     canvas and conversation digests, as one user content, and show the
     turn's seed hand-back (`SEEDED_STATE_KEY`) as its own user content after
-    the user's message (`_turn_question`), or first when the request holds
+    the user's message (`harness.turn_events.after_turn_question`), or first when the request holds
     no such message.
 
     They change from turn to turn, so they travel in the contents and the
@@ -319,12 +320,10 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
     them.
     """
     if seeded := callback_context.state.get(SEEDED_STATE_KEY):
-        at = 0
-        if (question := _turn_question(callback_context)) is not None:
-            for place, content in enumerate(llm_request.contents):
-                if content.role == "user" and content.parts == question.parts:
-                    at = place + 1
-        llm_request.contents.insert(at, types.Content(role="user", parts=[types.Part(text=seeded)]))
+        llm_request.contents.insert(
+            after_turn_question(callback_context, llm_request.contents),
+            types.Content(role="user", parts=[types.Part(text=seeded)]),
+        )
     lines = [
         f"{label}: {digest}"
         for key, label in _DIGESTS
@@ -334,24 +333,6 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
         llm_request.contents.insert(
             0, types.Content(role="user", parts=[types.Part(text="\n\n".join(lines))])
         )
-
-
-def _turn_question(callback_context: CallbackContext) -> types.Content | None:
-    """The message the user opened the turn with: the invocation's event
-    the user wrote outside any workflow node. A resume's answer to a pause
-    is a user event too, but it carries no text."""
-    return next(
-        (
-            event.content
-            for event in callback_context.session.events
-            if event.invocation_id == callback_context.invocation_id
-            and event.author == "user"
-            and not (event.node_info and event.node_info.path)
-            and event.content is not None
-            and any(part.text for part in event.content.parts or ())
-        ),
-        None,
-    )
 
 
 def _retrying(

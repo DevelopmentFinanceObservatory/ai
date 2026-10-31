@@ -68,7 +68,6 @@ from compiler.sources import (
 )
 from data_mcp.scope import ChoiceOrigin, ScopeAxis
 from data_mcp.settings import Settings as DataMcpSettings
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.plan_display import plan_words
 from harness.scope_choices import (
     ANY_REPORTERS,
@@ -90,6 +89,7 @@ from harness.scope_choices import (
     scope_money,
 )
 from harness.sentences import PlanWords
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from planner.parties import (
     PARTY_ROLES,
     FlowSide,

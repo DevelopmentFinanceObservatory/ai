@@ -62,7 +62,6 @@ from compiler.surface import ToolSurface
 from executor.classify import ExecutorCode
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
@@ -152,6 +151,7 @@ from harness.sentences import (
 )
 from harness.settings import Settings
 from harness.turn_budget import CLOSED_BY_KEY, current_turn_budget
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import (
     SETTLED_STATUSES,
     CandidateReading,
@@ -865,9 +865,8 @@ class PlannerSeam:
         session.
 
         The planner's own tool loop is opaque to this call: `ctx.run_node`
-        returns only once the whole turn has settled (no
-        streaming/async-generator variant of it exists in the installed
-        2.9.1 package). Progress, the stall watchdog's counting and its
+        returns only once the whole turn has settled (ADK has no
+        streaming/async-generator variant of it). Progress, the stall watchdog's counting and its
         early stop all happen from *inside* that one turn, through
         `LlmAgent` callbacks that ADK runs synchronously as part of the
         same `ctx.run_node` call: `after_tool_callback` fires right after
@@ -1859,22 +1858,30 @@ def _ask_response(args: dict[str, Any]) -> LlmResponse:
 def _without_refused(
     readings: Sequence[Mapping[str, Any]], refused: Collection[str]
 ) -> list[Mapping[str, Any]]:
-    """`readings` less every spec_id in `refused`. A reading whose own spec_id
-    was refused goes, with the other counts it offered, since a pin of one of
-    those is honoured through the offering reading's source. A refused
-    candidate or other count leaves the reading that offered it."""
+    """`readings` less every spec_id in `refused`, each reading kept.
+
+    A reading whose own spec_id was refused keeps its words and the
+    candidates, other counts and other prices it offered, so those stay
+    shown and pinnable, and loses only its spec_id. Only the newest reading
+    of a refused spec_id stays, as `newest_per_spec_id` would keep it, since
+    without its spec_id nothing later folds the older ones away. A refused
+    candidate, other count or other prices leaves the reading that offered it.
+    """
     if not refused:
         return list(readings)
+    parsed_readings = [SearchReading.model_validate(reading) for reading in readings]
+    last = {parsed.spec_id: index for index, parsed in enumerate(parsed_readings)}
     kept: list[Mapping[str, Any]] = []
-    for reading in readings:
-        parsed = SearchReading.model_validate(reading)
-        if parsed.spec_id in refused:
+    for index, parsed in enumerate(parsed_readings):
+        if parsed.spec_id in refused and last[parsed.spec_id] != index:
             continue
-        offered = {
+        update: dict[str, Any] = {
             field: tuple(c for c in getattr(parsed, field) if c.spec_id not in refused)
             for field in ("candidates", "alternatives", "other_prices")
         }
-        kept.append(parsed.model_copy(update=offered).model_dump(mode="json"))
+        if parsed.spec_id in refused:
+            update["spec_id"] = None
+        kept.append(parsed.model_copy(update=update).model_dump(mode="json"))
     return kept
 
 

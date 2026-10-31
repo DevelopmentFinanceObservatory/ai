@@ -17,7 +17,6 @@ from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.run import current_step_id
 from google.adk.events import Event
 from google.adk.events.event import NodeInfo
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.chart_binding import TopMembers
@@ -56,6 +55,7 @@ from harness.studio_translate import (
     _tool_call_label,
     _Translator,
 )
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import ActivityStep, CompositionActor, CompositionManifest, StepStatus
 from planner.plan import plan_revision
 from planner.workflow import ToolId

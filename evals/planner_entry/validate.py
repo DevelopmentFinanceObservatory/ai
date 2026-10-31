@@ -61,12 +61,12 @@ from entry import (
     stray_recordings,
     tool_calls,
 )
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from harness.turn_budget import bounded
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from pydantic import Field
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 

@@ -21,7 +21,6 @@ from executor.run import current_step_id
 from google.adk import Context
 from google.adk.events import Event, EventActions
 from google.adk.events.event import NodeInfo
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
@@ -54,6 +53,7 @@ from harness.studio_translate import (
     plan_approved,
 )
 from harness.tool_contracts import HarnessCode, ResolverError
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import (
     CompositionActor,
     MessageComplete,

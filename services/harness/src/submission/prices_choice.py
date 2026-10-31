@@ -37,7 +37,7 @@ from typing import Any, Literal, NamedTuple
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
 from compiler.evidence import requested_unit as requested_unit_of
 from compiler.sources import readable_source
-from google.adk.flows.llm_flows.functions import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     BaseYearUnstatedError,
