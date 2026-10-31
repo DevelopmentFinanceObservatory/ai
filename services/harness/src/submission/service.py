@@ -1449,10 +1449,13 @@ def _refused_spec_retrieved(
     compile alignment pins it to (`_aligned_requirements`), and that recorded
     pin is the spec_id an executor refusal names. Both moves are pure
     functions of the stated pin and what the requirement reads, so a refused
-    one comes back unless the requirement changes. The refusal names the
-    requirement as the planner states it in `written`, a rolling copy by the
-    requirement it copies, and the pin it states, which `_refused_spec_pinned`
-    has already passed.
+    one comes back unless the requirement changes. A calculation input the
+    planner states no pin for is pinned to the one dataset Search settles on
+    (`_aligned_bases`), which the harness cannot steer away from a refused
+    spec_id, and Search settles the same words the same way. The refusal
+    names the requirement as the planner states it in `written`, a rolling
+    copy by the requirement it copies, and the pin it states, which
+    `_refused_spec_pinned` has already passed, or says it states none.
     """
     refused = load_refused_specs(view.state)
     if not refused:
@@ -1468,6 +1471,16 @@ def _refused_spec_retrieved(
         requirement_id = origins.get(requirement.id, requirement.id)
         own = stated.get(requirement_id)
         pin = own.source_spec_id if isinstance(own, DatasetRequirement) else None
+        if pin is None:
+            return problem(
+                ProblemCode.SOURCE_NOT_OFFERED,
+                f"{requirement_id!r} states no pin, and Search settles it on a source this "
+                f"plan retrieves as {retrieved!r}, which the executor refused on an earlier "
+                "run of this plan. Pin another source the readings show, or change what it "
+                "asks for.",
+                outcome=Outcome.REFUSED,
+                detail={"requirement_id": requirement_id, "retrieved": retrieved},
+            )
         return problem(
             ProblemCode.SOURCE_NOT_OFFERED,
             f"{requirement_id!r} pins {pin!r}, which this plan retrieves over the "

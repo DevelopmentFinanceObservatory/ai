@@ -6150,6 +6150,32 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     assert load_plan(ctx.state) is None
 
 
+async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_refused(
+    decision: DecisionFactory,
+) -> None:
+    """Search settles the unpinned US total on a spec_id the executor refused in
+    this entry. The plan is refused, saying the total states no pin and Search
+    settles it on the refused spec_id, with no stated pin in `detail`."""
+    surface = BasisCompiles(
+        searched={
+            "status": "definite",
+            "spec": basis_block(TOTAL, narrow=False, active="measure_basis:gross"),
+        }
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+    ctx.state[REFUSED_SPECS_STATE_KEY] = [TOTAL]
+
+    refused = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert refused["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, refused
+    assert refused["detail"] == {"requirement_id": "total", "retrieved": TOTAL}
+    assert "'total' states no pin" in str(refused["message"])
+    assert load_plan(ctx.state) is None
+
+
 @pytest.mark.parametrize(
     ("retry_mode", "code", "held"),
     [

@@ -182,11 +182,14 @@ spec_id the executor refused since the session's last first draft
 (`planner.plan.REFUSED_SPECS_STATE_KEY`). The rule covers the pin a
 requirement it states or carries names (`submission.service._refused_spec_pinned`),
 and the pin the plan records for it: the copy over the requirement's period
-that `_window_pins` makes, and the compile alignment moves it to
-(`_refused_spec_retrieved`). `detail` names the requirement as the planner
-states it and the pin it states, and for a recorded pin adds that pin as
-`retrieved`. `harness.planner_seam` leaves those spec_ids out of the pin
-sources and names them in the brief.
+that `_window_pins` makes, the compile alignment moves it to, and the one
+dataset Search settles on for a calculation input the planner pins nothing for
+(`_refused_spec_retrieved`). Search answers one dataset the harness cannot
+steer, so the same words settle on the refused spec_id again; the planner pins
+another source or changes what the input asks for. `detail` names the
+requirement as the planner states it and any pin it states, and for a recorded
+pin adds that pin as `retrieved`. `harness.planner_seam`
+leaves those spec_ids out of the pin sources and names them in the brief.
 
 An entity's words can name more than one graph node, as "Congo" names both
 the Republic of the Congo and the Democratic Republic of the Congo. Search
