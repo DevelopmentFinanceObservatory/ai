@@ -275,8 +275,8 @@ class PlanAsk(StrictModel):
     `outputs` are the workflow steps whose results answer it. `declined` is
     the code a decline of it names and `not_computed` the part that decline
     leaves out, in the user's words. An ask carries outputs, a decline, or
-    both when the plan computes part of it, unless `dropped`: the user's
-    amendment removed it from the plan, and it carries neither.
+    both when the plan computes part of it. A `dropped` ask is one the
+    user's amendment removed from the plan, and it carries neither.
     """
 
     ask: str

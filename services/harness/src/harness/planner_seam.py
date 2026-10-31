@@ -222,9 +222,9 @@ _NO_READINGS = RenderedReadings("", ())
 
 # Every later amend or replan call leaves the spec_ids in
 # `REFUSED_SPECS_STATE_KEY` out of the pin sources and names them in its
-# brief's avoid sentence (`_avoid_sentence`).
-# Why the avoid sentence says a spec in `REFUSED_SPECS_STATE_KEY` was
-# refused, when this call's refusal does not name it.
+# brief's avoid sentence (`_avoid_sentence`). This is why that sentence says
+# a spec in `REFUSED_SPECS_STATE_KEY` was refused, when this call's refusal
+# does not name it.
 _REFUSED_EARLIER = "on an earlier run"
 
 # A decision's `description` and `rationale` are prose no validator compares,
@@ -1358,9 +1358,9 @@ class PlannerSeam:
         (`planner.plan.ASKS_STATE_KEY`), render numbered after the question,
         each with the parties `ask_breakdowns` says it breaks down by and
         marked when `asks_across_years` numbers it or `dropped`, the plan
-        being changed's `planner.plan.Plan.dropped_asks`, does. `refused` is every spec_id
-        the executor refused since the entry's first draft, which the ask
-        names (`_ask_text`).
+        being changed's `planner.plan.Plan.dropped_asks`, does. `refused` is
+        every spec_id the executor refused since the entry's first draft,
+        which the ask names (`_ask_text`).
 
         The question is the user's own words. Nothing bounds its length on the
         wire, so it renders cut to `MAX_QUESTION_CHARS`
@@ -1676,9 +1676,9 @@ def _issues_shown(split: _Split, *, warnings: bool, errors: bool = True) -> dict
 
 def _failed_run_sentence(computed: Sequence[int] | None, *, removed: bool = False) -> str:
     """What a replan's failed run computed: the asks its finished terminal
-    steps answer (`harness.graph.execute._computed_asks`), by number, or `None` for
-    a plan held to no asks. The new plan runs from the start, so it still
-    answers every ask the user kept (`_asks_section`), which the sentence
+    steps answer (`harness.graph.execute._computed_asks`), by number, or
+    `None` for a plan held to no asks. The new plan runs from the start, so
+    it still answers every ask the user kept (`_asks_section`), which the sentence
     words as every ask not marked removed when `removed` says the asks
     section marks one. The list of numbers is cut at `MAX_QUESTION_CHARS`."""
     if computed is None:
@@ -1712,7 +1712,7 @@ def _asks_section(
     `dropped`, the plan being changed's `planner.plan.Plan.dropped_asks`, is
     marked as removed by the user. In the user's amendment (`amending`) the
     section says it stays out unless the change asks for it again, and that
-    answering it puts it back; in any other entry it says to leave it out.
+    answering it puts it back. In any other entry it says to leave it out.
     """
     if not asks:
         return ""

@@ -1830,9 +1830,9 @@ def ask_rows(plan: Plan) -> list[dict[str, object]]:
     part the decline names in the user's words. The last three are `None`
     for an ask the plan answers whole; an ask answered in part carries
     both `answered_by` and a decline. `dropped` says the user's amendment
-    removed the ask (`Plan.dropped_asks`); such a row names no step and no
-    decline. A step's id is that of the operation
-    carrying out its requirement (`planner.workflow.WorkflowStep`).
+    removed the ask (`Plan.dropped_asks`), and such a row names no step and
+    no decline. A step's id is that of the operation carrying out its
+    requirement (`planner.workflow.WorkflowStep`).
 
     Requires a plan carrying a `translation`.
     """

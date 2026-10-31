@@ -272,9 +272,9 @@ def _ask_status(
     stopped: Mapping[str, str],
 ) -> dict[str, Any]:
     """One ask as `plan_done` reports it: removed by the user's amendment
-    (`dropped`), declined, with the plain reason, or
-    each step answering it with its status, and for an ask answered in part
-    the part not computed with its reason. `ran` holds each final step that
+    (`dropped`), declined, with the plain reason, or each step answering it
+    with its status, and for an ask answered in part the part not computed
+    with its reason. `ran` holds each final step that
     produced a frame. `data` and `empty` name the frame, and `empty` means it
     holds no series. `not_chartable` gives the reason no view was prepared.
     A step outside `ran` is `failed` when it is in `stopped` (each step the
@@ -709,8 +709,8 @@ def plan_done_node(
         names and `_unfinished_run_lead` tells), the step summaries, the
         notes on how the figures were computed (`totals`, `answer_notes`), what failed, each cut, and
         each ask the brief listed with its outputs' status, its decline, or
-        its removal by the user's amendment (`_ask_status`), then the plan record
-        (`harness.turn_records.PlanRecord`), under `plan_record`. It is the
+        its removal by the user's amendment (`_ask_status`), then the plan
+        record (`harness.turn_records.PlanRecord`), under `plan_record`. It is the
         result of the agent's `plan` call (`AgentHandBack`): a sentence that
         says what to do with it as the result's text, and the rest as its
         structured fields. A step refused

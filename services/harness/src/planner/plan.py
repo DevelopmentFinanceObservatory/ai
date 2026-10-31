@@ -1963,8 +1963,9 @@ def _check_asks_accounted(
     `Decline` whose `ask_ref` names it, or both: an answer for the part the
     plan computes and a decline naming, in `Decline.ask`, the part it does
     not. An ask the user's amendment removed (`dropped`) is accounted for
-    by that alone, and an answer or decline of it is a repeat. An answer names any requirement the plan states, one another
-    requirement reads included. `translator.mechanical.build_translation`
+    by that alone, and an answer or decline of it is a repeat. An answer
+    names any requirement the plan states, one another requirement reads
+    included. `translator.mechanical.build_translation`
     makes each a terminal, so its result reaches the answer. A number past
     the asks listed is a malformed draft. A gap, two answers or two declines
     is `AsksUnaccountedError`.
@@ -5899,10 +5900,9 @@ def _patched_accounts(
     whatever answered, declined or dropped it before is dropped. A decline
     naming no ask replaces the one with its code, as `_patched` keys it.
     An ask in `dropped` joins `dropped_asks`, and whatever answered or
-    declined it before goes. Unless
-    `same_asks`, the patch accounts for every ask: `plan`'s answers, drops
-    and the declines naming an ask are numbered against a list that no
-    longer holds.
+    declined it before goes. Unless `same_asks`, the patch accounts for
+    every ask: `plan`'s answers, drops and the declines naming an ask are
+    numbered against a list that no longer holds.
     """
     restated = {answer.ask for answer in answered} | {
         decline.ask_ref for decline in declined if decline.ask_ref is not None
