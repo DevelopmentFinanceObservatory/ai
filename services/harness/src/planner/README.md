@@ -177,6 +177,13 @@ refuses the requirement unpinned with its `entities` and `across` unchanged
 (`source_not_offered`): the translator's fresh search would settle on a
 withheld source. The planner makes the referral's `repair` or asks the user.
 
+`propose_plan` refuses as `source_not_offered` a plan that pins, in a
+requirement it states or carries, a spec_id the executor refused since the
+session's last first draft (`planner.plan.REFUSED_SPECS_STATE_KEY`,
+`submission.service._refused_spec_pinned`), with the requirement and the
+spec_id in `detail`. `harness.planner_seam` leaves those spec_ids out of the
+pin sources and names them in the brief.
+
 An entity's words can name more than one graph node, as "Congo" names both
 the Republic of the Congo and the Democratic Republic of the Congo. Search
 then answers an `entity_name_ambiguous` referral. Each reading in its
@@ -400,12 +407,16 @@ the user picked, answering an ask raised after the referral, drops its stated
 `source`, so the compiler accepts the source they chose. A pin the planner chose
 keeps the stated source, and the compiler refuses it again. The amended plan
 passes through the same validators as a first draft. In an entry the user's
-amendment at the approval card opened (`planner.plan.amendment_entry`), an ask
-whose every answering requirement the patch removes, and which the patch
-neither answers nor declines, moves to `Plan.dropped_asks`: it counts as
-accounted for, the plan card gives "you removed it from the plan" as its
-reason, and `plan_done` reports it as removed. A patch that declines such an
-ask is refused `decline_unearned`, with the ask in `detail.removed_asks`.
+amendment at the approval card opened (`planner.plan.amendment_entry`), the
+patch names each ask the user removed in `removed_asks` and narrows or removes
+the requirements that answered it. The ask moves to `Plan.dropped_asks`: it
+counts as accounted for, the plan card gives "you removed it from the plan" as
+its reason, and `plan_done` reports it as removed. Admission refuses
+`removed_asks` in any other entry and an ask the same patch answers or
+declines. A dropped ask stays dropped through later patches. A replan's brief
+marks it "(removed by the user)", and admission refuses a replan that answers
+or declines it; only a later amendment of the user's restores it, by answering
+it. An ask left out with nothing naming it is still unaccounted for.
 `starts_new_plan` begins a plan at version 1 instead. The wording of `question` plays no part in that
 choice, so a reworded question cannot be read as a new plan.
 

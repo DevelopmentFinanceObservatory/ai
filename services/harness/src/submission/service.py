@@ -183,6 +183,7 @@ from planner.plan import (
     load_plan,
     load_plan_rounds,
     load_reduction_refused_asks,
+    load_refused_specs,
     load_terminal_declines,
     load_unsupported,
     open_window,
@@ -354,6 +355,7 @@ class Proposal:
     removed_evidence_requirements: Sequence[Any] = ()
     declined: Sequence[Any] = ()
     answered: Sequence[Any] = ()
+    removed_asks: Sequence[Any] = ()
     across_years: Sequence[Any] = ()
     amends_version: int | None = None
     starts_new_plan: bool = False
@@ -482,6 +484,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 "removed_evidence_requirements": proposal.removed_evidence_requirements,
                 "declined": proposal.declined,
                 "answered": proposal.answered,
+                "removed_asks": proposal.removed_asks,
                 "across_years": proposal.across_years,
             }
         )
@@ -570,6 +573,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             previous=previous,
             reads_user_words=reads_user_words,
         )
+        or _removed_asks_refused(patch, previous, view)
+        or _refused_spec_pinned(written, view)
         or _referral_unanswered(existing, referral, view)
         or _draft_unreferenced(
             patch,
@@ -771,10 +776,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
                 first_years=_first_years_on_record(requirements_after, shown=on_record, read=read),
-                # An ask whose answer the user's amendment removes is dropped,
-                # as the user asked, rather than left for the planner to
-                # account for with another step's answer.
-                by_user=amendment_entry(view.state),
+                dropped=sorted(set(patch.removed_asks)),
             )
         elif question is None or answer_mode is None:
             missing = " and ".join(
@@ -989,6 +991,7 @@ class _Patch(BaseModel):
     ]
     declined: Annotated[list[Decline], Field(max_length=MAX_DECLINES)]
     answered: Annotated[list[AskAnswer], Field(max_length=MAX_PLAN_ASKS)]
+    removed_asks: Annotated[list[int], Field(max_length=MAX_PLAN_ASKS)]
     across_years: Annotated[list[Identifier], Field(max_length=MAX_PLAN_REQUIREMENTS)]
 
     @model_validator(mode="after")
@@ -1308,10 +1311,8 @@ def _decline_unearned(
     the same decline. A `BREAKDOWN_NOT_KEPT` decline is earned by its own
     rule, which checks a carried one too (`_breakdown_decline_unearned`).
     `detail.asks` lists the refused asks a decline named, when there are any.
-    In an entry the user's amendment opens (`amendment_entry`), a decline of
-    an ask whose every answering requirement in `previous` this plan removes
-    is told to leave the ask out instead, since `Plan.amend` records it in
-    `dropped_asks`; `detail.removed_asks` lists those asks.
+    In an entry the user's amendment opens (`amendment_entry`), the message
+    points at `removed_asks` for an ask the user removed.
     """
     carried = {decline.key for decline in previous.declined} if previous is not None else set()
     declines = [
@@ -1341,35 +1342,90 @@ def _decline_unearned(
             f" A `period_reduction_unstated` refusal named ask {_ask_list(refused)} in this "
             "entry, so a computation states it: make the change that refusal offers."
         )
-    removed = sorted(
-        {decline.ask_ref for decline in declines} & _asks_removed_by_amendment(plan, previous, view)
-    )
-    if removed:
-        message += (
-            f" This amendment removes every requirement answering ask {_ask_list(removed)}: "
-            "leave it out of `answered` and `declined`, and the plan records that the user "
-            "removed it."
-        )
+    if amendment_entry(view.state):
+        message += " An ask the user's amendment removes goes in `removed_asks` instead."
     return problem(
         ProblemCode.DECLINE_UNEARNED,
         message,
         outcome=Outcome.INVALID_INPUT,
-        detail={"operations": unearned}
-        | ({"asks": refused} if refused else {})
-        | ({"removed_asks": removed} if removed else {}),
+        detail={"operations": unearned} | ({"asks": refused} if refused else {}),
     )
 
 
-def _asks_removed_by_amendment(plan: Plan, previous: Plan | None, view: SessionView) -> set[int]:
-    """The asks `previous` answered whose every answering requirement `plan` no longer states.
+def _removed_asks_refused(
+    patch: _Patch, previous: Plan | None, view: SessionView
+) -> dict[str, object] | None:
+    """Return the `INVALID_PLAN` refusal of a patch's `removed_asks`, or of its answer to a dropped ask, or `None`.
 
-    Empty outside an entry the user's amendment opens (`amendment_entry`),
-    the only one where removing an ask's answer drops the ask.
+    Only the user's own amendment of a recorded plan (`amendment_entry`)
+    removes an ask, so `removed_asks` is refused elsewhere, as is an ask the
+    same patch answers or declines. `Plan` validation refuses a number past
+    the asks the brief lists. Outside such an entry a patch may neither
+    answer nor decline an ask `previous` records as dropped while the asks
+    stay the same: a replan cannot put back what the user took out, and only
+    their own amendment restores it, by answering it.
     """
-    if previous is None or not amendment_entry(view.state):
-        return set()
-    stated = {requirement.id for requirement in plan.evidence_requirements}
-    return {answer.ask for answer in previous.answered if stated.isdisjoint(answer.outputs)}
+    accounted = {answer.ask for answer in patch.answered} | {
+        decline.ask_ref for decline in patch.declined if decline.ask_ref is not None
+    }
+    if not amendment_entry(view.state) or previous is None:
+        if patch.removed_asks:
+            return _invalid_plan(
+                "`removed_asks` names the asks the user's own amendment of the plan removes, "
+                "and the user amended nothing in this entry. Leave it empty, and answer or "
+                "decline each ask."
+            )
+        restored = sorted(
+            accounted & set(previous.dropped_asks)
+            if previous is not None and tuple(load_asks(view.state)) == previous.asks
+            else ()
+        )
+        if restored:
+            return _invalid_plan(
+                f"The user's amendment removed ask {_ask_list(restored)} from the plan, and "
+                "only their own amendment puts it back. Leave it out of `answered` and "
+                "`declined`."
+            )
+        return None
+    both = sorted(accounted & set(patch.removed_asks))
+    if both:
+        return _invalid_plan(
+            f"`removed_asks` names ask {_ask_list(both)}, and this patch also answers or "
+            "declines it. Leave a removed ask out of `answered` and `declined`."
+        )
+    return None
+
+
+def _refused_spec_pinned(
+    requirements: Sequence[EvidenceRequirement], view: SessionView
+) -> dict[str, object] | None:
+    """Return the `SOURCE_NOT_OFFERED` refusal of a requirement pinning a spec_id the executor refused, or `None`.
+
+    `requirements` are those the plan states once the patch lands, carried
+    ones included, with each pin as the planner states it. The executor's
+    refusals since the entry's first draft (`load_refused_specs`) are left
+    out of the pin sources and named in the brief, so a pin of one would
+    fail the same way again.
+    """
+    refused = load_refused_specs(view.state)
+    for requirement in requirements:
+        if (
+            isinstance(requirement, DatasetRequirement)
+            and requirement.source_spec_id is not None
+            and requirement.source_spec_id in refused
+        ):
+            return problem(
+                ProblemCode.SOURCE_NOT_OFFERED,
+                f"{requirement.id!r} pins {requirement.source_spec_id!r}, which the executor "
+                "refused on an earlier run of this plan. Pin another source the readings "
+                "show, or unpin the requirement and change what it asks for.",
+                outcome=Outcome.REFUSED,
+                detail={
+                    "requirement_id": requirement.id,
+                    "spec_id": requirement.source_spec_id,
+                },
+            )
+    return None
 
 
 def _declinable(

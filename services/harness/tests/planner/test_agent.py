@@ -97,6 +97,7 @@ from planner.plan import (
     MAX_QUESTION_CHARS,
     PLAN_ROUNDS_STATE_KEY,
     PLAN_STATE_KEY,
+    REFUSED_SPECS_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
@@ -18250,55 +18251,241 @@ def test_no_brief_in_state_leaves_the_request_alone() -> None:
     assert request.contents == [_QUESTION]
 
 
-@pytest.mark.parametrize("declines", [False, True], ids=["leaves-it-out", "declines-it"])
-@pytest.mark.parametrize("amendment", [True, False], ids=["users-amendment", "replan"])
-def test_an_amendment_removing_an_asks_answer_drops_the_ask_only_for_the_user(
-    decision: DecisionFactory, requirement: RequirementFactory, amendment: bool, declines: bool
-) -> None:
-    """The user's amendment removes Nigeria's requirement and restates only the
-    other answers: Nigeria's ask is dropped. Outside such an entry the ask
-    still needs an answer or a decline. A patch declining that ask, which no
-    tool answered `unsupported`, is refused, and in the user's amendment the
-    refusal names the ask as one to leave out."""
-    countries = ("ghana", "kenya", "nigeria")
-    requirements = [
-        requirement(id=country, entities=[Entity(name=country.title(), role="debtor")])
-        for country in countries
-    ]
+_COUNTRIES = ("ghana", "kenya", "nigeria")
+
+
+def _country_entities(*countries: str) -> list[Entity]:
+    return [Entity(name=country.title(), role="debtor") for country in countries]
+
+
+def _three_country_plan(
+    decision: DecisionFactory, requirement: RequirementFactory, *, shared: bool = False
+) -> tuple[_FakeToolContext, Callable[..., dict[str, object]]]:
+    """A recorded plan whose three asks, ODA to each of `_COUNTRIES`, are
+    answered by each country's own requirement, or, when `shared`, all by one
+    requirement over the three."""
     ctx = _FakeToolContext()
-    ctx.state[ASKS_STATE_KEY] = [f"ODA to {country.title()}" for country in countries]
+    ctx.state[ASKS_STATE_KEY] = [f"ODA to {country.title()}" for country in _COUNTRIES]
     propose = _tools_by_name()["propose_plan"].func
+    if shared:
+        requirements = [requirement(id="all", entities=_country_entities(*_COUNTRIES))]
+        outputs = ["all"] * len(_COUNTRIES)
+    else:
+        requirements = [
+            requirement(id=country, entities=_country_entities(country)) for country in _COUNTRIES
+        ]
+        outputs = list(_COUNTRIES)
     first = propose(
         tool_context=ctx,
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
         evidence_requirements=requirements,
-        answered=[AskAnswer(ask=n, outputs=(c,)) for n, c in enumerate(countries)],
+        answered=[AskAnswer(ask=n, outputs=(output,)) for n, output in enumerate(outputs)],
     )
     assert first["outcome"] == Outcome.OK.value, first
+    return ctx, propose
+
+
+_NIGERIA_DECLINE = Decline(
+    ask="ODA to Nigeria", code=UnsupportedOperation.UNSUPPORTED_ASK, ask_ref=2
+)
+
+
+@pytest.mark.parametrize(
+    ("amendment", "removed_asks", "answers", "declines", "code"),
+    [
+        (True, [2], 2, False, None),
+        (False, [2], 2, False, ProblemCode.INVALID_PLAN),
+        (True, [3], 2, False, ProblemCode.INVALID_PLAN),
+        (True, [2], 3, False, ProblemCode.INVALID_PLAN),
+        (True, [2], 2, True, ProblemCode.INVALID_PLAN),
+        (True, [], 2, False, ProblemCode.INVALID_PLAN),
+        (True, [], 2, True, ProblemCode.DECLINE_UNEARNED),
+        (False, [], 2, True, ProblemCode.DECLINE_UNEARNED),
+    ],
+    ids=[
+        "users-amendment",
+        "replan",
+        "out-of-range",
+        "answers-it",
+        "declines-it",
+        "leaves-it-out",
+        "amendment-declines-it",
+        "replan-declines-it",
+    ],
+)
+def test_only_the_users_amendment_removes_an_ask_and_it_names_it(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    amendment: bool,
+    removed_asks: list[int],
+    answers: int,
+    declines: bool,
+    code: ProblemCode | None,
+) -> None:
+    """The patch removes Nigeria's requirement and answers the first `answers`
+    asks with their own. Naming ask 2 in `removed_asks` in the user's
+    amendment drops it. Elsewhere `removed_asks` is refused, as are a number
+    past the asks and an ask the patch also answers or declines. An ask left
+    out with nothing removing it is answered by a requirement the plan no
+    longer states. A decline nothing earned is refused, and in the user's
+    amendment the refusal points at `removed_asks`."""
+    ctx, propose = _three_country_plan(decision, requirement)
     ctx.state[AMENDMENT_ENTRY_STATE_KEY] = amendment
+    answered = [
+        AskAnswer(ask=n, outputs=(c if n < 2 else "kenya",))
+        for n, c in enumerate(_COUNTRIES[:answers])
+    ]
 
     amended = propose(
         tool_context=ctx,
         removed_evidence_requirements=["nigeria"],
-        answered=[AskAnswer(ask=n, outputs=(c,)) for n, c in enumerate(countries[:2])],
-        declined=[
-            Decline(ask="ODA to Nigeria", code=UnsupportedOperation.UNSUPPORTED_ASK, ask_ref=2)
-        ]
-        if declines
-        else (),
+        answered=answered,
+        declined=[_NIGERIA_DECLINE] if declines else [],
+        removed_asks=removed_asks,
         amends_version=1,
     )
 
-    if declines:
-        assert amended["code"] == ProblemCode.DECLINE_UNEARNED.value, amended
-        assert amended["detail"].get("removed_asks") == ([2] if amendment else None)
-    elif amendment:
+    if code is None:
         assert amended["outcome"] == Outcome.OK.value, amended
         plan = load_plan(ctx.state)
         assert plan is not None
         assert plan.dropped_asks == (2,)
         assert [answer.ask for answer in plan.answered] == [0, 1]
+        return
+    assert amended["code"] == code.value, amended
+    if code is ProblemCode.DECLINE_UNEARNED:
+        assert ("`removed_asks`" in str(amended["message"])) is amendment
+
+
+def test_a_planner_slip_in_the_users_amendment_is_not_read_as_a_removal(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """In the user's amendment the patch replaces `nigeria` with `nigeria2`
+    and leaves ask 2's answer on the removed requirement. Nothing names ask 2
+    in `removed_asks`, so the plan is refused, not recorded with ask 2 dropped."""
+    ctx, propose = _three_country_plan(decision, requirement)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+
+    amended = propose(
+        tool_context=ctx,
+        evidence_requirements=[requirement(id="nigeria2", entities=_country_entities("nigeria"))],
+        removed_evidence_requirements=["nigeria"],
+        amends_version=1,
+    )
+
+    assert amended["code"] == ProblemCode.INVALID_PLAN.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert (plan.version, plan.dropped_asks) == (1, ())
+
+
+def test_an_amendment_removes_one_ask_of_a_shared_requirement(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """One requirement answers all three asks. The user's amendment drops
+    Nigeria: the patch narrows that requirement and names ask 2 in
+    `removed_asks`, and the other two asks keep their answers."""
+    ctx, propose = _three_country_plan(decision, requirement, shared=True)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+
+    amended = propose(
+        tool_context=ctx,
+        evidence_requirements=[requirement(id="all", entities=_country_entities("ghana", "kenya"))],
+        removed_asks=[2],
+        amends_version=1,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.dropped_asks == (2,)
+    assert [(answer.ask, answer.outputs) for answer in plan.answered] == [
+        (0, ("all",)),
+        (1, ("all",)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("amendment", "accounts", "code", "dropped"),
+    [
+        (False, "answers", ProblemCode.INVALID_PLAN, (2,)),
+        (False, "declines", ProblemCode.INVALID_PLAN, (2,)),
+        (False, "leaves", None, (2,)),
+        (True, "answers", None, ()),
+    ],
+    ids=["replan-answers", "replan-declines", "replan-leaves-it", "users-amendment-answers"],
+)
+def test_a_dropped_ask_comes_back_only_by_the_users_amendment(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    amendment: bool,
+    accounts: str,
+    code: ProblemCode | None,
+    dropped: tuple[int, ...],
+) -> None:
+    """After the user's amendment drops ask 2, a replan that answers or
+    declines it is refused, and one that leaves it out carries the drop. A
+    later amendment of the user's restores it by answering it."""
+    ctx, propose = _three_country_plan(decision, requirement)
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+    first = propose(
+        tool_context=ctx,
+        removed_evidence_requirements=["nigeria"],
+        removed_asks=[2],
+        amends_version=1,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = amendment
+    nigeria = requirement(id="nigeria", entities=_country_entities("nigeria"))
+    patch: dict[str, Any] = {
+        "answers": {
+            "evidence_requirements": [nigeria],
+            "answered": [AskAnswer(ask=2, outputs=("nigeria",))],
+        },
+        "declines": {"declined": [_NIGERIA_DECLINE]},
+        "leaves": {"evidence_requirements": [nigeria]},
+    }[accounts]
+
+    again = propose(tool_context=ctx, amends_version=2, **patch)
+
+    if code is None:
+        assert again["outcome"] == Outcome.OK.value, again
     else:
-        assert amended["code"] == ProblemCode.INVALID_PLAN.value, amended
+        assert again["code"] == code.value, again
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.dropped_asks == dropped
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["shown", "executor-refused"])
+def test_a_carried_pin_the_executor_refused_is_refused(
+    decision: DecisionFactory, requirements: RequirementPair, refused: bool
+) -> None:
+    """A replan that leaves a requirement pinned to a spec_id the executor
+    refused in this entry is refused, naming the requirement and the spec_id.
+    With no refusal on record the same patch is recorded."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": SPEC})
+    first = _propose(
+        tools, ctx, decision(fixes=DecisionFixes(source_spec_id=SPEC)), [pinned, derived]
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    if refused:
+        ctx.state[REFUSED_SPECS_STATE_KEY] = [SPEC]
+
+    replan = _propose(
+        tools,
+        ctx,
+        decision(rationale="Reconsidered.", fixes=DecisionFixes(source_spec_id=SPEC)),
+        (),
+    )
+
+    if refused:
+        assert replan["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, replan
+        assert replan["detail"] == {"requirement_id": dataset.id, "spec_id": SPEC}
+    else:
+        assert replan["outcome"] == Outcome.OK.value, replan

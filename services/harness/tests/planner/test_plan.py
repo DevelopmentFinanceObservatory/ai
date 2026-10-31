@@ -561,12 +561,12 @@ def _country_plan(decision: DecisionFactory, requirement: RequirementFactory) ->
     )
 
 
-def test_an_ask_whose_answer_the_users_amendment_removes_is_dropped(
+def test_an_ask_the_users_amendment_removes_is_dropped(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
     plan = _country_plan(decision, requirement)
 
-    amended = plan.amend(removed_evidence_requirements=["nigeria"], by_user=True)
+    amended = plan.amend(removed_evidence_requirements=["nigeria"], dropped=[2])
 
     assert amended.answered == plan.answered[:2]
     assert amended.dropped_asks == (2,)
@@ -2879,6 +2879,7 @@ def _patch_of(requirements: list[EvidenceRequirement]) -> None:
             "removed_evidence_requirements": [],
             "declined": [],
             "answered": [],
+            "removed_asks": [],
             "across_years": [],
         }
     )

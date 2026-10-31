@@ -102,6 +102,7 @@ from planner.plan import (
     AggregateRequirement,
     AlignedInput,
     AnswerMode,
+    AskAnswer,
     AskBreakdown,
     DatasetRequirement,
     Decision,
@@ -1445,6 +1446,34 @@ def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
 
     assert "failed after it computed asks 0, 2." in message
     assert "computed_asks" not in message
+
+
+async def test_a_replan_brief_marks_each_ask_the_user_removed(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A replan of a plan whose ask 1 the user's amendment removed marks that
+    ask alone in the asks section, and the failed run's sentence holds the
+    new plan to the asks left unmarked."""
+    asks = ["Kenya's debt totals", "Uganda's debt totals"]
+    plan = Plan.model_validate(
+        {
+            **_translated_plan(decision, requirement, derived_requirement).model_dump(),
+            "asks": asks,
+            "answered": [AskAnswer(ask=0, outputs=("annual_totals",))],
+            "dropped_asks": [1],
+        }
+    )
+
+    text, _ = await _first_request_with_readings(
+        _turn_readings(),
+        plan=plan,
+        stored={ASKS_STATE_KEY: asks},
+        refusal={**_rediscovery_refusal(SPEC), "computed_asks": [0]},
+    )
+
+    marked = [line for line in text.splitlines() if line.endswith("(removed by the user)")]
+    assert marked == ["1. Uganda's debt totals (removed by the user)"]
+    assert "every ask not marked (removed by the user)" in text
 
 
 # -- the conversation's search readings ------------------------------------

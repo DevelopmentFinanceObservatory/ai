@@ -711,6 +711,7 @@ _PATCH_ARGUMENTS = (
     "removed_evidence_requirements",
     "declined",
     "answered",
+    "removed_asks",
 )
 
 
@@ -1510,9 +1511,12 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "When the brief lists asks, the requirements that answer each one, "
         "keyed by `ask`. Every ask is answered here or declined in `declined` "
         "with its number as `ask_ref`, exactly once, or both when the plan "
-        "computes part of it. When the user's amendment removes every requirement "
-        "answering an ask, leave that ask out of both: the plan records that the "
-        "user removed it."
+        "computes part of it, unless `removed_asks` names it."
+    ),
+    "removed_asks": (
+        "The number of each ask the user's amendment removes from the plan. Leave it out "
+        "of `answered` and `declined`, and narrow or remove what answered it. Only the "
+        "user's amendment removes an ask, and only a later one restores it, by answering it."
     ),
     "across_years": (
         "The `id` of each step that combines its years, an `aggregate` whose `group_by` "
@@ -2568,6 +2572,7 @@ def build_planner_tools(
         removed_evidence_requirements: list[str] = [],  # noqa: B006
         declined: list[Decline] = [],  # noqa: B006
         answered: list[AskAnswer] = [],  # noqa: B006
+        removed_asks: list[int] = [],  # noqa: B006
         across_years: list[str] = [],  # noqa: B006
         amends_version: int | None = None,
         starts_new_plan: bool = False,
@@ -2589,6 +2594,7 @@ def build_planner_tools(
                 removed_evidence_requirements=removed_evidence_requirements,
                 declined=declined,
                 answered=answered,
+                removed_asks=removed_asks,
                 across_years=across_years,
                 amends_version=amends_version,
                 starts_new_plan=starts_new_plan,

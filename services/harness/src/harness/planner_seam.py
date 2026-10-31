@@ -83,6 +83,7 @@ from planner.plan import (
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
     REDUCTION_REFUSED_ASKS_STATE_KEY,
+    REFUSED_SPECS_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
@@ -219,12 +220,10 @@ _READINGS_BUDGET = 3_000
 # The ledger `PlannerSeam._message` renders when its caller passes none.
 _NO_READINGS = RenderedReadings("", ())
 
-# Every spec_id the executor refused since the session's last first-draft
-# entry. Every later amend or replan call leaves them out of the pin sources
-# and names them in its brief's avoid sentence (`_avoid_sentence`). A
-# first-draft entry clears it.
-_REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
-# Why the avoid sentence says a spec in `_REFUSED_SPECS_STATE_KEY` was
+# Every later amend or replan call leaves the spec_ids in
+# `REFUSED_SPECS_STATE_KEY` out of the pin sources and names them in its
+# brief's avoid sentence (`_avoid_sentence`).
+# Why the avoid sentence says a spec in `REFUSED_SPECS_STATE_KEY` was
 # refused, when this call's refusal does not name it.
 _REFUSED_EARLIER = "on an earlier run"
 
@@ -588,7 +587,7 @@ class PlannerSeam:
                 # amendment of the new draft reads an input the old plan
                 # moved. The spec_ids the earlier plan's runs refused go too.
                 clear_plan(cast(SessionState, ctx.session.state))
-                ctx.session.state[_REFUSED_SPECS_STATE_KEY] = []
+                ctx.session.state[REFUSED_SPECS_STATE_KEY] = []
                 # A first draft may decline an ask no requirement kind states,
                 # which no tool's answer could ever earn, except one a
                 # `period_reduction_unstated` refusal named
@@ -613,11 +612,11 @@ class PlannerSeam:
                 # which adds nothing.
                 excluded = sorted(
                     {
-                        *ctx.session.state.get(_REFUSED_SPECS_STATE_KEY, ()),
+                        *ctx.session.state.get(REFUSED_SPECS_STATE_KEY, ()),
                         *(spec_id for spec_id, _ in _refused_specs(refusal)),
                     }
                 )
-                ctx.session.state[_REFUSED_SPECS_STATE_KEY] = excluded
+                ctx.session.state[REFUSED_SPECS_STATE_KEY] = excluded
                 # Every spec_id the planner's brief shows it, less the refused
                 # ones, written on every entry so `propose_plan` reads it
                 # (`PIN_SOURCES_STATE_KEY`). A pin of a shown one reuses its
@@ -656,6 +655,7 @@ class PlannerSeam:
                     asks=load_asks(cast(SessionState, ctx.session.state)),
                     ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
                     asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
+                    dropped=seeded.dropped_asks if seeded is not None else (),
                 )
                 submitted, plan, refused = await self._propose(
                     ctx=ctx, message=message, on_progress=on_progress
@@ -747,7 +747,7 @@ class PlannerSeam:
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
         # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
         # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY`,
-        # `SEARCHED_PINS_STATE_KEY` and `_REFUSED_SPECS_STATE_KEY` too. The
+        # `SEARCHED_PINS_STATE_KEY` and `REFUSED_SPECS_STATE_KEY` too. The
         # declines an ask-the-user resume still owes or may make, the failures
         # it may repeat, the amendment or card pick that opened it, the pins
         # compiled for its proposals and the spec_ids it may not pin are this
@@ -762,7 +762,7 @@ class PlannerSeam:
             DECISION_PICK_STATE_KEY,
             ALIGNED_PINS_STATE_KEY,
             SEARCHED_PINS_STATE_KEY,
-            _REFUSED_SPECS_STATE_KEY,
+            REFUSED_SPECS_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
@@ -1345,6 +1345,7 @@ class PlannerSeam:
         asks: Sequence[str] = (),
         ask_breakdowns: Sequence[AskBreakdown] = (),
         asks_across_years: Sequence[int] = (),
+        dropped: Sequence[int] = (),
     ) -> str:
         """The brief for one `_propose` call: the search readings, the canvas
         and conversation digests, the plan being changed, the question, the
@@ -1356,7 +1357,8 @@ class PlannerSeam:
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
         (`planner.plan.ASKS_STATE_KEY`), render numbered after the question,
         each with the parties `ask_breakdowns` says it breaks down by and
-        marked when `asks_across_years` numbers it. `refused` is every spec_id
+        marked when `asks_across_years` numbers it or `dropped`, the plan
+        being changed's `planner.plan.Plan.dropped_asks`, does. `refused` is every spec_id
         the executor refused since the entry's first draft, which the ask
         names (`_ask_text`).
 
@@ -1376,7 +1378,7 @@ class PlannerSeam:
                 _section("Earlier turns in this conversation", conversation_digest),
                 _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
-                _asks_section(asks, ask_breakdowns, asks_across_years),
+                _asks_section(asks, ask_breakdowns, asks_across_years, dropped),
                 _ask_text(amendment=amendment, refusal=refusal, pick=pick, refused=refused),
             ]
         )
@@ -1665,7 +1667,8 @@ def _failed_run_sentence(computed: Sequence[int] | None) -> str:
     """What a replan's failed run computed: the asks its finished terminal
     steps answer (`harness.graph.execute._computed_asks`), by number, or `None` for
     a plan held to no asks. The new plan runs from the start, so it still
-    answers every ask. The list of numbers is cut at `MAX_QUESTION_CHARS`."""
+    answers every ask the user kept (`_asks_section`). The list of numbers is
+    cut at `MAX_QUESTION_CHARS`."""
     if computed is None:
         return "Executing the approved plan failed, and the new plan runs from the start."
     if not computed:
@@ -1673,7 +1676,7 @@ def _failed_run_sentence(computed: Sequence[int] | None) -> str:
     numbers = cut_user_text(", ".join(str(number) for number in computed), MAX_QUESTION_CHARS)
     return (
         f"Executing the approved plan failed after it computed asks {numbers}. The new plan "
-        "runs from the start, so it still answers every ask."
+        "runs from the start, so it still answers every ask not marked (removed by the user)."
     )
 
 
@@ -1681,6 +1684,7 @@ def _asks_section(
     asks: Sequence[str],
     breakdowns: Sequence[AskBreakdown] = (),
     across_years: Sequence[int] = (),
+    dropped: Sequence[int] = (),
 ) -> str:
     """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none.
 
@@ -1689,7 +1693,9 @@ def _asks_section(
     to. The parties an ask totals across (`over`) are not shown: the plan
     holds a share's whole to them, and its refusal names the party.
     An ask in `across_years` is marked as one figure over its years taken
-    together, and the section then says no other ask is.
+    together, and the section then says no other ask is. An ask in
+    `dropped`, the plan being changed's `planner.plan.Plan.dropped_asks`, is
+    marked as removed by the user, and the section then says to leave it out.
     """
     if not asks:
         return ""
@@ -1698,6 +1704,7 @@ def _asks_section(
         f"{number}. {ask}"
         + (f" (by {', '.join(by[number])})" if number in by else "")
         + (" (across years)" if number in across_years else "")
+        + (_REMOVED_MARK if number in dropped else "")
         + "\n"
         for number, ask in enumerate(asks)
     )
@@ -1723,6 +1730,11 @@ def _asks_section(
             "years taken together. No other ask does: its answer keeps each year or reads "
             "one year.\n"
         )
+    if dropped:
+        rule += (
+            f"An ask marked{_REMOVED_MARK} was taken out of the plan by the user's "
+            "amendment: leave it out of `answered` and `declined`.\n"
+        )
     return (
         "The answer is held to these asks. Account for each exactly once: answer it in "
         "`answered`, or, when `declined` permits its decline, "
@@ -1730,6 +1742,10 @@ def _asks_section(
         "part of an ask, do both: answer it with what is computed and decline the rest, "
         "naming that part in the decline's `ask`.\n" + rule + lines
     )
+
+
+# How `_asks_section` marks an ask the user's amendment removed.
+_REMOVED_MARK = " (removed by the user)"
 
 
 def _check_branches(events: Sequence[Event], *, planner: str) -> None:
@@ -2120,6 +2136,8 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         # digest leaves them out.
         "rolling_copies",
         "first_years",
+        # The asks section marks each ask the user removed (`_asks_section`).
+        "dropped_asks",
     }
     lines.extend(f"{key}: {_scalar(prior_plan[key])}" for key in sorted(set(prior_plan) - known))
     return "\n".join(lines) + "\n"

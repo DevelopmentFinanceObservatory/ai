@@ -192,6 +192,12 @@ TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 # `UNSUPPORTED_STATE_KEY`.
 REDUCTION_REFUSED_ASKS_STATE_KEY = "planner:reduction_refused_asks"
 
+# Every spec_id the executor refused since the session's last first-draft
+# entry. `harness.planner_seam.PlannerSeam` writes it on each entry and
+# clears it on a first draft, and admission refuses a plan pinning one of
+# them (`submission.service.admit`).
+REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
+
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
 # (`pin_sources`). `harness.planner_seam` writes it from the search
@@ -4324,8 +4330,8 @@ class Plan(StrictModel):
         max_length=MAX_PLAN_ASKS,
         exclude_if=lambda dropped: not dropped,
         description=(
-            "The numbers of the asks the user's amendment removed from the plan: it "
-            "removed every requirement answering them (`Plan.amend`)."
+            "The numbers of the asks the user's amendment removed from the plan, as "
+            "`propose_plan`'s `removed_asks` names them (`Plan.amend`)."
         ),
     )
     ask_breakdowns: Annotated[tuple[AskBreakdown, ...], HASHED_WHEN_SET] = Field(
@@ -4630,7 +4636,7 @@ class Plan(StrictModel):
         asks_across_years: Sequence[int] = (),
         answered: Sequence[AskAnswer] = (),
         first_years: Sequence[FirstYear] | None = None,
-        by_user: bool = False,
+        dropped: Sequence[int] = (),
     ) -> Plan:
         """Return a new, incremented-version `Plan` with a patch applied.
 
@@ -4692,14 +4698,10 @@ class Plan(StrictModel):
                 its datasets' whole history from (`whole_history_split`).
                 Omitted, it keeps this plan's for the dataset requirements
                 it still states.
-            by_user: Whether the patch carries out the user's own amendment.
-                An ask the patch neither answers nor declines, whose every
-                answering requirement it removes, is then recorded in
-                `dropped_asks`: the user took it out of the plan. Otherwise
-                such an ask is answered by requirements the plan no longer
-                states, which validation rejects. An ask recorded there
-                stays until a patch answers or declines it, or replaces
-                the asks.
+            dropped: The numbers of the asks the user's amendment removes
+                from the plan, which join `dropped_asks`. Whatever answered
+                or declined one before goes. An ask recorded there stays
+                until a patch answers or declines it, or replaces the asks.
 
         Returns:
             A new `Plan`; `self` is unchanged.
@@ -4734,7 +4736,7 @@ class Plan(StrictModel):
                     answered=answered,
                     declined=declined,
                     same_asks=asks == self.asks,
-                    removed=set(removed_evidence_requirements) if by_user else set(),
+                    dropped=dropped,
                 ),
                 "asks": asks,
                 "ask_breakdowns": breakdowns,
@@ -5889,16 +5891,15 @@ def _patched_accounts(
     answered: Sequence[AskAnswer],
     declined: Sequence[Decline],
     same_asks: bool,
-    removed: Collection[str],
+    dropped: Collection[int],
 ) -> dict[str, tuple[Any, ...]]:
     """Apply a patch's answers and declines to `plan`'s, and its drops.
 
     An ask the patch answers or declines is accounted for by the patch alone:
     whatever answered, declined or dropped it before is dropped. A decline
     naming no ask replaces the one with its code, as `_patched` keys it.
-    A carried answer whose every output is in `removed`, the requirements
-    the user's amendment removes, moves its ask to `dropped_asks`, and a
-    carried decline of that ask goes with it. Unless
+    An ask in `dropped` joins `dropped_asks`, and whatever answered or
+    declined it before goes. Unless
     `same_asks`, the patch accounts for every ask: `plan`'s answers, drops
     and the declines naming an ask are numbered against a list that no
     longer holds.
@@ -5912,12 +5913,14 @@ def _patched_accounts(
             | {decline.ask_ref for decline in plan.declined if decline.ask_ref is not None}
             | set(plan.dropped_asks)
         )
-    carried = [answer for answer in plan.answered if answer.ask not in restated]
-    dropped = {answer.ask for answer in carried if set(answer.outputs) <= set(removed)}
-    dropped |= {number for number in plan.dropped_asks if number not in restated}
+    dropped = {*dropped, *(number for number in plan.dropped_asks if number not in restated)}
     return {
         "answered": _patched(
-            tuple(answer for answer in carried if answer.ask not in dropped),
+            tuple(
+                answer
+                for answer in plan.answered
+                if answer.ask not in restated and answer.ask not in dropped
+            ),
             answered,
             (),
             key="ask",
@@ -6807,6 +6810,11 @@ def load_reduction_refused_asks(state: SessionState) -> frozenset[int]:
 def record_reduction_refused_asks(state: SessionState, asks: Iterable[int]) -> None:
     """Add `asks` to those a `period_reduction_unstated` refusal named in the planner's current entry."""
     state[REDUCTION_REFUSED_ASKS_STATE_KEY] = sorted(load_reduction_refused_asks(state) | set(asks))
+
+
+def load_refused_specs(state: SessionState) -> frozenset[str]:
+    """Return every spec_id the executor refused since the session's last first-draft entry."""
+    return frozenset(state.get(REFUSED_SPECS_STATE_KEY) or ())
 
 
 def clear_unsupported(state: SessionState) -> None:
