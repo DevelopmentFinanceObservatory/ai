@@ -8,6 +8,7 @@ verdict `propose_plan` returns is a semantic judgement, which is what
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -100,7 +101,9 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
     agent = create_planner_with_translator(settings=Settings(), surface=surface)
     tools = {tool.name: tool for tool in agent.tools if isinstance(tool, FunctionTool)}
 
-    answer = await tools["get_skill"].func(skill_id="dfo-faq")
+    answer = await tools["get_skill"].func(
+        skill_id="dfo-faq", tool_context=SimpleNamespace(state={})
+    )
 
     assert answer == "# DFO FAQ\n"
     assert "`get_skill`" in str(agent.instruction)
