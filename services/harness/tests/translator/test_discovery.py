@@ -32,7 +32,6 @@ from data_mcp.definition_writes import windowed_identity
 from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import CodeNode
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from google.adk.tools.function_tool import FunctionTool
 from harness.turn_records import RecordedIdentity
 from planner.plan import (
     PLAN_STATE_KEY,
@@ -77,7 +76,7 @@ from translator.discovery import (
     PartFault,
     PartNotResolvedError,
     _resolved_key,
-    build_discovery_tools,
+    build_discover_source,
     compact_source,
     current_cut_calls,
     described_sources,
@@ -115,10 +114,6 @@ _KENYA_OVER: dict[str, dict[str, Any]] = json.loads(
 )["specs"]
 
 
-def _tools(surface: ToolSurface) -> dict[str, FunctionTool]:
-    return {tool.name: tool for tool in build_discovery_tools(surface=surface)}
-
-
 def _revision(context: Any) -> str:
     return plan_revision(Plan.model_validate_json(context.state[PLAN_STATE_KEY]))
 
@@ -144,8 +139,8 @@ async def _discover(
     requirement_id: str = "annual_debt_service",
     **args: Any,
 ) -> dict[str, Any]:
-    return await _tools(surface)["discover_source"].func(
-        requirement_id=requirement_id, tool_context=context, **args
+    return await build_discover_source(surface=surface)(
+        requirement_id=requirement_id, state=context.state, **args
     )
 
 
@@ -181,13 +176,6 @@ class _CountingSurface:
         return await self._surface.call_tool(
             tool=tool, arguments=arguments, on_progress=on_progress
         )
-
-
-def test_the_discovery_tools_wrap_search_and_nothing_else(surface: McpSurface) -> None:
-    # `describe` is not a model tool any more: `fetch_definitions` calls it
-    # from code. `get_data` and the verbs are unreachable by construction:
-    # no wrapper, no call.
-    assert set(_tools(surface)) == {"discover_source"}
 
 
 async def test_a_definite_answer_names_one_source_the_compiler_may_use(

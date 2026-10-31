@@ -32,7 +32,7 @@ from translator.discovery import (
     DiscoveryLog,
     DiscoveryRecord,
     apply_definitions,
-    build_discovery_tools,
+    build_discover_source,
     fetch_definitions,
     requirement_revision,
     save_log,
@@ -84,15 +84,11 @@ def _flat_keys(value: Any) -> set[str]:
     return keys
 
 
-def _discovery_tools(surface: ToolSurface) -> dict[str, Any]:
-    return {tool.name: tool for tool in build_discovery_tools(surface=surface)}
-
-
 async def _discover(
     surface: ToolSurface, context: Any, requirement_id: str = REQUIREMENT_ID
 ) -> dict[str, Any]:
-    return await _discovery_tools(surface)["discover_source"].func(
-        requirement_id=requirement_id, tool_context=context
+    return await build_discover_source(surface=surface)(
+        requirement_id=requirement_id, state=context.state
     )
 
 
@@ -219,10 +215,3 @@ def test_the_three_typed_shapes_carry_only_named_fields() -> None:
         "message",
     }
     assert set(referred({"kind": "no_data"})) == {"outcome", "referral"}
-
-
-def test_the_discovery_module_wraps_search_and_describe_and_nothing_else(
-    surface: McpSurface,
-) -> None:
-    """`get_data` and the analysis verbs have no wrapper here, so no model can call them."""
-    assert set(_discovery_tools(surface)) == {"discover_source"}

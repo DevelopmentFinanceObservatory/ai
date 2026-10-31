@@ -75,7 +75,8 @@ from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
 from harness.turn_records import PlanAsk, PlanRecord, SearchReading, WindowReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import ToolContextSession
+from planner.agent import AdkCall
+from planner.call import CallSession
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -659,7 +660,7 @@ async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     assert session is not None
     tool_context = SimpleNamespace(state=session.state, session=session)
-    chosen = ToolContextSession(cast(Any, tool_context)).elected_spec_ids()
+    chosen = CallSession(AdkCall(cast(Any, tool_context))).elected_spec_ids()
     assert {spec_id for spec_id in chosen if spec_id.startswith("spec_")} == elected
 
 

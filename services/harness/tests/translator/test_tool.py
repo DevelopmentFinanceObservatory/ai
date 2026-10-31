@@ -116,7 +116,7 @@ from translator.tool import (
 
 from ..described_nodes import stat_var_node
 from ..split_plan import SPEC_DEBT_HISTORY, split_draft
-from .conftest import _spec
+from .conftest import FakeCall, _spec
 
 DraftFactory = Callable[..., Plan]
 RequirementFactory = Callable[..., DatasetRequirement]
@@ -258,13 +258,15 @@ async def test_translate_records_an_unsupported_referral_the_plan_must_decline(
 ) -> None:
     referral = Referral(kind=kind, reason="r", requirement_id="annual_debt_service")
 
-    async def run_translate(tool_context: Any, *, core: TranslatorCore) -> dict[str, object]:
+    async def run_translate(state: Any, *, core: TranslatorCore) -> dict[str, object]:
         return referred(_referral_payload(referral))
 
     monkeypatch.setattr(translator.tool, "run_translate", run_translate)
     context = context_holding(draft())
 
-    answer = await build_translate(surface=FixtureSurface(schemas=real_schemas))(context)
+    answer = await build_translate(surface=FixtureSurface(schemas=real_schemas))(
+        FakeCall(context.state)
+    )
 
     assert answer["kind"] == kind.value
     assert load_unsupported(context.state) == recorded
@@ -285,7 +287,7 @@ async def test_propose_operations_compiles_and_moves_the_plan_to_pending_approva
     )
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["outcome"] == "ok", result
@@ -317,7 +319,7 @@ async def test_a_definite_sources_describe_definition_reaches_the_workflow(
     core = build_translator_core(surface=surface)
 
     result = await core.propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["outcome"] == "ok", result
@@ -340,7 +342,7 @@ async def test_a_missing_describe_answer_leaves_the_definition_unset_and_still_c
     _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["outcome"] == "ok", result
@@ -374,13 +376,13 @@ async def test_a_same_revision_retry_reads_the_describe_memo(
     }
 
     first = await core.propose_operations(
-        translation=Translation.model_validate(bad_translation), tool_context=context
+        translation=Translation.model_validate(bad_translation), state=context.state
     )
     assert first["outcome"] != "ok", first
     assert _stored(context).status == PlanStatus.DRAFT
 
     second = await core.propose_operations(
-        translation=Translation.model_validate(bad_translation), tool_context=context
+        translation=Translation.model_validate(bad_translation), state=context.state
     )
     assert second["outcome"] != "ok", second
 
@@ -402,7 +404,7 @@ async def test_propose_operations_refuses_while_a_referral_is_pending(
     )
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["outcome"] == "refused"
@@ -423,7 +425,7 @@ async def test_propose_operations_notes_a_source_found_under_other_words(
     )
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     (only_source,) = result["sources"]
@@ -442,7 +444,7 @@ async def test_a_source_discovery_never_confirmed_does_not_compile(
     _discovered(context, source(), source(spec_id=SPEC_OTHER), status=DiscoveryStatus.CANDIDATES)
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["outcome"] == "invalid_input"
@@ -474,7 +476,7 @@ async def test_a_mismatched_operation_comes_back_as_operation_mismatch(
     }
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(translation), tool_context=context
+        translation=Translation.model_validate(translation), state=context.state
     )
 
     assert result["code"] == "compile_failed"
@@ -510,7 +512,7 @@ async def test_a_failed_proposal_reports_every_issue_at_once(
     }
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(translation), tool_context=context
+        translation=Translation.model_validate(translation), state=context.state
     )
 
     assert result["code"] == "compile_failed"
@@ -566,7 +568,7 @@ async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
     core = _core(real_schemas)
 
     result = await core.propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert [issue["code"] for issue in result["detail"]["issues"]] == [code]
@@ -579,7 +581,7 @@ async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
             **({"source_mismatch": True} if offered else {}),
         },
     }
-    handed_back = core.return_to_planner(tool_context=context, **result["action"]["arguments"])
+    handed_back = core.return_to_planner(state=context.state, **result["action"]["arguments"])
     referral = handed_back["referral"]
     assert referral["kind"] == "requirement_unmeetable"
     assert [candidate["spec_id"] for candidate in referral["candidates"]] == offered
@@ -597,7 +599,7 @@ async def test_a_proposal_failing_only_on_structure_closes_as_an_internal_failur
     translation = {**GOOD_TRANSLATION, "terminal": ["answer"]}
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(translation), tool_context=context
+        translation=Translation.model_validate(translation), state=context.state
     )
 
     assert result["code"] == "compile_failed"
@@ -622,7 +624,7 @@ async def test_propose_operations_refuses_a_plan_it_cannot_translate(
     context = context_holding(draft(**plan_overrides))
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["code"] == expected_code
@@ -633,7 +635,7 @@ async def test_propose_operations_without_a_plan_returns_an_error(
     empty_context: Any,
 ) -> None:
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=empty_context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=empty_context.state
     )
 
     assert result["code"] == "plan_missing"
@@ -650,7 +652,7 @@ async def test_an_unreadable_surface_is_an_error_and_keeps_the_draft(
     core = build_translator_core(surface=_UnreadableSurface(schemas=real_schemas))
 
     result = await core.propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["code"] == "surface_unavailable"
@@ -675,7 +677,7 @@ def test_return_to_planner_attaches_the_candidates_discovery_recorded(
         kind=ReferralKind.SOURCE_AMBIGUOUS,
         reason="two series report debt service for Kenya",
         requirement_id="annual_debt_service",
-        tool_context=context,
+        state=context.state,
     )
 
     assert result["outcome"] == "referred"
@@ -709,7 +711,7 @@ def test_return_to_planner_attaches_the_candidates_for_a_kind_sent_as_a_string(
         kind="source_ambiguous",
         reason="two series report debt service for Kenya",
         requirement_id="annual_debt_service",
-        tool_context=context,
+        state=context.state,
     )
 
     assert result["outcome"] == "referred", result
@@ -735,7 +737,7 @@ def test_return_to_planner_attaches_no_datas_nearest_sources_and_reason(
         kind=ReferralKind.NO_DATA,
         reason="no series matches the ask as stated",
         requirement_id="annual_debt_service",
-        tool_context=context,
+        state=context.state,
     )
 
     assert result["outcome"] == "referred"
@@ -763,7 +765,7 @@ def test_return_to_planner_carries_no_candidates_when_no_data_found_no_nearest_s
         kind=ReferralKind.NO_DATA,
         reason="the entity itself never resolved",
         requirement_id="annual_debt_service",
-        tool_context=context,
+        state=context.state,
     )
 
     assert result["outcome"] == "referred"
@@ -780,7 +782,7 @@ def test_a_kind_the_vocabulary_does_not_hold_is_refused(
         kind="source_is_a_bit_odd",
         reason="something the vocabulary has no word for",
         requirement_id="annual_debt_service",
-        tool_context=context,
+        state=context.state,
     )
 
     assert result["outcome"] == "invalid_input"
@@ -801,7 +803,7 @@ def test_a_source_is_ambiguous_only_when_discovery_said_so(
         kind=ReferralKind.SOURCE_AMBIGUOUS,
         reason="r",
         requirement_id="annual_debt_service",
-        tool_context=context,
+        state=context.state,
     )
 
     assert result["code"] == "no_candidates_recorded"
@@ -817,7 +819,7 @@ def test_return_to_planner_logs_an_internal_failure_under_the_reference_it_carri
 
     with caplog.at_level("ERROR", logger="translator.tool"):
         result = _core(real_schemas).return_to_planner(
-            kind=ReferralKind.INTERNAL_FAILURE, reason="cycle: r", tool_context=context
+            kind=ReferralKind.INTERNAL_FAILURE, reason="cycle: r", state=context.state
         )
 
     referral = result["referral"]
@@ -836,7 +838,7 @@ def test_return_to_planner_refuses_a_requirement_the_plan_lacks(
         kind=ReferralKind.NO_DATA,
         reason="r",
         requirement_id="population",
-        tool_context=context_holding(draft()),
+        state=context_holding(draft()).state,
     )
 
     assert result["code"] == "requirement_unknown"
@@ -848,7 +850,7 @@ def test_return_to_planner_refuses_a_referral_that_names_the_wrong_thing(
     context_holding: ContextHolding,
 ) -> None:
     result = _core(real_schemas).return_to_planner(
-        kind=ReferralKind.NO_DATA, reason="r", tool_context=context_holding(draft())
+        kind=ReferralKind.NO_DATA, reason="r", state=context_holding(draft()).state
     )
 
     assert result["code"] == "invalid_referral"
@@ -858,7 +860,7 @@ def test_return_to_planner_without_a_plan_returns_an_error(
     real_schemas: list[ToolSchema], empty_context: Any
 ) -> None:
     result = _core(real_schemas).return_to_planner(
-        kind=ReferralKind.DISCOVERY_BUDGET_EXHAUSTED, reason="r", tool_context=empty_context
+        kind=ReferralKind.DISCOVERY_BUDGET_EXHAUSTED, reason="r", state=empty_context.state
     )
 
     assert result["code"] == "plan_missing"
@@ -873,7 +875,7 @@ def test_return_to_planner_refuses_a_plan_that_is_no_longer_a_draft(
     context = context_holding(draft(status=PlanStatus.PENDING_APPROVAL))
 
     result = _core(real_schemas).return_to_planner(
-        kind=ReferralKind.DISCOVERY_BUDGET_EXHAUSTED, reason="r", tool_context=context
+        kind=ReferralKind.DISCOVERY_BUDGET_EXHAUSTED, reason="r", state=context.state
     )
 
     assert result["outcome"] == "refused"
@@ -1040,7 +1042,7 @@ async def test_a_pair_no_unit_reconciles_refers_its_pinned_side_and_earns_a_decl
     context = context_holding(draft())
 
     result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
     assert result["action"]["call"] == "return_to_planner"
@@ -1153,7 +1155,7 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
     surface = _CountingSurface(schemas=real_schemas)
 
     with caplog.at_level(logging.INFO, logger="translator.discovery"):
-        answer = await build_translate(surface=surface)(context)
+        answer = await build_translate(surface=surface)(FakeCall(context.state))
 
     stored = _stored(context)
     pinned = stored.requirement("annual_debt_service")
@@ -1260,7 +1262,7 @@ async def test_a_pin_leaving_open_the_side_its_names_sit_on_is_searched_with_the
     )
     surface = _SearchRecordingSurface(schemas=real_schemas)
 
-    await build_translate(surface=surface)(context)
+    await build_translate(surface=surface)(FakeCall(context.state))
 
     if not searched:
         assert surface.searched == []
@@ -1313,7 +1315,7 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": resolved})
 
     translate = build_translate(surface=surface)
-    answer = await translate(context)
+    answer = await translate(FakeCall(context.state))
 
     assert surface.calls["resolve_definition"] == 1
     # Only a translation that reaches a compile lists the surface. The set-aside one
@@ -1326,7 +1328,7 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
         decisions=[pinning_decision(SPEC_AFRICA)],
         evidence_requirements=[pinned, derived_requirement()],
     ).model_dump_json()
-    again = await translate(context)
+    again = await translate(FakeCall(context.state))
 
     assert surface.calls["resolve_definition"] == 1
     assert surface.listed == 2 * int(named)
@@ -1369,12 +1371,12 @@ async def test_translate_asks_search_once_for_a_pinned_identity_it_cannot_reach(
     surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": unavailable})
     translate = build_translate(surface=surface)
 
-    answer = await translate(context)
+    answer = await translate(FakeCall(context.state))
 
     assert answer["kind"] == ReferralKind.DISCOVERY_UNAVAILABLE.value, answer
     assert surface.calls["resolve_definition"] == 1
 
-    await translate(context)
+    await translate(FakeCall(context.state))
 
     assert surface.calls["resolve_definition"] == 2
 
@@ -1453,7 +1455,7 @@ async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
     )
     save_pin_sources(context.state, {SPEC_G7: PinSource(block=_G7_BLOCK, settled=True)})
 
-    found = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+    found = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
 
     g7 = Entity(name="G7", role="donor")
     assert found == ((NamedGroup("oda", g7, "donor"),) if named else ())
@@ -1545,7 +1547,7 @@ async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
     }
     save_pin_sources(context.state, {SPEC_DAC_MEMBERS: PinSource(block=block, settled=True)})
 
-    found = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+    found = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
 
     members = Entity(name="DAC members", role="donor", members=True)
     assert found == ((NamedGroup("req_oda", members, "donor"),) if named else ())
@@ -1619,7 +1621,7 @@ async def test_a_group_a_pin_holds_is_named_on_a_dataset_and_its_whole_history_c
     context = context_holding(recorded)
     save_pin_sources(context.state, {SPEC_AFRICA: PinSource(block=_AFRICA_BLOCK, settled=True)})
 
-    named = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+    named = await name_pinned_groups(context.state, surface=FixtureSurface(schemas=real_schemas))
 
     assert named == (NamedGroup("oda", africa, "recipient"),)
     stored = _stored(context)
@@ -1646,7 +1648,7 @@ async def test_translate_refers_a_search_never_issued_back_marked_not_issued(
     surface = _CountingSurface(schemas=real_schemas)
     token = current_discovery_time_left.set(lambda: 0.0)
     try:
-        answer = await build_translate(surface=surface)(context)
+        answer = await build_translate(surface=surface)(FakeCall(context.state))
     finally:
         current_discovery_time_left.reset(token)
 
@@ -1710,7 +1712,7 @@ def test_return_to_planner_carries_the_choices_search_offered(
         kind=kind,
         reason="Choose one",
         requirement_id=ask.id,
-        tool_context=context,
+        state=context.state,
     )
     assert result["outcome"] == "referred"
     # An entity reading reaches the planner with its picks naming the requirement.
@@ -1765,13 +1767,15 @@ async def test_a_referral_on_a_copy_names_its_origin_to_the_model(
     log's records key on.
     """
 
-    async def run_translate(tool_context: Any, *, core: TranslatorCore) -> dict[str, object]:
-        return core.return_to_planner(tool_context=tool_context, **arguments)
+    async def run_translate(state: Any, *, core: TranslatorCore) -> dict[str, object]:
+        return core.return_to_planner(state=state, **arguments)
 
     monkeypatch.setattr(translator.tool, "run_translate", run_translate)
     context = context_holding(split_draft(decision))
 
-    answer = await build_translate(surface=FixtureSurface(schemas=real_schemas))(context)
+    answer = await build_translate(surface=FixtureSurface(schemas=real_schemas))(
+        FakeCall(context.state)
+    )
 
     assert answer["kind"] == arguments["kind"]
     assert answer["requirement_id"] == "debt"

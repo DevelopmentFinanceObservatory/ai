@@ -100,6 +100,7 @@ from translator.referral import ReferralKind  # noqa: E402
 from translator.tool import build_translate, build_translator_core  # noqa: E402
 
 from .decision_drafts import drafts  # noqa: E402
+from .translator.conftest import FakeCall  # noqa: E402
 
 _TRANSLATOR_DIR = REPO_ROOT / "evals" / "agents" / "harness_translator_v1"
 _PAIR_DIR = REPO_ROOT / "evals" / "agents" / "harness_pair_v1"
@@ -118,8 +119,8 @@ _PLANNER_CASES = _cases(_PLANNER_DIR / "harness-planner-v2.evalset.json")
 
 class FakeToolContext:
     """A minimal stand-in for ADK's `ToolContext`: `.state` and
-    `.session.events` are read (the latter by `planner.agent.
-    _elected_spec_ids`, which `propose_plan` checks a `resolved_by=user`
+    `.session.events` are read (the latter by `planner.call.
+    elected_spec_ids`, which `propose_plan` checks a `resolved_by=user`
     source pin against)."""
 
     def __init__(self) -> None:
@@ -149,7 +150,7 @@ def _core() -> TranslatorCore:
 
 async def _translate(context: FakeToolContext) -> dict[str, Any]:
     """The `translation` a `propose_plan` answers the planner with on `context`'s plan."""
-    return await build_translate(surface=EvalSurface())(context)  # ty: ignore[invalid-argument-type] -- the fake carries the state and session the translation reads
+    return await build_translate(surface=EvalSurface())(FakeCall(context.state))
 
 
 def mirror(plan: Plan, spec_ids: dict[str, str]) -> Translation:
@@ -267,7 +268,7 @@ async def _discover_definite(
     Fails the test outright if the answer is not `definite`, since every
     mapping case's requirements are ones the canned stub resolves outright.
     """
-    result = await core.discover_source(requirement_id=requirement_id, tool_context=context)
+    result = await core.discover_source(requirement_id=requirement_id, state=context.state)
     assert result["outcome"] == "ok", result
     assert result["status"] == "definite", result
     (source,) = result["sources"]
@@ -291,7 +292,7 @@ async def _propose_mapping_case(case_id: str) -> FakeToolContext:
     }
     translation = mirror(plan, spec_ids)
 
-    result = await core.propose_operations(translation=translation, tool_context=context)
+    result = await core.propose_operations(translation=translation, state=context.state)
 
     assert result["outcome"] == "ok", result
     assert matches_subset(_expected_response(case)["response"], result)
@@ -349,7 +350,7 @@ async def test_the_constant_price_referral_is_reachable() -> None:
     spec_id = await _discover_definite(core, context, dataset.id)
     translation = mirror(plan, {dataset.id: spec_id})
 
-    proposed = await core.propose_operations(translation=translation, tool_context=context)
+    proposed = await core.propose_operations(translation=translation, state=context.state)
 
     assert proposed["outcome"] == "invalid_input", proposed
     issue_codes = {issue["code"] for issue in proposed["detail"]["issues"]}
@@ -361,7 +362,7 @@ async def test_the_constant_price_referral_is_reachable() -> None:
         kind=ReferralKind(action["arguments"]["kind"]),
         reason="the source states no price basis, so it cannot meet a constant-price ask",
         requirement_id=action["arguments"].get("requirement_id"),
-        tool_context=context,
+        state=context.state,
     )
 
     assert matches_subset(_expected_response(case)["response"], referred)
@@ -433,7 +434,7 @@ async def test_the_share_of_form_of_a_per_head_figure_is_referred_for_repair() -
         if isinstance(requirement, DatasetRequirement)
     }
     proposed = await core.propose_operations(
-        translation=mirror(plan, spec_ids), tool_context=context
+        translation=mirror(plan, spec_ids), state=context.state
     )
 
     assert proposed["outcome"] == "invalid_input", proposed
@@ -447,7 +448,7 @@ async def test_the_share_of_form_of_a_per_head_figure_is_referred_for_repair() -
         requirement_id=action["arguments"]["requirement_id"],
         constraint=action["arguments"]["constraint"],
         repair=action["arguments"]["repair"],
-        tool_context=context,
+        state=context.state,
     )
 
     assert referred["outcome"] == "referred", referred
@@ -465,7 +466,7 @@ async def test_the_several_sources_referral_is_reachable() -> None:
     core = _core()
 
     (dataset,) = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
-    result = await core.discover_source(requirement_id=dataset.id, tool_context=context)
+    result = await core.discover_source(requirement_id=dataset.id, state=context.state)
 
     assert result["outcome"] == "ok", result
     assert result["status"] == "candidates", result
@@ -477,7 +478,7 @@ async def test_the_several_sources_referral_is_reachable() -> None:
         kind=ReferralKind(action["arguments"]["kind"]),
         reason="two sources report aid disbursements to Kenya",
         requirement_id=action["arguments"]["requirement_id"],
-        tool_context=context,
+        state=context.state,
     )
 
     assert matches_subset(_expected_response(case)["response"], referred)

@@ -6,7 +6,8 @@ user's answer in code (`declare_ready`), with no model call. It runs
 uncompiled workflow, a status other than `PENDING_APPROVAL`) and, past those,
 answers `_approval_summary(plan)` (the version and revision that tie the
 answer to one content hash, and the compiler's warnings, the one thing on it a
-caller cannot read off the plan record) under `summary`, and ends the run.
+caller cannot read off the plan record) under `summary`. `end_run_when_ready`
+ends the ADK run on an answer carrying `summary`.
 Declaring a plan ready approves nothing. `harness.studio_translate` builds the
 plan card the user reads from the plan record itself, through `harness.plan_display`, so nothing here restates a
 decision, a requirement, a source or a step. Whatever runs this agent is what
@@ -30,7 +31,7 @@ builds it. So no tool name, column or operation appears here,
 `PENDING_APPROVAL` is a status only translation writes, and `declare_ready`
 requires a plan that has been through that step. The checks a proposal passes
 before it is recorded are `submission.service`'s, which `propose_plan` runs
-over its call's session (`ToolContextSession`).
+over its call's session (`planner.call.CallSession` over `AdkCall`).
 
 Every tool below answers with `planner.tool_results`' typed shape -- `ok`,
 `problem`, with a stable `code` and, where the next step is known, an
@@ -48,10 +49,8 @@ import functools
 import logging
 from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, override
+from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
-from compiler.evidence import PriceBasis
 from compiler.sources import block_group, party_class, readable_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
@@ -60,6 +59,7 @@ from data_mcp.scope import ChoiceOrigin, ScopeEntry
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.events import Event
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
@@ -67,9 +67,6 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
-from harness.graph.orchestrate import counts_chosen
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers, stored_mapping
-from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.scope_choices import (
     PROVIDER_AXIS,
     EntitiesBinding,
@@ -84,25 +81,13 @@ from harness.tool_contracts import resolver_digest
 from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
-from submission.prices_choice import (
-    PRICES_BY_LABEL,
-    PRICES_OPTIONS,
-    PRICES_PICKS,
-    PRICES_SLOT_PREFIX,
-    PricesChoice,
-    measure_key,
-    prices_slot,
-)
+from submission.prices_choice import PRICES_OPTIONS
 from submission.service import (
     COMBINATION_OPTIONS,
-    COMBINE_OPTION,
     WHOLE_COLUMNS,
-    Admission,
     AlignedPin,
-    Combination,
     Proposal,
     Realignment,
-    ReferralAnswers,
     SearchedPin,
     Unpinned,
     aligned_pins,
@@ -142,6 +127,13 @@ from translator.referral import (
 )
 from translator.tool import Translate, authored_answer
 
+from planner.call import (
+    CallSession,
+    PlannerCall,
+    Step,
+    answered_since_referral,
+    candidate_ids,
+)
 from planner.declaration import PlanTool
 from planner.plan import (
     MAX_PLAN_DECISIONS,
@@ -149,7 +141,6 @@ from planner.plan import (
     AnswerMode,
     AskAnswer,
     DecisionDraft,
-    DecisionPick,
     Decline,
     EvidenceRequirement,
     FullHistory,
@@ -157,8 +148,6 @@ from planner.plan import (
     Plan,
     PlanStatus,
     SessionState,
-    UnsupportedOperation,
-    decision_pick,
     full_histories,
     full_history,
     held_sources,
@@ -166,16 +155,11 @@ from planner.plan import (
     load_plan,
     pin_sources,
     plan_revision,
-    record_optional_decline,
-    record_reduction_refused_asks,
     record_spec_searched,
     record_unsupported,
-    save_alignments,
     save_full_history,
     save_pin_sources,
     save_plan,
-    save_plan_rounds,
-    save_windowed_pins,
     split_of,
 )
 from planner.records import (
@@ -193,8 +177,7 @@ logger = logging.getLogger(__name__)
 AGENT_NAME = "dfo_planner"
 
 # The tool the planner proposes a plan through.
-PROPOSE_PLAN = "propose_plan"
-
+PROPOSE_PLAN = PROPOSE_PLAN_PROPOSER.call
 
 _PLANNING = (
     "You are the Planner Agent for the Development Finance Observatory. "
@@ -622,7 +605,7 @@ def _approval_summary(plan: Plan) -> dict[str, object]:
     }
 
 
-def _execution_blocked(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
+def _execution_blocked(plan: Plan, call: PlannerCall) -> dict[str, object] | None:
     """Return the problem that stops `declare_ready` on `plan`, or `None` to let it proceed.
 
     Checked in order: a rejected plan; a pending referral, which the planner settles by
@@ -642,9 +625,9 @@ def _execution_blocked(plan: Plan, tool_context: ToolContext) -> dict[str, objec
             outcome=Outcome.REFUSED,
             action=PROPOSE_PLAN_PROPOSER.action(),
         )
-    referral = load_referral(tool_context.state)
+    referral = load_referral(call.state)
     if referral is not None:
-        asks_user = referral.kind in USER_DECIDES and not _answered_since_referral(tool_context)
+        asks_user = referral.kind in USER_DECIDES and not answered_since_referral(call)
         return problem(
             ProblemCode.REFERRAL_PENDING,
             "The translator referred this plan back; settle the referral with the user "
@@ -680,13 +663,13 @@ def _execution_blocked(plan: Plan, tool_context: ToolContext) -> dict[str, objec
 
 def declare_ready(
     answer: dict[str, object],
-    tool_context: ToolContext,
+    call: PlannerCall,
 ) -> dict[str, object]:
     """Declare the plan on record ready for the user's answer, when `answer`'s translation compiled.
 
     `answer` is an accepted `propose_plan` answer carrying its `translation`. A verdict other
     than `ok` leaves it unchanged. Past `_execution_blocked`, it gains `summary`
-    (`_approval_summary`), and the run ends there (`skip_summarization`). The harness asks the
+    (`_approval_summary`), and the run ends there (`end_run_when_ready`). The harness asks the
     user, so no model call follows to restate the plan the user already sees. A plan the gate
     blocks gains the gate's problem under `submission` instead, its `action` naming
     `propose_plan`, and the run goes on. Approves nothing. Whatever runs this agent gates on the
@@ -695,13 +678,24 @@ def declare_ready(
     translation = answer.get("translation")
     if not isinstance(translation, dict) or translation.get("outcome") != Outcome.OK.value:
         return answer
-    plan = load_plan(tool_context.state)
+    plan = load_plan(call.state)
     assert plan is not None, "a translation answers ok only for the plan on record"
-    blocked = _execution_blocked(plan, tool_context)
+    blocked = _execution_blocked(plan, call)
     if blocked is not None:
         return {**answer, "submission": blocked}
-    tool_context.actions.skip_summarization = True
     return {**answer, "summary": _approval_summary(plan)}
+
+
+def end_run_when_ready(answer: dict[str, object], call: AdkCall) -> dict[str, object]:
+    """`declare_ready` over the ADK `call`, ending the run once it is ready.
+
+    An answer carrying `summary` is a plan declared ready, so ADK ends the run on it
+    (`skip_summarization`) with no model call after. Any other answer leaves the run going.
+    """
+    declared = declare_ready(answer, call)
+    if "summary" in declared:
+        call.tool_context.actions.skip_summarization = True
+    return declared
 
 
 # The `propose_plan` arguments that patch a plan. A call naming none of them
@@ -745,242 +739,67 @@ def _transient_retry(arguments: Mapping[str, Any], state: SessionState) -> Plan 
     return plan
 
 
-def _candidate_ids(candidates: Any) -> frozenset[str]:
-    """The spec_ids of a list of `{"spec_id", "label"}` candidates."""
-    return frozenset(
-        str(candidate["spec_id"])
-        for candidate in candidates or []
-        if isinstance(candidate, dict) and candidate.get("spec_id")
-    )
+@dataclass(frozen=True)
+class AdkCall:
+    """The `planner.call.PlannerCall` an ADK tool call is, over the `ToolContext` serving it.
 
-
-def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
-    """The candidates an `adk_request_input` call's own function-call event
-    offered, by the id of the question that offered them, from any shape that
-    name occurs under:
-
-    - the planner's own `ask_user` tool call: a plain `FunctionTool` call,
-      so `args` is exactly the kwargs the model supplied, flat --
-      `args["candidates"]`, the one question `q1`.
-    - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
-      built through ADK's own `google.adk.workflow.utils.
-      _workflow_hitl_utils.create_request_input_event`, which dumps the
-      whole `RequestInput` into `args`, so the caller's own `payload` nests
-      under `args["payload"]`. Its `questions` each carry their own `id` and
-      `candidates`, whose ids are scoped to that question. A `payload` with
-      `candidates` and no `questions` holds the one question `q1`.
-    """
-    return {
-        question_id: _candidate_ids(candidates)
-        for question_id, candidates in _question_candidates(args).items()
-    }
-
-
-def _question_candidates(args: dict[str, Any]) -> dict[str, Any]:
-    """The raw candidates list of each question an `adk_request_input` call's
-    `args` offers, by question id, read as `_offered_candidates` reads them."""
-    candidates = args.get("candidates")
-    payload = args.get("payload")
-    payload = payload if isinstance(payload, dict) else {}
-    if not candidates and payload.get("questions"):
-        return {
-            str(question["id"]): question.get("candidates")
-            for question in payload["questions"]
-            if isinstance(question, dict) and question.get("id")
-        }
-    return {"q1": candidates or payload.get("candidates")}
-
-
-def _prices_chosen(tool_context: ToolContext) -> dict[str, PricesChoice]:
-    """The prices the user picked answering `adk_request_input` calls, by the
-    part each prices, read off this session's event history.
-
-    The `ask` node marks each prices option's candidate with its `part` and
-    `prices` (`harness.graph.state.ask_candidates`), so a pick states them
-    whether or not the option carries a spec_id. Each response pairs with the
-    nearest preceding call sharing its `id`, as `_elected_spec_ids` pairs
-    them. A choice stands until the user answers the same question again,
-    a question pricing the same part or another window of its measure
-    (`submission.prices_choice.measure_key`): a pick of other prices
-    replaces it, and any other answer, a skip aside, releases it, so one
-    measure holds one choice however many asks priced it.
-
-    A prices refusal that sends the planner to the user (`detail.part`,
-    `submission.prices_choice`) binds the planner's next ask offering
-    `PRICES_OPTIONS` to its part, and the user's pick there sets the part's
-    prices, marked `asked` so the planner does not ask it again
-    (`submission.prices_choice`). The user's own words there release the
-    part's choice, as they do on the orchestrator's question, and a skip
-    keeps it, marking a constant choice `asked`. A switch of the part's
-    prices row on the plan card (`_prices_switched`) is a new answer for the
-    part, marked `asked` too, while its replan is under way or once the plan
-    on record states it (`_switch_stands`). Any other `propose_plan`
-    response, the plan landing included, clears the refusal, so no later ask
-    of another kind is read as that one. A message the user typed
-    (`_user_message`) releases every choice and clears the refusal, and an
-    amendment of the approval card (`_is_amendment`) releases every choice.
-    An answer to any other question leaves them standing. A Studio turn is
-    one session, so a choice holds for the turn it was made in.
-    """
-    measures = {
-        spec_id: measure_key(block)
-        for spec_id, source in pin_sources(tool_context.state).items()
-        if (block := source.spec_block(spec_id)) is not None
-    }
-    chosen: dict[str, PricesChoice] = {}
-    refused: str | None = None
-    asked: dict[str, str] = {}
-    offered = [dict(option) for option in PRICES_OPTIONS]
-    for step in _session_steps(tool_context):
-        if step.kind == "message":
-            chosen.clear()
-            refused = None
-        elif step.kind == "response":
-            if step.name == PROPOSE_PLAN:
-                refused = _prices_refused(step.body)
-        elif step.kind == "call":
-            if refused is not None and (step.args or {}).get("options") == offered:
-                asked[str(step.call_id)], refused = refused, None
-        elif _is_amendment(dict(step.body)):
-            chosen.clear()
-        elif (switched := _prices_switched(step.body)) is not None:
-            part, basis = switched
-            if _switch_stands(tool_context.state, part, basis):
-                _release_measure(chosen, part, measures)
-                chosen[part] = PricesChoice(basis, asked=True)
-        elif step.call_id in asked:
-            part = asked.pop(step.call_id)
-            answer = _answers(step.body.get("result")).get("q1") or {}
-            basis = PRICES_PICKS.get(str(answer.get("spec_id")))
-            if answer.get("kind") == "option" and basis is not None:
-                _release_measure(chosen, part, measures)
-                chosen[part] = PricesChoice(basis, asked=True)
-            elif _said(answer):
-                _release_measure(chosen, part, measures)
-            elif part in chosen and chosen[part].prices == "constant":
-                chosen[part] = chosen[part]._replace(asked=True)
-        else:
-            _priced_answers(step.args or {}, step.body, chosen, measures)
-    return chosen
-
-
-def _prices_switched(body: Mapping[str, Any]) -> tuple[str, PriceBasis] | None:
-    """The part and prices a switch of a part's prices row on the plan card
-    picks (`harness.studio`'s `{"result": {"switch": {"choice_id",
-    "option_id"}}}` answer to the approval card), or `None` for any other answer."""
-    result = body.get("result")
-    switch = result.get("switch") if isinstance(result, dict) else None
-    if not isinstance(switch, dict):
-        return None
-    slot = str(switch.get("choice_id")).removeprefix(DECISION_CHOICE_PREFIX)
-    if not slot.startswith(PRICES_SLOT_PREFIX):
-        return None
-    basis = next(
-        (
-            basis
-            for label, basis in PRICES_BY_LABEL.items()
-            if decision_option_id(label) == switch.get("option_id")
-        ),
-        None,
-    )
-    return (slot.removeprefix(PRICES_SLOT_PREFIX), basis) if basis is not None else None
-
-
-def _switch_stands(state: Any, part: str, basis: PriceBasis) -> bool:
-    """Whether a switch of `part`'s prices row to `basis` holds: its replan is
-    under way (`planner.plan.decision_pick` names the row), or the plan on
-    record states the switched prices. A switch whose replan was refused or
-    stopped holds neither, so the prices stay as the card shows them."""
-    slot = prices_slot(part)
-    pick = decision_pick(state)
-    if pick is not None and pick.slot == slot:
-        return True
-    plan = load_plan(state)
-    label = PricesChoice(basis).label
-    return plan is not None and any(d.slot == slot and d.chosen == label for d in plan.decisions)
-
-
-def _release_measure(
-    chosen: dict[str, PricesChoice], part: str, measures: Mapping[str, str | None]
-) -> None:
-    """Take out of `chosen` the choice for `part` and for every part measuring
-    what it measures (equal `measures`), as a new answer pricing it replaces them."""
-    key = measures.get(part)
-    for priced in [p for p in chosen if p == part or (key is not None and measures.get(p) == key)]:
-        del chosen[priced]
-
-
-def _prices_refused(body: Mapping[str, Any]) -> str | None:
-    """The part a `propose_plan` refusal of the user's prices sending the planner
-    to the user names (`detail.part`), or `None`."""
-    detail = body.get("detail")
-    action = body.get("action")
-    if not (
-        isinstance(detail, dict)
-        and isinstance(action, dict)
-        and action.get("call") == REQUEST_INPUT_FUNCTION_CALL_NAME
-        and str(detail.get("slot")).startswith(PRICES_SLOT_PREFIX)
-    ):
-        return None
-    part = detail.get("part")
-    return part if isinstance(part, str) else None
-
-
-def _priced_answers(
-    args: dict[str, Any],
-    body: Mapping[str, Any],
-    chosen: dict[str, PricesChoice],
-    measures: Mapping[str, str | None],
-) -> None:
-    """Record in `chosen` what one clarify response says of each part its call
-    priced, each answer replacing the choices of its part's measure (`_prices_chosen`)."""
-    answers = _answers(body.get("result"))
-    for question_id, candidates in _question_candidates(args).items():
-        marked = [c for c in candidates or () if isinstance(c, dict) and c.get("part")]
-        answer = answers.get(question_id)
-        if not marked or not isinstance(answer, dict) or not _said(answer):
-            continue
-        part = str(marked[0]["part"])
-        picked = next(
-            (
-                choice
-                for candidate in marked
-                if answer.get("kind") == "option"
-                and candidate.get("spec_id") == answer.get("spec_id")
-                and (choice := PricesChoice.of_candidate(candidate)) is not None
-            ),
-            None,
-        )
-        _release_measure(chosen, part, measures)
-        if picked is not None:
-            chosen[part] = picked
-
-
-class _Step(NamedTuple):
-    """One step of a session's history, as the readers of what the user answered walk it.
-
-    `message` is a message the user typed (`_user_message`). `call` is an
-    `adk_request_input` call, with its id and `args`. `answer` is a response
-    to one, with its id, the `args` of the nearest preceding call sharing
-    that id (`None` when none precedes it) and the response body. `response`
-    is any other tool's response, with its `name` and body.
+    `ToolContext` is `Context` (`google.adk.tools.tool_context`), so
+    `tool_context.session` is the same live `Session` every other seam
+    shares, `events` included. The steps are those events read as
+    `_session_steps` reads them.
     """
 
-    kind: Literal["message", "call", "answer", "response"]
-    call_id: str | None = None
-    args: dict[str, Any] | None = None
-    body: Mapping[str, Any] = MappingProxyType({})
-    name: str | None = None
+    tool_context: ToolContext
+
+    @property
+    def state(self) -> SessionState:
+        """The call's session state."""
+        return self.tool_context.state
+
+    @property
+    def call_id(self) -> str | None:
+        """The id of the function call the tool serves."""
+        return self.tool_context.function_call_id
+
+    def steps(self) -> Sequence[Step]:
+        """`_session_steps` over the call's session events."""
+        return tuple(_session_steps(self.tool_context.session.events))
 
 
-def _session_steps(tool_context: ToolContext) -> Iterator[_Step]:
-    """The steps of `tool_context`'s session history, in event order (`_Step`)."""
+def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
+    """The steps of a session's `events`, in event order (`planner.call.Step`).
+
+    The only reader of ADK events in the planner. A message the user typed
+    (`_user_message`) is one `message` step; the event's other parts are not
+    read, and no producer in the harness sends a user-typed event that also
+    carries a function part. Every other event yields a step for each
+    `adk_request_input` call carrying an id, each response to one, paired
+    with the `args` of the nearest preceding call sharing its id, and each
+    other tool's response.
+
+    How ADK records an ask: `create_request_input_event` builds the call with
+    `id=interrupt_id` and dumps the whole `RequestInput` into its `args`, so a
+    graph interrupt's own `payload` nests under `args["payload"]`, and
+    `create_request_input_response` builds the answer
+    with `FunctionResponse.id` set to that same `interrupt_id`;
+    `harness.studio`'s `/interrupt` route sends it. A long-running tool call
+    that pauses (returns `None`) never gets a response built for that call
+    (`_tool_caller.py`'s `is_long_running`-and-falsy rule), so nothing written
+    to the call's state from inside it survives the pause: there is no
+    response for the write's delta to ride, and no commit to trigger for a
+    plain mutation. The call itself, carrying its offered candidates in
+    `args`, is recorded regardless (it is the model's own turn, not the
+    tool's response), which is what `ctx.run_node`'s own pause-and-resume
+    depends on surviving (`harness.planner_seam`'s module docstring). The
+    matching response, once it exists, is built by ADK from the resumed
+    run's own input message.
+    """
     calls: dict[str, dict[str, Any]] = {}
-    for event in tool_context.session.events:
+    for event in events:
         if not (event.content and event.content.parts):
             continue
         if _user_message(event):
-            yield _Step("message")
+            yield Step("message")
             continue
         for part in event.content.parts:
             call = part.function_call
@@ -990,151 +809,16 @@ def _session_steps(tool_context: ToolContext) -> Iterator[_Step]:
                 and call.id is not None
             ):
                 calls[call.id] = call.args or {}
-                yield _Step("call", call.id, call.args or {})
+                yield Step("call", call.id, call.args or {})
                 continue
             response = part.function_response
             if response is None:
                 continue
             body = response.response or {}
             if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
-                yield _Step("answer", response.id, calls.get(response.id or ""), body)
+                yield Step("answer", response.id, calls.get(response.id or ""), body)
             else:
-                yield _Step("response", body=body, name=response.name)
-
-
-def _answers(result: object) -> dict[str, dict[str, Any]]:
-    """An `adk_request_input` response's `result` as one answer per question id
-    (`harness.graph.state.resume_answers`). A missing result and a dismissal of the
-    whole pause hold none."""
-    return {} if result is None else resume_answers(result) or {}
-
-
-def _picks(result: object, offered: dict[str, frozenset[str]]) -> tuple[str, ...]:
-    """The spec_ids `result` picks, in question order, each as an option its own
-    question offered.
-
-    A skipped or free-text answer picks nothing, and neither does an id another
-    question offered."""
-    return tuple(
-        str(answer["spec_id"])
-        for question_id, answer in _answers(result).items()
-        if isinstance(answer, dict)
-        and answer.get("kind") == "option"
-        and str(answer.get("spec_id")) in offered.get(question_id, frozenset())
-    )
-
-
-def _answered_calls(tool_context: ToolContext) -> Iterator[tuple[dict[str, Any], object]]:
-    """Each interrupt answer with the nearest preceding call sharing its id."""
-    for step in _session_steps(tool_context):
-        if step.kind == "answer" and step.args is not None:
-            yield step.args, step.body.get("result")
-
-
-def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
-    """Every spec_id the user actually chose answering an `adk_request_input`
-    call, read off this session's own event history -- the record of what
-    the user was asked and what they answered, which
-    makes a measure decision the user's (`_user_settled_measures`).
-
-    Membership in a call's offered `candidates` is not by itself an
-    election: an `adk_request_input` call that offers `{A, B}` records only
-    a question, not a choice, and a plan pinning `B` after the user picked
-    `A` -- or after no answer has arrived at all -- is not a user election
-    either. What counts as one is a call's own function-call event, paired
-    with the matching `FunctionResponse` event, if any, that answers it:
-    `create_request_input_event` builds the call with `id=interrupt_id`, and
-    `create_request_input_response` builds the answer with
-    `FunctionResponse.id` set to that same `interrupt_id`; `harness.studio`'s
-    `/interrupt` route is what actually sends it, its `result` read as one
-    answer per question id (`harness.graph.state.resume_answers`), a chosen
-    candidate as `{"kind": "option", "spec_id": ...}`. A call with no
-    paired response yet -- the run is still paused there, or the answer
-    hasn't arrived -- contributes nothing: its candidates were offered, not
-    elected.
-
-    One response's picks elect the counts they choose, read against the
-    turn's search blocks (`harness.graph.orchestrate.counts_chosen`): a pick
-    of other prices alone chooses no count, and a count picked with other
-    prices elects the listed reading measuring both, the one the `ask`
-    node tells the agent to fetch.
-
-    Every `adk_request_input` call the workflow itself raises (the `ask`
-    node of `harness.graph`, under `CLARIFY_INTERRUPT`) shares the one fixed
-    id `"clarify"` across every question in a session. The planner's own
-    `ask_user` calls each get their own id. Pairing by id alone
-    would let a round-2 offer, re-raised under the same id, retroactively
-    read a round-1 answer as electing whatever round 2 happens to also
-    offer. This walks the session once, in event order, and pairs each
-    response with the call whose offer was seen most recently at that
-    point -- the nearest preceding call sharing its id -- rather than
-    building a dict of every call keyed by id first and reading it back
-    after the fact.
-
-    Not a state key this seam writes and reads back: a long-running tool
-    call that pauses (returns `None`) never gets its own `FunctionResponse`
-    event built for *that* call (`_tool_caller.py`'s
-    `is_long_running`-and-falsy rule), so nothing written to
-    `tool_context.state` -- or even straight to `tool_context.session.state`
-    -- from inside that call survives the pause; there is no event for
-    either write's delta to ride, and no commit to trigger for a plain
-    mutation. The call's own function-call event, carrying its offered
-    candidates in `args`, is built regardless (it is the model's own turn,
-    not the tool's response) and is exactly what `ctx.run_node`'s own
-    pause-and-resume already depends on surviving (`harness.planner_seam`'s
-    module docstring) -- so reading it back here needs no bookkeeping of
-    this seam's own. The matching `FunctionResponse`, once it exists, is
-    built by ADK from the resumed run's own input message, not by anything
-    in this package.
-
-    Read across the whole session, not scoped to one invocation: the ask
-    pauses the run, and the answer that resumes it can arrive on a later
-    invocation than the one that asked, so there is no single "this turn"
-    an `Event.invocation_id` could scope this to.
-
-    `ToolContext` is `Context` (`google.adk.tools.tool_context`), so
-    `tool_context.session` is the same live `Session` every other seam
-    shares, `events` included.
-    """
-    specs = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
-    elected: set[str] = set()
-    for args, result in _answered_calls(tool_context):
-        elected |= counts_chosen(_picks(result, _offered_candidates(args)), specs)
-    return frozenset(elected)
-
-
-def _said(answer: object) -> str:
-    """What one answer says: the candidate picked or the user's own words, else nothing."""
-    if not isinstance(answer, dict):
-        return ""
-    key = {"option": "spec_id", "text": "text"}.get(answer.get("kind"))
-    value = answer.get(key) if key else None
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _is_answer(body: dict[str, Any]) -> bool:
-    """Whether an `adk_request_input` response body carries something the user said.
-
-    A user's answer is `{"result": ...}` (`harness.studio`'s `/interrupt` route wraps
-    it, as ADK wraps any non-dict value), read as `harness.graph.state.resume_answers`
-    reads it: a pick of a candidate, or free text for a reply outside the offered
-    options. A body with no `result` is a call the tool or ADK rejected. A dismissal of
-    the pause and a question left to the planner are the user declining to choose, and
-    blank text says nothing.
-    """
-    return any(_said(answer) for answer in _answers(body.get("result")).values())
-
-
-def _is_amendment(body: dict[str, Any]) -> bool:
-    """Whether an `adk_request_input` response body is the user amending the approval card.
-
-    `harness.studio`'s `/interrupt` route answers the approval card
-    (`harness.graph.APPROVE_INTERRUPT`) with `{"result": {"amendment": ...}}`
-    when the user types a change there.
-    """
-    result = body.get("result")
-    amendment = result.get("amendment") if isinstance(result, dict) else None
-    return isinstance(amendment, str) and bool(amendment.strip())
+                yield Step("response", body=body, name=response.name)
 
 
 def _user_message(event: Any) -> bool:
@@ -1150,301 +834,6 @@ def _user_message(event: Any) -> bool:
         and not getattr(event, "branch", None)
         and any((getattr(part, "text", None) or "").strip() for part in event.content.parts)
     )
-
-
-def _user_spoke_since_recorded(tool_context: ToolContext, version: int) -> bool:
-    """Whether the user has said something since plan `version` was recorded.
-
-    Read off this session's event history. The first `propose_plan` response carrying `version`
-    marks where the plan was recorded. A later response repeating the version records nothing
-    (`_transient_retry` answers a bare retry so) and moves no mark. After the mark, the user
-    speaks with an `adk_request_input` response they answered (`_is_answer`: a pick, free text),
-    an amendment of the approval card (`_is_amendment`), or a message of their own
-    (`_user_message`), as the ADK eval runner sends a case's later messages into one session. A
-    refusal, a skip, a referral and the planner seam's own messages are not.
-
-    `harness.studio_state.ConversationState.session_id` opens a new ADK
-    session for every Studio turn, and every turn starts with the user's
-    message. A plan this session holds no recording response for was
-    recorded before that message, so this answers `True`. The planner seam
-    seeds such a plan from the graph's record
-    (`harness.planner_seam.PlannerSeam`).
-    """
-    last: object = None
-    recorded = False
-    spoke = False
-    for event in tool_context.session.events:
-        if not (event.content and event.content.parts):
-            continue
-        if recorded and _user_message(event):
-            spoke = True
-            continue
-        for part in event.content.parts:
-            response = part.function_response
-            if response is None:
-                continue
-            body = response.response or {}
-            if response.name == PROPOSE_PLAN and "version" in body:
-                if body["version"] != last:
-                    last = body["version"]
-                    recorded, spoke = last == version, False
-            elif response.name == REQUEST_INPUT_FUNCTION_CALL_NAME and recorded:
-                spoke = spoke or _is_answer(body) or _is_amendment(body)
-    return spoke or not recorded
-
-
-def _answered_since_referral(tool_context: ToolContext) -> bool:
-    """Whether the user has answered an ask the planner raised after seeing the
-    translator's referral (`_answers_since_referral`)."""
-    return _answers_since_referral(tool_context).answered
-
-
-def _answers_since_referral(tool_context: ToolContext) -> ReferralAnswers:
-    """Whether the user has answered an ask the planner raised after seeing the
-    translator's referral, the spec_ids they picked answering those asks, and the
-    spec_ids offered by those asks still unanswered, read off this session's event
-    history as `_elected_spec_ids` reads it.
-
-    The referral reaches the planner in the `translation` of the response that recorded the
-    plan, `propose_plan`'s, carrying its `kind` and `requirement_id`. This walks the session
-    once, in event order. An `adk_request_input` call event after that response is an ask the
-    model raised knowing the referral, and its `id` is remembered. A response counts as the
-    user's answer when it pairs by `id` with one of those asks and `_is_answer` holds. An ask
-    issued before the referral, a call the tool or ADK rejected, and a skip do not count. A skip
-    is the user declining to choose, which the planner may not substitute for, so the planner
-    ends the turn by telling them what cannot be done.
-
-    A response that recorded a version clears the referral in session
-    state and translates the new version, so it ends the referral this walk is
-    following and starts the one its `translation` names, if any. A refused
-    proposal leaves both alone, which keeps the user's answer standing for the
-    retry.
-
-    With no referral on record the result is no answer. The guard refuses when
-    it cannot say where the referral began, so an answer given for something
-    else settles nothing.
-
-    A spec_id counts as picked when an answer names it and the ask it answers,
-    the nearest preceding one with its `id`, offered it, as `_elected_spec_ids`
-    pairs them. A pick made before the referral is not counted. Picks keep the
-    order the answers came in. An ask with no answer, a skip included, leaves
-    every id it offered unanswered. An ask whose response has no `result`,
-    one the tool or ADK refused, never reached the user, so it offered
-    nothing. A pending ask has no response and stays unanswered.
-
-    `picked_ever` holds the user's standing picks since the first referral,
-    which a later translation does not clear. An answered ask, picked or in
-    the user's own words, replaces every earlier pick among the ids it
-    offered, so the latest answer about a reading stands and a free-text
-    answer releases it to the planner. A message the user typed
-    (`_user_message`) or an amendment of the approval card (`_is_amendment`)
-    releases them all.
-    """
-    answered = False
-    referral: tuple[object, object] | None = None
-    asks: dict[str, dict[str, frozenset[str]]] = {}
-    replied: set[str] = set()
-    picked: list[str] = []
-    picked_ever: list[str] = []
-    for event in tool_context.session.events:
-        if not (event.content and event.content.parts):
-            continue
-        if _user_message(event):
-            picked_ever.clear()
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if (
-                call is not None
-                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-                and call.id is not None
-                and referral is not None
-            ):
-                asks[call.id] = _offered_candidates(call.args or {})
-            response = part.function_response
-            if response is None:
-                continue
-            body = response.response or {}
-            if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
-                if _is_amendment(body):
-                    picked_ever.clear()
-                if response.id not in asks:
-                    continue
-                if "result" not in body:
-                    del asks[response.id]
-                    continue
-                if not _is_answer(body):
-                    continue
-                answered = True
-                replied.add(response.id)
-                offered = {spec_id for ids in asks[response.id].values() for spec_id in ids}
-                picks = _picks(body.get("result"), asks[response.id])
-                picked.extend(picks)
-                picked_ever = [pick for pick in picked_ever if pick not in offered]
-                picked_ever.extend(picks)
-            elif "translation" in body:
-                translation = body["translation"]
-                referral = (
-                    (translation.get("kind"), translation.get("requirement_id"))
-                    if isinstance(translation, dict) and "kind" in translation
-                    else None
-                )
-                answered = False
-                asks.clear()
-                replied.clear()
-                picked.clear()
-    unanswered = frozenset(
-        spec_id
-        for call_id, offered in asks.items()
-        if call_id not in replied
-        for spec_ids in offered.values()
-        for spec_id in spec_ids
-    )
-    return ReferralAnswers(
-        answered=answered,
-        picked=tuple(picked),
-        unanswered=unanswered,
-        picked_ever=tuple(picked_ever),
-    )
-
-
-def _refused_combination(body: dict[str, Any]) -> Combination | None:
-    """The combination a `combination_unasked` refusal names in its `detail`, or `None`."""
-    if body.get("code") != ProblemCode.COMBINATION_UNASKED.value:
-        return None
-    detail = body.get("detail")
-    if not isinstance(detail, dict):
-        return None
-    requirement_id = detail.get("requirement_id")
-    datasets = detail.get("datasets")
-    if not isinstance(requirement_id, str) or not isinstance(datasets, list):
-        return None
-    named = [dataset for dataset in datasets if isinstance(dataset, str)]
-    if len(named) != len(datasets):
-        return None
-    return requirement_id, frozenset(named)
-
-
-def _combination_picks(
-    tool_context: ToolContext,
-) -> tuple[dict[Combination, str | None], bool]:
-    """The option id the user last picked for each combination they were asked about, and a flag.
-
-    A combination ask is an `adk_request_input` call whose `options` are `COMBINATION_OPTIONS`.
-    It asks about the combination the latest `combination_unasked` refusal before it names, read
-    off that refusal's own response event, so the model cannot point an ask at another sum. A
-    refusal binds the first ask after it and no other, so an ask with no refusal of its own
-    before it asks about nothing. Each response pairs with the nearest preceding call sharing
-    its `id`, as `_elected_spec_ids` pairs them. The combination ask is one question, `q1`
-    (`harness.graph.state.resume_answers`). Each answer about a combination replaces the one
-    before it, and free text or a skip records `None`, so a user who changes their mind, or
-    answers outside the options, ends with no pick for it. The flag says whether any answer to
-    any combination ask, about a combination or about nothing, was other than `COMBINE_OPTION`.
-    """
-    offered = [dict(option) for option in COMBINATION_OPTIONS]
-    ids = {option["id"] for option in COMBINATION_OPTIONS}
-    refused: Combination | None = None
-    asks: dict[str, Combination | None] = {}
-    picks: dict[Combination, str | None] = {}
-    declined = False
-    for event in tool_context.session.events:
-        if not (event.content and event.content.parts):
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if (
-                call is not None
-                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-                and call.id is not None
-            ):
-                if (call.args or {}).get("options") == offered:
-                    asks[call.id], refused = refused, None
-                else:
-                    asks.pop(call.id, None)
-                continue
-            response = part.function_response
-            if response is None:
-                continue
-            body = response.response or {}
-            if response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
-                refused = _refused_combination(body) or refused
-            elif response.id in asks:
-                answer = _answers(body.get("result")).get("q1")
-                option = (
-                    answer.get("spec_id") if answer and answer.get("kind") == "option" else None
-                )
-                declined = declined or option != COMBINE_OPTION
-                combination = asks[response.id]
-                if combination is not None:
-                    picks[combination] = option if option in ids else None
-    return picks, declined
-
-
-@dataclass(frozen=True)
-class ToolContextSession:
-    """The `submission.service.SessionView` over one ADK tool call.
-
-    The state is the call's own. What the user was asked and answered is
-    read off the session's event history (`_elected_spec_ids`,
-    `_answers_since_referral`, `_combination_picks`,
-    `_user_spoke_since_recorded`, `_prices_chosen`). Recording an admitted
-    plan writes its windowed pins, the plan, its round count, and clears the
-    referral the new proposal supersedes.
-    """
-
-    tool_context: ToolContext
-
-    @property
-    def state(self) -> SessionState:
-        """The call's session state."""
-        return self.tool_context.state
-
-    def elected_spec_ids(self) -> frozenset[str]:
-        """`_elected_spec_ids` over the call's session."""
-        return _elected_spec_ids(self.tool_context)
-
-    def answers_since_referral(self) -> ReferralAnswers:
-        """`_answers_since_referral` over the call's session."""
-        return _answers_since_referral(self.tool_context)
-
-    def combination_picks(self) -> tuple[dict[Combination, str | None], bool]:
-        """`_combination_picks` over the call's session."""
-        return _combination_picks(self.tool_context)
-
-    def user_spoke_since(self, version: int) -> bool:
-        """`_user_spoke_since_recorded` over the call's session."""
-        return _user_spoke_since_recorded(self.tool_context, version)
-
-    def prices_chosen(self) -> dict[str, PricesChoice]:
-        """`_prices_chosen` over the call's session."""
-        return _prices_chosen(self.tool_context)
-
-    def decision_pick(self) -> DecisionPick | None:
-        """The pick on the plan card the call's planner entry holds (`planner.plan.decision_pick`)."""
-        return decision_pick(self.tool_context.state)
-
-    def record_unsupported(self, operation: UnsupportedOperation) -> None:
-        """Record `operation` as answered `unsupported` in this planner entry."""
-        record_unsupported(self.tool_context.state, operation)
-
-    def record_optional_decline(self, operation: UnsupportedOperation) -> None:
-        """Permit `operation` as an optional decline in this planner entry."""
-        record_optional_decline(self.tool_context.state, operation)
-
-    def record_reduction_refused(self, asks: Iterable[int]) -> None:
-        """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
-        record_reduction_refused_asks(self.tool_context.state, asks)
-
-    def record_admission(self, admission: Admission) -> None:
-        """Record `admission` in the call's state."""
-        state = self.tool_context.state
-        if admission.windowed_pins is not None:
-            save_windowed_pins(state, admission.windowed_pins)
-        save_alignments(state, admission.alignments)
-        save_plan(state, admission.plan)
-        save_plan_rounds(state, admission.rounds)
-        # A new proposal supersedes whatever the translator referred back.
-        clear_referral(state)
 
 
 # What each `propose_plan` argument means, as the model reads it on the
@@ -2422,7 +1811,7 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
     """
     if referral is None or referral.kind is not ReferralKind.ENTITY_NAME_AMBIGUOUS:
         return None
-    offered = _candidate_ids(candidates)
+    offered = candidate_ids(candidates)
     readings = {
         candidate.pick: reading.entity
         for reading in referral.ambiguous_entities
@@ -2466,8 +1855,9 @@ class _AskTool(LongRunningFunctionTool):
 
     @override
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        referral = load_referral(tool_context.state)
-        plan = load_plan(tool_context.state)
+        state = tool_context.state
+        referral = load_referral(state)
+        plan = load_plan(state)
         if referral is not None and plan is not None and plan.rolling_copies:
             referral = Referral.model_validate(
                 authored_answer(referral.model_dump(mode="json"), split_of(plan))
@@ -2491,7 +1881,7 @@ def build_planner_tools(
     `propose_plan` that records a plan runs on it, answering with the verdict
     under `translation` alongside its own `ok`. Given, `propose_plan` is a
     coroutine function, and a translation that compiles declares the plan
-    ready (`declare_ready`). Omitted, `propose_plan` records the plan and
+    ready (`end_run_when_ready`). Omitted, `propose_plan` records the plan and
     stops, and nothing declares a plan ready.
 
     `surface` is the tool surface `propose_plan` reads a pinned dataset's
@@ -2595,7 +1985,7 @@ def build_planner_tools(
         `None` on a first draft; and the `question` as stored.
         """
         return submit(
-            ToolContextSession(tool_context),
+            CallSession(AdkCall(tool_context)),
             Proposal(
                 question=question,
                 answer_mode=answer_mode,
@@ -2621,7 +2011,8 @@ def build_planner_tools(
         Nothing in the plan may run afterwards. Call `propose_plan` again if
         the user wants a revision rather than an outright stop.
         """
-        plan = load_plan(tool_context.state)
+        state = tool_context.state
+        plan = load_plan(state)
         if plan is None:
             return problem(ProblemCode.PLAN_MISSING, _NO_PLAN, outcome=Outcome.STATE_MISSING)
         try:
@@ -2634,8 +2025,8 @@ def build_planner_tools(
                 outcome=Outcome.REFUSED,
                 detail={"status": plan.status.value},
             )
-        save_plan(tool_context.state, plan)
-        clear_referral(tool_context.state)
+        save_plan(state, plan)
+        clear_referral(state)
         return ok(status=plan.status.value)
 
     @functools.wraps(propose_plan)
@@ -2661,24 +2052,24 @@ def build_planner_tools(
         any first-year reads (`propose_plan_reading`). The proposal's own
         `outcome` stays `ok` whatever the verdict, since the version is
         recorded either way, and a verdict of `ok` declares the plan ready
-        (`declare_ready`). A proposal that records nothing translates
+        (`end_run_when_ready`). A proposal that records nothing translates
         nothing. A bare re-proposal after a transient verdict
         (`_transient_retry`) translates the recorded version again and
         records nothing.
         """
         assert translate is not None
-        tool_context = arguments["tool_context"]
-        retried = _transient_retry(arguments, tool_context.state)
+        call = AdkCall(arguments["tool_context"])
+        retried = _transient_retry(arguments, call.state)
         if retried is not None:
-            clear_referral(tool_context.state)
+            clear_referral(call.state)
             answer = ok(
                 status=retried.status.value,
                 version=retried.version,
                 previous_version=retried.previous_version,
                 question=retried.question,
-                translation=await translate(tool_context),
+                translation=await translate(call),
             )
-            return declare_ready(answer, tool_context)
+            return end_run_when_ready(answer, call)
         result = (
             propose_plan(**arguments)
             if surface is None
@@ -2686,10 +2077,7 @@ def build_planner_tools(
         )
         if result.get("outcome") != Outcome.OK.value:
             return result
-        return declare_ready(
-            {**result, "translation": await translate(tool_context)},
-            tool_context,
-        )
+        return end_run_when_ready({**result, "translation": await translate(call)}, call)
 
     ask_user.__name__ = REQUEST_INPUT_FUNCTION_CALL_NAME
     proposing: Callable[..., Any] = propose_plan

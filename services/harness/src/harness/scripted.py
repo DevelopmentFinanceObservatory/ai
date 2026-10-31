@@ -30,7 +30,7 @@ from google.adk import Context
 from google.adk.agents import LlmAgent
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
-from planner.agent import declare_ready
+from planner.agent import AdkCall, end_run_when_ready
 from planner.plan import load_plan, plan_revision
 from planner.tool_results import ok
 from planner.workflow import ToolId
@@ -247,7 +247,7 @@ def use_compiled_proposals(agent: LlmAgent) -> None:
     """Replace `agent`'s `propose_plan` with one that records nothing and
     answers as a proposal whose translation compiled the plan on record.
 
-    The answer goes through `planner.agent.declare_ready`, so a plan on
+    The answer goes through `planner.agent.end_run_when_ready`, so a plan on
     record that is `PENDING_APPROVAL` is declared ready and ends the run, as
     a compiled proposal does, and any other is refused under `submission`.
     """
@@ -262,7 +262,7 @@ def use_compiled_proposals(agent: LlmAgent) -> None:
             question=plan.question,
             translation=ok(),
         )
-        return declare_ready(answer, tool_context)
+        return end_run_when_ready(answer, AdkCall(tool_context))
 
     agent.tools = [
         FunctionTool(propose_plan) if getattr(tool, "name", None) == "propose_plan" else tool

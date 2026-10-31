@@ -13,7 +13,7 @@ from data_mcp.server import mcp as data_mcp
 from planner.plan import AnswerMode, load_plan, pin_sources
 from planner.tool_results import Outcome
 from planner.workflow import Workflow
-from translator.discovery import build_discovery_tools
+from translator.discovery import build_discover_source
 from translator.mechanical import build_translation
 
 from ..decision_drafts import drafts
@@ -39,11 +39,10 @@ async def _compiled(ctx: _FakeToolContext) -> Workflow:
     plan = load_plan(ctx.state)
     assert plan is not None
     refused = _SearchRefused()
-    discover = build_discovery_tools(surface=cast(ToolSurface, refused))
-    (discover_source,) = [t for t in discover if t.name == "discover_source"]
+    discover_source = build_discover_source(surface=cast(ToolSurface, refused))
     pins = dict(_pins(ctx))
     for requirement_id in pins:
-        found = await discover_source.func(requirement_id=requirement_id, tool_context=ctx)
+        found = await discover_source(requirement_id=requirement_id, state=ctx.state)
         assert found["status"] == "definite", (requirement_id, found)
     assert refused.calls == []
     shown = pin_sources(ctx.state)

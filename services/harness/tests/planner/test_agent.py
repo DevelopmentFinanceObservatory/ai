@@ -3,8 +3,8 @@
 Most tool functions are exercised directly (`FunctionTool.func`) against a fake
 tool context, rather than through a full ADK `Runner` -- what belongs to this
 package is the business logic each tool function runs once ADK decides to call
-it. `_FakeToolContext` carries no `tool_confirmation`: `declare_ready` gates
-nothing of its own, so a body that tried to touch it would raise
+it. `_FakeToolContext` carries no `tool_confirmation`: `declare_ready` and
+`end_run_when_ready` gate nothing of their own, so a body that tried to touch it would raise
 `AttributeError` here rather than silently working again -- see the tests
 under "Submitting".
 
@@ -67,15 +67,16 @@ from harness.turn_records import RecordedIdentity, SearchReading, _periods
 from planner import agent as planner_agent
 from planner.agent import (
     BRIEF_STATE_KEY,
-    ToolContextSession,
+    AdkCall,
     build_planner_tools,
     create_planner_agent,
-    declare_ready,
+    end_run_when_ready,
     planner_instruction,
     prepend_brief,
     read_full_history,
     with_source_reads,
 )
+from planner.call import CallSession, elected_spec_ids, prices_chosen
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, PlanTool, compact_schema
 from planner.operations import (
     AggregateOperation,
@@ -216,7 +217,7 @@ from translator.discovery import (
     DefinitionNotResolvedError,
     DiscoveryLog,
     DiscoveryRecord,
-    build_discovery_tools,
+    build_discover_source,
     load_log,
     name_pinned_groups,
     resolving_once,
@@ -300,13 +301,13 @@ HANDED_BACK_KINDS = (
 
 
 class _FakeSession:
-    """A minimal stand-in for ADK's `Session`: just `.events`, read by
-    `planner.agent._elected_spec_ids` to find what the user actually chose
-    answering `adk_request_input`, and by `_answered_since_referral` to find
-    whether they answered at all. Empty by default -- a test that needs an
-    election on record populates it with `_ask_event` and `_answer_event`,
-    below, and one that needs an answer or a referral with `_ask_answered_events`
-    and `_hand_back`."""
+    """A minimal stand-in for ADK's `Session`: just `.events`, read through
+    `planner.agent._session_steps` by `planner.call.elected_spec_ids` to find
+    what the user actually chose answering `adk_request_input`, and by
+    `planner.call.answered_since_referral` to find whether they answered at
+    all. Empty by default -- a test that needs an election on record populates
+    it with `_ask_event` and `_answer_event`, below, and one that needs an
+    answer or a referral with `_ask_answered_events` and `_hand_back`."""
 
     def __init__(self) -> None:
         self.events: list[Any] = []
@@ -316,7 +317,7 @@ class _FakeToolContext:
     """A minimal stand-in for ADK's `ToolContext`.
 
     `.state` (a plain, mutable mapping), `.session` (`.events` only) and
-    `.actions` (where `declare_ready` ends the run) are all `planner.agent`'s
+    `.actions` (where `end_run_when_ready` ends the run) are all `planner.agent`'s
     tool functions use: none of them gates on a confirmation any more, so
     none needs `.tool_confirmation`. A tool body that tried to read it would
     raise `AttributeError` against this stand-in, which is exactly the
@@ -333,14 +334,14 @@ class _FakeToolContext:
 def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> Any:
     """A fake session event for `adk_request_input`'s own function call,
     carrying `candidates` in its `args` and `call_id` in its `id` -- the
-    shape `_elected_spec_ids` pairs against a matching `_answer_event`'s
-    `id`. A `SimpleNamespace` tree rather than a real
-    `google.adk.events.Event`: `_elected_spec_ids` only ever reads
+    shape `planner.call.elected_spec_ids` pairs against a matching
+    `_answer_event`'s `id`. A `SimpleNamespace` tree rather than a real
+    `google.adk.events.Event`: `planner.agent._session_steps` only ever reads
     `.content.parts[*].function_call.{id,name,args}` and
     `.content.parts[*].function_response`, so that is all this (and
     `_answer_event`, below) build. `function_response` is set to `None`
     explicitly -- a real ADK `Part` always carries the field, defaulting to
-    `None`, and `_elected_spec_ids` reads it unconditionally off every part.
+    `None`, and `_session_steps` reads it unconditionally off every part.
     """
     call = SimpleNamespace(id=call_id, name="adk_request_input", args={"candidates": candidates})
     part = SimpleNamespace(function_call=call, function_response=None)
@@ -398,7 +399,7 @@ def _ask_answered_events(
 def _clarify_ask_event(*questions: list[dict[str, str]]) -> Event:
     """A real ADK event for the graph's own `clarify` interrupt
     (`harness.graph.state.CLARIFY_INTERRUPT`), built through ADK's own
-    `create_request_input_event`: this is the shape `_offered_candidates`'s
+    `create_request_input_event`: this is the shape `planner.call._offered_candidates`'s
     `payload` branch reads, distinct from `ask_user`'s flat
     `args["candidates"]` -- `RequestInput.model_dump` nests the caller's own
     `payload` under `args["payload"]`. Each argument is one question's
@@ -591,8 +592,11 @@ def _translate(
 
 
 def _declare(ctx: _FakeToolContext) -> dict[str, object]:
-    """`declare_ready` over the plan on record, as a proposal whose translation compiled."""
-    return declare_ready({"outcome": Outcome.OK.value, "translation": {"outcome": "ok"}}, ctx)  # type: ignore[arg-type]
+    """`end_run_when_ready` over the plan on record, as a proposal whose translation compiled."""
+    return end_run_when_ready(
+        {"outcome": Outcome.OK.value, "translation": {"outcome": "ok"}},
+        AdkCall(ctx),  # type: ignore[arg-type]
+    )
 
 
 def _tool_args(
@@ -635,8 +639,8 @@ async def test_a_proposal_that_compiles_declares_the_plan_ready(
     # would raise `AttributeError` here rather than requesting one. It ends
     # the planner's run, so no model call follows. The plan itself is left
     # exactly where translation put it.
-    async def compiling(tool_context: Any) -> dict[str, object]:
-        _translate(tool_context)
+    async def compiling(call: Any) -> dict[str, object]:
+        _translate(call)
         return {"outcome": Outcome.OK.value}
 
     tools = _tools_by_name(translate=compiling)
@@ -792,8 +796,8 @@ async def test_a_translation_that_did_not_compile_declares_nothing(
     # A draft states the methodology; nothing has been compiled to run, so
     # declaring it ready would put nothing real in front of the user. The
     # proposal answers its verdict alone, and the run goes on.
-    async def unavailable(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def unavailable(call: Any) -> dict[str, object]:
+        del call
         return {"outcome": "refused", "code": "surface_unavailable", "message": "m"}
 
     tools = _tools_by_name(translate=unavailable)
@@ -1820,7 +1824,7 @@ def test_a_sum_of_two_datasets_needs_the_users_decision(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     if refused:
@@ -1998,7 +2002,7 @@ def test_a_users_decision_to_combine_two_datasets_needs_their_pick(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     if traced:
@@ -2029,7 +2033,7 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     assert result is not None
@@ -2109,7 +2113,7 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
     previous = None
     if route == "pick":
         refusal = _combination_unasked(
-            first, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+            first, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
         )
         assert refusal is not None
         detail = refusal["detail"]
@@ -2122,7 +2126,7 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
         previous = first
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=previous, sources=_shown_readings(ctx)
+        plan, CallSession(AdkCall(ctx)), previous=previous, sources=_shown_readings(ctx)
     )
 
     assert (result is not None) is refused
@@ -2220,7 +2224,10 @@ def test_a_sum_carried_from_an_earlier_plan_keeps_its_sum_without_a_new_pick(
     )
 
     result = _combination_unasked(
-        plan, ToolContextSession(ctx), previous=previous_of(recorded), sources=_shown_readings(ctx)
+        plan,
+        CallSession(AdkCall(ctx)),
+        previous=previous_of(recorded),
+        sources=_shown_readings(ctx),
     )
 
     assert (result is not None) is refused
@@ -3003,7 +3010,7 @@ def test_an_answer_after_a_referral_counts() -> None:
     ctx.session.events.append(_referred_event(ReferralKind.UNSUPPORTED_ASK, "gdp"))
     ctx.session.events.extend(_ask_answered_events())
 
-    assert ToolContextSession(ctx).answers_since_referral().answered
+    assert CallSession(AdkCall(ctx)).answers_since_referral().answered
 
 
 def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
@@ -4494,8 +4501,8 @@ async def test_an_amendment_re_pins_an_aid_requirement_to_the_measure_offered_be
         "definition": {"schema_version": 1, "spec_id": copy.spec_id, "identity": copy.identity},
     }
     surface = _ResolveOnly(DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered]))
-    discover = {t.name: t for t in build_discovery_tools(surface=cast(ToolSurface, surface))}
-    result = await discover["discover_source"].func(requirement_id="aid", tool_context=ctx)
+    discover_source = build_discover_source(surface=cast(ToolSurface, surface))
+    result = await discover_source(requirement_id="aid", state=ctx.state)
 
     assert result["status"] == "definite", result
     assert surface.other_calls == []
@@ -9999,14 +10006,12 @@ async def test_a_dac_donor_whole_searchs_answer_compiles(
     assert proposed["outcome"] == Outcome.OK.value, proposed
 
     refused = _SearchRefused()
-    named = await name_pinned_groups(ctx, surface=cast(ToolSurface, refused))
+    named = await name_pinned_groups(ctx.state, surface=cast(ToolSurface, refused))
     named_in_place = [(g.requirement_id, g.entity.name, g.across) for g in named]
     assert named_in_place == ([(_WHOLE, group, "donor")] if group else [])
-    discover = {t.name: t for t in build_discovery_tools(surface=cast(ToolSurface, refused))}
+    discover_source = build_discover_source(surface=cast(ToolSurface, refused))
     for requirement_id in (_PART, _WHOLE):
-        found = await discover["discover_source"].func(
-            requirement_id=requirement_id, tool_context=ctx
-        )
+        found = await discover_source(requirement_id=requirement_id, state=ctx.state)
         assert found["status"] == "definite", (requirement_id, found)
     assert refused.calls == []
 
@@ -12594,7 +12599,7 @@ def test_a_later_ask_pricing_another_window_replaces_the_measures_choice(
     held = {other: PricesChoice("current")}
     if not same_measure:
         held[_GROSS] = PricesChoice("constant")
-    assert planner_agent._prices_chosen(ctx) == held
+    assert prices_chosen(AdkCall(ctx)) == held
 
 
 @pytest.mark.parametrize(
@@ -12621,7 +12626,7 @@ def test_an_answer_to_the_planners_prices_ask_sets_or_releases_the_choice(
         _ask_response("ask-prices", {"result": result}),
     ]
 
-    assert planner_agent._prices_chosen(ctx) == held
+    assert prices_chosen(AdkCall(ctx)) == held
 
 
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
@@ -12638,7 +12643,7 @@ def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
         _answer_event("prices:current", call_id="ask-prices"),
     ]
 
-    assert planner_agent._prices_chosen(ctx) == {}
+    assert prices_chosen(AdkCall(ctx)) == {}
 
 
 @pytest.mark.parametrize("asks_user", [True, False], ids=["asked-then-landed", "restated"])
@@ -12661,7 +12666,7 @@ def test_a_landed_plan_clears_a_prices_refusal_so_later_asks_keep_their_picks(
         _clarify_answer_event(_option("o2")),
     ]
 
-    assert planner_agent._prices_chosen(ctx) == {
+    assert prices_chosen(AdkCall(ctx)) == {
         _GROSS: PricesChoice("constant"),
         other: PricesChoice("constant"),
     }
@@ -13580,8 +13585,8 @@ def test_propose_plan_accepts_a_user_election_from_the_graphs_clarify_interrupt(
 ) -> None:
     """`harness.graph`'s `clarify` interrupt carries its candidates at
     `args["payload"]["candidates"]`, which is easy to confuse with
-    `ask_user`'s own flat `args["candidates"]` -- `_offered_candidates`
-    reads both."""
+    `ask_user`'s own flat `args["candidates"]` --
+    `planner.call._offered_candidates` reads both."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     ctx.session.events = [
@@ -13630,7 +13635,27 @@ def test_elected_spec_ids_pairs_a_response_with_the_call_that_precedes_it() -> N
     tool_context = _FakeToolContext()
     tool_context.session = session
 
-    assert planner_agent._elected_spec_ids(tool_context) == frozenset({SPEC})
+    assert elected_spec_ids(AdkCall(tool_context)) == frozenset({SPEC})
+
+
+def test_a_typed_message_is_one_step_whatever_else_its_event_carries() -> None:
+    """A message the user typed is one `message` step. A function part on the
+    same event is not read, so an answer counts only on an event of its own."""
+    answer = _answer_event(SPEC)
+    typed = SimpleNamespace(
+        author="user",
+        branch=None,
+        content=SimpleNamespace(
+            parts=[
+                SimpleNamespace(text="use this one", function_call=None, function_response=None),
+                *answer.content.parts,
+            ]
+        ),
+    )
+
+    steps = planner_agent._session_steps([typed, answer])
+
+    assert [step.kind for step in steps] == ["message", "answer"]
 
 
 # --- The declaration ADK builds from a union-typed parameter --------------------------
@@ -14176,8 +14201,8 @@ async def test_an_accepted_proposal_answers_with_the_translation_and_no_translat
     `translation`. A proposal that records nothing translates nothing."""
     translated: list[int] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        stored = load_plan(tool_context.state)
+    async def translate(call: Any) -> dict[str, object]:
+        stored = load_plan(call.state)
         assert stored is not None
         translated.append(stored.version)
         return {"outcome": Outcome.OK.value}
@@ -14205,8 +14230,8 @@ async def test_a_referred_translation_leaves_the_proposed_version_recorded(
     dataset, _derived = requirements
     referral = _referral_of(ReferralKind.NO_DATA, dataset.id)
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        save_referral(tool_context.state, referral)
+    async def translate(call: Any) -> dict[str, object]:
+        save_referral(call.state, referral)
         return {"kind": referral.kind.value, "outcome": referral.outcome.value}
 
     tools = _tools_by_name(translate=translate)
@@ -14252,14 +14277,14 @@ async def test_a_bare_reproposal_after_a_transient_verdict_spends_no_round(
     verdicts = [_referral_of(kind, dataset.id), None]
     translated: list[int] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        stored = load_plan(tool_context.state)
+    async def translate(call: Any) -> dict[str, object]:
+        stored = load_plan(call.state)
         assert stored is not None
         translated.append(stored.version)
         referral = verdicts.pop(0)
         if referral is None:
             return {"outcome": Outcome.OK.value}
-        save_referral(tool_context.state, referral)
+        save_referral(call.state, referral)
         return {"kind": referral.kind.value, "outcome": referral.outcome.value}
 
     tools = _tools_by_name(translate=translate)
@@ -14598,17 +14623,17 @@ def _drafted_arguments(decision: DecisionFactory, requirements: RequirementPair)
     }
 
 
-async def _compiled_then_rejected(tool_context: Any) -> dict[str, object]:
+async def _compiled_then_rejected(call: Any) -> dict[str, object]:
     """An `ok` translation after which the plan on record is rejected, so
     `planner.agent.declare_ready`'s gate refuses it."""
-    _translate(tool_context)
-    plan = load_plan(tool_context.state)
+    _translate(call)
+    plan = load_plan(call.state)
     assert plan is not None
-    save_plan(tool_context.state, plan.reject())
+    save_plan(call.state, plan.reject())
     return {"outcome": "ok"}
 
 
-async def _never_translated(tool_context: Any) -> dict[str, object]:
+async def _never_translated(call: Any) -> dict[str, object]:
     raise AssertionError("a refused proposal records nothing to translate")
 
 
@@ -17349,7 +17374,7 @@ def test_prior_translator_provider_sources_remain_summable(decision, pinning_dec
     )
     assert (
         _combination_unasked(
-            plan, ToolContextSession(ctx), previous=None, sources=_shown_readings(ctx)
+            plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
         )
         is None
     )
@@ -17375,7 +17400,7 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
     )
     changed = plan.model_copy(update={"evidence_requirements": (modified,)})
     assert (
-        _source_ref_unpicked(changed, load_referral(ctx.state), ToolContextSession(ctx), None)
+        _source_ref_unpicked(changed, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
         is None
     ) == (target == dataset.id)
     changed_wording = changed.model_copy(
@@ -17383,13 +17408,13 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
     )
     assert (
         _source_ref_unpicked(
-            changed_wording, load_referral(ctx.state), ToolContextSession(ctx), None
+            changed_wording, load_referral(ctx.state), CallSession(AdkCall(ctx)), None
         )
         is not None
     )
     ctx.state.pop("translator:referral")
     assert (
-        _source_ref_unpicked(changed, load_referral(ctx.state), ToolContextSession(ctx), None)
+        _source_ref_unpicked(changed, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
         is not None
     )
 
@@ -17430,7 +17455,8 @@ def test_a_code_held_by_several_publishers_takes_the_picked_one_as_its_source(
         question="question", decisions=[decision()], evidence_requirements=[repaired, derived]
     )
     assert (
-        _source_ref_unpicked(plan, load_referral(ctx.state), ToolContextSession(ctx), None) is None
+        _source_ref_unpicked(plan, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+        is None
     ) == valid
 
 
@@ -17716,7 +17742,7 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
         evidence_requirements=[dataset.model_copy(update={"entities": entities}), derived],
     )
 
-    refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), ToolContextSession(ctx), None)
+    refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
 
     assert (refusal is None) == valid
     if refusal is not None:
@@ -17811,7 +17837,7 @@ def test_an_entity_answer_on_a_history_copy_binds_its_origin(
             )
         }
     )
-    view = ToolContextSession(ctx)
+    view = CallSession(AdkCall(ctx))
 
     refusal = _entity_dcid_unpicked(
         plan, submission_service._authored_referral(view, draft), view, draft
@@ -17909,7 +17935,7 @@ def test_a_group_restated_by_its_name_counts_as_its_candidate(
     referral = load_referral(ctx.state)
 
     refusal = _entity_dcid_unoffered(plan, referral, None) or _entity_dcid_unpicked(
-        plan, referral, ToolContextSession(ctx), None
+        plan, referral, CallSession(AdkCall(ctx)), None
     )
 
     assert (refusal is None) == valid
@@ -17973,7 +17999,7 @@ def test_an_entity_referral_leaves_a_kept_pin_as_it_is(
         evidence_requirements=[pinned, derived_requirement()],
     )
 
-    assert _choice_not_offered(plan, load_referral(ctx.state), ToolContextSession(ctx)) is None
+    assert _choice_not_offered(plan, load_referral(ctx.state), CallSession(AdkCall(ctx))) is None
 
 
 @pytest.mark.parametrize("modifier", [{"source_ref": "provenance/a"}, {"source_exclude": True}])
