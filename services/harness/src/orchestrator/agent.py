@@ -433,11 +433,14 @@ def create_orchestrator_agent(
         mode="chat",
         before_model_callback=[_without_adk_identity(AGENT_NAME), prepend_digests],
         # Thought summaries are requested for the traces. The studio stream
-        # does not carry them.
+        # does not carry them. A stream cut off mid-response resumes from a
+        # continuation token, one extra hop instead of a full retry;
+        # google-genai's docs and code disagree on the default, so it is set.
         generate_content_config=types.GenerateContentConfig(
+            automatic_continuation=True,
             thinking_config=types.ThinkingConfig(
                 thinking_level=types.ThinkingLevel(thinking_level),
                 include_thoughts=True,
-            )
+            ),
         ),
     )

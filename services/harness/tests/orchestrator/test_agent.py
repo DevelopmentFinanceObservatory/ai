@@ -111,6 +111,7 @@ async def test_the_static_prefix_is_the_same_whatever_the_canvas(scripted_llm: A
     second = await _first_request(scripted_llm, canvas_digest=ghana, conversation_digest=history)
 
     assert _prefix_hash(first) == _prefix_hash(second)
+    assert first.config.automatic_continuation is True
     assert first.contents[0].parts[0].text == (
         f"Today's date (UTC): 2026-10-05\n\nThe user's canvas: {kenya}"
     )

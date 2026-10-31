@@ -2787,6 +2787,10 @@ def create_planner_agent(
         # reads the turn's question and every event on this run's node path,
         # so `prepend_brief` finds the question to follow.
         include_contents="default",
+        # A stream cut off mid-response resumes from a continuation token, one
+        # extra hop instead of a full retry; google-genai's docs and code
+        # disagree on the default, so it is set.
+        generate_content_config=types.GenerateContentConfig(automatic_continuation=True),
         # `AGENT_THINKING_CONFIG` (see `planner.settings`) pins every
         # generation to LOW thinking.
         planner=BuiltInPlanner(thinking_config=AGENT_THINKING_CONFIG),

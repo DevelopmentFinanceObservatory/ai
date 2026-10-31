@@ -3232,6 +3232,7 @@ async def test_every_planner_generation_runs_at_the_low_thinking_config(
     assert len(planner_llm.captured_requests) > 1
     assert all(
         request.config.thinking_config == AGENT_THINKING_CONFIG
+        and request.config.automatic_continuation is True
         for request in planner_llm.captured_requests
     )
 
