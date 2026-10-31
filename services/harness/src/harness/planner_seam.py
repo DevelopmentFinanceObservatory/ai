@@ -139,7 +139,10 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    conversation_readings,
     store_search,
+    stored_mapping,
+    stored_sequence,
 )
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
@@ -660,9 +663,12 @@ class PlannerSeam:
                 )
                 # An earlier turn's spec_id pins from the block its own turn
                 # stored; this turn's search of one replaces it.
-                prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
-                blocks = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
-                searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
+                prior = stored_mapping(ctx.state, ORCHESTRATOR_PRIOR_LEDGER_KEY)
+                blocks = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
+                searched = {
+                    *_named(stored_sequence(ctx.state, ORCHESTRATOR_SEARCHES_KEY)),
+                    *blocks,
+                }
                 sources = _reading_pin_sources(
                     readings,
                     ledger.spec_ids,
@@ -1512,7 +1518,7 @@ def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
         for spec_id, held in held_sources(state).items()
         if (block := held.spec_block(spec_id)) is not None
     }
-    blocks.update(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    blocks.update(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
     return blocks
 
 
@@ -1975,10 +1981,7 @@ def store_searched_pin_readings(ctx: Context, planner_state: SessionState) -> No
         return
     stored = {
         SearchReading.model_validate(reading).spec_id
-        for reading in (
-            *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-            *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
-        )
+        for reading in conversation_readings(ctx.state)
     }
     for found in searched:
         if found.spec_id in stored or found.digest is None:

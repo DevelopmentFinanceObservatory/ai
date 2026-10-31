@@ -68,7 +68,7 @@ from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from harness.graph.orchestrate import counts_chosen
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers, stored_mapping
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
 from harness.scope_choices import (
     PROVIDER_AXIS,
@@ -1093,7 +1093,7 @@ def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     `tool_context.session` is the same live `Session` every other seam
     shares, `events` included.
     """
-    specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    specs = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
     elected: set[str] = set()
     for args, result in _answered_calls(tool_context):
         elected |= counts_chosen(_picks(result, _offered_candidates(args)), specs)

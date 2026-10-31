@@ -38,6 +38,7 @@ from harness.graph.state import (
     pending_action,
     priced_options,
     resume_answers,
+    stored_mapping,
 )
 from harness.orchestrator_tools import HANDED_OFF
 
@@ -244,7 +245,7 @@ def ask(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
         ]
     if answers is not None and (
         paired := measure_pair_reply(
-            questions, answers, ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+            questions, answers, stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)
         )
     ):
         lines.append(paired)
