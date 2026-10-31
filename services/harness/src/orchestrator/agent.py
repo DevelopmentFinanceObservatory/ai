@@ -335,6 +335,30 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
         )
 
 
+def _without_adk_identity(
+    name: str, description: str
+) -> Callable[[CallbackContext, LlmRequest], None]:
+    """A before-model callback that takes out of the system instruction the
+    line ADK appends to a chat-mode agent's
+    (`google.adk.flows.llm_flows.prompt._identity`, built here from the same
+    f-string), so the model reads `INSTRUCTION` as it is. On gemini-3.8-flash that line alone switched the
+    orchestrator into thinking in 6 of 6 replays, at about 50 s and 6-8k
+    reasoning tokens a planned turn, and ADK has no setting to leave it out.
+    It runs before the model is called, so the shared prefix cache
+    (`harness.prefix_cache`) holds the instruction without it."""
+    line = f'You are an agent. Your internal name is "{name}".'
+    if description:
+        line += f' The description about you is "{description}".'
+    appended = "\n\n" + line
+
+    def drop(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
+        instruction = llm_request.config.system_instruction
+        if isinstance(instruction, str):
+            llm_request.config.system_instruction = instruction.replace(appended, "", 1)
+
+    return drop
+
+
 def _retrying(
     model_name: str,
     *,
@@ -408,7 +432,7 @@ def create_orchestrator_agent(
         # single_turn node run reads only the events on its own node path,
         # which leaves out every hand-back (`harness.graph.orchestrate`).
         mode="chat",
-        before_model_callback=prepend_digests,
+        before_model_callback=[_without_adk_identity(AGENT_NAME, ""), prepend_digests],
         # Thought summaries are requested for the traces. The studio stream
         # does not carry them.
         generate_content_config=types.GenerateContentConfig(
