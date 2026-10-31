@@ -11,7 +11,7 @@ from pathlib import Path
 
 from _pytest.fixtures import FixtureFunctionDefinition
 
-_ROOT = Path(__file__).resolve().parents[3]
+_ROOT = next(p for p in Path(__file__).resolve().parents if (p / "services" / "harness").is_dir())
 
 
 def _load(name: str, path: Path) -> object:
