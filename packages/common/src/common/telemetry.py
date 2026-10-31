@@ -21,6 +21,20 @@ Recognised env vars:
   groups above select would export nothing; the state is off.
 - None of them set -- the state is off.
 
+When a backend comes up, `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
+is set to `SPAN_ONLY` unless the environment already sets it, so ADK's
+`generate_content` spans carry each model call's prompt and response and its
+`execute_tool` spans each tool's arguments and result. ADK writes every
+streamed response as its own output message and thought summaries as plain
+text parts.
+
+The spans follow ADK's telemetry schema v2, its default.
+`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` brings back schema
+v1, which this module does not adapt for Langfuse: each model call is priced
+twice, on `call_llm` and on `generate_content`, and Langfuse's default span
+filter drops ADK's attribute-less `invocation` spans, so the `invoke_workflow`
+spans under them lose their parent.
+
 `start_turn_span`/`end_turn_span` open and close one root span per unit of
 work (a harness turn, say) on whichever backend is active. `use_turn_span`
 makes that span current in the task that runs a `with` block, so a unit of
@@ -52,10 +66,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Any, Literal
-
-if TYPE_CHECKING:
-    from langfuse.types import MaskOtelSpansParams, MaskOtelSpansResult
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +75,9 @@ _LANGFUSE_ENV_VARS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BA
 _AUTH_CHECK_THREAD_NAME = "langfuse-auth-check"
 _FLUSH_THREAD_NAME = "telemetry-flush"
 
-# ADK's instrumentation scope, the name of its attribute-less `invocation` span,
-# and the name of its `call_llm` span. `_mask_otel_spans` explains how each is
-# exported.
-_ADK_SCOPE_NAME = "gcp.vertex.agent"
-_ADK_INVOCATION_SPAN_NAME = "invocation"
-_ADK_CALL_LLM_SPAN_NAME = "call_llm"
-_LANGFUSE_OBSERVATION_TYPE = "langfuse.observation.type"
-_LANGFUSE_USAGE_DETAILS = "langfuse.observation.usage_details"
+# The OpenTelemetry GenAI variable that decides whether ADK writes message
+# content on its spans (`_capture_message_content`).
+_CAPTURE_MESSAGE_CONTENT_VAR = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
 # The longest a response waits on `flush_telemetry`. An export to a healthy
 # Langfuse takes well under a second; the exporter's own request timeout is
@@ -108,8 +114,6 @@ _backend: Literal["langfuse", "otel"] | None = None
 # Whether a `record_event` failure has been logged at WARNING yet; later ones
 # log at DEBUG so a broken exporter is visible once without a line per event.
 _event_failure_warned = False
-# The same latch for `_mask_otel_spans` failures, which bring double pricing back.
-_mask_failure_warned = False
 # Single-flight state for `flush_telemetry`, guarded by `_flush_lock`:
 # `_flush_running` is true while a flush thread owns the backend, and
 # `_flush_pending` records that a call found it running. The thread checks
@@ -178,15 +182,32 @@ def _start_backend(*, service_name: str) -> str | None:
     if not missing:
         disabled_reason = _langfuse_disabled_reason()
         if disabled_reason is None:
+            _capture_message_content()
             _init_langfuse(service_name=service_name)
         return disabled_reason
     if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        _capture_message_content()
         _init_otel(service_name=service_name)
         _backend = "otel"
         return None
     if len(missing) == len(_LANGFUSE_ENV_VARS):
         return "no LANGFUSE_* or OTEL_EXPORTER_OTLP_ENDPOINT set"
     return f"LANGFUSE_* incomplete, missing {', '.join(missing)}"
+
+
+def _capture_message_content() -> None:
+    """Have ADK write prompts, responses, tool arguments and tool results on
+    its spans, unless the environment already says otherwise.
+
+    ADK's telemetry schema v2 puts a model call's messages on its
+    `generate_content` span and a tool's arguments and result on its
+    `execute_tool` span only when `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
+    is `SPAN_ONLY` or `SPAN_AND_EVENT`; unset, the spans carry none. ADK reads
+    the variable each time it builds a telemetry config, which it does per
+    model and tool call, so setting it here, before the first run, reaches
+    every call. A value already set, even an empty one, is left as it is.
+    """
+    os.environ.setdefault(_CAPTURE_MESSAGE_CONTENT_VAR, "SPAN_ONLY")
 
 
 def _otel_sdk_disabled_reason() -> str | None:
@@ -220,9 +241,9 @@ def _init_langfuse(*, service_name: str) -> None:
     """Create the Langfuse client, which attaches its exporter to the global
     tracer provider, and start a background credentials check.
 
-    The client is built with `_should_export_span`, `_langfuse_exporter` and
-    `_mask_otel_spans`.
-    The SDK keeps the first client built in a process and ignores the arguments
+    The client is built with `_langfuse_exporter` and the SDK's default span
+    filter, which exports its own spans and every span with a `gen_ai.*`
+    attribute, so every span ADK opens. The SDK keeps the first client built in a process and ignores the arguments
     of a later one, and `get_client()` returns that first client, so this has
     to run before anything else builds one; a client that already exists is
     reported.
@@ -235,15 +256,11 @@ def _init_langfuse(*, service_name: str) -> None:
 
     if _langfuse_client_exists():
         logger.warning(
-            "A Langfuse client already exists in %s, so its span filter stays in force: ADK's "
-            "invocation spans are dropped and its workflow spans show as separate roots",
+            "A Langfuse client already exists in %s, so its exporter stays in force and "
+            "may export credentials in span URIs unredacted",
             service_name,
         )
-    client = Langfuse(
-        should_export_span=_should_export_span,
-        span_exporter=_langfuse_exporter(),
-        mask_otel_spans=_mask_otel_spans,
-    )
+    client = Langfuse(span_exporter=_langfuse_exporter())
     _backend = "langfuse"
     logger.info("Telemetry configured for %s via Langfuse", service_name)
     try:
@@ -311,79 +328,6 @@ def _langfuse_client_exists() -> bool:
     except Exception:
         logger.debug("could not tell whether a Langfuse client exists", exc_info=True)
         return False
-
-
-def _should_export_span(span: Any) -> bool:
-    """The Langfuse SDK's default export filter, plus ADK's `invocation` span.
-
-    ADK opens an attribute-less `invocation` span around each run, and its
-    `invoke_workflow` spans are that span's children. The default filter drops
-    it, so those workflow spans would reference a parent that is never
-    exported and the Langfuse UI would show them as roots beside `turn`. The
-    match is on scope and name alone because the SDK also calls the filter as
-    a span starts, before any attributes exist. It reads only those two fields
-    and never raises.
-    """
-    from langfuse.span_filter import is_default_export_span
-
-    if is_default_export_span(span):
-        return True
-    scope = span.instrumentation_scope
-    return (
-        scope is not None
-        and scope.name == _ADK_SCOPE_NAME
-        and span.name == _ADK_INVOCATION_SPAN_NAME
-    )
-
-
-def _mask_otel_spans(*, params: MaskOtelSpansParams) -> MaskOtelSpansResult | None:
-    """Export ADK's `call_llm` spans to Langfuse as plain spans with empty usage.
-
-    Langfuse prices any observation that carries usage, types a span that
-    carries a model as a generation, and for ADK's scope derives cached-token
-    usage from the `gcp.vertex.agent.llm_response` JSON on `call_llm`. ADK's
-    `call_llm` is an agent step. Its duration covers the tools it triggers, and
-    it carries the same usage as the `generate_content <model>` span inside it,
-    which is the model call. Left alone, each model call would be priced twice.
-
-    So the hook types `call_llm` as a span (`langfuse.observation.type`, whose
-    lowercase value Langfuse matches case-sensitively) and gives it an explicit
-    empty `langfuse.observation.usage_details`, which Langfuse reads before any
-    other usage source. Langfuse estimates tokens itself for an observation with
-    empty usage only when the model has a tokenizer, and no Gemini model in its
-    price list has one. Every other span is left as it is.
-
-    The SDK drops a whole export batch if this raises, so a failure leaves the
-    batch unchanged and is logged at WARNING the first time in a process and at
-    DEBUG afterwards.
-    """
-    global _mask_failure_warned  # noqa: PLW0603 -- one process-wide first-failure latch
-    try:
-        from langfuse.types import MaskOtelSpansResult, OtelSpanPatch
-
-        patches = {
-            identifier: OtelSpanPatch(
-                set_attributes={
-                    _LANGFUSE_OBSERVATION_TYPE: "span",
-                    _LANGFUSE_USAGE_DETAILS: "{}",
-                },
-            )
-            for identifier, span in params.spans.items()
-            if span.instrumentation_scope_name == _ADK_SCOPE_NAME
-            and span.name == _ADK_CALL_LLM_SPAN_NAME
-        }
-        return MaskOtelSpansResult(span_patches=patches) if patches else None
-    except Exception:
-        if _mask_failure_warned:
-            logger.debug("could not retype call_llm spans -- continuing", exc_info=True)
-        else:
-            _mask_failure_warned = True
-            logger.warning(
-                "could not retype call_llm spans, so Langfuse prices each model call twice; "
-                "later failures log at DEBUG",
-                exc_info=True,
-            )
-        return None
 
 
 def _check_langfuse_auth(client: Any, service_name: str) -> None:
@@ -729,9 +673,9 @@ def use_request_span(name: str) -> Iterator[RequestSpan]:
     MCP call. fastmcp opens a SERVER span per request and honours an incoming
     `_meta` traceparent, so under a plain OTel backend the current span is
     already the request's and nothing opens: a second span would split
-    fastmcp's one SERVER span per request in two. Langfuse exports only spans
-    from its own tracer (see `_should_export_span`), so under Langfuse the
-    block gets an observation named `name` from the Langfuse client, in the
+    fastmcp's one SERVER span per request in two. Langfuse's default span
+    filter exports only its own spans and those with `gen_ai.*` attributes,
+    which fastmcp's lack, so under Langfuse the block gets an observation named `name` from the Langfuse client, in the
     same trace. With no valid span current (no tracer provider, or the SDK
     disabled), a non-recording span with fresh random ids is made current, so
     every `current_trace_id` in the block still names one id. A span that
