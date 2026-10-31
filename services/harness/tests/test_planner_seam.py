@@ -3242,7 +3242,9 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
     """Two entries of one turn, each its own `run_node` child as the graph's
     planner node runs them: the later entry's first request holds the turn's
     question, the brief after it with the amendment, and none of the earlier
-    entry's tool calls, since a `single_turn` run reads only its own node path."""
+    entry's tool calls, since a `single_turn` run reads only its own node path.
+    The skill the earlier entry read is in the later brief instead, starred on
+    the Skills named line."""
     seam = _translator_seam(
         responses={
             "search": _NO_DATA_SEARCH_RESPONSE,
@@ -3261,6 +3263,7 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
     seam._agent.model = planner_llm
     plan_json = draft.model_dump(mode="json")
     entries: list[dict[str, Any]] = [{}, {"amendment": "only since 2015"}]
+    readings = _skill_readings("dfo-faq")
 
     async def _turn(ctx: Context, node_input: Any) -> None:
         del node_input
@@ -3269,7 +3272,11 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
             async def _entry(ctx: Context, node_input: Any, entry: dict[str, Any] = entry) -> Any:
                 del node_input
                 return await seam(
-                    ctx=ctx, question="gdp guatemala", readings=[], prior_plan=plan_json, **entry
+                    ctx=ctx,
+                    question="gdp guatemala",
+                    readings=readings,
+                    prior_plan=plan_json,
+                    **entry,
                 )
 
             await ctx.run_node(node(_entry, name="planner", rerun_on_resume=True))
@@ -3289,9 +3296,154 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
     # generation.
     earlier = _call_and_response_names(planner_llm.captured_requests[2])
     assert {"FC:get_skill", "FR:get_skill", "FC:propose_plan", "FR:propose_plan"} <= set(earlier)
+    first_brief = _brief_follows_the_question(planner_llm.captured_requests[0])
+    assert _skills_named(first_brief) == "dfo-faq"
+    assert _SKILL_PAGE not in first_brief
     later = planner_llm.captured_requests[3]
-    assert "only since 2015" in _brief_follows_the_question(later)
+    brief = _brief_follows_the_question(later)
+    assert "only since 2015" in brief
+    assert _skills_named(brief) == "dfo-faq*"
+    assert f"get_skill('dfo-faq'):\n{_SKILL_PAGE}\n" in brief
     assert _call_and_response_names(later) == []
+
+
+_SKILL_PAGE = "# DFO FAQ"
+
+
+def _skill_readings(*skills: str) -> list[dict[str, Any]]:
+    """One definite reading naming `skills`, as `search` stores it."""
+    reading = SearchReading(text="aid", status="definite", spec_id=SPEC, skills=skills)
+    return [reading.model_dump(mode="json")]
+
+
+def _skills_named(brief: str) -> str:
+    """The skills the brief's Skills named line lists, starred as it stars them."""
+    (line,) = [line for line in brief.splitlines() if line.startswith("Skills named")]
+    return line.removeprefix("Skills named (* = already read): ")
+
+
+def _skill_seam() -> PlannerSeam:
+    """A seam whose `get_skill` and `get_skill_file` answer one page each."""
+    return _translator_seam(
+        responses={
+            "get_skill": ToolCallResult(is_error=False, text=_SKILL_PAGE),
+            "get_skill_file": ToolCallResult(is_error=False, text="# Methods"),
+        }
+    )
+
+
+async def test_a_first_draft_carries_no_skill_an_earlier_plan_read() -> None:
+    """A first draft starts a new plan, so the skills the last plan's entries
+    read leave the brief with it, while an amend of that last plan still
+    carried them."""
+    seam = _skill_seam()
+    llm = ScriptedPlannerLlm(script=[[("get_skill", {"skill_id": "dfo-faq"})], "stop"])
+    seam._agent.model = llm
+    harness = _SeamHarness()
+    entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
+
+    await harness.run(seam, **entry)
+    amending = len(llm.captured_requests)
+    await harness.run(seam, amendment="only since 2015", **entry)
+    drafting = len(llm.captured_requests)
+    await harness.run(seam, **entry)
+
+    amend = _brief_follows_the_question(llm.captured_requests[amending])
+    assert _skills_named(amend) == "dfo-faq*" and _SKILL_PAGE in amend
+    draft = _brief_follows_the_question(llm.captured_requests[drafting])
+    assert _skills_named(draft) == "dfo-faq"
+    assert _SKILL_PAGE not in draft
+
+
+async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> None:
+    """A read stores its own page's text and a short index, so a later read's
+    state delta carries no earlier page and each text appears in one event,
+    however many reads and entries follow."""
+    first, second = "# FAQ " + "a" * 400, "# Methods " + "b" * 400
+    seam = _translator_seam(
+        responses={
+            "get_skill": ToolCallResult(is_error=False, text=first),
+            "get_skill_file": ToolCallResult(is_error=False, text=second),
+        }
+    )
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[
+            [("get_skill", {"skill_id": "dfo-faq"})],
+            [("get_skill_file", {"skill_id": "dfo-faq", "path": "methods.md"})],
+            "stop",
+            "stop",
+        ]
+    )
+    harness = _SeamHarness()
+    entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
+
+    await harness.run(seam, **entry)
+    await harness.run(seam, amendment="only since 2015", **entry)
+
+    deltas = [
+        json.dumps(event.actions.state_delta)
+        for event in await harness.events()
+        if event.actions and event.actions.state_delta
+    ]
+    # The earliest delta holding the second page is its `get_skill_file` event.
+    read_second = next(delta for delta in deltas if second in delta)
+    assert first not in read_second
+    assert sum(delta.count(first) for delta in deltas) == 1
+
+
+async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_next_entry() -> None:
+    """An amend reads a skill file, then pauses on a planner-side ask. The
+    request the answer resumes carries the skill the first draft read in its
+    brief, and the file the paused run read in its own history only. The next
+    entry's brief carries both, read back from state the resume persisted."""
+    seam = _skill_seam()
+    ask = (
+        "adk_request_input",
+        {
+            "message": "Which source did you mean?",
+            "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
+            "recommended_spec_id": SPEC,
+            "rationale": "broader coverage",
+        },
+    )
+    llm = ScriptedPlannerLlm(
+        script=[
+            [("get_skill", {"skill_id": "dfo-faq"})],
+            "stop",
+            [("get_skill_file", {"skill_id": "dfo-faq", "path": "methods.md"})],
+            [ask],
+            "stop",
+            "stop",
+        ]
+    )
+    seam._agent.model = llm
+    harness = _SeamHarness()
+    entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
+
+    await harness.run(seam, **entry)
+    paused = await harness.run(seam, amendment="only since 2015", **entry)
+    assert paused is None, "the ask should pause the amend"
+    resuming = len(llm.captured_requests)
+    answer = types.Content(
+        role="user",
+        parts=[
+            create_request_input_response(
+                _pending_ask_interrupt_id(await harness.events()), {"result": {"spec_id": SPEC}}
+            )
+        ],
+    )
+    await harness.run(seam, amendment="only since 2015", new_message=answer, **entry)
+    replanning = len(llm.captured_requests)
+    await harness.run(seam, amendment="and drop Kenya", **entry)
+
+    resumed = llm.captured_requests[resuming]
+    brief = _brief_follows_the_question(resumed)
+    assert _skills_named(brief) == "dfo-faq*"
+    assert brief.count(_SKILL_PAGE) == 1 and "# Methods" not in brief
+    assert "FR:get_skill_file" in _call_and_response_names(resumed)
+    later = _brief_follows_the_question(llm.captured_requests[replanning])
+    assert f"get_skill('dfo-faq'):\n{_SKILL_PAGE}\n" in later
+    assert "get_skill_file('dfo-faq', 'methods.md', offset=0):\n# Methods\n" in later
 
 
 # An `unsupported` `search` answer: translation refers the plan back as
