@@ -356,9 +356,9 @@ def _frame_lost(exc: PlatformError, spec_id: str) -> bool:
     marks an expired frame retryable. dfo-apis checks revocation before any of these
     causes, so a revoked frame answers another cause. Any other 404
     stays the platform's refusal, since a revoked, quarantined or digest-mismatched
-    frame must not be read again under a newer version. A 503 `frame_unavailable` (a failed
-    read, a recipe still pending or unreadable) passes back as the retryable refusal
-    it is. With `rebuild_lost_frames`, the frame is then built again as the analysis
+    frame must not be read again under a newer version. A retryable 404 `frame_unavailable`
+    whose cause is `recipe_pending`, and a 503 `service_unavailable` for a failed read, pass
+    back as the retryable refusals they are. With `rebuild_lost_frames`, the frame is then built again as the analysis
     verbs' rebuild builds it, a `spec_` frame in the rendering it holds
     (`_lost_spec_frame`) and an `ops_` frame computed again from its recipe
     (`common.derived_replay`)."""
