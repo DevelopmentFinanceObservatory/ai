@@ -20,7 +20,7 @@ describes a measure rather than enumerating one -- a schema-shaped identity
 names up to five schema properties and pins no dcid, which is how one
 definition legitimately covers hundreds of stat_vars -- so the definition's
 own binding under a stable identity is checked separately, by
-`STAT_VAR_MEMBERSHIP_DRIFT`: the digest of the family `search` stated at
+`STAT_VAR_FAMILY_MOVED`: the digest of the family `search` stated at
 approval (`resolved.shape.member_digest`) against the digest of the family
 the mint admitted at execution (the manifest trace's `family_member_digest`).
 Both digest every member the bindings admit, before the mint reduces the
@@ -2138,7 +2138,8 @@ def _pinned_stat_var(approved: SelectedSource) -> set[str] | None:
 def _membership_issues(
     requirement: DatasetRequirement, evidence: RetrievalEvidence, approved: SelectedSource
 ) -> list[EvidenceIssue]:
-    """`STAT_VAR_MEMBERSHIP_DRIFT` when the definition's binding has moved under a stable identity.
+    """`STAT_VAR_MEMBERSHIP_DRIFT`, or `STAT_VAR_FAMILY_MOVED` for the family's digest, when the
+    definition's binding has moved under a stable identity.
 
     `SOURCE_DRIFT` holds the definition's *description* stable; this holds
     its *binding* under that description stable. What the retrieval is held
@@ -2171,10 +2172,10 @@ def _digest_issues(
 
     Both are computed the same way over the same population, every member the
     bindings admit (`compiler.sources.member_digest`), so a different digest
-    is drift, an ERROR, and an equal one confirms the family. A side that
-    states none (`search` states none for a walk it could not finish, and the
-    mint none for a family it could not state whole) leaves membership
-    unverified, a WARNING.
+    is drift, the ERROR `STAT_VAR_FAMILY_MOVED`, and an equal one confirms the
+    family. A side that states none (`search` states none for a walk it could
+    not finish, and the mint none for a family it could not state whole)
+    leaves membership unverified, a WARNING.
     """
     required: JsonValue = {
         "member_count": approved.shape_member_count,
@@ -2190,7 +2191,7 @@ def _digest_issues(
         return []
     return [
         EvidenceIssue(
-            code=EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT,
+            code=EvidenceIssueCode.STAT_VAR_FAMILY_MOVED,
             severity=Severity.ERROR,
             requirement_id=requirement.id,
             detail=(
