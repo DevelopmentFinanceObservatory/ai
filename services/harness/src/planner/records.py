@@ -625,6 +625,12 @@ class EvidenceIssueCode(TitlelessEnum):
     # What a retrieval's own manifest reports, once a run has one to read.
     SOURCE_DRIFT = "source_drift"
     STAT_VAR_MEMBERSHIP_DRIFT = "stat_var_membership_drift"
+    # The family's digest moved between approval and the mint
+    # (`compiler.evidence._digest_issues`). A later Search answer states the
+    # family as it stands then, so a replan approves the moved digest again.
+    # A rebound binding (`STAT_VAR_MEMBERSHIP_DRIFT`) fails the same way for
+    # every search.
+    STAT_VAR_FAMILY_MOVED = "stat_var_family_moved"
     # No check reports this code. A run recorded while `get_data` answered a
     # described identity under a second spec_id holds it among its evidence
     # findings (`executor.outcomes.EvidenceRecord.gaps`), so the member stays

@@ -2784,8 +2784,9 @@ def _membership(
     *served: str,
     family: Sequence[str] | None = None,
 ) -> list[EvidenceIssue]:
-    """The `STAT_VAR_MEMBERSHIP_DRIFT` findings for a retrieval serving `served`, whose
-    trace states the digest of `family`, or no family digest when `family` is `None`."""
+    """The `STAT_VAR_MEMBERSHIP_DRIFT` and `STAT_VAR_FAMILY_MOVED` findings for a retrieval
+    serving `served`, whose trace states the digest of `family`, or no family digest when
+    `family` is `None`."""
     trace: dict[str, object] = _trace(*served)
     if family is not None:
         trace |= _family_trace(family)
@@ -2798,7 +2799,13 @@ def _membership(
         evidence_from_manifest(manifest, series_stats=_series_stats(*map(_stat, served))),
         approved=approved,
     )
-    return [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
+    return [i for i in issues if i.code in _MEMBERSHIP_CODES]
+
+
+_MEMBERSHIP_CODES = (
+    EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT,
+    EvidenceIssueCode.STAT_VAR_FAMILY_MOVED,
+)
 
 
 def _family_source(source: SourceFactory, **overrides: object) -> SelectedSource:
@@ -2838,7 +2845,7 @@ def test_a_family_whose_trace_states_another_digest_is_drift(
 
     (drift,) = _membership(requirement, approved, "Count_Person", family=family)
 
-    assert drift.severity is Severity.ERROR
+    assert (drift.code, drift.severity) == (EvidenceIssueCode.STAT_VAR_FAMILY_MOVED, Severity.ERROR)
     assert drift.found == {"member_count": len(family), "member_digest": member_digest(family)}
     assert drift.required == {
         "member_count": 3,
@@ -2927,7 +2934,7 @@ def test_an_unapproved_identity_still_gets_the_membership_check(
 
     codes = [i.code for i in issues]
     assert EvidenceIssueCode.IDENTITY_UNVERIFIED in codes
-    (drift,) = [i for i in errors(issues) if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
+    (drift,) = [i for i in errors(issues) if i.code is EvidenceIssueCode.STAT_VAR_FAMILY_MOVED]
     assert drift.severity is Severity.ERROR
 
 

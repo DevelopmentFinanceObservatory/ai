@@ -835,7 +835,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "stale_revision",
             "surface_changed",
             "source_drift",
-            "stat_var_membership_drift",
+            "stat_var_family_moved",
             "not_found",
             HarnessCode.REDISCOVERY_NEEDED,
             HarnessCode.RESOLVED_REVISION_UNAVAILABLE,
@@ -844,6 +844,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
     ),
     FailureClass.UNVERIFIED: frozenset(
         {
+            "stat_var_membership_drift",
             "data_unverified",
             "identity_unverified",
             "entity_unverified",

@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -115,9 +115,9 @@ from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
-from harness.sentences import SeamCode
+from harness.sentences import FAILURE_SENTENCES, FailureClass, SeamCode
 from harness.settings import Settings
-from harness.studio_translate import _node_name
+from harness.studio_translate import _node_name, failure_detail
 from harness.tool_contracts import HarnessCode, reading_facts
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -2925,6 +2925,118 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     assert len(seam.calls) == 2
     assert seam.calls[-1]["refusal"]["code"] == "over_ceiling"
+
+
+_MOVED = (EvidenceIssueCode.STAT_VAR_FAMILY_MOVED, Severity.ERROR)
+_REBOUND = (EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT, Severity.ERROR)
+_UNCONFIRMED = (EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT, Severity.WARNING)
+_SHORT = (EvidenceIssueCode.COVERAGE_GAPS, Severity.ERROR)
+
+
+# What one stop of a stubbed wave failed on: its evidence issues, each a code
+# and severity, or `None` for a tool refusal `classify_refusal` calls `STOP`.
+type _StopSpec = Sequence[tuple[EvidenceIssueCode, Severity]] | None
+
+
+def _stop(revision: str, step_id: str, spec: _StopSpec) -> Refused:
+    """A stop at `step_id`: a `requirement_unmet` one on `spec`'s issues, or a
+    tool's `spec_not_exportable` refusal when `spec` is `None`."""
+    if spec is None:
+        return Refused(
+            revision=revision,
+            refusal=RefusalKind.STEP_REFUSED,
+            detail="'get_data' refused: spec_not_exportable",
+            step_id=step_id,
+            payload=ToolFailure(
+                code="spec_not_exportable",
+                message="the definition mints no dataset",
+                retry_mode="do_not_retry",
+            ),
+        )
+    return Refused(
+        revision=revision,
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail=f"requirement {step_id!r} is not met by what 'get_data' returned",
+        step_id=step_id,
+        requirement_id=step_id,
+        issues=tuple(
+            EvidenceIssue(
+                code=code,
+                severity=severity,
+                requirement_id=step_id,
+                detail=f"{code.value} on {step_id}",
+            )
+            for code, severity in spec
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("primary", "also", "dead_end"),
+    [
+        ((_MOVED,), (), True),
+        ((_REBOUND,), (), False),
+        ((_MOVED, _UNCONFIRMED), (), True),
+        ((_MOVED, _REBOUND), (), True),
+        ((_MOVED, _SHORT), (), False),
+        ((_MOVED,), ((_SHORT,),), False),
+        (None, ((_SHORT,),), False),
+        (None, ((_MOVED,), None), True),
+    ],
+    ids=[
+        "family-moved",
+        "binding-rebound",
+        "family-moved-beside-a-caveat",
+        "family-grown-past-one-series",
+        "family-moved-and-coverage-short",
+        "family-moved-beside-a-replannable-stop",
+        "tool-stop-beside-a-replannable-stop",
+        "tool-stop-beside-dead-ends",
+    ],
+)
+async def test_a_wave_of_dead_ends_closes_the_turn(
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+    primary: _StopSpec,
+    also: tuple[_StopSpec, ...],
+    dead_end: bool,
+) -> None:
+    """A wave whose every stop is a dead end closes the turn on the first, with
+    no replan. An evidence stop is one when the StatVar family's digest moved
+    since Search approved it and that move explains every error, a family
+    grown past the one series approved included: a replan in the same turn
+    approves the digest the turn already holds, so the turn closes on the
+    source-gone sentence, which asks the user to ask again. A tool's `STOP`
+    refusal is another. A binding that fails the same way for every search, a
+    stop that also fails on another issue, or a wave with any other stop
+    (`also`) replans like any other."""
+    plan = _seam_plan(schemas=real_schemas)
+    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+
+    async def _stub_wave(drafted_plan: Any, **_kwargs: Any) -> Any:
+        revision = plan_revision(drafted_plan)
+        siblings = tuple(_stop(revision, f"sibling_{n}", spec) for n, spec in enumerate(also))
+        stop = _stop(revision, "get_data", primary)
+        return drafted_plan, stop.model_copy(update={"also_stopped": siblings})
+
+    monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+
+    assert len(seam.calls) == (1 if dead_end else 2)
+    if not dead_end:
+        assert _pending_interrupt(events) == APPROVE_INTERRUPT
+        return
+    assert _pending_interrupt(events) is None
+    failed = _output_of(events, "execute")["failed_step"]
+    if primary is None:
+        assert failed["code"] == "spec_not_exportable"
+        return
+    assert failed["code"] == "stat_var_family_moved"
+    gone = FAILURE_SENTENCES[FailureClass.SOURCE_GONE]
+    assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
 
 
 async def test_a_not_approved_outcome_raises_instead_of_replanning(
