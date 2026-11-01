@@ -16,6 +16,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from typing import Any, cast
 
+from compiler.evidence import EvidenceIssue, EvidenceIssueCode, errors
 from compiler.surface import ProgressReport, ToolSurface
 from executor.classify import (
     Disposition,
@@ -149,11 +150,45 @@ def _planner_refusal(
 
 
 def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> bool:
-    """Whether `outcome` is a tool's refusal `classify_refusal` calls `Disposition.STOP`."""
-    return (
-        isinstance(outcome, Refused)
-        and outcome.payload is not None
-        and classify_refusal(outcome.payload) is Disposition.STOP
+    """Whether no replan in this turn can get past `outcome` or any stop in its wave.
+
+    The wave's other stops are `outcome.also_stopped`. A stop is a dead end when a tool
+    refused it in a way `classify_refusal` calls `Disposition.STOP`, or when its errors
+    are a moved family (`_family_moved`). A wave with any other stop replans.
+    """
+    return all(_stop_is_dead_end(stop) for stop in (outcome, *outcome.also_stopped))
+
+
+def _stop_is_dead_end(stop: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> bool:
+    """Whether one stop of a wave is a dead end (`_is_dead_end`)."""
+    if not isinstance(stop, Refused):
+        return False
+    if stop.payload is not None:
+        return classify_refusal(stop.payload) is Disposition.STOP
+    return _family_moved(errors(list(stop.issues)))
+
+
+def _family_moved(failing: list[EvidenceIssue]) -> bool:
+    """Whether `failing`, a stop's errors, hold a `stat_var_family_moved` that explains them all.
+
+    Every other error has to be `stat_var_membership_drift` on a requirement
+    whose family moved: a family grown from one member to several also
+    fails the single-series check. The turn holds each definition it
+    resolved with the time Search answered it, so a replan in the same turn
+    approves the digest that moved again, and the next turn resolves afresh.
+    """
+    moved = {
+        issue.requirement_id
+        for issue in failing
+        if issue.code is EvidenceIssueCode.STAT_VAR_FAMILY_MOVED
+    }
+    return bool(moved) and all(
+        issue.code is EvidenceIssueCode.STAT_VAR_FAMILY_MOVED
+        or (
+            issue.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT
+            and issue.requirement_id in moved
+        )
+        for issue in failing
     )
 
 
@@ -473,13 +508,16 @@ def execute_node(
         The "ok" route carries those frames as final; the "replan" refusal
         names the asks they compute (`computed_asks`), since the new plan
         runs from the start.
-        The exception is a plain `Refused` whose own `payload` is a
+        The exception is a wave whose every stop is a dead end no replan
+        reaches (`_is_dead_end`): a plain `Refused` whose own `payload` is a
         `ToolFailure` `executor.classify.classify_refusal` calls
-        `Disposition.STOP`: that is a dead end no replan reaches, so the
-        turn closes right there with the refusal's own remedy, no replan
-        spent, rather than spending the budget reproducing the identical
-        failing call. `Refused(NOT_APPROVED)` and
-        `Refused(STALE_REVISION)` mean the workflow's own `approve` node let
+        `Disposition.STOP`, or an evidence stop failing on
+        `stat_var_family_moved` and nothing that move does not explain
+        (`_family_moved`), whose family a replan in this turn would approve
+        again as it was. The turn closes right there on the failed step with
+        the refusal's own remedy and no replan spent, so the budget does not go
+        on reproducing the identical failing call.
+        `Refused(NOT_APPROVED)` and `Refused(STALE_REVISION)` mean the workflow's own `approve` node let
         through a plan it should not have -- a replan here would loop on the
         same defect, so those raise instead. Any other outcome also corrects
         that step's own activity record, and every sibling's in
@@ -607,9 +645,10 @@ def execute_node(
                 "the approve node let a plan reach execute that execute_approved_plan refused "
                 f"as {outcome.refusal.value}: {outcome.detail}"
             )
-        # A dead end: no replan can fix this, so none is spent, and the
-        # planner's re-proposal (which would reproduce this exact failing
-        # call) never runs.
+        # A dead end: a tool's STOP refusal or a family that moved since
+        # approval, for every stop in the wave. No replan in this turn can fix
+        # it, so none is spent, and the planner's re-proposal (which would
+        # reproduce the same failure) never runs.
         dead_end = _is_dead_end(outcome)
         answers = answer_frames(outcome)
         link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow)
