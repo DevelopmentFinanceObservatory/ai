@@ -3036,6 +3036,7 @@ _REPLAY_READY = httpx2.Response(
                 ("revoked", _frame_unavailable("revoked")),
                 ("quarantined", _frame_unavailable("quarantined")),
                 ("digest_mismatch", _frame_unavailable("digest_mismatch")),
+                ("recipe_pending", _frame_unavailable("recipe_pending", retryable=True)),
                 (
                     "no cause",
                     _problem_body(code="frame_unavailable", retryable=False, status=404),
@@ -3072,7 +3073,7 @@ async def test_a_frame_the_platform_refuses_to_serve_stays_its_refusal(
     ("status", "code", "retryable", "rebuild_lost_frames"),
     [
         pytest.param(404, "frame_unavailable", False, False, id="without rebuild_lost_frames"),
-        pytest.param(503, "frame_unavailable", True, True, id="503 frame_unavailable"),
+        pytest.param(503, "service_unavailable", True, True, id="503 service_unavailable"),
         pytest.param(404, "spec_not_found", False, True, id="another code"),
     ],
 )
