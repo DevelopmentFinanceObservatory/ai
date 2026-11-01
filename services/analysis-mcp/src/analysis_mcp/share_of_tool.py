@@ -17,6 +17,10 @@ registration-site wrapper is the backstop that turns it into an
 `internal_error` refusal instead of a raw traceback reaching the wire;
 this backstop complements the typed handling below rather than replacing it.
 
+`operation="quotient"` hands the call to `quotient_of_tool.quotient_of`, so one
+listed tool serves both forms and each keeps its own op-spec, result and
+refusals.
+
 The stored step (`_share_step`) counts the numerator keys and periods the
 share keeps, the entities each period's denominator sums, and what it leaves
 out: the numerator keys with no denominator group (`unmatched_key`) and
@@ -30,7 +34,7 @@ counts both kinds of key, as `quotient_of`'s does.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from common.unit_refs import PERCENT_UNIT
 from fastmcp.tools import ToolResult
@@ -63,6 +67,7 @@ from analysis_mcp.engine.share_of import (
     ShareOfUnitUnboundError,
     run_share_of,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     canonical_columns_or_refusal,
     canonical_entity_binding,
@@ -77,7 +82,8 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frames,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import PinnedUnit, ShareOfOpSpec
+from analysis_mcp.op_spec import FrameRefArgument, PinnedUnit, ShareOfOpSpec
+from analysis_mcp.quotient_of_tool import quotient_of
 from analysis_mcp.settings import Settings
 from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, left_out_keys, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -373,22 +379,24 @@ def _share_or_refusal(
 @holds_input_rows
 async def share_of(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The numerator's {spec_id, content_version} pair, naming a materialised "
                 "frame or a prior verb result. Obtained from get_data's or a prior verb's "
-                "own digest -- never invented."
+                "own digest -- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],
     denominator_frame_ref: Annotated[
-        dict[str, str] | None,
+        FrameRefArgument | None,
         Field(
             default=None,
             description=(
                 "The denominator's frame_ref. Omit to compute a share within two slices of "
-                "the same frame_ref, narrowed by numerator_entity/denominator_entity instead."
+                "the same frame_ref, narrowed by numerator_entity/denominator_entity instead. "
+                "A bare spec_id also works: the server fetches the data itself."
             ),
         ),
     ] = None,
@@ -459,37 +467,46 @@ async def share_of(
             ),
         ),
     ] = None,
+    operation: Annotated[
+        Literal["share", "quotient"],
+        Field(
+            description=(
+                "share (the default): the numerator as a per cent of its whole, in one unit. "
+                "quotient: one measure per unit of another in two different units, such as GDP "
+                "per person."
+            )
+        ),
+    ] = "share",
 ) -> ToolResult:
-    """Compute the numerator's share of the denominator, per matched (key, period).
+    """Divide a numerator by a denominator, per matched (key, period).
 
-    The result is in per cent, unit `Percent` (5.3 means 5.3%), the unit a
-    published share such as a "% of GDP" series carries, under its own
-    stat_var. Each side is narrowed by its own `entity` binding, then every remaining
-    row sharing both `numerator_by`'s own key values and a `time_period` is
-    summed (`math.fsum`); more than one row per (key, period) is a
-    deliberate total here, though `compare` treats it as an ambiguity.
-    `numerator_by` left empty (the default) computes a single-figure share,
-    one row per period, no role columns. `denominator_by` pairs each
-    `numerator_by` column with the denominator's own column carrying that
-    role, by name; left empty, the
+    `operation` picks the form. `share` (the default) gives the numerator's
+    share of its whole in per cent, unit `Percent` (5.3 means 5.3%), the unit
+    a published "% of GDP" series carries. `quotient` divides one measure by
+    another in different units, such as GDP by population; the result's unit
+    is "<numerator's unit> per <denominator's unit>", and a side that is a
+    share, a growth rate or a quotient already refuses
+    (`quotient_of_side_unit_unsupported`). Either way the result is one series
+    under its own stat_var.
+
+    Each side is narrowed by its own `entity` binding, then every remaining
+    row sharing both `numerator_by`'s key values and a `time_period` is
+    summed. `numerator_by` left empty (the default) gives one row per period,
+    no role columns. `denominator_by` pairs each `numerator_by` column with
+    the denominator's column carrying that role, by name; left empty, the
     denominator is pooled (one total per period, shared by every numerator
-    key). A `denominator_by` key outside `numerator_by` refuses
-    (`op_spec_invalid`); a non-empty `denominator_by` that leaves a
-    `numerator_by` column out refuses (`share_of_key_unknown`). A numerator
-    key with no matching denominator group under that mapping is left out
-    and recorded, as `quotient_of` records it, and only a call where no key
-    has a group refuses (`share_of_key_unmatched`). Each key divides over
-    the periods both
-    sides report for it, and every period one side holds alone is left out
-    and recorded as an exclusion on that side, as `quotient_of` records it.
-    A key sharing no period is left out the same way, and the result counts
-    both kinds of key in `dropped_key_count`; only a call where no key shares a period
-    refuses (`share_of_grain_mismatch`), naming both sides' periods. A period whose denominator sums to zero
-    refuses (`share_of_zero_denominator`) before any division is attempted,
-    and is retryable, since a different denominator source can sum to
-    nonzero; a genuine overflow (`non_finite_result`) is not. One measure
-    per unit of another in two different units, such as GDP per person, is
-    `quotient_of`.
+    key). A non-empty `denominator_by` must name every `numerator_by`
+    column, and a share refuses a key outside `numerator_by`
+    (`op_spec_invalid`). A numerator key with no denominator match, a key
+    sharing no period, and a period one side holds alone are left out and
+    recorded, never counted as zero; the digest names them. The call refuses
+    only when nothing is left to divide (`share_of_key_unmatched`,
+    `share_of_grain_mismatch`, `quotient_of_no_key_matched`,
+    `comparison_periods_disjoint`). A period whose denominator sums to zero
+    refuses a share (`share_of_zero_denominator`, retryable with another
+    denominator source); a quotient leaves that cell out and refuses only
+    when every cell divides by zero (`quotient_of_zero_denominator`). A
+    genuine overflow (`non_finite_result`) is not retryable.
 
     Args:
         frame_ref: The numerator's frame_ref.
@@ -500,14 +517,27 @@ async def share_of(
         denominator_unit: Pins the denominator's unit.
         numerator_by: Role column(s) to key the numerator's own rows by.
         denominator_by: {numerator_by column: denominator column}, pairing by name.
+        operation: `share` gives a per cent, `quotient` a composed unit
+            (`quotient_of_tool.quotient_of`).
 
     Returns:
-        A digest: the first and latest share, each matched (key,
-        period)'s numerator/denominator values and share in per cent, each
-        side's stat_var and unit, and the result's {spec_id,
-        content_version} pair and identity fields. On refusal, a typed
-        error with a machine-readable fix.
+        A digest: the first and latest share or quotient, each matched (key,
+        period)'s numerator/denominator values and result, each side's
+        stat_var and unit, and the result's {spec_id, content_version} pair
+        and identity fields. On refusal, a typed error with a
+        machine-readable fix.
     """
+    if operation == "quotient":
+        return await quotient_of(
+            frame_ref=frame_ref,
+            denominator_frame_ref=denominator_frame_ref,
+            numerator_entity=numerator_entity,
+            denominator_entity=denominator_entity,
+            numerator_unit=numerator_unit,
+            denominator_unit=denominator_unit,
+            numerator_by=numerator_by,
+            denominator_by=denominator_by,
+        )
     op_spec = build_op_spec_or_refusal(
         lambda: ShareOfOpSpec(
             frame_ref=frame_ref,
@@ -617,7 +647,7 @@ async def share_of(
         trace=output_trace,
         step=_share_step(op_spec, result, trace=output_trace),
         digest=lambda: render_share_of_digest(
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

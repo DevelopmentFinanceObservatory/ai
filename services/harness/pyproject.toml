@@ -14,7 +14,7 @@ dependencies = [
     "dfo-spec-kit-frame-grammar",
     "fastapi>=0.139.1",
     "fastmcp>=4.0.10,<5",
-    "google-adk[db]==2.10.0",
+    "google-adk[db]==2.13.0",
     # harness.langfuse_export loads observation rows into BigQuery.
     "google-cloud-bigquery>=3.46",
     # harness.server builds its loopback self-check client on httpx2, and
@@ -80,9 +80,15 @@ exclude_lines = [
 show_missing = true
 precision = 2
 
+[dependency-groups]
+dev = [
+    # test_combined_mcp counts the public tool list in o200k tokens.
+    "tiktoken>=0.14.0",
+]
+
 [tool.uv.sources]
 analysis_mcp = { workspace = true }
 common = { workspace = true }
 data_mcp = { workspace = true }
-dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "708f293d39094977bf2ed3a646016d951fddf685", subdirectory = "python/frame-grammar" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "2dd2400a36d592bd3ca814aa2eff30bd016433e3", subdirectory = "python/frame-grammar" }
 presentation_mcp = { workspace = true }

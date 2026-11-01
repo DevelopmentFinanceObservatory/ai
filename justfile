@@ -155,7 +155,7 @@ env:
     resolve LANGFUSE_SECRET_KEY dfo-dev-langfuse-secret-key  optional
     resolve STUDIO_API_TOKEN    dfo-dev-studio-api-token     optional "studio auth stays open to any non-empty token until it is set"
     resolve MCP_API_TOKEN       dfo-dev-mcp-api-token        optional "the harness mints a per-process token and every external MCP client gets a 401"
-    resolve DATASETS_FIRST_PARTY_PRINCIPAL dfo-dev-datasets-first-party-principal optional "presentation-mcp cannot publish an analysis-minted frame, so an analysis verb answers in prose and renders no card"
+    resolve DATASETS_FIRST_PARTY_PRINCIPAL dfo-dev-datasets-first-party-principal optional "Studio's cards spend one shared card allowance and a live share's redraw refuses refresh_not_configured"
     echo ""
     echo "$TARGET is ready. Run 'just dev' to start the harness."
 

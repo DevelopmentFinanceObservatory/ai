@@ -32,7 +32,7 @@ import httpx2
 import pyarrow as pa
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
-from common.place_type import PARTY_ROLES, PLACE_ROLE, type_column
+from common.place_type import PARTY_ROLES, type_column
 from fastmcp import Context
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
@@ -58,13 +58,16 @@ from data_mcp.definition_store import (
 )
 from data_mcp.errors import UpstreamAuthUnavailable, UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import (
+    DEFAULT_ENRICHMENT,
     DEFAULT_MINT_OPTIONS,
-    FLOW_ENRICHMENT_COLUMNS,
+    ENRICHMENT,
     KIND_COLUMNS,
     WITHOUT_PARTY_TOTALS,
+    coverage_roles,
     materialise_and_register,
-    place_type_columns_for,
+    names_flow_role,
     replayed_mint_options,
+    resolved_options,
 )
 from data_mcp.get_data_digest import (
     BreakdownLevel,
@@ -224,8 +227,15 @@ _open_mint_posts: dict[str, asyncio.Future[_MintOutcome | None]] = {}
 
 logger = logging.getLogger(__name__)
 
-# The type column of a place-subject frame.
-_PLACE_TYPE_COLUMN = type_column(PLACE_ROLE)
+# The combined server sends each call with `place_types` set and lists the tool without
+# it (`server.PUBLIC_SHAPES`), so every public `get_data` frame carries these columns.
+TYPE_COLUMNS = (
+    "Every frame carries place or party types. A frame that names places gets an\n"
+    "observationAbout_type column. A flow frame gets financingProvider_party_kind and\n"
+    "financingRecipient_party_kind: party, residual, or total for a group total such as\n"
+    "Africa, Total. rank, aggregate and share_of read these columns to leave group\n"
+    "totals out and, with place_level, to keep one level of place."
+)
 
 
 class GetDataScope(BaseModel):
@@ -331,9 +341,9 @@ class Breakdown(BaseModel):
     def groupby(self) -> dict[str, Any]:
         """The `options.groupby` apis sums this breakdown with: keep the year and the
         code axis, roll each code up to its ancestor at `level`, and sum away every other
-        summable code axis and `stat_var`."""
+        summable code axis and `stat_var`. `by` is sorted, as apis records it."""
         return {
-            "by": ["time_period", self.code_system],
+            "by": sorted(["time_period", self.code_system]),
             "op": "sum",
             "levels": {self.code_system: self.level},
         }
@@ -361,7 +371,7 @@ async def _breakdown_refusal(
         )
         document = response.json()
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="get_data"))
     except ValueError as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
@@ -390,6 +400,7 @@ async def _breakdown_refusal(
         listed = ", ".join(sorted(str(axis) for axis in axes)) or "none"
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="get_data",
                 pointer="/breakdown/code_system",
                 detail=f"{breakdown.code_system!r} cannot be rolled up to a level; "
                 f"this deployment rolls up {listed}",
@@ -431,7 +442,7 @@ def _refusal_for_unresolved_outcome(
     if isinstance(outcome, InvalidName):
         return to_tool_result(
             ToolRefusal.request_invalid(
-                pointer=f"/scope/entities/{role}", role=role, detail=outcome.reason
+                tool="get_data", pointer=f"/scope/entities/{role}", role=role, detail=outcome.reason
             )
         )
     return None
@@ -542,7 +553,7 @@ async def _registry_identity_or_refuse(
     except UpstreamError as exc:
         if exc.code == "spec_not_found":
             return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="get_data"))
     except (ValueError, KeyError, TypeError) as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
@@ -602,51 +613,13 @@ async def _resolve_entities_or_refuse(
     except TimeoutError:
         return _pre_mint_deadline_refusal(service="dfo-apis", step="entity resolution")
     except UpstreamError as exc:
-        return to_tool_result(from_upstream_error(exc))
+        return to_tool_result(from_upstream_error(exc, tool="get_data"))
     except (ValueError, KeyError, TypeError) as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
                 detail=f"the resolve response did not match the shape this service expects: {exc}"
             )
         )
-
-
-# The prefix an upstream `request_invalid` pointer carries for a scope-entities role, in
-# apis' own wire envelope (`{input: {scope: {entities: {role: [...]}}}}`), which differs
-# from this tool's own `scope.entities.{role}` argument path, which `InvalidName` above
-# already points into directly.
-_UPSTREAM_ENTITIES_ROLE_POINTER_PREFIX = "/input/scope/entities/"
-
-
-def _rebase_entities_role_pointer(refusal: ToolRefusal) -> ToolRefusal:
-    """Rewrite an upstream-derived entities-role pointer onto this tool's own argument path.
-
-    `invalid_role_ref`/`role_incompatible` map to `request_invalid` with a pointer straight
-    off apis' wire (`/input/scope/entities/{role}`), while a locally-rejected name
-    (`InvalidName` above) already points at `/scope/entities/{role}` -- this tool's own
-    `scope` argument, with no `/input` wrapper, since that wrapper names apis' request
-    envelope, not anything this tool's own caller ever supplied. Same argument, one
-    convention: this rebases the upstream-derived pointer onto the local one rather than
-    leaving a caller to notice the two never match.
-    """
-    pointer = refusal.fix.get("pointer")
-    if refusal.code is not ToolErrorCode.REQUEST_INVALID or not isinstance(pointer, str):
-        return refusal
-    if not pointer.startswith(_UPSTREAM_ENTITIES_ROLE_POINTER_PREFIX):
-        return refusal
-    rebased = "/scope/entities/" + pointer[len(_UPSTREAM_ENTITIES_ROLE_POINTER_PREFIX) :]
-    # Rebuilt through `request_invalid` itself: that factory renders `message` with the
-    # pointer embedded inline (`f"...at {pointer}..."`), so `message` and `fix` have to come
-    # from one call to name the same rebased path. `retry_after_s` and `upstream_code` are
-    # not carried through explicitly: `_request_invalid_refusal` never sets either for this
-    # code, so both are already at their factory defaults on `refusal` too.
-    return ToolRefusal.request_invalid(
-        pointer=rebased,
-        detail=refusal.fix.get("detail"),
-        role=refusal.fix.get("role"),
-        trace_id=refusal.trace_id,
-        capability_version=refusal.capability_version,
-    )
 
 
 async def _load_identity_or_refuse(
@@ -1000,7 +973,9 @@ async def _finish_mint_response(
         requested_spec_id: The `spec_id` this call's own request carried, to detect a re-mint.
         options: The mint request's `options`, which name the artifact the frame is
             read from and, through `options.columns` and `options.groupby`, its frame
-            reference.
+            reference. An `enrichment: "default"` request is read as the columns apis
+            resolved it to (`frame_materialisation.resolved_options`), and its mint
+            record keeps those.
         scope: The mint request's `scope`, kept with `options` in the frame's mint
             record (`common.materialisation.MintRecord`).
         entity_labels: dcid -> name, forwarded to the digest renderer.
@@ -1037,10 +1012,11 @@ async def _finish_mint_response(
                 f"expects: {render_validation_errors(exc)}"
             )
         )
+    options = resolved_options(options, manifest=manifest)
     manifest = _narrowed_to_rendering(manifest, options=options)
     if (
         asked_for_kinds
-        and place_type_columns_for(manifest.definition.identity) == FLOW_ENRICHMENT_COLUMNS
+        and not PARTY_ROLES.isdisjoint(coverage_roles(manifest))
         and not set(KIND_COLUMNS) <= set(options.get("columns") or ())
     ):
         return to_tool_result(
@@ -1078,8 +1054,8 @@ async def _finish_mint_response(
     assert frame_ref is not None  # set on every outcome but a refusal
 
     # apis' pair, not `frame_ref`, keys the description: a frame minted with
-    # `options.columns` or `options.groupby` is held under a pair of its own that apis
-    # never stored.
+    # `options.columns`, `options.groupby` or `options.without_party_totals` is held
+    # under a pair of its own that apis never stored.
     (series_stats, statistics_fetch_failed), description, warning_labels = await asyncio.gather(
         _fetch_statistics_for_digest(manifest, deadline=deadline),
         fetch_version_description(
@@ -1149,9 +1125,9 @@ def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) ->
     """`manifest` listing only the artifact whose `rendering` equals `options`, and the
     statistics artifact.
 
-    A manifest lists every rendering apis stores under its pair, so other callers'
-    groupby sums and column selections sit beside the requested one, in no set order.
-    The resource links and the harness's freshness date
+    apis answers a mint with one data rendering, the one it resolved for the request,
+    beside the statistics, so the narrowed list holds the same artifacts unless the
+    rendering apis resolved differs from `options`. The resource links and the harness's freshness date
     (`harness.provenance.data_artifact`) read the narrowed list, and so does the frame
     fetch of a mint with columns or a groupby. A manifest without the requested
     rendering keeps only its statistics, and `materialise_and_register` refuses such a
@@ -1416,14 +1392,14 @@ async def _attempt_mint(
     With one contributor the two frames are the same bytes under one `content_version`.
     A `breakdown` adds its own `Breakdown.groupby` instead, which sums the StatVars
     within each code at the breakdown's level.
-    `place_types` sets `options.columns` to the columns
-    `frame_materialisation.place_type_columns_for` picks for `identity`, which adds them to
-    the default columns, and gives the frame a `content_version` of its own
-    (`frame_materialisation.frame_ref_for`). A `column_unknown` refusal of the place type
-    column from a table without one is sent once more with no columns
-    (`_without_unserved_place_type`). A refusal of a flow table's `party_kind` is relayed: a
-    flow frame without kinds would let a sum count party totals beside their parties.
-    `without_party_totals` on a flow spec asks for the kinds alone (`KIND_COLUMNS`) when
+    `place_types` sends `options.enrichment: "default"`. apis adds the enrichment the
+    version's own role columns take to the default columns, and the frame is named by
+    the columns it resolved to (`frame_materialisation.resolved_options`), a
+    `content_version` of its own when there are any (`frame_materialisation.frame_ref_for`).
+    A manifest whose frame holds a flow party role but whose rendering holds no kinds is
+    refused, since a flow frame without kinds would let a sum count party totals beside
+    their parties. `without_party_totals` on a spec naming a flow axis
+    (`frame_materialisation.names_flow_role`) asks for the kinds alone (`KIND_COLUMNS`) when
     `place_types` is not set, and sends `options.without_party_totals`: apis leaves out the group
     totals of the
     party roles the identity it serves leaves open, and mints the frame that remains a
@@ -1450,11 +1426,9 @@ async def _attempt_mint(
         options["groupby"] = breakdown.groupby()
     elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
-    drops_totals = (
-        without_party_totals and place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
-    )
+    drops_totals = without_party_totals and names_flow_role(identity)
     if place_types:
-        options["columns"] = list(place_type_columns_for(identity))
+        options[ENRICHMENT] = DEFAULT_ENRICHMENT
     elif drops_totals:
         options["columns"] = list(KIND_COLUMNS)
     if drops_totals:
@@ -1486,107 +1460,62 @@ async def _attempt_mint(
             )
         )
 
-    removable = set(place_type_columns_for(identity)) if place_types else set()
-    for attempt in range(2):
-        try:
-            posted = await _post_mint(
-                client,
-                request_body,
-                spec_id=spec_id,
-                settings=settings,
-                deadline=deadline,
-                admission=admission,
-                on_sent=on_sent,
-            )
-            if isinstance(posted, ToolResult):
-                return posted
-            if admission is not None:
-                # A background caller needs only the mint started, so it neither polls nor reads a frame.
-                outcome = "queued" if posted.status_code == HTTPStatus.ACCEPTED else "minted"
-                return background_result(spec_id=spec_id, outcome=outcome)
-            resolved = await _mint_payload_or_refusal(
-                posted,
-                client=client,
-                settings=settings,
-                deadline=deadline,
-                on_poll=on_poll,
-                raise_upstream_error=True,
-            )
-        except UpstreamError as exc:
-            if attempt == 0 and _negotiate_unserved_columns(
-                options=options, refused=exc, removable=removable, spec_id=spec_id
-            ):
-                request_body["options"] = options
-                continue
-            if not sends_definition and exc.code == "spec_not_found":
-                # The sidecar-free registry-fallback request above just missed
-                # apis' own registry too: `mint_spec_id` raises exactly this
-                # code in that case, and the platform contract's
-                # `definition_not_held` -- "held by neither store nor registry"
-                # -- is what this completes.
-                return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-            refusal = _rebase_entities_role_pointer(from_upstream_error(exc))
-            if admission is not None:
-                refusal = declined_in_background(refusal, exc)
-            return minted(to_tool_result(refusal))
-        if isinstance(resolved, ToolResult):
-            return minted(resolved)
-        payload, operation_poll = resolved
-        return await _finish_mint_response(
-            payload,
-            requested_spec_id=spec_id,
-            options=options,
-            scope=wire_scope,
-            entity_labels=entity_labels,
-            dropped_roles=dropped_roles,
+    try:
+        posted = await _post_mint(
+            client,
+            request_body,
+            spec_id=spec_id,
             settings=settings,
             deadline=deadline,
-            asked_for_kinds=place_types or without_party_totals,
-            operation_poll=operation_poll,
-            breakdown=(
-                None
-                if breakdown is None
-                else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
-            ),
+            admission=admission,
+            on_sent=on_sent,
         )
-    raise AssertionError("two mint attempts must return or raise")
-
-
-def _without_unserved_place_type(
-    options: dict[str, Any],
-    refused: UpstreamError,
-    *,
-    removable: set[str],
-    spec_id: str,
-) -> bool:
-    """Drop `options.columns` when it asks for the place type column alone and a
-    `column_unknown` refusal lists that column as unserved, and say whether it did. A
-    refusal of any other code or request, or one whose list is truncated, changes
-    nothing.
-    """
-    alternatives = refused.extensions.get("alternatives")
-    if (
-        refusal_code(refused) != "column_unknown"
-        or refused.extensions.get("pointer") != "/options/columns"
-        or options.get("columns") != [_PLACE_TYPE_COLUMN]
-        or _PLACE_TYPE_COLUMN not in removable
-        or refused.extensions.get("truncated")
-        or not isinstance(alternatives, list)
-        or not all(
-            isinstance(item, dict) and isinstance(item.get("ref"), str) for item in alternatives
+        if isinstance(posted, ToolResult):
+            return posted
+        if admission is not None:
+            # A background caller needs only the mint started, so it neither polls nor reads a frame.
+            outcome = "queued" if posted.status_code == HTTPStatus.ACCEPTED else "minted"
+            return background_result(spec_id=spec_id, outcome=outcome)
+        resolved = await _mint_payload_or_refusal(
+            posted,
+            client=client,
+            settings=settings,
+            deadline=deadline,
+            on_poll=on_poll,
+            raise_upstream_error=True,
         )
-    ):
-        return False
-    served = {alternative["ref"] for alternative in alternatives}
-    if _PLACE_TYPE_COLUMN in served:
-        return False
-    logger.info(
-        "get_data: %s serves no %s; minting again with the default columns",
-        spec_id,
-        _PLACE_TYPE_COLUMN,
+    except UpstreamError as exc:
+        if not sends_definition and exc.code == "spec_not_found":
+            # The sidecar-free registry-fallback request above just missed
+            # apis' own registry too: `mint_spec_id` raises exactly this
+            # code in that case, and the platform contract's
+            # `definition_not_held` -- "held by neither store nor registry"
+            # -- is what this completes.
+            return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
+        refusal = from_upstream_error(exc, tool="get_data")
+        if admission is not None:
+            refusal = declined_in_background(refusal, exc)
+        return minted(to_tool_result(refusal))
+    if isinstance(resolved, ToolResult):
+        return minted(resolved)
+    payload, operation_poll = resolved
+    return await _finish_mint_response(
+        payload,
+        requested_spec_id=spec_id,
+        options=options,
+        scope=wire_scope,
+        entity_labels=entity_labels,
+        dropped_roles=dropped_roles,
+        settings=settings,
+        deadline=deadline,
+        asked_for_kinds=place_types or without_party_totals,
+        operation_poll=operation_poll,
+        breakdown=(
+            None
+            if breakdown is None
+            else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
+        ),
     )
-    del options["columns"]
-    return True
 
 
 def _without_unserved_flow_types(
@@ -1631,19 +1560,6 @@ def _without_unserved_flow_types(
             return False
     options["columns"] = remaining
     return True
-
-
-def _negotiate_unserved_columns(
-    *,
-    options: dict[str, Any],
-    removable: set[str],
-    spec_id: str,
-    refused: UpstreamError,
-) -> bool:
-    """Narrow policy-added metadata after one complete column refusal."""
-    return _without_unserved_place_type(
-        options, refused, removable=removable, spec_id=spec_id
-    ) or _without_unserved_flow_types(options, refused, removable=removable)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1826,14 +1742,12 @@ async def _mint_recorded_response(
                 raise_upstream_error=True,
             )
         except UpstreamError as exc:
-            if attempt == 0 and _negotiate_unserved_columns(
-                options=options, refused=exc, removable=removable, spec_id=spec_id
-            ):
+            if attempt == 0 and _without_unserved_flow_types(options, exc, removable=removable):
                 request_body["options"] = options
                 continue
             if identity is None and exc.code == "spec_not_found":
                 return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-            return to_tool_result(from_upstream_error(exc))
+            return to_tool_result(from_upstream_error(exc, tool="get_data"))
         if isinstance(payload, ToolResult):
             return payload
         return payload, options
@@ -1971,8 +1885,8 @@ async def get_data(
         Field(
             description=(
                 "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
-                "Total or the G7) from each side the spec leaves open, and add the party cells as "
-                "place_types does, so the side's members can be compared or ranked without "
+                "Total or the G7) from each side the spec leaves open, and add the party cells, "
+                "so the side's members can be compared or ranked without "
                 "totals among them. A sum of these members can differ from the source's "
                 "published total. For a total across the whole side, search naming the "
                 'population ("all donors") with no operation over that side. A side the spec '
@@ -2040,12 +1954,7 @@ async def get_data(
 
     A spec that names no place covers every place with data, at every
     level: the world, regions, World Bank groups, countries and their
-    subdivisions. `place_types=true` adds the `observationAbout_type` column,
-    so a `filter` can keep one level before a rank or a total sets a place
-    beside the places inside it. On a flow frame it adds each party's type,
-    kind, class and whole-population mark (`financingProvider_type`,
-    `financingProvider_party_kind`, `financingProvider_party_class`,
-    `financingProvider_party_whole` and the recipient's four) instead.
+    subdivisions.
 
     `breakdown` sums the family within each code of one hierarchical code
     system rolled up to one level, so a question such as "which sectors got
@@ -2065,8 +1974,8 @@ async def get_data(
             each party's type and its kind, class and whole cells on a flow frame, for a
             spec that names no place.
         without_party_totals: Whether a flow frame leaves out the group totals of each side
-            the spec leaves open, to compare or rank its members, and adds the party cells as
-            `place_types` does. On a spec with no flow side it changes nothing.
+            the spec leaves open, to compare or rank its members, and adds the party cells.
+            On a spec with no flow side it changes nothing.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 
@@ -2088,6 +1997,7 @@ async def get_data(
     if breakdown is not None and stat_vars == "sum":
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="get_data",
                 pointer="/stat_vars",
                 detail='"sum" totals the whole family into one series, which leaves no '
                 'code to break it down by; use "separate" with breakdown',

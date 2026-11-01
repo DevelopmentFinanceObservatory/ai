@@ -47,13 +47,16 @@ import json
 import logging
 import re
 import weakref
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
 from typing import Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
+import pyarrow as pa
 from analysis_mcp.frame_ref_resolution import read_derived_marker
 from analysis_mcp.identity import OP_SPEC_HASH_PREFIX
 from common.materialisation import FrameRef
@@ -64,7 +67,7 @@ from common.place_type import (
     kind_column,
     type_column,
 )
-from common.row_budget import row_budget
+from common.row_budget import RowBudgetExhausted, row_budget
 from compiler.sources import (
     default_reading,
     is_family,
@@ -74,6 +77,7 @@ from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
 from data_mcp.search_tool import SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar import FrameError
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
 from google.adk.tools import ToolContext
@@ -122,6 +126,7 @@ from harness.chart_binding import (
     top_members,
 )
 from harness.conversation import current_user_message
+from harness.derived_frames import DerivedFile, derived_file
 from harness.dfo_faq import (
     CANNOT_DESCRIBE_DFO,
     DfoFaqUnavailable,
@@ -150,6 +155,8 @@ from harness.graph.state import (
     prices_question,
     register_frames,
     store_search,
+    stored_mapping,
+    stored_sequence,
     turn_budgets,
 )
 from harness.reply_figures import (
@@ -188,7 +195,8 @@ _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
-# action; the Studio stream holds back later text only after one of these.
+# action; the Studio stream holds back later text only after one of these,
+# and `harness.graph.orchestrate` answers the call whose last result holds it.
 HANDED_OFF = "handed_off"
 # The identity member each `get_data` scope member replaces.
 _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets": "facets"}
@@ -409,16 +417,28 @@ class FetchScope(GetDataScope):
 _ANSWER_NOW = "Answer with what you have, and say plainly what you could not do."
 
 
-async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[Any, Any], T]) -> T | None:
-    """What `work` makes of the frame the store holds under `ref` and its
-    trace, or None when the store does not hold the frame or cannot read it.
-    `work` runs in a worker thread, off the event loop, and the frame's rows
-    stay claimed on the process's row budget until that thread returns, also
-    when the task awaiting it is cancelled first."""
+@dataclass(frozen=True, kw_only=True)
+class _FrameRows:
+    """A frame's rows, each as a mapping, and whether its values are rank positions."""
+
+    rows: list[dict[str, Any]]
+    rank_positions: bool
+
+
+async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[_FrameRows], T]) -> T | None:
+    """What `work` makes of the rows of the frame `ref` names, or None when they
+    cannot be read. The store holds a frame `get_data` fetched, and a derived
+    (`ops_`) frame an in-process verb computed. A derived frame the store does not
+    hold is read from dfo-apis' analysis runner, which stored it
+    (`harness.derived_frames`). `work` runs in a worker thread, off the
+    event loop, and the frame's rows stay claimed on the process's row budget
+    until that thread returns, also when the task awaiting it is cancelled first."""
     try:
         held = await get_frame_store().open(
             FrameRef(spec_id=ref["spec_id"], content_version=ref["content_version"])
         )
+        if held is None and str(ref["spec_id"]).startswith(OP_SPEC_HASH_PREFIX):
+            return await _derived_frame_work(ref, work)
         if held is None:
             logger.warning("make_charts: the store holds no frame under %s", ref)
             return None
@@ -437,12 +457,83 @@ async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[Any, Any], T]) 
         except Exception:
             logger.warning("make_charts: could not read %s", ref, exc_info=True)
             return None
-        return await claim.hold_through(asyncio.to_thread(work, data, trace))
+
+        def rows_work() -> T:
+            marker = read_derived_marker(trace)
+            rows = [dict(zip(data.columns, row, strict=True)) for row in data.rows]
+            return work(_FrameRows(rows=rows, rank_positions=marker is not None and marker.ordinal))
+
+        return await claim.hold_through(asyncio.to_thread(rows_work))
 
 
-def _rows_of(data: Any) -> list[dict[str, Any]]:
-    """The rows of a stored frame, each as a mapping."""
-    return [dict(zip(data.columns, row, strict=True)) for row in data.rows]
+# The derived files one make_charts call has read, by frame pair, `None` for a
+# read that failed, or no mapping outside a call. A chart can read the same frame
+# for its drawn period, its ranking, its coordinates and its covering select, and
+# a derived frame is immutable, so each pair is read once a call, a failed read
+# included. The held bytes are compressed Parquet, and they go when the call ends.
+_derived_reads: ContextVar[dict[tuple[str, str], DerivedFile | None] | None] = ContextVar(
+    "derived_reads", default=None
+)
+
+
+@contextmanager
+def _derived_reads_once() -> Iterator[None]:
+    """Read each derived frame pair at most once inside the block."""
+    token = _derived_reads.set({})
+    try:
+        yield
+    finally:
+        _derived_reads.reset(token)
+
+
+async def _read_derived(ref: Mapping[str, Any]) -> DerivedFile | None:
+    """The derived file `ref` names, or `None` when it could not be read, from
+    this call's reads when it read the pair before."""
+    pair = (str(ref["spec_id"]), str(ref["content_version"]))
+    reads = _derived_reads.get()
+    if reads is not None and pair in reads:
+        return reads[pair]
+    try:
+        derived = await derived_file(FrameRef(spec_id=pair[0], content_version=pair[1]))
+    except Exception:
+        # As the store's read in `_frame_work`: an unread frame leaves the select as written.
+        logger.warning("make_charts: could not read %s from dfo-apis", ref, exc_info=True)
+        derived = None
+    if reads is not None:
+        reads[pair] = derived
+    return derived
+
+
+async def _derived_frame_work[T](
+    ref: Mapping[str, Any], work: Callable[[_FrameRows], T]
+) -> T | None:
+    """`_frame_work` for a derived frame, read from dfo-apis."""
+    derived = await _read_derived(ref)
+    if derived is None:
+        return None
+    try:
+        claim = row_budget().claim(derived.num_rows)
+    except RowBudgetExhausted:
+        logger.warning("make_charts: no row budget left for %s", ref, exc_info=True)
+        return None
+    with claim:
+
+        def rows_work() -> T | None:
+            try:
+                rows = derived.rows()
+            except (FrameError, pa.ArrowException, KeyError):
+                # dfo-apis served a file this harness cannot decode, a defect on one
+                # side or the other. The select stays as written, as for an unread frame.
+                logger.error(
+                    "make_charts: could not decode the derived frame %s/%s",
+                    ref["spec_id"],
+                    ref["content_version"],
+                    exc_info=True,
+                )
+                return None
+            return work(_FrameRows(rows=rows, rank_positions=derived.rank_positions))
+
+        return await claim.hold_through(asyncio.to_thread(rows_work))
 
 
 def _stated_frames(data: Mapping[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
@@ -460,11 +551,11 @@ def _period_note_entry(held: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _covering_selects(
-    data: Any, _trace: Any, *, selects: Sequence[dict[str, Any]]
+    held: _FrameRows, *, selects: Sequence[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Those of `selects` that bind only dimensions every row of a stored
     frame holds a value on (`covers_every_row`), in their order."""
-    rows = _rows_of(data)
+    rows = held.rows
     return [select for select in selects if covers_every_row(select, rows)]
 
 
@@ -480,10 +571,10 @@ def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, 
     }
 
 
-def _role_cells(data: Any, _trace: Any) -> dict[str, dict[str, str]]:
+def _role_cells(held: _FrameRows) -> dict[str, dict[str, str]]:
     """Each typed role's members' kind or type cells among a stored frame's
     rows, the roles it carries no enrichment column for left out."""
-    rows = _rows_of(data)
+    rows = held.rows
     by_role = {role: _held_cells(role, rows) for role in TYPED_ROLES}
     return {role: cells for role, cells in by_role.items() if cells}
 
@@ -528,14 +619,14 @@ async def _member_cells(
     (`_read_member_cells`). A read that succeeded is kept for the turn in the
     frame's entry of `ORCHESTRATOR_FRAMES_KEY`; one that failed answers None
     and is made again on the next call."""
-    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    frames = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)
     frame = frames[frame_id]
     if _MEMBER_CELLS in frame:
         return frame[_MEMBER_CELLS]
     cells = await _read_member_cells(frame, executor)
     if cells is None:
         return None
-    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    frames = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)
     state[ORCHESTRATOR_FRAMES_KEY] = {
         **frames,
         frame_id: {**frames[frame_id], _MEMBER_CELLS: cells},
@@ -564,8 +655,7 @@ class _Unranked:
 
 
 def _ranked(
-    data: Any,
-    trace: Any,
+    held: _FrameRows,
     *,
     select: dict[str, Any],
     dimension: str,
@@ -580,10 +670,9 @@ def _ranked(
     Rows are ranked without their enrichment columns (`common.place_type`),
     which describe a member and split no series. Rows that give no ranking
     and differ on a dimension `view` declares are `coordinates_differ`."""
-    marker = read_derived_marker(trace)
-    if marker is not None and marker.ordinal:
+    if held.rank_positions:
         return _Unranked("rank_positions")
-    rows = _rows_of(data)
+    rows = held.rows
     cells = None
     if cut and dimension in TYPED_ROLES:
         cells = _held_cells(dimension, rows) or kinds
@@ -805,7 +894,7 @@ async def _card_period(
     return at, {"start": at, "end": at} if pinned else None
 
 
-def _drawn_period(data: Any, _trace: Any, *, select: dict[str, Any]) -> str | None:
+def _drawn_period(held: _FrameRows, *, select: dict[str, Any]) -> str | None:
     """`latest_shared_period` over a stored frame, read without its enrichment
     columns, which describe a member and split no series."""
     rows = [
@@ -814,7 +903,7 @@ def _drawn_period(data: Any, _trace: Any, *, select: dict[str, Any]) -> str | No
             for name, cell in row.items()
             if name in select or enrichment_role(name, roles=TYPED_ROLES) is None
         }
-        for row in _rows_of(data)
+        for row in held.rows
     ]
     return latest_shared_period(rows=rows, select=select)
 
@@ -857,7 +946,7 @@ async def _top_select(
         dimension multiplies or the frame cannot be read; otherwise why its
         rows gave no ranking (`_ranked`).
     """
-    frame = (state.get(ORCHESTRATOR_FRAMES_KEY) or {})[chart.frame]
+    frame = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)[chart.frame]
     if frame["view"].get("rolling") or chart.latest_periods is not None:
         return _Unranked("period_moves")
     over = over_cap_dimension(select=select, view=frame["view"])
@@ -938,7 +1027,7 @@ def _drawn_store_ref(payload: Mapping[str, Any], frame: Mapping[str, Any]) -> di
     return dict(drawn)
 
 
-def _coordinate_rows(data: Any, _trace: Any, *, series: Sequence[DrawnSeries]) -> list[DrawnSeries]:
+def _coordinate_rows(held: _FrameRows, *, series: Sequence[DrawnSeries]) -> list[DrawnSeries]:
     """`series` with the coordinates a stored frame's rows give those that
     state none (`with_coordinates`). The rows are read without their
     enrichment columns, which describe a member and split no series."""
@@ -948,7 +1037,7 @@ def _coordinate_rows(data: Any, _trace: Any, *, series: Sequence[DrawnSeries]) -
             for name, cell in row.items()
             if enrichment_role(name, roles=TYPED_ROLES) is None
         }
-        for row in _rows_of(data)
+        for row in held.rows
     ]
     return with_coordinates(series, rows)
 
@@ -1228,7 +1317,7 @@ def _breakdowns_missing(
     totalled = [role for ask in asks for role in ask.over]
     held: dict[str, str] = {}
     shared: dict[str, str] = {}
-    for stored in tool_context.state.get(ORCHESTRATOR_SEARCHES_KEY) or []:
+    for stored in stored_sequence(tool_context.state, ORCHESTRATOR_SEARCHES_KEY):
         reading = SearchReading.model_validate(stored)
         if reading.status in SETTLED_STATUSES and reading.spec_id:
             text = reading.text or reading.spec_id
@@ -1309,7 +1398,7 @@ def _named_spec_ids(tool_context: ToolContext) -> set[str]:
     """Every spec_id this turn's search results named: each part's own and each
     candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count and other
     prices a part's result offers (`measure_choice`)."""
-    specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    specs = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
     named = set(specs)
     for block in specs.values():
         choice = measure_choice(block or {})
@@ -1397,7 +1486,9 @@ def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[s
     """Record `action` as the turn's pending action, unless one is pending.
 
     A recorded action skips the model call that would only end the turn: the
-    workflow's `route` node acts on it once the turn ends. The refusal of a
+    workflow's `route` node acts on it once the turn ends. The record stands
+    as the call's result until the hand-back replaces it, a later response
+    under the call's id (`harness.graph.orchestrate`). The refusal of a
     second hand-off goes back to the model.
     """
     pending = pending_action(tool_context.state)
@@ -1410,7 +1501,7 @@ def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[s
     tool_context.state[ORCHESTRATOR_PENDING_KEY] = action.model_dump(mode="json")
     tool_context.actions.skip_summarization = True
     return {
-        "status": "Recorded. End your turn now; the result comes back as the next message.",
+        "status": "Recorded. End your turn now; the result replaces this record.",
         HANDED_OFF: action.kind,
     }
 
@@ -1419,8 +1510,7 @@ def _spec_block(tool_context: ToolContext, spec_id: str) -> Mapping[str, Any] | 
     """The spec block this turn's search returned for `spec_id`, else the one
     an earlier turn of the conversation stored (`earlier_block`); `None`
     when neither did."""
-    state = tool_context.state
-    block = (state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(spec_id)
+    block = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
     return block if block is not None else earlier_block(spec_id)
 
 
@@ -1522,9 +1612,9 @@ def _attach_fetch(
     state = tool_context.state
     searches = [
         SearchReading.model_validate(stored)
-        for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or []
+        for stored in stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY)
     ]
-    block = (state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(spec_id)
+    block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY).get(spec_id)
     candidate_of = next(
         (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
     )
@@ -1949,7 +2039,7 @@ def build_orchestrator_tools(
         reading = stat_vars or (
             "separate"
             if breakdown is not None
-            else (tool_context.state.get(ORCHESTRATOR_READINGS_KEY) or {}).get(spec_id)
+            else stored_mapping(tool_context.state, ORCHESTRATOR_READINGS_KEY).get(spec_id)
         )
         block = _spec_block(tool_context, spec_id)
         if block is None:
@@ -1960,7 +2050,7 @@ def build_orchestrator_tools(
                 return _unresolved_refusal(spec_id, exc)
             if block is not None:
                 tool_context.state[ORCHESTRATOR_SPECS_KEY] = {
-                    **(tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+                    **stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY),
                     spec_id: block,
                 }
         source = None
@@ -1978,7 +2068,7 @@ def build_orchestrator_tools(
         key = _fetch_key(args, block)
         earlier = (tool_context.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
-            frames = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+            frames = stored_mapping(tool_context.state, ORCHESTRATOR_FRAMES_KEY)
             found = (
                 {**earlier, "spec_id": spec_id, "same_data_as": earlier["spec_id"]}
                 if earlier.get("refusal")
@@ -2181,7 +2271,7 @@ def build_orchestrator_tools(
         is on the canvas, drawn this turn or an earlier one, is not drawn
         again: its figures are read from the card's head revision
         (`_stored_card`), and a card that cannot be read is refused."""
-        frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+        frames = stored_mapping(tool_context.state, ORCHESTRATOR_FRAMES_KEY)
         on_canvas = _canvas_series(tool_context)
         held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
         drawn_cards: dict[str, dict[str, Any]] = (
@@ -2424,7 +2514,8 @@ def build_orchestrator_tools(
                     "make_charts needs at least one chart. It only adds charts; it "
                     "cannot remove or clear cards on the canvas. Nothing changed.",
                 )
-            drawn = await _draw(charts, tool_context)
+            with _derived_reads_once():
+                drawn = await _draw(charts, tool_context)
         result: dict[str, Any] = {"charts": drawn}
         if len(charts) > MAX_CHARTS_PER_CALL:
             result["not_drawn"] = (
@@ -2444,12 +2535,12 @@ def build_orchestrator_tools(
         carries the spec_id the result gives it, and the answer names that
         spec_id when the user picks it. A prices question names its part in
         `prices_of`, and its options are filled in. Each spec_id goes on one option. End
-        your turn after calling ask_user. Every answer comes back as the next
-        message.
+        your turn after calling ask_user. Every answer comes back as this
+        call's result.
         """
         parts = open_parts(tool_context.state)
         questions = [prices_question(question, parts) for question in questions]
-        blocks = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+        blocks = stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY)
         refused = _questions_refusal(
             questions,
             _named_spec_ids(tool_context),
@@ -2483,8 +2574,8 @@ def build_orchestrator_tools(
         Each ask is `{"text", "by", "over", "across_years"}`. Every party a
         search this turn held open goes in some ask's `by` or `over`, and the
         plan keeps the parties each ask lists in `by` together in one output.
-        End your turn after calling it; the plan's result comes back as the
-        next message.
+        End your turn after calling it; the plan's result comes back as this
+        call's result.
         """
         texts = [ask.text for ask in asks]
         refused = _asks_refusal(texts) or _breakdowns_missing(tool_context, asks)

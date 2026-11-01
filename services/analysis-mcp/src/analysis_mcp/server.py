@@ -3,15 +3,16 @@
 Holds infrastructure: the FastMCP instance, the `/healthz` liveness route,
 the fixture-store lifespan, and the console-script entry point (settings,
 logging, telemetry, transport). Registers the closed nine-verb set, one
-tool per verb, each under an explicit wire name, and `resolve_anchor`
-(`rolling_tool.py`), which finds the latest period rolling calls follow and
-computes no frame. `filter` needs the explicit name because the Python
-function backing it cannot be called `filter` without shadowing the builtin
-(see `filter_tool.py`'s own docstring).
+tool per verb, each under an explicit wire name, and `resolve_anchor`, which
+finds the latest period rolling calls follow and computes no frame. Every
+registered tool (`verbs`) computes in dfo-apis' analysis runner. `filter` needs
+the explicit name because the Python function backing it cannot be called
+`filter` without shadowing the builtin (see `filter_tool.py`'s own docstring).
 
 Refusal policy: every anticipated failure gets its own typed refusal, built
-and returned via `to_tool_result` inside that verb's own tool module (see
-each `*_tool.py`'s own module docstring). Underneath all nine sits the
+and returned via `to_tool_result`: an op-spec that does not validate, a frame
+the runner cannot be sent (`runner_tree`), and each runner refusal
+(`runner_client`). Underneath all nine sits the
 backstop: `_with_internal_error_backstop` wraps each verb at its
 registration site, so an exception the verb's own typed handling missed
 becomes an `internal_error` refusal instead of a raw traceback crossing the
@@ -33,6 +34,7 @@ from typing import Any
 
 import mcp.types as mt
 from common.auth import BearerTokenVerifier, apply_gate
+from common.declaration import declared_tool
 from common.logging import configure_logging
 from common.materialisation import (
     InMemoryMaterialisationStore,
@@ -43,34 +45,37 @@ from common.materialisation import (
     store_is_set,
 )
 from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddleware
+from common.public_shape import PublicShape
 from common.refusal import log_unexpected_error
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools import ToolResult
+from fastmcp.tools import Tool, ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from analysis_mcp.aggregate_tool import aggregate
-from analysis_mcp.compare_tool import compare
-from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.fixtures import seed_fixture_store
-from analysis_mcp.growth_tool import growth
-from analysis_mcp.join_tool import join
-from analysis_mcp.quotient_of_tool import quotient_of
-from analysis_mcp.rank_tool import rank
 from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
-from analysis_mcp.rolling_tool import (
-    RESOLVE_ANCHOR_OUTPUT_SCHEMA,
-    RESOLVE_ANCHOR_VERSION,
-    resolve_anchor,
-)
+from analysis_mcp.rolling_tool import RESOLVE_ANCHOR_OUTPUT_SCHEMA, RESOLVE_ANCHOR_VERSION
+from analysis_mcp.runner_client import runner_holder
 from analysis_mcp.settings import Settings
-from analysis_mcp.share_of_tool import share_of
-from analysis_mcp.sum_of_tool import sum_of
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from analysis_mcp.verbs import (
+    FOLLOWS_TREE,
+    REBUILD_LOST_FRAMES,
+    aggregate,
+    compare,
+    filter_verb,
+    growth,
+    join,
+    quotient_of,
+    rank,
+    resolve_anchor,
+    share_of,
+    sum_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +142,17 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     ownership rule) -- `store_is_set()` is this lifespan's side of that same rule: skip
     building (and, with it, fixture seeding) entirely rather than replace what's
     already there.
+
+    The store serves `get_data`'s mint records, which name each root the
+    runner reads, and `resolve_anchor`'s anchor records. The runner client
+    (`runner_client.runner_holder`) is closed on shutdown too.
     """
     if not store_is_set():
         set_store(await _build_store(Settings()))
     try:
         yield
     finally:
+        await runner_holder.aclose()
         await aclose_store()
 
 
@@ -151,10 +161,10 @@ mcp = FastMCP(name="analysis-mcp", lifespan=_lifespan, auth=BearerTokenVerifier(
 
 _TITLES: Mapping[str, str] = {
     "aggregate": "Aggregate by group",
-    "compare": "Compare two series",
+    "compare": "Subtract or add two series",
     "growth": "Calculate growth",
     "rank": "Rank entities",
-    "share_of": "Calculate share of total",
+    "share_of": "Calculate a share or a ratio",
     "join": "Join two results",
     "filter": "Filter rows",
     "sum_of": "Add two series",
@@ -169,9 +179,9 @@ def _register(fn: Callable[..., Awaitable[ToolResult]], wire_name: str) -> None:
     `tool_pipeline.store_result_and_render` builds every successful payload
     from. `-> ToolResult` on the wrapped function suppresses fastmcp's own
     schema derivation, so `output_schema` is passed explicitly here rather
-    than left to be derived.
+    than left to be derived. The input schema is `common.declaration`'s.
     """
-    mcp.tool(
+    tool = Tool.from_function(
         _with_internal_error_backstop(fn, wire_name),
         name=wire_name,
         version=IMPLEMENTATION_VERSIONS[wire_name],
@@ -179,6 +189,7 @@ def _register(fn: Callable[..., Awaitable[ToolResult]], wire_name: str) -> None:
         annotations=READ_ONLY_CATALOGUE,
         output_schema=VERB_OUTPUT_SCHEMA,
     )
+    mcp.add_tool(declared_tool(tool))
 
 
 _register(aggregate, "aggregate")
@@ -193,14 +204,34 @@ _register(quotient_of, "quotient_of")
 
 # `resolve_anchor` computes no frame, so it declares its own result schema and
 # version in place of the verbs'.
-mcp.tool(
-    _with_internal_error_backstop(resolve_anchor, "resolve_anchor"),
-    name="resolve_anchor",
-    version=RESOLVE_ANCHOR_VERSION,
-    title="Find the latest period",
-    annotations=READ_ONLY_CATALOGUE,
-    output_schema=RESOLVE_ANCHOR_OUTPUT_SCHEMA,
+mcp.add_tool(
+    declared_tool(
+        Tool.from_function(
+            _with_internal_error_backstop(resolve_anchor, "resolve_anchor"),
+            name="resolve_anchor",
+            version=RESOLVE_ANCHOR_VERSION,
+            title="Find the latest period",
+            annotations=READ_ONLY_CATALOGUE,
+            output_schema=RESOLVE_ANCHOR_OUTPUT_SCHEMA,
+        )
+    )
 )
+
+
+# The public form of each tool the combined server lists differently from this
+# mount (`common.public_shape`). A rolling call needs `resolve_anchor`'s
+# `anchor_key`, and only the harness calls `resolve_anchor`. Every public verb lets
+# a derived input's rolling years follow the call's tree, and rebuilds a frame the
+# runner no longer holds.
+_PUBLIC_FLAGS = {FOLLOWS_TREE: True, REBUILD_LOST_FRAMES: True}
+_PUBLIC_VERB = PublicShape(hidden=frozenset(_PUBLIC_FLAGS), forced=_PUBLIC_FLAGS)
+_PUBLIC_ROLLING_VERB = PublicShape(
+    hidden=frozenset({"rolling", "anchor_key", *_PUBLIC_FLAGS}), forced=_PUBLIC_FLAGS
+)
+PUBLIC_SHAPES: Mapping[str, PublicShape] = {
+    **dict.fromkeys(("aggregate", "compare", "share_of", "join"), _PUBLIC_VERB),
+    **dict.fromkeys(("growth", "rank", "filter"), _PUBLIC_ROLLING_VERB),
+}
 
 
 class _NameUnknownVerbsMiddleware(Middleware):

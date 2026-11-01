@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from common.refusal import detail_sentence
 from common.skills import ordered_skill_ids
 
 from data_mcp.scope import REASON_COPY
@@ -482,7 +483,9 @@ def _candidate_piece(candidate: Mapping[str, Any]) -> str:
 def _render_unsupported_part(part: Mapping[str, Any]) -> str:
     unsupported = part.get("unsupported") or {}
     code = unsupported.get("code")
-    detail = _normalise_detail(unsupported.get("detail") or "")
+    # The engine writes `detail` as a fragment meant to continue a sentence. The
+    # digest gives it a sentence of its own.
+    detail = detail_sentence(unsupported.get("detail") or "")
     field = _unsupported_field_name(unsupported.get("pointer") or "")
     if field is None:
         return f"Not supported: {detail}".strip()
@@ -492,20 +495,6 @@ def _render_unsupported_part(part: Mapping[str, Any]) -> str:
         else f"Drop the field named `{field}` and retry."
     )
     return f"Not supported: the {field} field. {detail} {step}".strip()
-
-
-def _normalise_detail(detail: str) -> str:
-    """Turn an upstream `detail` fragment into its own sentence, capitalised and full-stopped.
-
-    The upstream engine writes `detail` as a lower-case fragment meant to
-    continue an existing sentence. The digest gives it its own sentence
-    instead, so the first character is upper-cased and a trailing full stop
-    is added when the fragment doesn't already end in one.
-    """
-    if not detail:
-        return detail
-    text = detail[0].upper() + detail[1:]
-    return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
 def _unsupported_field_name(pointer: str) -> str | None:

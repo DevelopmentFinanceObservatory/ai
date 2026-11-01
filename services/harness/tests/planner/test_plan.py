@@ -541,6 +541,55 @@ def test_amend_keeps_the_question_when_it_is_given_none(decision: DecisionFactor
     assert plan.amend().question == plan.question
 
 
+_COUNTRY_ASKS = ("ODA to Ghana", "ODA to Kenya", "ODA to Nigeria")
+
+
+def _country_plan(decision: DecisionFactory, requirement: RequirementFactory) -> Plan:
+    """A plan answering each of `_COUNTRY_ASKS` with its own country's dataset."""
+    countries = ("ghana", "kenya", "nigeria")
+    return _plan(
+        decision(),
+        answer_mode=AnswerMode.SERIES,
+        evidence_requirements=[
+            requirement(id=country, entities=[Entity(name=country.title(), role="debtor")])
+            for country in countries
+        ],
+        asks=_COUNTRY_ASKS,
+        answered=[
+            AskAnswer(ask=number, outputs=(country,)) for number, country in enumerate(countries)
+        ],
+    )
+
+
+def test_an_ask_the_users_amendment_removes_is_dropped(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    plan = _country_plan(decision, requirement)
+
+    amended = plan.amend(removed_evidence_requirements=["nigeria"], dropped=[2])
+
+    assert amended.answered == plan.answered[:2]
+    assert amended.dropped_asks == (2,)
+    assert "dropped_asks" in revision_content(amended)
+    assert "dropped_asks" not in plan.model_dump()
+    # A later patch carries the drop until it accounts for the ask again.
+    assert amended.amend(question="q").dropped_asks == (2,)
+    restored = amended.amend(
+        evidence_requirements=[plan.evidence_requirements[2]],
+        answered=[plan.answered[2]],
+    )
+    assert (restored.answered, restored.dropped_asks) == (plan.answered, ())
+
+
+def test_a_dropped_ask_is_neither_answered_nor_declined(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    plan = _country_plan(decision, requirement)
+
+    with pytest.raises(ValidationError, match="ask 2"):
+        Plan.model_validate({**plan.model_dump(), "dropped_asks": (2,)})
+
+
 def test_amend_keeps_the_answer_mode_when_it_is_given_none(decision: DecisionFactory) -> None:
     plan = _plan(decision(), answer_mode=AnswerMode.SERIES)
 
@@ -2830,6 +2879,7 @@ def _patch_of(requirements: list[EvidenceRequirement]) -> None:
             "removed_evidence_requirements": [],
             "declined": [],
             "answered": [],
+            "removed_asks": [],
             "across_years": [],
         }
     )

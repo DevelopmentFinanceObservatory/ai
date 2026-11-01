@@ -219,6 +219,7 @@ def _ref_refusal(ref: str) -> ToolResult | None:
     if not DCID_PATTERN.fullmatch(ref) or any(segment in (".", "..") for segment in ref.split("/")):
         return to_tool_result(
             ToolRefusal.request_invalid(
+                tool="sources",
                 pointer="/ref",
                 detail=(
                     f"{ref!r} is not a well-formed dataset ref; expected one or more "
@@ -244,6 +245,7 @@ def _refusal_from_upstream(exc: UpstreamError, ref: str | None) -> ToolResult:
         )
     elif exc.code == "request_invalid" and ref is not None:
         refusal = ToolRefusal.request_invalid(
+            tool="sources",
             pointer="/ref",
             detail=exc.detail or f"{ref!r} is not a dataset the catalogue names",
             trace_id=exc.trace_id,
@@ -256,7 +258,7 @@ def _refusal_from_upstream(exc: UpstreamError, ref: str | None) -> ToolResult:
             capability_version=exc.capability_version,
         )
     else:
-        refusal = from_upstream_error(exc)
+        refusal = from_upstream_error(exc, tool="sources")
     return to_tool_result(refusal)
 
 

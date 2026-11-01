@@ -24,7 +24,6 @@ from google.adk.events.event import NodeInfo
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
 from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -36,7 +35,7 @@ from harness.planner_seam import PlannerSeamError
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
-from harness.sentences import DECLINE_REASONS, failure_sentence
+from harness.sentences import DECLINE_REASONS, DROPPED_REASON, failure_sentence
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -54,6 +53,7 @@ from harness.studio_translate import (
     plan_approved,
 )
 from harness.tool_contracts import HarnessCode, ResolverError
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import (
     CompositionActor,
     MessageComplete,
@@ -840,6 +840,8 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
 
 
 def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_declined() -> None:
+    """An answered ask names its step, a declined one its reason, one answered
+    in part both, and one the user's amendment removed says so as its reason."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     final = plan.evidence_requirements[-1]
     assert plan.translation is not None
@@ -848,6 +850,7 @@ def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_decline
         "life expectancy in Kenya each period",
         "a ranking of East African countries",
         "life expectancy in Kenya and its rank",
+        "life expectancy in Uganda",
     ]
     payload = _plan_payload(
         asks=asks,
@@ -856,12 +859,13 @@ def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_decline
             {"ask": asks[1], "code": "unsupported_ask", "ask_ref": 1},
             {"ask": "its rank", "code": "unsupported_ask", "ask_ref": 2},
         ],
+        dropped_asks=[3],
     )
 
     (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
 
     assert frame.asks is not None
-    answered, declined, in_part = frame.asks
+    answered, declined, in_part, dropped = frame.asks
     reason = DECLINE_REASONS[UnsupportedOperation.UNSUPPORTED_ASK]
     assert answered == PlanAsk(ask=asks[0], answered_by=[step_id])
     assert step_id in {step.id for step in frame.steps}
@@ -869,6 +873,7 @@ def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_decline
     assert in_part == PlanAsk(
         ask=asks[2], answered_by=[step_id], declined=reason, not_computed="its rank"
     )
+    assert dropped == PlanAsk(ask=asks[3], declined=DROPPED_REASON)
 
 
 def test_a_regressed_version_is_logged_and_does_not_move_latest_backwards(

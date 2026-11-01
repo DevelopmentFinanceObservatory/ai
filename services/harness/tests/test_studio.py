@@ -4049,10 +4049,11 @@ class _TokenIssuingPlatform:
         *,
         text: list[str] | None = None,
         meta: dict[str, Any] | None = None,
+        is_error: bool = False,
     ) -> SimpleNamespace:
         content = [SimpleNamespace(type="text", text=block) for block in text or []]
         result = SimpleNamespace(
-            is_error=False, structured_content=body, content=content, meta=meta
+            is_error=is_error, structured_content=body, content=content, meta=meta
         )
         self.results.append(result)
         return result
@@ -4108,7 +4109,13 @@ class _TokenIssuingPlatform:
             return self._written(component_id, token=self.tokens[component_id])
         if arguments.get("write_token") != self.tokens.get(component_id):
             return self._result(
-                {"error": "write_refused", "retry": "do_not_retry", "detail": "wrong token"}
+                {
+                    "code": "write_refused",
+                    "retry_mode": "do_not_retry",
+                    "message": "wrong token",
+                    "fix": {},
+                },
+                is_error=True,
             )
         self.revisions[component_id] += 1
         return self._written(component_id, token=None)

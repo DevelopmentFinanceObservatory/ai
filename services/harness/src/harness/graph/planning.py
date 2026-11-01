@@ -22,10 +22,12 @@ from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
+    MAX_QUESTION_CHARS,
     PlanStatus,
     SessionState,
     UnreadablePickError,
     alignments,
+    cut_user_text,
     pick_of,
     plan_revision,
     save_decision_pick,
@@ -42,14 +44,14 @@ from harness.graph.seams import (
 )
 from harness.graph.state import (
     APPROVE_INTERRUPT,
+    ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
-    ORCHESTRATOR_PRIOR_LEDGER_KEY,
-    ORCHESTRATOR_SEARCHES_KEY,
     PICK_REPLAN_KEY,
     PLANNER_STARTED_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
+    conversation_readings,
     interrupt_event,
     readable_plan,
     state_json,
@@ -247,10 +249,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         drafting = planner(
             ctx=ctx,
             question=question,
-            readings=[
-                *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-                *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
-            ],
+            readings=conversation_readings(ctx.state),
             prior_plan=(
                 None if is_first_draft else (existing.model_dump(mode="json") if existing else None)
             ),
@@ -337,6 +336,11 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             return
         planner_plan = PlannerPlan.model_validate(drafted["plan"])
         ctx.state["plan"] = planner_plan.model_dump_json()
+        if amendment:
+            ctx.state[ORCHESTRATOR_AMENDMENTS_KEY] = [
+                *(ctx.state.get(ORCHESTRATOR_AMENDMENTS_KEY) or ()),
+                cut_user_text(str(amendment), MAX_QUESTION_CHARS),
+            ]
         if pick is not None:
             _end_pick_entry(ctx)
         yield Event(
@@ -558,11 +562,12 @@ def plan_start(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
     break down by under `ASK_BREAKDOWNS_STATE_KEY`, and the numbers of the
     asks across years under `ASKS_ACROSS_YEARS_STATE_KEY`. The last two are
     cleared when the call lists none, so no plan is held to an earlier
-    call's, and no earlier call's kept asks are listed. The planner's
-    first-draft entry is an empty payload."""
+    call's, and no earlier call's kept asks or amendments are listed. The
+    planner's first-draft entry is an empty payload."""
     ctx.state[ORCHESTRATOR_BRIEF_KEY] = node_input["brief"]
     ctx.state[ASKS_STATE_KEY] = node_input["asks"]
     ctx.state[ASK_BREAKDOWNS_STATE_KEY] = node_input.get("ask_breakdowns") or None
     ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = node_input.get("asks_across_years") or None
     ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
+    ctx.state[ORCHESTRATOR_AMENDMENTS_KEY] = None
     return {}

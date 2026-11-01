@@ -51,23 +51,21 @@ planner path, and it buckets separately as `text(seam-brief)` on its own opening
 words. It is the seam's own input, a full brief carrying the search readings,
 the canvas and conversation digests, the plan being changed and the question.
 
-A session sends that full brief once. `_message` renders it under `fresh`,
-which `PlannerSeam.__call__` reads from `_BRIEFED_STATE_KEY`, so the first
-planner call of a session carries the brief and every later call carries only
-the ask. Sessions are minted per turn (`harness.studio_state.StudioStore`), so a turn's
-first call is where the brief is billed.
+Every planner call renders that full brief, and every request of the call
+carries it as the content after the turn's question (`planner.agent.
+prepend_brief`).
 
 `GeminiContextCacheManager._find_count_of_contents_to_cache` caches every
-content before the last run of user contents, which puts the brief, the first
-content, inside the cache as soon as there is one. It caches 0 contents on call
-1, 2 on call 2 (the brief and the first model turn), so the brief is sent at
-full price on call 1, paid again when call 2 creates the cache over it, and
-read at the cached rate from call 3 on.
+content before the last run of user contents, which puts the brief inside the
+cache as soon as there is one. It caches 0 contents on a call's first request,
+and the question, the brief and the first model turn on its second, so the
+brief is sent at full price on the first request, paid again when the second
+creates the cache over it, and read at the cached rate from the third on.
 
-So a character cut here is worth about two full-price sends of a turn rather
-than one per call. It is still worth making: those two sends are real, the
-brief has to fit the request on call 1 before any cache exists, and the brief
-is what the model's attention is spent on either way. `SEAM_BUCKET` is what a
+So a character cut here is worth about two full-price sends per planner call
+rather than one per request. It is still worth making: those two sends are
+real, the brief has to fit the first request before any cache exists, and the
+brief is what the model's attention is spent on either way. `SEAM_BUCKET` is what a
 change to that rendering is measured against.
 """
 
@@ -122,7 +120,7 @@ from planner.records import (
 )
 from pydantic import Field
 
-# ADK's own fence marker (`google.adk.flows.llm_flows._fencing.QUOTED_CONTENT_BEGIN`).
+# ADK's own fence marker (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`).
 # Spelled out literally, not imported: the point of counting this bucket is to
 # notice if the marker or the relaying it marks ever moves, which importing the
 # same constant from the module that emits it would hide.

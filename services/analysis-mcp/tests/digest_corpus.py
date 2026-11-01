@@ -12,17 +12,6 @@ from dataclasses import dataclass, field
 
 import pyarrow as pa
 from analysis_mcp.artifact import Exclusion
-from analysis_mcp.digest import (
-    render_aggregate_digest,
-    render_compare_digest,
-    render_filter_digest,
-    render_growth_digest,
-    render_join_digest,
-    render_quotient_of_digest,
-    render_rank_digest,
-    render_share_of_digest,
-    render_sum_of_digest,
-)
 from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary
 from analysis_mcp.engine.compare import CompareResult, PeriodComparison
 from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
@@ -35,6 +24,17 @@ from analysis_mcp.engine.sum_of import PeriodSum, SumOfResult
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
+from digest_facts import (
+    render_aggregate_digest,
+    render_compare_digest,
+    render_filter_digest,
+    render_growth_digest,
+    render_join_digest,
+    render_quotient_of_digest,
+    render_rank_digest,
+    render_share_of_digest,
+    render_sum_of_digest,
+)
 
 _EI = ExecutionIdentity(
     engine_version="0.1.0", frame_grammar_version="1.0.0", reduction_policy_version="0.1.0"

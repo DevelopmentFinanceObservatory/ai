@@ -186,7 +186,7 @@ async def test_an_offset_at_or_past_the_end_refuses_request_invalid(offset: int)
 
     refusal = refusal_of(result)
     assert refusal["code"] == "request_invalid"
-    assert refusal["fix"]["pointer"] == "/offset"
+    assert refusal["fix"]["problems"][0].startswith("offset: ")
 
 
 @pytest.mark.parametrize(
@@ -199,7 +199,7 @@ async def test_a_malformed_path_refuses_request_invalid_without_a_call(path: str
 
     refusal = refusal_of(result)
     assert refusal["code"] == "request_invalid"
-    assert refusal["fix"]["pointer"] == "/path"
+    assert refusal["fix"]["problems"][0].startswith("path: ")
     assert requests == []
 
 
@@ -211,7 +211,7 @@ async def test_a_continuation_without_a_digest_refuses_request_invalid_without_a
 
     refusal = refusal_of(result)
     assert refusal["code"] == "request_invalid"
-    assert refusal["fix"]["pointer"] == "/digest"
+    assert refusal["fix"]["problems"][0].startswith("digest: ")
     assert (
         f'get_skill_file(skill_id="{SKILL_ID}", path="{_CORE}", offset=0)' in (refusal["message"])
     )
@@ -225,5 +225,5 @@ async def test_a_malformed_digest_refuses_request_invalid_without_a_call() -> No
 
     refusal = refusal_of(result)
     assert refusal["code"] == "request_invalid"
-    assert refusal["fix"]["pointer"] == "/digest"
+    assert refusal["fix"]["problems"][0].startswith("digest: ")
     assert requests == []

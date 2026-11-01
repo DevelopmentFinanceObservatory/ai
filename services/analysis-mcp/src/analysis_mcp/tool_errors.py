@@ -2,10 +2,12 @@
 `StrEnum` code, a `StrEnum` retry mode, a frozen kw-only `ToolRefusal` with
 one classmethod factory per code, and `to_tool_result` to render one.
 
-Simplified from that precedent: analysis-mcp makes no upstream HTTP calls of
-its own, so there is no `upstream_code`/`trace_id`/`capability_version` to
-carry -- this module's fields are `code`, `message`, `fix`, and the
-`retry_after_s` only `service_unavailable` sets.
+The verbs and `resolve_anchor` compute in dfo-apis' analysis runner
+(`runner_client`), which refuses with the engine's own codes, retry modes and
+fixes, so a runner refusal maps onto this module's fields: `code`, `message`,
+`fix`, the `retry_after_s` that `service_unavailable` and a retryable
+`upstream_error` set, and `upstream_code`, the runner's own code where this
+module has none for it.
 
 `unit_heterogeneous` and `facet_heterogeneous` carry a
 `analysis_mcp.disambiguation.DisambiguationPayload` in `fix["disambiguation"]`.
@@ -20,7 +22,11 @@ object. A converted candidate's label names its price basis and currency, a
 composed candidate's label reads "<numerator> per <denominator>", and the
 `id` of either is the object to pin. `role_ambiguous` names whichever
 column-list parameter the calling verb actually has in `fix["parameter"]`,
-never a hardcoded name borrowed from `aggregate`.
+never a hardcoded name borrowed from `aggregate`. `place_level_side_unnamed`
+is the same code for the `place_level` argument, whose column the call's keys
+did not settle. `fix["available"]` lists the frame's `{role}_type` columns, and
+the retry goes through `filter` with the argument in `fix["retry_without"]` left
+out, since sending it again repeats the refused step.
 
 `comparison_periods_disjoint` fires when compare's two sides share no
 overlapping period; `growth_gap_year` fires when no entity has a row in
@@ -29,6 +35,9 @@ both of growth's endpoint years. `cross_frame_unit_mismatch`/`cross_frame_unit_u
 (`compare`'s left/right, `share_of`'s numerator/denominator) disagree on
 unit or facet -- distinct from `unit_heterogeneous`/`facet_heterogeneous`,
 which fire when *one* frame itself carries more than one value.
+A `share_of` call in share mode whose sides resolve to two units refuses
+`cross_frame_unit_mismatch` with `fix["operation"]` `quotient`, the form that
+divides across units (`share_units_differ`).
 `cross_frame_facet_mismatch` fires only when the two sides hold the same
 StatVar; two different measures each keep their own facet selection.
 `cross_frame_unit_unbound` is the narrower case where one side's rows leave
@@ -104,6 +113,13 @@ fires when a pair aged out past an in-memory store's TTL, with a `get_data`
 retry only for a Datasets-family (`spec_...`) pair; a durable, bucket-backed
 store never raises it, since a pair its lifecycle rule has deleted comes
 back as the same `frame_not_held` a pair that was never registered would.
+`frame_ref_incomplete` fires when a frame argument names a derived (`ops_`) or
+malformed `spec_id` with no `content_version`. The call is retryable with the
+full pair. A bare `spec_` id is fetched (`runner_tree.spec_root`).
+A frame the runner lost is fetched or computed again before either refusal
+reaches a caller (`tool_pipeline.run_on_runner`). When that fails the refusal
+keeps its code and retry mode, and its message gains the sentence saying the
+server could not rebuild the frame (`not_rebuilt`).
 `frame_integrity_failed` fires when a durable store's read-time check finds
 the stored object itself is wrong: its bytes don't match what was recorded
 at write time, its row count differs from the count recorded beside it,
@@ -153,9 +169,10 @@ the world, regions, World Bank groups, countries and their subdivisions
 side by side. A type outside `PLACE_LEVELS`, such as `Place`,
 `ProvisionalNode` or `UNGeoRegion`, names no level, so places sharing only
 that type are refused, and one place alone passes whatever its type. It is
-retryable over a `filter` result that keeps one level (`place_level` on the
-type column). On a flow party role (`financingProvider`,
-`financingRecipient`) the verbs leave out the parties whose
+retryable with `place_level` set, which `rank`, `aggregate` and `share_of` take,
+and `fix["place_level"]` names a level some of the places sit at. On a flow
+party role (`financingProvider`, `financingRecipient`) the verbs leave out the
+parties whose
 `{role}_party_kind` cell is `total` and record them as `party_total`
 exclusions; the refusal fires there only when several parties include one
 with no kind or a cell no kind names, are all totals on a role the verb pools
@@ -182,9 +199,22 @@ and `growth`, `rank` and `filter` raise it for a rolling call whose
 `anchor_key` names no stored record, or a record that does not cover the
 call. `fix["detail"]` names the check that failed. It is retryable, since a
 `resolve_anchor` call over the question's populations and root frames gives
-the key and the period to write the literals from. `rolling_grain_unsupported`
+the key and the period to write the literals from. A call stating a relative
+year has no key. The runner raises the code from its own latest year, and
+`ToolRefusal.latest_year_unresolved` asks for fixed years. `rolling_grain_unsupported`
 fires when a population's periods are not calendar years, which the frames
 do not change between calls, so it is `do_not_retry`.
+
+`rendering_not_recorded` fires when a `spec_` frame was fetched with an option
+the runner does not read a root with, so no runner call reproduces that frame.
+It is retryable over a frame fetched without the option. It also fires when a
+lost frame has no mint record to state its rendering, and `get_data` names a
+frame that has one.
+
+`upstream_error` is a runner refusal under a code this module does not
+define, or an answer the runner could not give. `upstream_code` names the
+runner's code. It is `retry_after_delay` when the refusal was retryable and
+carries a delay, and `do_not_retry` otherwise.
 
 `internal_error` is the registration-site catch-all's code (see
 `server.py`): every other code names something a specific, anticipated
@@ -197,10 +227,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Literal, Self
 
+from common.echoed_text import MAX_LABEL_CHARS, truncate_value
+from common.materialisation import FrameRef
 from common.place_type import (
     PARTY_ROLES,
     PLACE_LEVELS,
@@ -209,6 +241,7 @@ from common.place_type import (
     PartyKind,
     class_column,
     enrichment_role,
+    levels_of,
     whole_column,
 )
 from common.refusal import internal_error_message, refusal_meta, refusal_text
@@ -216,11 +249,7 @@ from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, UnitRequest
 from fastmcp.tools import ToolResult
 
-from analysis_mcp.disambiguation import (
-    MAX_LABEL_CHARS,
-    DisambiguationCandidate,
-    DisambiguationPayload,
-)
+from analysis_mcp.disambiguation import DisambiguationCandidate, DisambiguationPayload
 from analysis_mcp.units import unit_json, unit_name
 
 
@@ -246,6 +275,7 @@ class ToolErrorCode(StrEnum):
     NON_FINITE_RESULT = "non_finite_result"
     FRAME_NOT_HELD = "frame_not_held"
     FRAME_EXPIRED = "frame_expired"
+    FRAME_REF_INCOMPLETE = "frame_ref_incomplete"
     MIXED_TIME_GRAIN = "mixed_time_grain"
     FRAME_INTEGRITY_FAILED = "frame_integrity_failed"
     COMPARISON_PERIODS_DISJOINT = "comparison_periods_disjoint"
@@ -271,7 +301,10 @@ class ToolErrorCode(StrEnum):
     PLACE_LEVELS_MIXED = "place_levels_mixed"
     ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
     ROLLING_GRAIN_UNSUPPORTED = "rolling_grain_unsupported"
+    ROLLING_REANCHOR_UNAVAILABLE = "rolling_reanchor_unavailable"
     SERVICE_UNAVAILABLE = "service_unavailable"
+    RENDERING_NOT_RECORDED = "rendering_not_recorded"
+    UPSTREAM_ERROR = "upstream_error"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -306,6 +339,7 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.NON_FINITE_RESULT: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.FRAME_NOT_HELD: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.FRAME_EXPIRED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.FRAME_REF_INCOMPLETE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.MIXED_TIME_GRAIN: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.FRAME_INTEGRITY_FAILED: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.COMPARISON_PERIODS_DISJOINT: RetryMode.CORRECT_AND_RETRY,
@@ -331,7 +365,10 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.PLACE_LEVELS_MIXED: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.ROLLING_REANCHOR_UNAVAILABLE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.SERVICE_UNAVAILABLE: RetryMode.RETRY_AFTER_DELAY,
+    ToolErrorCode.RENDERING_NOT_RECORDED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.UPSTREAM_ERROR: RetryMode.RETRY_AFTER_DELAY,
     ToolErrorCode.INTERNAL_ERROR: RetryMode.DO_NOT_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
@@ -346,6 +383,25 @@ _DISAMBIGUATION_CANDIDATE_CAP = 10
 # How many of each side's sampled keys a `quotient_of_no_key_matched` message
 # lists; `fix` carries the whole sample.
 _KEY_SAMPLE_IN_MESSAGE = 5
+
+# The codes of a refusal whose caller frames the runner no longer holds.
+_LOST_CODES = frozenset(
+    {
+        ToolErrorCode.FRAME_NOT_HELD,
+        ToolErrorCode.FRAME_EXPIRED,
+        ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE,
+    }
+)
+
+# The sentence a lost-frame refusal gains when the server could not rebuild the frame.
+_NOT_REBUILT = (
+    "The server could not rebuild this frame by itself. Call get_data with the spec_id "
+    "(spec_...) to register it again and pass the frame_ref it returns; for an ops_ result, "
+    "repeat the verb calls that made it."
+)
+
+# The level a `place_levels_mixed` fix names first when the places sit at it.
+_COUNTRY_LEVEL = "Country"
 
 # The party kinds a filter keeps to compare or rank a flow side's members: private parties
 # are of kind `party` too, told apart by their class.
@@ -416,10 +472,34 @@ class ToolRefusal:
     message: str
     fix: dict[str, Any]
     retry_after_s: float | None = None
+    upstream_code: str | None = None
 
     @property
     def retry_mode(self) -> RetryMode:
+        if self.code is ToolErrorCode.UPSTREAM_ERROR and self.retry_after_s is None:
+            # A runner refusal that was not retryable names no delay to wait.
+            return RetryMode.DO_NOT_RETRY
         return _RETRY_MODE_BY_CODE[self.code]
+
+    @property
+    def lost_frames(self) -> tuple[FrameRef, ...]:
+        """The caller's frames this refusal says the runner no longer holds: every
+        frame `frames_lost` or `derived_input_root_lost` names, none for any other."""
+        if self.code not in _LOST_CODES:
+            return ()
+        named = self.fix.get("frame_refs")
+        if named is None and "spec_id" in self.fix and "content_version" in self.fix:
+            named = [self.fix]
+        if not isinstance(named, list):
+            return ()
+        return tuple(
+            FrameRef(spec_id=ref["spec_id"], content_version=ref["content_version"])
+            for ref in named
+        )
+
+    def not_rebuilt(self) -> Self:
+        """This lost-frame refusal after the server failed to rebuild its frames."""
+        return replace(self, message=f"{self.message} {_NOT_REBUILT}")
 
     @classmethod
     def op_spec_invalid(cls, *, detail: str) -> Self:
@@ -479,6 +559,35 @@ class ToolRefusal:
                 f"Available: {available}."
             ),
             fix={"parameter": parameter, "columns": columns, "available": available},
+        )
+
+    @classmethod
+    def place_level_side_unnamed(cls, *, columns: list[str], available: list[str]) -> Self:
+        """A `place_level` step read `columns`, which this frame lacks. `available`
+        holds the frame's `{role}_type` columns. Choosing a side here could drop every
+        row, as on a frame whose provider is a DAC group, so the caller chooses. `filter`
+        is the one route for every verb, since a pooled `share_of` denominator has no key to
+        name a side with and a key added to `group_by` changes the rows the call returns.
+        """
+        next_step = (
+            "Call filter with a place_level predicate on the column of the side to keep, on "
+            "each frame this call reads. Then repeat this call on the filtered frames without "
+            "place_level. Or leave place_level out."
+            if available
+            else "Leave place_level out."
+        )
+        return cls(
+            code=ToolErrorCode.ROLE_AMBIGUOUS,
+            message=(
+                f"place_level reads {columns}, which this frame does not have. Its place "
+                f"type columns: {available}. {next_step}"
+            ),
+            fix={
+                "parameter": "place_level",
+                "columns": columns,
+                "available": available,
+                "retry_without": "place_level",
+            },
         )
 
     @classmethod
@@ -692,6 +801,62 @@ class ToolRefusal:
         )
 
     @classmethod
+    def frames_lost(cls, *, frame_refs: Sequence[Mapping[str, str]], expired: bool) -> Self:
+        """`frame_expired` (`expired`) or `frame_not_held` for the caller's frames
+        `frame_refs`, which the runner read as one dataset version it no longer holds.
+        Two sides fetched from one version with different options are two frames over
+        one root, so the refusal names both and one round of fetches mends the call."""
+        first, *others = frame_refs
+        lost = cls.frame_expired if expired else cls.frame_not_held
+        refusal = lost(spec_id=first["spec_id"], content_version=first["content_version"])
+        if not others:
+            return refusal
+        named = ", ".join(f"{ref['spec_id']}/{ref['content_version']}" for ref in others)
+        return cls(
+            code=refusal.code,
+            message=(
+                f"{refusal.message} The frame(s) {named} of this call were read from the "
+                "same data and are lost with it: fetch each again the same way and retry "
+                "with the new frame_refs."
+            ),
+            fix={**refusal.fix, "frame_refs": [dict(ref) for ref in frame_refs]},
+        )
+
+    @classmethod
+    def bare_frames_lost(cls, *, spec_ids: Sequence[str], expired: bool) -> Self:
+        """`frame_expired` (`expired`) or `frame_not_held` for a call whose frames
+        `spec_ids`, passed without a `content_version`, the runner could not read at
+        their newest version. Its refusal names no root, so each is named, and it names
+        no version, so `lost_frames` holds none of them. Reading the newest version is
+        all a rebuild would do."""
+        named = ", ".join(spec_ids)
+        return cls(
+            code=ToolErrorCode.FRAME_EXPIRED if expired else ToolErrorCode.FRAME_NOT_HELD,
+            message=(
+                f"The newest version of {named} cannot be read, and retrying with the same "
+                "spec_id reaches the same refusal. Call get_data with the spec_id, or search "
+                "for the data again, and retry with the frame_ref it returns."
+            ),
+            fix={"spec_ids": list(spec_ids)},
+        )
+
+    @classmethod
+    def frame_ref_incomplete(cls, *, argument: str, spec_id: str) -> Self:
+        """The frame argument `argument` names `spec_id`, which is no `spec_` id, with
+        no `content_version`. The caller's `spec_id` is echoed capped
+        (`echoed_text.truncate_value`)."""
+        shown = truncate_value(spec_id)
+        return cls(
+            code=ToolErrorCode.FRAME_REF_INCOMPLETE,
+            message=(
+                f"{argument} names {shown!r} without its content_version, and only a "
+                "spec_ id is fetched by itself. Pass the full {spec_id, content_version} "
+                "pair from the result that made the frame."
+            ),
+            fix={"argument": argument, "spec_id": shown},
+        )
+
+    @classmethod
     def mixed_time_grain(cls, *, grains: list[str], periods: list[str]) -> Self:
         """`grains` names every distinct grain the resolved input's own
         `time_period` column carries, in `year`/`month`/`day` order, and
@@ -796,6 +961,27 @@ class ToolRefusal:
             fix={
                 left_label: unit_json(left_unit),
                 right_label: unit_json(right_unit),
+            },
+        )
+
+    @classmethod
+    def share_units_differ(cls, *, numerator_unit: object, denominator_unit: object) -> Self:
+        """A share whose numerator and denominator resolved to two units, each a
+        unit as the runner's refusal states it: a unit ref, or a converted or
+        composed unit's object. Two units make a quotient, so `fix` names that
+        form beside the runner's two units."""
+        units = (json.dumps(numerator_unit), json.dumps(denominator_unit))
+        return cls(
+            code=ToolErrorCode.CROSS_FRAME_UNIT_MISMATCH,
+            message=(
+                f"The numerator is in {units[0]} and the denominator in {units[1]}, so the "
+                "numerator is no share of the denominator. Repeat the call with "
+                'operation="quotient" and the same arguments to divide one by the other.'
+            ),
+            fix={
+                "operation": "quotient",
+                "numerator": numerator_unit,
+                "denominator": denominator_unit,
             },
         )
 
@@ -1330,6 +1516,31 @@ class ToolRefusal:
         )
 
     @classmethod
+    def derived_input_root_lost(
+        cls, *, frame_refs: Sequence[Mapping[str, str]], root: Mapping[str, Any], upstream_code: str
+    ) -> Self:
+        """`frame_refs` are the derived (`ops_`) inputs of the call computed from
+        `root`, the dataset version dfo-apis no longer holds
+        (`upstream_code`: `snapshot_not_found`, `recipe_not_found` or
+        `artifact_expired`). dfo-apis computes a derived input again from its
+        stored recipe, so the input is lost with its root."""
+        named = ", ".join(f"{ref['spec_id']}/{ref['content_version']}" for ref in frame_refs)
+        return cls(
+            code=ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE,
+            message=(
+                f"The derived frame {named} was computed from data the analysis service no "
+                f"longer holds ({upstream_code}), so it cannot be computed again, and "
+                "retrying with the same frame_ref reaches the same refusal. Recompute it "
+                "from its sources: call get_data for the data it came from, repeat the "
+                "steps that produced it, and retry with the new frame_ref."
+            ),
+            fix={
+                "frame_refs": [dict(ref) for ref in frame_refs],
+                "root": {key: root[key] for key in ("spec_id", "content_version") if key in root},
+            },
+        )
+
+    @classmethod
     def derived_input_ordinal(cls, *, reason: str) -> Self:
         return cls(
             code=ToolErrorCode.DERIVED_INPUT_ORDINAL,
@@ -1356,6 +1567,7 @@ class ToolRefusal:
         whole_class: str | None = None,
         member_count: int = 0,
         members: Sequence[str] = (),
+        takes_place_level: bool = True,
     ) -> Self:
         """`types` are the distinct cells of `column`, sorted and capped by
         the engine that found them, and empty when the frame carries no such
@@ -1370,7 +1582,9 @@ class ToolRefusal:
         members it may hold, of which `members` are examples. The message asks
         to keep the whole totals alone, by a filter on the role's whole column,
         or the members alone, by a filter on `column`, and `fix.filters` holds
-        both."""
+        both. Any other column's message asks for `place_level` where the
+        tool takes it (`takes_place_level`), and otherwise for a `place_level`
+        predicate through `filter`."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and whole_total is not None:
             counted = f"{member_count} member{'' if member_count == 1 else 's'}"
@@ -1410,9 +1624,10 @@ class ToolRefusal:
                 message=(
                     f"The {role} parties in this frame cannot be pooled or ranked: the frame "
                     f"carries no {column!r} column, so its parties cannot be told apart from "
-                    "the group totals that hold them. Retrieve the data again with get_data "
-                    f"and place_types=true, which adds {column!r}, and retry with that "
-                    f"frame_ref, or filter the frame to a single {role} party."
+                    "the group totals that hold them. Call get_data again for this spec_id, "
+                    "with place_types=true where get_data takes that argument (otherwise it "
+                    "adds the party kinds by default), and repeat the call with the frame_ref "
+                    f"it returns, or filter the frame to a single {role} party."
                 ),
                 fix={"column": column, "types": []},
             )
@@ -1435,6 +1650,15 @@ class ToolRefusal:
                 ),
                 fix={"column": column, "types": list(types), "member_kinds": list(_MEMBER_KINDS)},
             )
+        levels = sorted({level for cell in types for level in levels_of(cell) & PLACE_LEVELS})
+        level = _COUNTRY_LEVEL if _COUNTRY_LEVEL in levels else next(iter(levels), None)
+        keep_one_level = (
+            "Repeat the call with place_level set to the level to keep, for example "
+            'place_level="Country".'
+            if takes_place_level
+            else f"Filter the frame first with a place_level predicate on {column!r} naming "
+            "the level to keep, such as Country, then retry with that result's frame_ref."
+        )
         return cls(
             code=ToolErrorCode.PLACE_LEVELS_MIXED,
             message=(
@@ -1443,13 +1667,11 @@ class ToolRefusal:
                 "among every place's types. A frame that names no place holds the world, "
                 "regions, World Bank groups, countries and their subdivisions side by side, "
                 "and ranking or summing them together counts a place beside the places inside "
-                "it. Filter the frame first with a place_level predicate on "
-                f"{column!r} naming one of those levels, such as Country, then retry with that "
-                "result's frame_ref. A type outside those levels, such as Place or "
-                "ProvisionalNode, names no level, and no place_level filter keeps the places "
-                "that carry it alone."
+                "it. A type outside those levels, such as Place or ProvisionalNode, names no "
+                f"level, and no level kept leaves the places that carry it alone. {keep_one_level}"
             ),
-            fix={"column": column, "types": list(types)},
+            fix={"column": column, "types": list(types)}
+            | ({} if level is None or not takes_place_level else {"place_level": level}),
         )
 
     @classmethod
@@ -1469,6 +1691,27 @@ class ToolRefusal:
         )
 
     @classmethod
+    def latest_year_unresolved(cls, *, fix: Mapping[str, Any], derived: Sequence[str] = ()) -> Self:
+        """`rolling_anchor_unresolved` for a call with no `anchor_key` to resolve and
+        retry with. `fix` is the runner's, whose `detail` names the check that failed.
+        A year counted from the latest year stands in the call or in the recipe of one
+        of its `derived` inputs, which the call computes again."""
+        fixed_years = (
+            f"State each such year as a fixed year, in this call and in the calls that made "
+            f"{', '.join(derived)}, then retry with the frame_ref those return."
+            if derived
+            else "State the periods as fixed years instead."
+        )
+        return cls(
+            code=ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED,
+            message=(
+                f"The latest year of the data is not established ({fix.get('detail')}), so "
+                f"a year counted from it cannot be worked out. {fixed_years}"
+            ),
+            fix=dict(fix),
+        )
+
+    @classmethod
     def rolling_grain_unsupported(cls, *, reason: str, periods: Sequence[str]) -> Self:
         return cls(
             code=ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED,
@@ -1477,6 +1720,23 @@ class ToolRefusal:
                 "State the periods as fixed years instead."
             ),
             fix={"periods": list(periods)},
+        )
+
+    @classmethod
+    def rolling_reanchor_unavailable(cls, *, frame_refs: Sequence[Mapping[str, str]]) -> Self:
+        """The derived (`ops_`) inputs `frame_refs` hold no stored recipe, so the
+        runner cannot compute them again inside this call's tree, where every
+        rolling year follows one latest year."""
+        named = ", ".join(f"{ref['spec_id']}/{ref['content_version']}" for ref in frame_refs)
+        return cls(
+            code=ToolErrorCode.ROLLING_REANCHOR_UNAVAILABLE,
+            message=(
+                f"The derived frame {named} holds no stored recipe, so this call cannot "
+                "compute it again under one latest year with its other inputs. Make it "
+                "again: call get_data for the data it came from, repeat the verb calls "
+                "that made it, and retry with the frame_ref the last one returns."
+            ),
+            fix={"frame_refs": [dict(ref) for ref in frame_refs], "tool": "get_data"},
         )
 
     @classmethod
@@ -1495,6 +1755,93 @@ class ToolRefusal:
                 "rows_in_flight_max": max_rows,
             },
             retry_after_s=ROW_BUDGET_RETRY_AFTER_S,
+        )
+
+    @classmethod
+    def frame_store_unavailable(
+        cls, *, spec_id: str, content_version: str, retry_after_s: float
+    ) -> Self:
+        """The frame store failed a read of the mint record of a `get_data` frame,
+        which names the dataset version the runner reads it as."""
+        return cls(
+            code=ToolErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                f"The record of the frame spec_id={spec_id!r}, "
+                f"content_version={content_version!r} could not be read just now. Retry "
+                f"the same call after {retry_after_s:.1f}s."
+            ),
+            fix={"service": "frame-store", "spec_id": spec_id, "content_version": content_version},
+            retry_after_s=retry_after_s,
+        )
+
+    @classmethod
+    def analysis_pending(cls, *, retry_after_s: float, operations: Sequence[str]) -> Self:
+        """The runner answered 202 because a root dataset of the call is still
+        building. `operations` are the rebuilds it waits on, none for a call the
+        runner is already computing."""
+        queued = f" ({len(operations)} rebuild(s) queued)" if operations else ""
+        return cls(
+            code=ToolErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                f"The data this call reads is still being prepared upstream{queued}. "
+                f"Retry the same call after {retry_after_s:.1f}s."
+            ),
+            fix={"service": "dfo-apis", "operations": list(operations)},
+            retry_after_s=retry_after_s,
+        )
+
+    @classmethod
+    def rendering_not_recorded(
+        cls, *, spec_id: str, content_version: str, options: Sequence[str]
+    ) -> Self:
+        """`options` are the mint options of the frame the runner cannot read a root with,
+        empty for a frame no mint record states the rendering of."""
+        frame = f"The frame spec_id={spec_id!r}, content_version={content_version!r}"
+        return cls(
+            code=ToolErrorCode.RENDERING_NOT_RECORDED,
+            message=(
+                f"{frame} was fetched with {', '.join(options)}, which the analysis service "
+                "cannot read a frame with. Call get_data for the same data without those "
+                "options and retry with that frame_ref."
+                if options
+                else f"{frame} is no longer held, and no record states how it was fetched, "
+                "so it cannot be read again with the same rows. Call get_data for the same "
+                "data and retry with that frame_ref."
+            ),
+            fix={
+                "spec_id": spec_id,
+                "content_version": content_version,
+                "options": list(options),
+                "tool": "get_data",
+            },
+        )
+
+    @classmethod
+    def upstream_error(
+        cls,
+        *,
+        upstream_code: str | None,
+        detail: str,
+        retry_after_s: float | None,
+        fix: Mapping[str, Any] | None = None,
+    ) -> Self:
+        """A runner refusal under a code this module does not define, or a call the
+        runner could not answer. `retry_after_s` is `None` when a retry is not
+        expected to succeed."""
+        retry = (
+            f"Retry after {retry_after_s:.1f}s."
+            if retry_after_s is not None
+            else "A repeated call is unlikely to succeed unmodified."
+        )
+        return cls(
+            code=ToolErrorCode.UPSTREAM_ERROR,
+            message=(
+                f"The analysis service refused the call ({upstream_code or 'unclassified'}): "
+                f"{detail}. {retry}"
+            ),
+            fix={"detail": detail, **(fix or {})},
+            retry_after_s=retry_after_s,
+            upstream_code=upstream_code,
         )
 
     @classmethod
@@ -1525,7 +1872,8 @@ def to_tool_result(refusal: ToolRefusal, *, preamble: str | None = None) -> Tool
     line of compact JSON, so a client that renders only `content` still sees
     them. `structured_content` carries `retry_after_s` under the same rule.
 
-    `meta` is `common.refusal.refusal_meta` of `code`.
+    `structured_content` also carries `upstream_code` when set, and `meta` is
+    `common.refusal.refusal_meta` of `code` and `upstream_code`.
     """
     return ToolResult(
         content=refusal_text(
@@ -1547,7 +1895,8 @@ def to_tool_result(refusal: ToolRefusal, *, preamble: str | None = None) -> Tool
             "message": refusal.message,
             "fix": refusal.fix,
         }
-        | ({} if refusal.retry_after_s is None else {"retry_after_s": refusal.retry_after_s}),
-        meta=refusal_meta(code=refusal.code.value),
+        | ({} if refusal.retry_after_s is None else {"retry_after_s": refusal.retry_after_s})
+        | ({} if refusal.upstream_code is None else {"upstream_code": refusal.upstream_code}),
+        meta=refusal_meta(code=refusal.code.value, upstream_code=refusal.upstream_code),
         is_error=True,
     )

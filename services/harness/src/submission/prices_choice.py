@@ -5,7 +5,7 @@ open_prices`). The orchestrator's prices question names its part, and code
 gives it the part's `open_prices` entries as options, each marked with the
 part and its prices (`harness.graph.state.priced_options`). The planner
 reads the user's picks off the answered interrupt, one per part
-(`planner.agent._prices_chosen`).
+(`planner.call.prices_chosen`).
 
 `prices_decisions` writes each pick as a `resolved_by=user` decision fixing
 the price basis alone (`DecisionFixes.prices`), cited by every dataset
@@ -37,7 +37,7 @@ from typing import Any, Literal, NamedTuple
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
 from compiler.evidence import requested_unit as requested_unit_of
 from compiler.sources import readable_source
-from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     BaseYearUnstatedError,
@@ -63,7 +63,7 @@ PRICES_SLOT_PREFIX = "user_prices_"
 
 # The fixed choices of the planner's ask a prices refusal sends it to, by
 # the prices each picks. A pick sets the part's prices
-# (`planner.agent._prices_chosen`).
+# (`planner.call.prices_chosen`).
 PRICES_OPTIONS: tuple[dict[str, str], ...] = tuple(
     {"id": f"prices:{basis}", "label": f"{label[:1].upper()}{label[1:]}"}
     for basis, label in _LABELS.items()

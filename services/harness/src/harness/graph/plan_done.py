@@ -10,6 +10,7 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Mapping,
+    Sequence,
 )
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, cast
@@ -34,11 +35,13 @@ from planner.plan import (
 from harness import plan_display
 from harness.chart_binding import MAX_SERIES_PER_COMPONENT
 from harness.graph.delivery import Delivery, deliver, frame_read
+from harness.graph.orchestrate import AgentHandBack
 from harness.graph.seams import (
     Executor,
 )
 from harness.graph.state import (
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
+    ORCHESTRATOR_AMENDMENTS_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
@@ -52,6 +55,8 @@ from harness.graph.state import (
     frame_id_for,
     readable_plan,
     register_frames,
+    stored_mapping,
+    stored_sequence,
 )
 from harness.sentences import DECLINE_REASONS
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
@@ -163,8 +168,8 @@ def _counted_blocks(lines: list[str]) -> list[tuple[int, int, int]]:
 def _lists_kept_rows(summary: StepSummary, blocks: list[tuple[int, int, int]]) -> bool:
     """Whether `summary` is a ranking that ran with a `limit`, keeps no more
     rows than a card draws, and whose one block of rank lines holds every row
-    the frame keeps. The digest lists at most `_LIST_CAP` rows of the whole
-    ranking, so a frame that keeps more is not listed whole."""
+    the frame keeps. The digest lists at most `_LIST_CAP` rows, so a frame that
+    keeps more is not listed whole."""
     if summary.tool != _RANKING_TOOL or summary.ranked_before_limit is None:
         return False
     if summary.rows is None or len(blocks) != 1:
@@ -179,22 +184,31 @@ def _without_entity_lines(summary: StepSummary, *, whole_ranking: bool = True) -
     states the count, and a line saying how many lines were left out. The
     digest of any other tool is returned as it is.
 
-    A rank digest lists the first rows of the whole ranking, past the
-    `limit` its frame keeps. Its one block of rows in rank order starts with
-    the frame's `summary.rows` rows, which are the rows kept. The block is cut
-    to them, and where the ranking ran with a limit, keeps no more rows than
-    a card draws and the block lists every one (`_lists_kept_rows`), they are
-    all handed back, if `whole_ranking`. Otherwise the block is cut to its
-    first and last of those rows. A digest prints at most
-    `analysis_mcp.digest._LIST_CAP` rows, so a frame that keeps more rows than
-    the block holds keeps the first row and the count, and the marker says the
-    last row is not listed. A rank digest with a block for each period, or of
-    a frame whose row count is unknown, keeps the count only."""
+    A rank digest lists the rows its frame keeps. When the ranking ran with
+    a limit, keeps no more rows than a card draws and its one block lists
+    every one (`_lists_kept_rows`), all rows are handed back if
+    `whole_ranking`. Otherwise the block is cut to its first and last rows. A
+    digest prints at most `analysis_mcp.digest._LIST_CAP` rows, so a frame that
+    keeps more rows than the block holds keeps the first row and the count, and
+    the marker says the last row is not listed. A limited rank digest with a
+    block for each period has its blocks replaced by one marker, since its
+    header states the kept and ranked counts, and a line per period can pass
+    `_HAND_BACK_CAP` and lose the unit, coverage and warning lines after them.
+    Any other rank digest with a block for each period, or of a frame whose row
+    count is unknown, has each block of more than `_LINES_KEPT_WHOLE` lines cut
+    to its count."""
     if summary.tool != _RANKING_TOOL and summary.tool not in _COUNT_ONLY_TOOLS:
         return summary.digest
     lines = summary.digest.split("\n")
     blocks = _counted_blocks(lines)
     ranking = summary.tool == _RANKING_TOOL and summary.rows is not None and len(blocks) == 1
+    if summary.ranked_before_limit is not None and len(blocks) > 1:
+        first = blocks[0][1] - 2  # The period heading over the first count heading.
+        last = blocks[-1][2]
+        while last < len(lines) and lines[last].lstrip().startswith("..."):
+            last += 1
+        marker = f"({len(blocks)} period blocks left out; the header states the counts)"
+        return "\n".join([*lines[:first], marker, *lines[last:]])
     whole = whole_ranking and _lists_kept_rows(summary, blocks)
     kept: list[str] = []
     cursor = 0
@@ -261,9 +275,10 @@ def _ask_status(
     failed: Mapping[str, Any] | None,
     stopped: Mapping[str, str],
 ) -> dict[str, Any]:
-    """One ask as `plan_done` reports it: declined, with the plain reason, or
-    each step answering it with its status, and for an ask answered in part
-    the part not computed with its reason. `ran` holds each final step that
+    """One ask as `plan_done` reports it: removed by the user's amendment
+    (`dropped`), declined, with the plain reason, or each step answering it
+    with its status, and for an ask answered in part the part not computed
+    with its reason. `ran` holds each final step that
     produced a frame. `data` and `empty` name the frame, and `empty` means it
     holds no series. `not_chartable` gives the reason no view was prepared.
     A step outside `ran` is `failed` when it is in `stopped` (each step the
@@ -272,6 +287,8 @@ def _ask_status(
     otherwise: a step the run never reached, or a derived step whose frame
     is withheld because it is not published (`presentable_steps`), as on a
     stopped run or one whose publication is unfinished."""
+    if ask.dropped:
+        return _dropped_status(ask.ask)
     if ask.declined is not None and not ask.outputs:
         return {"ask": ask.ask, "declined": DECLINE_REASONS[ask.declined]}
 
@@ -299,6 +316,15 @@ def _ask_status(
             "reason": DECLINE_REASONS[ask.declined],
         }
     return status
+
+
+# What `_ask_status` says of an ask the user's amendment removed.
+_DROPPED = "The user's amendment removed this ask from the plan; nothing computes it."
+
+
+def _dropped_status(ask: str) -> dict[str, Any]:
+    """`ask`, which the user's amendment removed, as `plan_done` reports it."""
+    return {"ask": ask, "dropped": _DROPPED}
 
 
 # The `_ask_status` statuses of a step that produced no frame.
@@ -359,6 +385,28 @@ def _partial_result(asks: list[dict[str, Any]] | None, *, frames: bool) -> str:
     if missing:
         sentences.append("Not computed: " + "; ".join(json.dumps(ask) for ask in missing) + ".")
     return " ".join(sentences) or "Its result is not available."
+
+
+def _removed_asks(removed: Sequence[str]) -> str:
+    """The sentence every `plan_done` lead carries when the user's amendment
+    removed asks from the plan: each ask in `removed`, kept out of the
+    answer. Empty when no ask was removed.
+
+    The agent never reads the amendment as a message of its own: the
+    question it holds still asks a removed ask, and its own search still
+    names a source for it. Without the sentence it reads the removed ask as
+    unanswered and fetches it, on a stopped run and on one whose charts
+    failed alike."""
+    if not removed:
+        return ""
+    it, was = ("it", "it was") if len(removed) == 1 else ("them", "they were")
+    return (
+        "The user removed from the plan "
+        + "; ".join(json.dumps(ask) for ask in removed)
+        + f": leave {it} out of the answer, fetch and state no figure for {it}, and do not "
+        f"report {it} as not computed or failed. Say only that {was} removed at the "
+        "user's request."
+    )
 
 
 # The fields of a run's report that name a step or a requirement, or carry
@@ -614,7 +662,7 @@ def record_plan(
     without searching again. `run_id` is the run the plan executed as, which
     a later turn reads the record's status from.
     """
-    readings = dict(state.get(ORCHESTRATOR_READINGS_KEY) or {})
+    readings = dict(stored_mapping(state, ORCHESTRATOR_READINGS_KEY))
     unavailable = dict(state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})
     for row in plan_display.step_rows(plan):
         args = cast("dict[str, Any]", row["args"])
@@ -636,8 +684,8 @@ def record_plan(
         # A source an earlier turn's search returned is a searched one too,
         # and keeps its block in that turn's record.
         searched={
-            *(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
-            *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("spec_ids", []),
+            *stored_mapping(state, ORCHESTRATOR_SPECS_KEY),
+            *stored_mapping(state, ORCHESTRATOR_PRIOR_LEDGER_KEY).get("spec_ids", []),
         },
         failed_steps=frozenset(stopped.values()),
         run_id=run_id,
@@ -646,7 +694,7 @@ def record_plan(
         aligned_bases=_aligned_bases(state),
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
-        *(state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),
+        *stored_sequence(state, ORCHESTRATOR_PLAN_RECORDS_KEY),
         plan_record.model_dump(mode="json"),
     ]
     return plan_record
@@ -692,19 +740,28 @@ def plan_done_node(
         run whose progress could not be recorded; a run's standing `run`
         names and `_unfinished_run_lead` tells), the step summaries, the
         notes on how the figures were computed (`totals`, `answer_notes`), what failed, each cut, and
-        each ask the brief listed with its outputs' status or its decline
-        (`_ask_status`), then the plan record
-        (`harness.turn_records.PlanRecord`). A step refused
+        each ask the brief listed with its outputs' status, its decline, or
+        its removal by the user's amendment (`_ask_status`), then the plan
+        record (`harness.turn_records.PlanRecord`), under `plan_record`. It is the
+        result of the agent's `plan` call (`AgentHandBack`): a sentence that
+        says what to do with it as the result's text, and the rest as its
+        structured fields. A step refused
         `capability_unavailable` marks its spec_id unavailable to `fetch`
         for the rest of the turn and does not give the plan call back.
 
         When the plan call's last run stopped or did not complete, or the
         planner refused after a run stopped, each ask that run did not
-        compute but an earlier run of the call did is listed from that
+        compute but an earlier run of the call did, and the user's amendment
+        did not remove, is listed from that
         earlier run's kept frames (`ORCHESTRATOR_KEPT_ASKS_KEY`), marked
         `earlier_plan`, with their step summaries and those notes, and an
         ask that earlier run computed in part with the part not computed and
-        its reason.
+        its reason. On the planner's refusal after a stopped run, each ask the
+        user's amendment removed from the plan that run executed is listed
+        `dropped`. Every lead names the asks removed, kept out of the answer
+        (`_removed_asks`), and every hand-back of a plan the user amended
+        carries the user's words for each amendment, in order, under
+        `amendments` (`ORCHESTRATOR_AMENDMENTS_KEY`).
 
         A completed run's delivery is decided by its own final frames
         (`harness.graph.delivery.deliver`): once the session holds the
@@ -712,8 +769,19 @@ def plan_done_node(
         were all read is recorded delivered; one with a frame left unread is
         recorded undelivered, says so in its standing, and the next turn
         lists it again (`harness.graph.resume`)."""
-        kept: dict[str, Any] = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY) or {}
+        # `execute` writes the kept asks when a run of this plan call stops,
+        # and `plan_start` clears them, so a mapping here, even an empty one,
+        # says a run of this call stopped.
+        stopped_kept: dict[str, Any] | None = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY)
+        kept = stopped_kept or {}
         ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
+        # The user's words for each amendment of this plan call's plan, which
+        # the agent reads nowhere else.
+        amendments = (
+            {"amendments": list(words)}
+            if (words := ctx.state.get(ORCHESTRATOR_AMENDMENTS_KEY))
+            else {}
+        )
         hand_back = HandBack(
             executor,
             summaries=[StepSummary.of(stored) for stored in node_input.get("step_summaries", [])],
@@ -753,31 +821,49 @@ def plan_done_node(
             # A final refusal (an internal or repeated failure, or a question
             # declined whole) fails the same way for any brief.
             again = not node_input.get("final") and _give_plan_back(ctx)
-            computed = listed = ""
-            if kept:
+            computed = ""
+            listing: dict[str, Any] = {}
+            # A run of this call stopped, and the stored plan is the one it
+            # executed: a replan proposal written since is pending approval,
+            # and a refusal while one is pending goes back to `approve`
+            # (`harness.graph.planning`), so it never reaches here. A plan
+            # this release cannot read routes here, but `readable_plan`
+            # clears it, so it names no removed ask.
+            stopped_plan = (
+                readable_plan(ctx, ctx.state.get("plan")) if stopped_kept is not None else None
+            )
+            removed = set(stopped_plan.dropped_asks) if stopped_plan is not None else set()
+            numbers = sorted({*map(int, kept), *removed})
+            if numbers:
                 brief_asks = load_asks(ctx.state)
-                result = hand_back.listing(
-                    ctx.state,
-                    [
-                        await earlier(int(number), brief_asks[int(number)])
-                        for number in sorted(kept, key=int)
-                    ],
-                )
-                computed = (
-                    f"{_partial_result(result['asks'], frames=bool(result['frames']))} "
-                    "Every other ask was not computed. "
-                )
-                listed = f"\n{json.dumps(result)}"
-            yield {
-                "status": ORCHESTRATOR_PLAN_FAILED_STATUS,
+                entries: list[dict[str, Any]] = []
+                for number in numbers:
+                    if number in removed:
+                        entries.append(_dropped_status(brief_asks[number]))
+                    else:
+                        entries.append(await earlier(number, brief_asks[number]))
+                listing = hand_back.listing(ctx.state, entries)
+                if any(int(number) not in removed for number in kept):
+                    # "Every other ask" would cover a removed ask too.
+                    others = "the plan kept " if removed else ""
+                    computed = (
+                        f"{_partial_result(listing['asks'], frames=bool(listing['frames']))} "
+                        f"Every other ask {others}was not computed. "
+                    )
+                if removed:
+                    computed += f"{_removed_asks([brief_asks[n] for n in sorted(removed)])} "
+            refused = AgentHandBack(
+                answers="plan",
+                status=ORCHESTRATOR_PLAN_FAILED_STATUS,
                 # The refusal's code, which words the failed step the user sees.
-                "failure": {"code": node_input.get("code")},
-                "text": "The planner could not make a plan: "
+                failure={"code": node_input.get("code")},
+                text="The planner could not make a plan: "
                 f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}Answer with search "
                 "and fetch where you can, and say plainly what could not be calculated."
-                + (" A brief that avoids the problem may be planned once more." if again else "")
-                + listed,
-            }
+                + (" A brief that avoids the problem may be planned once more." if again else ""),
+                body={**listing, **amendments},
+            )
+            yield refused.model_dump(mode="json")
             return
         plan = readable_plan(ctx, ctx.state.get("plan"))
         wholes = plan_display.share_wholes(plan) if plan is not None else {}
@@ -805,7 +891,8 @@ def plan_done_node(
         if run is not None and not unfinished:
             delivery = await deliver(run_ledger, run["run_id"], read=read)
         unrecorded = unfinished and run.get("status") in ("unfinished", "not_started")
-        record = ""
+        record: dict[str, str] = {}
+        removed: list[str] = []
         if plan is not None:
             stopped = _stop_causes(plan, failed.get("step_id") if failed else None)
             plan_record = record_plan(
@@ -816,13 +903,14 @@ def plan_done_node(
                 run_id=run.get("run_id") if run else None,
             )
             failed = shown_failure(failed, plan, stopped)
-            record = "\n" + plan_record.render(budget=_PLAN_RECORD_CHARS)
+            record["plan_record"] = plan_record.render(budget=_PLAN_RECORD_CHARS)
+            removed = [ask.ask for ask in plan_record.asks if ask.dropped]
             if plan_record.asks and not unrecorded:
                 asks = [_ask_status(ask, ran, failed, stopped) for ask in plan_record.asks]
         if (failed or unfinished) and asks:
             asks = [
                 await earlier(number, status["ask"])
-                if str(number) in kept and not _computed(status)
+                if str(number) in kept and not _computed(status) and "dropped" not in status
                 else status
                 for number, status in enumerate(asks)
             ]
@@ -856,11 +944,11 @@ def plan_done_node(
             else:
                 lead = (
                     f"The approved plan stopped at the step marked failed. {partial} Some "
-                    "other parts of the question may still be retrievable on their own with "
-                    "fetch, by the spec_id a step names: show what can be shown, labelled as "
-                    "what it is, never as the derived result; do not repeat the failed "
-                    "request unchanged; and say plainly what remains unanswered and why, in "
-                    "the user's terms."
+                    "other parts of the asks the plan kept may still be retrievable on their "
+                    "own with fetch, by the spec_id a step names: show what can be shown, "
+                    "labelled as what it is, never as the derived result; do not repeat the "
+                    "failed request unchanged; and say plainly what remains unanswered and "
+                    "why, in the user's terms."
                 )
                 if _give_plan_back(ctx):
                     lead += " A brief that avoids the failure may be planned once more."
@@ -876,10 +964,15 @@ def plan_done_node(
             )
         else:
             lead = "The approved plan ran. Chart its frames and answer."
-        yield {
-            "status": ORCHESTRATOR_PLAN_RAN_STATUS,
-            "text": f"{lead}\n{json.dumps(result)}{record}",
-        }
+        if removed:
+            lead += f" {_removed_asks(removed)}"
+        ran_back = AgentHandBack(
+            answers="plan",
+            status=ORCHESTRATOR_PLAN_RAN_STATUS,
+            text=lead,
+            body={**result, **record, **amendments},
+        )
+        yield ran_back.model_dump(mode="json")
         if delivery is not None:
             await delivery.acknowledge()
 

@@ -42,6 +42,7 @@ from analysis_mcp.engine.join import (
     JoinUnknownKeyError,
     run_join,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     canonical_columns_or_refusal,
     derive_frame_content_version,
@@ -55,7 +56,7 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frames,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import JoinOpSpec, PinnedUnit
+from analysis_mcp.op_spec import FrameRefArgument, JoinOpSpec, PinnedUnit
 from analysis_mcp.settings import Settings
 from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, shared_step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -176,19 +177,23 @@ def _join_step(
 @holds_input_rows
 async def join(
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The left side's {spec_id, content_version} pair, naming a materialised "
                 "frame or a prior verb result. Obtained from get_data's or a prior verb's "
-                "own digest -- never invented."
+                "own digest -- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],
     right_frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
-            description="The right side's frame_ref pair -- required; join always needs two frames."
+            description=(
+                "The right side's frame_ref pair -- required; join always needs two frames. "
+                "A bare spec_id also works: the server fetches the data itself."
+            )
         ),
     ],
     join_keys: Annotated[
@@ -241,7 +246,7 @@ async def join(
     shared role column, auto-detected) plus `time_period`.
 
     `right_keys` pairs a left column with a right column of another name
-    holding the same entities, as `quotient_of`'s `denominator_by` does:
+    holding the same entities, as `share_of`'s `denominator_by` does:
     `join_keys=["observationAbout"]`, `right_keys={"observationAbout":
     "destination"}` joins a WHO series to a CRS series where both name
     Kenya. Values match by equality, so Kenya against Uganda matches
@@ -419,7 +424,7 @@ async def join(
             ratio=(holds_ratio(left_trace), holds_ratio(right_trace)),
         ),
         digest=lambda: render_join_digest(
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

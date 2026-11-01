@@ -446,7 +446,7 @@ async def resolve_operation_response(
             if not is_retryable(exc):
                 if raise_upstream_error:
                     raise
-                return to_tool_result(from_upstream_error(exc))
+                return to_tool_result(from_upstream_error(exc, tool="get_data"))
             if bound.remaining() > 0:
                 logger.info(
                     "get_data operation poll: %s poll attempt %d failed retryably (%s); "
@@ -536,7 +536,11 @@ async def _fetch_finished(
     except UpstreamError as exc:
         if raise_upstream_error and not is_retryable(exc):
             raise
-        return queued if is_retryable(exc) else to_tool_result(from_upstream_error(exc))
+        return (
+            queued
+            if is_retryable(exc)
+            else to_tool_result(from_upstream_error(exc, tool="get_data"))
+        )
     if isinstance(polled, ToolResult):
         return polled
     if polled.operation.status == "done" and polled.manifest is not None:

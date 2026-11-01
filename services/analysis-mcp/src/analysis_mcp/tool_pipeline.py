@@ -11,11 +11,37 @@ ends with, once its own engine call (and any coverage-floor check) has
 already succeeded. What sits between those two halves -- the engine call
 itself, and mapping its own typed exceptions to a refusal -- stays inline in
 each verb tool: that mapping is genuinely each verb's own.
+
+The registered tools (`verbs`) compute in dfo-apis' analysis runner.
+`run_on_runner` sends a validated op-spec as a one-node tree
+(`runner_tree.verb_tree`) and turns the runner's summary into the reply, its
+`VerbResult` and its digest (`digest.render_summary_digest`).
+
+On a public call (`rebuild_lost_frames`), a frame the runner no longer holds
+(`ToolRefusal.lost_frames`) is rebuilt and the call sent again: a `spec_` frame
+as the Spec root that fetches it at its newest version in its recorded rendering
+(`runner_tree.spec_root`), an `ops_` frame as the pair the runner computes from its
+stored recipe on current data (`runner_client.replay_derived`). The runner names one
+lost dataset per refusal, so a call over two lost datasets is sent again once per
+side, at most once per distinct frame argument. A `spec_` frame whose rendering
+cannot be established refuses as `spec_root` says. A replay the runner cannot run
+yet refuses with its own delay. When any other replay fails, the call refuses with
+the lost-frame refusal and the sentence that says so (`ToolRefusal.not_rebuilt`). The
+call sent again keeps its own refusal, and gains that sentence only when it names a
+frame still lost.
+The frame each bare `spec_id` and each fetched-again `spec_` frame was read as is
+recorded as its mint record (`runner_tree.record_spec_reads`), and the digest
+opens with a sentence naming that frame's pair, and one naming the pair each rebuilt
+frame was read as when it moved, since a replay can mint a new `ops_` id.
+
+The rest of this module serves the in-process tools, which no registered tool
+calls.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from common.caller import current_writer
 from common.materialisation import FrameRef, FrameTooLarge, get_store
@@ -23,15 +49,20 @@ from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
 
 from analysis_mcp.artifact import Exclusion
+from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
 from analysis_mcp.frame_ref_resolution import call_row_claim, op_spec_hash_or_refusal
 from analysis_mcp.identity import mint_toolkit_content_version
 from analysis_mcp.result import VerbResult, observed_shape
-from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from analysis_mcp.runner_client import Pair, replay_derived, run_tree
+from analysis_mcp.runner_tree import Tree, newest_ref, record_spec_reads, spec_root, verb_tree
+from analysis_mcp.summary import VerbSummary
+from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
 
+    from common.place_type import PlaceLevel
     from dfo_frame_grammar import Frame
 
     from analysis_mcp.engine.common import Exclusions
@@ -199,6 +230,176 @@ async def store_result_and_render(
     return ToolResult(
         content=digest(),
         structured_content=result.model_dump(mode="json"),
+        is_error=False,
+    )
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Rebuilt:
+    """A lost frame `ref` and the root `node` that stands for it."""
+
+    ref: FrameRef
+    node: dict[str, Any]
+
+
+def _transient(refusal: ToolRefusal) -> bool:
+    """Whether `refusal` is a busy, still-building or failing service's, which the same
+    call outlives."""
+    return refusal.code is ToolErrorCode.SERVICE_UNAVAILABLE or refusal.retry_after_s is not None
+
+
+async def _rebuilt(
+    ref: FrameRef, *, lost: ToolRefusal, default_enrichment: bool
+) -> _Rebuilt | ToolRefusal:
+    """The root that rebuilds `ref`, which the refusal `lost` names, or the refusal the
+    call answers when no root can."""
+    if ref.spec_id.startswith("ops_"):
+        replayed = await replay_derived(ref)
+        if isinstance(replayed, ToolRefusal):
+            return replayed if _transient(replayed) else lost.not_rebuilt()
+        return _Rebuilt(ref=ref, node=replayed.model_dump())
+    root = await spec_root(ref, default_enrichment=default_enrichment)
+    return root if isinstance(root, ToolRefusal) else _Rebuilt(ref=ref, node=root)
+
+
+def _pairs(frames: tuple[FrameRef, ...]) -> str:
+    """Each frame as the `spec_id` and `content_version` a later call names it by."""
+    return "; ".join(f"{frame.spec_id}, {frame.content_version}" for frame in frames)
+
+
+def _rebuilt_sentence(rebuilt: _Rebuilt, read: Mapping[str, tuple[FrameRef, ...]]) -> str | None:
+    """The sentence naming a rebuilt frame's old and new pair, `None` when its pair
+    did not move or the new one is unknown."""
+    ref = rebuilt.ref
+    if "content_version" in rebuilt.node:
+        now = (FrameRef.model_validate(rebuilt.node),)
+        how = "computed again from its recipe on current data"
+    else:
+        now = read.get(ref.spec_id, ())
+        how = "fetched again at its newest version"
+    if not now or now == (ref,):
+        return None
+    return (
+        f"The frame {ref.spec_id}, {ref.content_version} was no longer held, so it was "
+        f"{how}: {_pairs(now)} in place of {ref.content_version}."
+    )
+
+
+def _newest_sentence(spec_id: str, read: Mapping[str, tuple[FrameRef, ...]]) -> str:
+    """The sentence naming the frame a bare `spec_id` was read as."""
+    if not (frames := read.get(spec_id)):
+        return f"{spec_id} was read at its newest version."
+    return f"{spec_id} was read at its newest version as {_pairs(frames)}."
+
+
+def _frame_count(op_spec: OpSpecVariant) -> int:
+    """How many distinct frames `op_spec`'s frame arguments name."""
+    return len(
+        {
+            (value.spec_id, value.content_version)
+            for _, value in op_spec
+            if isinstance(value, FrameRef)
+        }
+    )
+
+
+async def run_on_runner(
+    op_spec: OpSpecVariant,
+    *,
+    anchor_key: str | None = None,
+    place_level: PlaceLevel | None = None,
+    newest: Collection[str] = (),
+    follows_tree: bool = False,
+    rebuild_lost_frames: bool = False,
+    refine: Callable[[ToolRefusal], ToolRefusal] | None = None,
+    heading: str | None = None,
+) -> ToolResult:
+    """The reply every registered verb returns for `op_spec`, computed by the runner.
+    A rolling call's `anchor_key` sends the roots of its anchor record beside the
+    tree (`runner_tree.verb_tree`), and its answer is checked against them
+    (`runner_client.run_tree`). `place_level` filters each input to that level
+    first. `follows_tree` lets a derived input's rolling years follow the call's
+    tree (`run_tree`). `newest` are the Specs passed as bare `spec_id`s, held in
+    `op_spec` under `runner_tree.newest_ref` and read at their newest version. With
+    `rebuild_lost_frames`, a lost frame is rebuilt (see the module docstring).
+    Without it, the runner's refusal is returned. `refine`, when given, rewrites a runner
+    refusal before it is returned. `heading`, when given, opens the digest of a
+    `sum_of` or `quotient_of` computed under another tool's name.
+
+    `structured_content` is the summary's `VerbResult` fields and `content` the
+    digest rendered from its facts, as the in-process tools built both. A frame
+    the tree cannot name, and every runner refusal, comes back as its refusal
+    (`runner_client`).
+    """
+    replaced: dict[Pair, dict[str, Any]] = {
+        (spec_id, newest_ref(spec_id).content_version): {"spec_id": spec_id} for spec_id in newest
+    }
+    sent: Tree | None = None
+
+    async def run() -> VerbSummary | ToolRefusal:
+        nonlocal sent
+        # Only the public server sets `follows_tree`.
+        tree = await verb_tree(
+            op_spec,
+            anchor_key=anchor_key,
+            place_level=place_level,
+            replaced=replaced,
+            default_enrichment=follows_tree,
+        )
+        if isinstance(tree, ToolRefusal):
+            return tree
+        sent = tree
+        return await run_tree(
+            tree.node,
+            anchor=tree.anchor,
+            refs_by_root=tree.refs_by_root,
+            spec_roots=tree.spec_roots,
+            follows_tree=follows_tree,
+        )
+
+    answer = await run()
+    rebuilt: dict[Pair, _Rebuilt] = {}
+    lost: ToolRefusal | None = None
+    frames = _frame_count(op_spec) if rebuild_lost_frames else 0
+    while isinstance(answer, ToolRefusal) and len(rebuilt) < frames:
+        fresh = {
+            pair: ref
+            for ref in answer.lost_frames
+            if (pair := (ref.spec_id, ref.content_version)) not in rebuilt
+        }
+        if not fresh:
+            break
+        lost = answer
+        for pair, ref in fresh.items():
+            root = await _rebuilt(ref, lost=lost, default_enrichment=follows_tree)
+            if isinstance(root, ToolRefusal):
+                return to_tool_result(root)
+            rebuilt[pair] = root
+            replaced[pair] = root.node
+        answer = await run()
+    if isinstance(answer, ToolRefusal):
+        if lost is not None and answer.lost_frames:
+            return to_tool_result(answer.not_rebuilt())
+        return to_tool_result(answer if refine is None else refine(answer))
+    read = (
+        await record_spec_reads(
+            FrameRef(spec_id=answer.spec_id, content_version=answer.content_version), sent.node
+        )
+        if sent is not None and sent.spec_roots
+        else {}
+    )
+    sentences = [
+        sentence
+        for sentence in (
+            *(_newest_sentence(spec_id, read) for spec_id in newest),
+            *(_rebuilt_sentence(root, read) for root in rebuilt.values()),
+        )
+        if sentence is not None
+    ]
+    digest = render_summary_digest(answer, heading=heading)
+    return ToolResult(
+        content="\n\n".join([" ".join(sentences), digest]) if sentences else digest,
+        structured_content=answer.verb_result().model_dump(mode="json"),
         is_error=False,
     )
 

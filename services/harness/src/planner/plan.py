@@ -192,6 +192,26 @@ TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 # `UNSUPPORTED_STATE_KEY`.
 REDUCTION_REFUSED_ASKS_STATE_KEY = "planner:reduction_refused_asks"
 
+# Every spec_id the executor refused since the session's last first-draft
+# entry, as a list of bare spec_ids. `harness.planner_seam.PlannerSeam` writes
+# it on each entry and clears it on a first draft, and admission refuses a plan
+# pinning one still in force (`submission.service.refused_in_force`,
+# `submission.service.admit`).
+REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
+# Each refused spec_id's `RefusedSpec`, its code and time, by spec_id. Kept
+# under a key of its own so `REFUSED_SPECS_STATE_KEY` keeps the shape a build
+# that reads only the ids expects; a spec_id with no entry here reads as
+# refused with no code or time (`load_refused_specs`).
+REFUSAL_DETAILS_STATE_KEY = "planner:refused_spec_details"
+# The time of the latest Search call made that settled on each spec_id, by
+# spec_id: the search for an input the planner pinned no dataset for
+# (`planner.agent.pin_by_search`) and each compile (`planner.agent.
+# compile_on_basis`, `compile_whole`). An answer served again keeps the time
+# of the call that made it (`translator.discovery.answered_once_at`), so it
+# moves nothing (`record_spec_searched`). Kept beside the pins, whose stored
+# shape it leaves as it was.
+SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
+
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
 # (`pin_sources`). `harness.planner_seam` writes it from the search
@@ -1948,6 +1968,7 @@ def _check_asks_accounted(
     asks: Sequence[str],
     answered: Sequence[AskAnswer],
     declined: Sequence[Decline],
+    dropped: Sequence[int],
     requirements: Sequence[EvidenceRequirement],
 ) -> None:
     """Reject a plan that leaves an ask unaccounted for, or answers or declines one twice.
@@ -1955,15 +1976,17 @@ def _check_asks_accounted(
     Each ask the brief lists is answered by one `AskAnswer`, declined by one
     `Decline` whose `ask_ref` names it, or both: an answer for the part the
     plan computes and a decline naming, in `Decline.ask`, the part it does
-    not. An answer names any requirement the plan states, one another
-    requirement reads included. `translator.mechanical.build_translation`
+    not. An ask the user's amendment removed (`dropped`) is accounted for
+    by that alone, and an answer or decline of it is a repeat. An answer
+    names any requirement the plan states, one another requirement reads
+    included. `translator.mechanical.build_translation`
     makes each a terminal, so its result reaches the answer. A number past
     the asks listed is a malformed draft. A gap, two answers or two declines
     is `AsksUnaccountedError`.
     """
     answer_numbers = [answer.ask for answer in answered]
     decline_numbers = [decline.ask_ref for decline in declined if decline.ask_ref is not None]
-    numbers = answer_numbers + decline_numbers
+    numbers = answer_numbers + decline_numbers + list(dropped)
     unlisted = sorted(set(numbers) - set(range(len(asks))))
     if unlisted:
         listed = f"numbered 0 to {len(asks) - 1}" if asks else "none"
@@ -1978,7 +2001,9 @@ def _check_asks_accounted(
     repeated = [
         number
         for number in range(len(asks))
-        if answer_numbers.count(number) > 1 or decline_numbers.count(number) > 1
+        if answer_numbers.count(number) > 1
+        or decline_numbers.count(number) > 1
+        or (number in dropped and numbers.count(number) > 1)
     ]
     if uncovered or repeated:
         raise AsksUnaccountedError(asks=asks, uncovered=uncovered, repeated=repeated)
@@ -4315,6 +4340,15 @@ class Plan(StrictModel):
         max_length=MAX_PLAN_ASKS,
         description="The requirements that answer each ask this plan does not decline.",
     )
+    dropped_asks: Annotated[tuple[int, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=MAX_PLAN_ASKS,
+        exclude_if=lambda dropped: not dropped,
+        description=(
+            "The numbers of the asks the user's amendment removed from the plan, as "
+            "`propose_plan`'s `removed_asks` names them (`Plan.amend`)."
+        ),
+    )
     ask_breakdowns: Annotated[tuple[AskBreakdown, ...], HASHED_WHEN_SET] = Field(
         default=(),
         max_length=MAX_PLAN_ASKS,
@@ -4503,7 +4537,9 @@ class Plan(StrictModel):
         decisions_by_slot = {decision.slot: decision for decision in self.decisions}
         _check_requirements_honour_their_decisions(self.evidence_requirements, decisions_by_slot)
         _check_population_claims_are_cited(self.evidence_requirements, decisions_by_slot)
-        _check_asks_accounted(self.asks, self.answered, self.declined, self.evidence_requirements)
+        _check_asks_accounted(
+            self.asks, self.answered, self.declined, self.dropped_asks, self.evidence_requirements
+        )
         _check_asks_keep_their_parties(self)
         check_wholes_span_their_totals(self)
         _check_asks_across_years(self.asks, self.asks_across_years)
@@ -4615,6 +4651,7 @@ class Plan(StrictModel):
         asks_across_years: Sequence[int] = (),
         answered: Sequence[AskAnswer] = (),
         first_years: Sequence[FirstYear] | None = None,
+        dropped: Sequence[int] = (),
     ) -> Plan:
         """Return a new, incremented-version `Plan` with a patch applied.
 
@@ -4676,6 +4713,10 @@ class Plan(StrictModel):
                 its datasets' whole history from (`whole_history_split`).
                 Omitted, it keeps this plan's for the dataset requirements
                 it still states.
+            dropped: The numbers of the asks the user's amendment removes
+                from the plan, which join `dropped_asks`. Whatever answered
+                or declined one before goes. An ask recorded there stays
+                until a patch answers or declines it, or replaces the asks.
 
         Returns:
             A new `Plan`; `self` is unchanged.
@@ -4706,7 +4747,11 @@ class Plan(StrictModel):
                 "rolling_copies": (),
                 "first_years": tuple(first_years),
                 **_patched_accounts(
-                    self, answered=answered, declined=declined, same_asks=asks == self.asks
+                    self,
+                    answered=answered,
+                    declined=declined,
+                    same_asks=asks == self.asks,
+                    dropped=dropped,
                 ),
                 "asks": asks,
                 "ask_breakdowns": breakdowns,
@@ -5861,35 +5906,50 @@ def _patched_accounts(
     answered: Sequence[AskAnswer],
     declined: Sequence[Decline],
     same_asks: bool,
+    dropped: Collection[int],
 ) -> dict[str, tuple[Any, ...]]:
-    """Apply a patch's answers and declines to `plan`'s.
+    """Apply a patch's answers and declines to `plan`'s, and its drops.
 
     An ask the patch answers or declines is accounted for by the patch alone:
-    whatever answered or declined it before is dropped. A decline naming no
-    ask replaces the one with its code, as `_patched` keys it. Unless
-    `same_asks`, the patch accounts for every ask: `plan`'s answers and the
-    declines naming an ask are numbered against a list that no longer holds.
+    whatever answered, declined or dropped it before is dropped. A decline
+    naming no ask replaces the one with its code, as `_patched` keys it.
+    An ask in `dropped` joins `dropped_asks`, and whatever answered or
+    declined it before goes. Unless `same_asks`, the patch accounts for
+    every ask: `plan`'s answers, drops and the declines naming an ask are
+    numbered against a list that no longer holds.
     """
     restated = {answer.ask for answer in answered} | {
         decline.ask_ref for decline in declined if decline.ask_ref is not None
     }
     if not same_asks:
-        restated |= {answer.ask for answer in plan.answered} | {
-            decline.ask_ref for decline in plan.declined if decline.ask_ref is not None
-        }
+        restated |= (
+            {answer.ask for answer in plan.answered}
+            | {decline.ask_ref for decline in plan.declined if decline.ask_ref is not None}
+            | set(plan.dropped_asks)
+        )
+    dropped = {*dropped, *(number for number in plan.dropped_asks if number not in restated)}
     return {
         "answered": _patched(
-            tuple(answer for answer in plan.answered if answer.ask not in restated),
+            tuple(
+                answer
+                for answer in plan.answered
+                if answer.ask not in restated and answer.ask not in dropped
+            ),
             answered,
             (),
             key="ask",
         ),
         "declined": _patched(
-            tuple(decline for decline in plan.declined if decline.ask_ref not in restated),
+            tuple(
+                decline
+                for decline in plan.declined
+                if decline.ask_ref not in restated and decline.ask_ref not in dropped
+            ),
             declined,
             (),
             key="key",
         ),
+        "dropped_asks": tuple(sorted(dropped)),
     }
 
 
@@ -6764,6 +6824,66 @@ def load_reduction_refused_asks(state: SessionState) -> frozenset[int]:
 def record_reduction_refused_asks(state: SessionState, asks: Iterable[int]) -> None:
     """Add `asks` to those a `period_reduction_unstated` refusal named in the planner's current entry."""
     state[REDUCTION_REFUSED_ASKS_STATE_KEY] = sorted(load_reduction_refused_asks(state) | set(asks))
+
+
+class RefusedSpec(StrictModel):
+    """A spec_id the executor refused, with the refusal's `code` and the time the planner entry answering it began.
+
+    `code` and `refused_at` are `None` for a spec_id `REFUSAL_DETAILS_STATE_KEY`
+    holds nothing for, which `harness.turn_records.refusals_in_force` holds in
+    force for good.
+    """
+
+    spec_id: str
+    code: str | None = None
+    refused_at: datetime | None = None
+
+
+def load_refused_specs(state: SessionState) -> tuple[RefusedSpec, ...]:
+    """Return every spec_id the executor refused since the session's last first-draft entry, with its code and time where held."""
+    details = state.get(REFUSAL_DETAILS_STATE_KEY) or {}
+    return tuple(
+        RefusedSpec.model_validate(details[spec_id])
+        if spec_id in details
+        else RefusedSpec(spec_id=spec_id)
+        for spec_id in state.get(REFUSED_SPECS_STATE_KEY) or ()
+    )
+
+
+def save_refused_specs(state: SessionState, refused: Iterable[RefusedSpec]) -> None:
+    """Hold `refused` as every spec_id the executor refused since the session's last first-draft entry.
+
+    The ids go under `REFUSED_SPECS_STATE_KEY` and each one's code and time
+    under `REFUSAL_DETAILS_STATE_KEY`.
+    """
+    ordered = sorted(refused, key=lambda spec: spec.spec_id)
+    state[REFUSED_SPECS_STATE_KEY] = [spec.spec_id for spec in ordered]
+    state[REFUSAL_DETAILS_STATE_KEY] = {
+        spec.spec_id: spec.model_dump(mode="json")
+        for spec in ordered
+        if spec.code is not None or spec.refused_at is not None
+    }
+
+
+def spec_searched_at(state: SessionState) -> dict[str, datetime]:
+    """When a Search call made last settled on each spec_id (`SPEC_SEARCHED_STATE_KEY`)."""
+    return {
+        spec_id: datetime.fromisoformat(at)
+        for spec_id, at in (state.get(SPEC_SEARCHED_STATE_KEY) or {}).items()
+    }
+
+
+def record_spec_searched(state: SessionState, spec_id: str, at: datetime | None) -> None:
+    """Hold that a Search call made at `at` settled on `spec_id`, unless a later one is held; `None` holds nothing."""
+    if at is None:
+        return
+    held = spec_searched_at(state)
+    if spec_id in held and held[spec_id] >= at:
+        return
+    state[SPEC_SEARCHED_STATE_KEY] = {
+        **(state.get(SPEC_SEARCHED_STATE_KEY) or {}),
+        spec_id: at.isoformat(),
+    }
 
 
 def clear_unsupported(state: SessionState) -> None:

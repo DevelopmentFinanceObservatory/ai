@@ -18,6 +18,17 @@ presentation-mcp as FastMCP ASGI sub-apps inside its own process,
 reachable over streamable HTTP at in-container loopback paths
 (`/mcp/data`, `/mcp/analysis`, `/mcp/presentation`).
 
+The agent runs in ADK's chat mode, so each of its runs in a turn reads its
+own earlier calls and their results. Its `plan` and `ask_user` tools record
+a hand-off and end its run; when the workflow comes back, the `orchestrate`
+node (`harness.graph.orchestrate`) answers the open call with a function
+response under the call's id, and ADK pairs a call with its last response.
+The agent reads a plan's frames, step summaries, asks and plan record, or
+the user's answers, as that call's result. The `seed` node's hand-back, the
+runs and datasets a turn opens with, answers no call: it waits in session
+state and `orchestrator.agent.prepend_digests` shows it after the user's
+message on every request.
+
 **`services/harness/src/planner`** is the Planner Agent: an ADK agent that
 drafts a methodological plan for a question, recording each decision it makes,
 the alternatives it considered, and the evidence an acceptable answer rests on.
@@ -81,7 +92,8 @@ the model to compute a number directly, the model emits an op-spec against a
 closed verb set (`aggregate`, `compare`, `growth`, `rank`, `share_of`,
 `quotient_of`, `sum_of`, `join`, `filter`). Deterministic code executes that spec and returns a
 frame reference, a summary, and a trace (instead of raw bulk data back into the model's
-context).
+context). The public tool list serves `sum_of` as `compare`'s sum form and `quotient_of` as
+`share_of`'s quotient form.
 
 **`packages/common`** holds the small pieces of shared internals every
 service needs: a settings base class, a logging setup, a telemetry
@@ -194,10 +206,19 @@ proxy-level metrics do not dilute the agent traces.
 A deployed service with the Langfuse variables set sends Langfuse Cloud (EU
 region) the text of each Studio question and the assistant's replies; the
 orchestrator and planner prompts, which include the canvas and conversation
-digests (ADK's `call_llm` spans carry them); tool arguments and results at digest
-level; and refusal codes with the refusal fields recorded on the trace events
-below. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE` and a
-Langfuse `mask` function limit it.
+digests, and each model response, on ADK's `generate_content` spans; tool
+arguments and results at digest level, on its `execute_tool` spans; and
+refusal codes with the refusal fields recorded on the trace events below.
+`common.telemetry.init_telemetry` sets
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY` when the
+environment leaves it unset, which is what puts prompts, responses and tool
+content on those spans; `NO_CONTENT` keeps them off. A streamed response
+appears as one output message per chunk, and a thought summary appears as
+unlabelled text. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE`
+and a Langfuse `mask` function limit it.
+`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` returns ADK to its v1
+span layout, under which Langfuse prices each model call twice and shows each
+`invoke_workflow` span without its parent.
 
 One studio turn is one trace. `ConversationState.begin_turn` opens a `turn`
 span whose trace id is derived from the turn's wire `trace_id`, and

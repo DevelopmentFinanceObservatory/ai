@@ -7,7 +7,8 @@ sentence fails `tests/test_sentences.py`:
 - `COMPILE_REASONS`, per `compiler.compile.CompileIssueCode`, which a
   `requirement_needs_repair` referral names as its `constraint`;
 - `DECLINE_REASONS`, per `planner.plan.UnsupportedOperation`, the reason the
-  plan card and `harness.graph.plan_done` give for an ask the plan declines;
+  plan card and `harness.graph.plan_done` give for an ask the plan declines,
+  and `DROPPED_REASON`, the card's for an ask the user's amendment removed;
 - `SEAM_REASONS`, per `SeamCode` and `planner.tool_results.ProblemCode`: why
   a revision in code was refused and nothing more, which
   `harness.graph.switch` shows under the choice a switch did not apply to;
@@ -228,6 +229,10 @@ DECLINE_REASONS: Mapping[UnsupportedOperation, str] = {
     UnsupportedOperation.UNSUPPORTED_ASK: _CANNOT_ANSWER,
     UnsupportedOperation.BREAKDOWN_NOT_KEPT: _NO_BREAKDOWN,
 }
+
+# The reason the plan card gives for an ask the user's amendment removed
+# (`planner.plan.Plan.dropped_asks`), in `DECLINE_REASONS`' form.
+DROPPED_REASON = "you removed it from the plan"
 
 # A problem the planner's model repairs within its entry, which ends a
 # revision in code (`harness.planner_seam.PlannerSeam.revise`), where no model
@@ -731,6 +736,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "over_ceiling",
             "frame_too_large",
             "resource_exhausted",
+            "payload_too_large",
             HarnessCode.SERIES_LIMIT_EXCEEDED,
         }
     ),
@@ -799,7 +805,9 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "operation_uncovered",
             "derived_input_ordinal",
             "derived_input_unrecoverable",
+            "rolling_reanchor_unavailable",
             "derived_input_unusable",
+            "rendering_not_recorded",
             "join_output_collision",
             "grain_ambiguous",
             "spec_not_exportable",
@@ -854,6 +862,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "authorisation_mismatch",
             "manifest_outside_authorisation",
             HarnessCode.PROVENANCE_UNAVAILABLE,
+            "licence_not_redistributable",
         }
     ),
     FailureClass.CARD_REFUSED: frozenset(
@@ -862,6 +871,10 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "constraint_violation",
             "schema_invalid",
             "write_refused",
+            "allowance_exhausted",
+            "share_not_replaceable",
+            "write_token_invalid",
+            "write_token_required",
             "render_target_mismatch",
             "unsupported_schema_version",
             "unsupported_version",
@@ -883,12 +896,14 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "internal_error",
             "request_invalid",
             "op_spec_invalid",
+            "frame_ref_incomplete",
             "role_ambiguous",
             "join_no_common_key_columns",
             "filter_predicate_type_mismatch",
             "share_of_key_unknown",
             "place_levels_mixed",
             "frame_integrity_failed",
+            "share_id_taken",
             ExecutorCode.MALFORMED_REFUSAL,
             HarnessCode.UNKNOWN_TOOL,
             HarnessCode.RUN_RECORD_UNREADABLE,
@@ -909,6 +924,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "skill_not_found",
             "skill_resource_not_found",
             "refresh_not_permitted",
+            "share_import_not_permitted",
             HarnessCode.ROLLING_REPLAY_NOT_CONFIGURED,
             HarnessCode.TOOL_NOT_CONFIGURED,
             HarnessCode.PUBLISH_UNAVAILABLE,

@@ -160,7 +160,7 @@ def _one_turn(external_id: str) -> None:
     """Open a `turn` span, a child span inside it, and close the turn."""
     handle = start_turn_span(external_id)
     with use_turn_span(handle):
-        _child_span("call_llm")
+        _child_span("generate_content gemini-x")
     end_turn_span(handle)
     get_client().flush()
 
@@ -168,7 +168,7 @@ def _one_turn(external_id: str) -> None:
 def _assert_turn_root_exported(fake: FakeLangfuse, external_id: str) -> None:
     spans = fake.spans()
     (turn,) = [span for span in spans if span.name == "turn"]
-    (child,) = [span for span in spans if span.name == "call_llm"]
+    (child,) = [span for span in spans if span.name == "generate_content gemini-x"]
 
     expected_trace_id = Langfuse.create_trace_id(seed=external_id)
     assert turn.trace_id.hex() == expected_trace_id
@@ -323,13 +323,13 @@ async def test_flush_telemetry_exports_queued_spans_without_waiting_for_the_inte
 
     handle = start_turn_span("tr_export0006")
     with use_turn_span(handle):
-        _child_span("call_llm")
+        _child_span("generate_content gemini-x")
     end_turn_span(handle)
     assert fake_langfuse.spans() == []
 
     await flush_telemetry()
 
-    assert {span.name for span in fake_langfuse.spans()} == {"turn", "call_llm"}
+    assert {span.name for span in fake_langfuse.spans()} == {"turn", "generate_content gemini-x"}
 
 
 async def test_flush_telemetry_returns_at_its_bound_when_the_server_hangs(
@@ -340,7 +340,7 @@ async def test_flush_telemetry_returns_at_its_bound_when_the_server_hangs(
     _join_auth_check_thread()
     handle = start_turn_span("tr_export0007")
     with use_turn_span(handle):
-        _child_span("call_llm")
+        _child_span("generate_content gemini-x")
     end_turn_span(handle)
     fake_langfuse.hang_exports = True
 
@@ -357,7 +357,7 @@ async def test_flush_telemetry_returns_at_its_bound_when_the_server_hangs(
         if thread.name == telemetry._FLUSH_THREAD_NAME:
             thread.join(timeout=30)
             assert not thread.is_alive()
-    assert {span.name for span in fake_langfuse.spans()} == {"turn", "call_llm"}
+    assert {span.name for span in fake_langfuse.spans()} == {"turn", "generate_content gemini-x"}
 
 
 async def test_a_flush_requested_during_a_running_one_is_served_before_it_finishes(
@@ -414,38 +414,32 @@ def _spans_with_an_unexported_parent(spans: list[Span]) -> list[Span]:
     return [span for span in spans if span.parent_span_id not in exported]
 
 
-async def test_adks_invocation_span_is_exported_and_other_bare_spans_are_not(
+async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
     fake_langfuse: FakeLangfuse,
 ) -> None:
-    """ADK wraps each run in an attribute-less `invocation` span that is the
-    parent of its `invoke_workflow` span. The Langfuse default filter drops it;
-    the client built by `init_telemetry` keeps it (matched on scope and name),
-    while an attribute-less span from any other scope, or of another name in
-    ADK's scope, is dropped."""
+    """ADK's schema v2 spans carry `gen_ai.*` attributes, so the Langfuse
+    default filter exports them, `invoke_workflow` as a child of `turn`. A span
+    with no such attribute, from ADK's scope or any other, is dropped."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
     handle = start_turn_span("tr_export0010")
     with use_turn_span(handle):
         adk = trace.get_tracer("gcp.vertex.agent")
-        with adk.start_as_current_span("invocation"):
-            with adk.start_as_current_span("invoke_workflow wf") as workflow:
-                workflow.set_attribute("gen_ai.operation.name", "invoke_workflow")
-            with adk.start_as_current_span("bare_adk_span"):
-                pass
-        other = trace.get_tracer("some.other.library")
-        with other.start_as_current_span("invocation"), other.start_as_current_span("bare"):
+        with adk.start_as_current_span("invoke_workflow wf") as workflow:
+            workflow.set_attribute("gen_ai.operation.name", "invoke_workflow")
+        with adk.start_as_current_span("bare_adk_span"):
+            pass
+        with trace.get_tracer("some.other.library").start_as_current_span("bare"):
             pass
     end_turn_span(handle)
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert sorted(span.name for span in spans) == ["invocation", "invoke_workflow wf", "turn"]
+    assert sorted(span.name for span in spans) == ["invoke_workflow wf", "turn"]
     (turn,) = [span for span in spans if span.name == "turn"]
-    (invocation,) = [span for span in spans if span.name == "invocation"]
     (workflow,) = [span for span in spans if span.name == "invoke_workflow wf"]
-    assert invocation.parent_span_id == turn.span_id
-    assert workflow.parent_span_id == invocation.span_id
+    assert workflow.parent_span_id == turn.span_id
     # The only parent that was never exported is the SDK's synthetic one for `turn`.
     assert _spans_with_an_unexported_parent(spans) == [turn]
 
@@ -636,126 +630,11 @@ def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
     assert inner._timeout == sdk._timeout
 
 
-_USAGE = {
-    "gen_ai.usage.input_tokens": 120,
-    "gen_ai.usage.output_tokens": 30,
-    "gen_ai.usage.reasoning.output_tokens": 12,
-    "gen_ai.usage.experimental.system_instruction_tokens": 40,
-}
-
-
-_LLM_RESPONSE_KEY = "gcp.vertex.agent.llm_response"
-_LLM_RESPONSE = json.dumps(
-    {"content": {"parts": [{"text": "hi"}]}, "usage_metadata": {"cached_content_token_count": 7}}
-)
-
-
-def _model_call(call_llm_scope: str, *, call_llm_usage: dict[str, int] = _USAGE) -> None:
-    """Open ADK's two nested spans for one model call: `call_llm` from
-    `call_llm_scope`, carrying `call_llm_usage`, and the `generate_content
-    gemini-x` inference span inside it, carrying the token usage."""
-    handle = start_turn_span("tr_export0012")
-    call_llm_tracer = trace.get_tracer(call_llm_scope)
-    inference_tracer = trace.get_tracer(telemetry._ADK_SCOPE_NAME)
-    with (
-        use_turn_span(handle),
-        call_llm_tracer.start_as_current_span("call_llm") as call_llm,
-    ):
-        call_llm.set_attributes(
-            {
-                "gen_ai.request.model": "gemini-x",
-                _LLM_RESPONSE_KEY: _LLM_RESPONSE,
-                **call_llm_usage,
-            }
-        )
-        with inference_tracer.start_as_current_span("generate_content gemini-x") as inference:
-            inference.set_attributes({"gen_ai.request.model": "gemini-x", **_USAGE})
-    end_turn_span(handle)
-    get_client().flush()
-
-
-def _usage_on(span: Span) -> dict[str, str | int | float | bool | None]:
-    return {
-        attribute.key: _attribute(span, attribute.key)
-        for attribute in span.attributes
-        if attribute.key.startswith("gen_ai.usage.")
-    }
-
-
-@pytest.mark.parametrize("call_llm_usage", [_USAGE, {}], ids=["with_usage", "without_usage"])
-def test_adks_call_llm_span_exports_as_a_plain_span_with_empty_usage_details(
-    fake_langfuse: FakeLangfuse, call_llm_usage: dict[str, int]
-) -> None:
-    """Langfuse prices every generation, and types a span that carries a model
-    as one. ADK writes the same usage on `call_llm` and on the `generate_content`
-    span inside it, so the export types every `call_llm` as a span, usage or
-    not, and gives it an explicit empty `usage_details`, which Langfuse reads
-    before any other usage source. The `gen_ai.usage.*` attributes are kept."""
-    init_telemetry(service_name="harness")
-    _join_auth_check_thread()
-
-    _model_call(telemetry._ADK_SCOPE_NAME, call_llm_usage=call_llm_usage)
-
-    spans = fake_langfuse.spans()
-    (call_llm,) = [span for span in spans if span.name == "call_llm"]
-    (inference,) = [span for span in spans if span.name == "generate_content gemini-x"]
-    assert _attribute(call_llm, "langfuse.observation.type") == "span"
-    assert _usage_on(call_llm) == call_llm_usage
-    assert _attribute(call_llm, "langfuse.observation.usage_details") == "{}"
-    assert _attribute(call_llm, _LLM_RESPONSE_KEY) == _LLM_RESPONSE
-    assert _attribute(call_llm, "gen_ai.request.model") == "gemini-x"
-    assert _attribute(inference, "langfuse.observation.type") is None
-    assert _attribute(inference, "langfuse.observation.usage_details") is None
-    assert _usage_on(inference) == _USAGE
-    assert inference.parent_span_id == call_llm.span_id
-
-
-def test_a_call_llm_span_from_another_scope_exports_untouched(
-    fake_langfuse: FakeLangfuse,
-) -> None:
-    init_telemetry(service_name="harness")
-    _join_auth_check_thread()
-
-    _model_call("some.other.library")
-
-    (call_llm,) = [span for span in fake_langfuse.spans() if span.name == "call_llm"]
-    assert _usage_on(call_llm) == _USAGE
-    assert _attribute(call_llm, "langfuse.observation.type") is None
-    assert _attribute(call_llm, "langfuse.observation.usage_details") is None
-
-
-def test_a_failing_span_mask_leaves_the_export_batch_intact_and_warns_once(
-    fake_langfuse: FakeLangfuse, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The SDK drops a whole export batch when its mask hook raises, so the hook
-    catches its own failures and the spans arrive as they were. A failure brings
-    double pricing back, so the first one in a process logs at WARNING and later
-    ones at DEBUG."""
-
-    def fail(**_: object) -> None:
-        raise RuntimeError("patch construction failed")
-
-    monkeypatch.setattr("langfuse.types.OtelSpanPatch", fail)
-    init_telemetry(service_name="harness")
-    _join_auth_check_thread()
-
-    with caplog.at_level(logging.DEBUG, logger=telemetry.logger.name):
-        _model_call(telemetry._ADK_SCOPE_NAME)
-        _model_call(telemetry._ADK_SCOPE_NAME)
-
-    spans = fake_langfuse.spans()
-    assert {span.name for span in spans} == {"turn", "call_llm", "generate_content gemini-x"}
-    for call_llm in [span for span in spans if span.name == "call_llm"]:
-        assert _usage_on(call_llm) == _USAGE
-    failures = [record for record in caplog.records if "call_llm" in record.message]
-    assert [record.levelno for record in failures] == [logging.WARNING, logging.DEBUG]
-
-
 # --- one Langfuse session per conversation ------------------------------------
 
 
 def _adk_child_span(name: str) -> None:
-    """A span like ADK's `call_llm`: a separate tracer, with ADK's own
+    """A span like ADK's `generate_content`: a separate tracer, with ADK's own
     per-turn conversation id."""
     with trace.get_tracer("gcp.vertex.agent").start_as_current_span(name) as span:
         span.set_attribute("gen_ai.conversation.id", "conv-1#t1")
@@ -769,12 +648,12 @@ def test_a_turn_with_a_session_id_exports_it_on_the_turn_and_on_spans_a_library_
 
     handle = start_turn_span("tr_export0013", session_id="conv-1")
     with use_turn_span(handle):
-        _adk_child_span("call_llm")
+        _adk_child_span("generate_content gemini-x")
     end_turn_span(handle)
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert {span.name for span in spans} == {"turn", "call_llm"}
+    assert {span.name for span in spans} == {"turn", "generate_content gemini-x"}
     for span in spans:
         assert _attribute(span, "session.id") == "conv-1", span.name
         assert _attribute(span, "langfuse.trace.name") == "turn", span.name
@@ -788,12 +667,12 @@ def test_a_turn_without_a_session_id_exports_no_langfuse_session(
 
     handle = start_turn_span("tr_export0014")
     with use_turn_span(handle):
-        _child_span("call_llm")
+        _child_span("generate_content gemini-x")
     end_turn_span(handle)
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert {span.name for span in spans} == {"turn", "call_llm"}
+    assert {span.name for span in spans} == {"turn", "generate_content gemini-x"}
     for span in spans:
         assert _attribute(span, "session.id") is None, span.name
         assert _attribute(span, "langfuse.trace.name") == "turn", span.name
@@ -809,7 +688,7 @@ def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
 
     handle = start_turn_span("tr_export0018", session_id="conv-1")
     with use_turn_span(handle):
-        _adk_child_span("call_llm")
+        _adk_child_span("generate_content gemini-x")
     end_turn_span(handle, request="life expectancy in Kenya", response="It rose to 66.")
     get_client().flush()
 
@@ -822,7 +701,7 @@ def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
     }
     assert io == {
         "turn": ("life expectancy in Kenya", "It rose to 66."),
-        "call_llm": (None, None),
+        "generate_content gemini-x": (None, None),
     }
 
 
@@ -841,7 +720,7 @@ def test_a_turn_closed_with_an_error_exports_its_root_at_level_error(
 
     handle = start_turn_span("tr_export0019")
     with use_turn_span(handle):
-        _child_span("call_llm")
+        _child_span("generate_content gemini-x")
     end_turn_span(handle, request="q", response="a", error=error)
     get_client().flush()
 
@@ -852,7 +731,7 @@ def test_a_turn_closed_with_an_error_exports_its_root_at_level_error(
         )
         for span in fake_langfuse.spans()
     }
-    assert marks == {"turn": (level, status_message), "call_llm": (None, None)}
+    assert marks == {"turn": (level, status_message), "generate_content gemini-x": (None, None)}
 
 
 # --- the session across an MCP call ------------------------------------------

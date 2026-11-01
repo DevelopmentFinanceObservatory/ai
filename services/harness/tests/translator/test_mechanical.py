@@ -98,7 +98,7 @@ from translator.referral import (
 )
 from translator.tool import build_translate, build_translator_core
 
-from .conftest import _spec
+from .conftest import FakeCall, _spec
 from .test_model_facing_tool_results import _ENVELOPE_KEYS, _flat_keys
 
 RequirementFactory = Callable[..., DatasetRequirement]
@@ -415,7 +415,7 @@ async def test_run_translate_compiles_a_clean_plan(
 ) -> None:
     context = context_holding(draft())
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert result["status"] == PlanStatus.PENDING_APPROVAL.value
@@ -435,7 +435,7 @@ async def test_a_compiled_plan_reaches_the_model_carrying_no_upstream_envelope(
     """
     context = context_holding(draft())
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert _flat_keys(result) & _ENVELOPE_KEYS == set()
@@ -446,7 +446,7 @@ async def _planner_reads(
 ) -> dict[str, Any]:
     """The verdict translation answers for `plan`, which `propose_plan` hands the
     planner's model under `translation`."""
-    return await build_translate(surface=surface)(context_holding(plan))
+    return await build_translate(surface=surface)(FakeCall(context_holding(plan).state))
 
 
 def _ranking_plan(
@@ -547,7 +547,7 @@ async def test_run_translate_compiles_a_two_level_derived_chain(
     )
     context = context_holding(plan)
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert [s["tool"] for s in result["steps"]] == [
@@ -583,7 +583,7 @@ async def test_run_translate_closes_an_ambiguous_requirement_on_its_candidates(
     )
     context = context_holding(plan)
 
-    referred = await run_translate(context, core=core)
+    referred = await run_translate(context.state, core=core)
 
     assert referred["outcome"] == "referred", referred
     referral = referred["referral"]
@@ -609,7 +609,7 @@ async def test_run_translate_refers_a_timed_out_search_as_discovery_unavailable(
     core = build_translator_core(surface=unreachable)
     context = context_holding(draft())
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "referred", result
     referral = result["referral"]
@@ -634,7 +634,7 @@ async def test_a_budget_spent_on_timed_out_searches_stays_a_transient_referral(
 
     async def proposed_again() -> dict[str, Any]:
         clear_referral(context.state)
-        return cast("dict[str, Any]", (await run_translate(context, core=core))["referral"])
+        return cast("dict[str, Any]", (await run_translate(context.state, core=core))["referral"])
 
     retried = [await proposed_again() for _ in range(DISCOVERY_CALL_BUDGET_PER_REQUIREMENT)]
 
@@ -683,7 +683,7 @@ async def test_run_translate_refuses_an_unmodeled_requirement_kind_rather_than_r
     )
     context = context_holding(plan)
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "referred", result
     referral = result["referral"]
@@ -716,7 +716,7 @@ async def test_run_translate_refuses_the_unmodeled_kind_before_any_discovery_cal
     )
     context = context_holding(plan)
 
-    await run_translate(context, core=core)
+    await run_translate(context.state, core=core)
 
     assert search_calls == []
 
@@ -727,8 +727,8 @@ async def test_run_translate_gives_up_after_max_rounds(
     """A `propose_operations` that keeps naming the same `discover_source`
     retry forever is bounded by `MAX_ROUNDS`, and ends as an internal failure."""
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
+        del state
         return {
             "outcome": "ok",
             "requirement_id": requirement_id,
@@ -737,9 +737,9 @@ async def test_run_translate_gives_up_after_max_rounds(
         }
 
     async def propose_operations(
-        *, translation: object, tool_context: Any, schemas: object
+        *, translation: object, state: Any, schemas: object
     ) -> dict[str, object]:
-        del translation, tool_context, schemas
+        del translation, state, schemas
         return {
             "outcome": "invalid_input",
             "code": "compile_failed",
@@ -764,7 +764,7 @@ async def test_run_translate_gives_up_after_max_rounds(
     )
     context = context_holding(draft())
 
-    await run_translate(context, core=core)
+    await run_translate(context.state, core=core)
 
     (stop,) = referred
     assert stop["kind"] is ReferralKind.INTERNAL_FAILURE
@@ -783,16 +783,16 @@ def _compile_failure_core(
     `propose_operations` answering each of `failures` in turn, keeping the
     real `return_to_planner`."""
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
+        del state
         return _ok_answer(requirement_id, SPEC_KENYA)
 
     answers = iter(failures)
 
     async def propose_operations(
-        *, translation: object, tool_context: Any, schemas: object
+        *, translation: object, state: Any, schemas: object
     ) -> dict[str, object]:
-        del translation, tool_context, schemas
+        del translation, state, schemas
         return next(answers)
 
     return dataclasses.replace(
@@ -824,9 +824,9 @@ async def test_every_proposal_round_compiles_against_one_listing_of_the_surface(
         return listed[-1]
 
     async def propose_operations(
-        *, translation: object, tool_context: Any, schemas: object
+        *, translation: object, state: Any, schemas: object
     ) -> dict[str, object]:
-        del translation, tool_context
+        del translation, state
         read.append(schemas)
         return next(answers)
 
@@ -836,7 +836,7 @@ async def test_every_proposal_round_compiles_against_one_listing_of_the_surface(
         list_tools=list_tools,
     )
 
-    result = await run_translate(context_holding(draft()), core=core)
+    result = await run_translate(context_holding(draft()).state, core=core)
 
     assert result == {"outcome": "ok"}
     assert len(listed) == 1
@@ -852,7 +852,8 @@ async def test_a_surface_that_cannot_be_listed_refers_the_plan_as_transient(
     core = dataclasses.replace(_compile_failure_core(core, []), list_tools=list_tools)
 
     referral = cast(
-        "dict[str, object]", (await run_translate(context_holding(draft()), core=core))["referral"]
+        "dict[str, object]",
+        (await run_translate(context_holding(draft()).state, core=core))["referral"],
     )
 
     assert (referral["kind"], referral["outcome"]) == ("surface_unavailable", "transient")
@@ -894,11 +895,11 @@ async def test_a_translation_failing_the_same_way_again_is_referred_as_repeated(
     )
     context = context_holding(draft())
 
-    first = await run_translate(context, core=core)
+    first = await run_translate(context.state, core=core)
     clear_referral(context.state)
-    second = await run_translate(context, core=core)
+    second = await run_translate(context.state, core=core)
     clear_referral(context.state)
-    other = await run_translate(context, core=core)
+    other = await run_translate(context.state, core=core)
 
     assert (first["referral"]["outcome"], first["referral"]["repeated"]) == (
         "invalid_input",
@@ -952,9 +953,9 @@ async def test_a_failure_whose_reason_moved_within_one_code_is_not_repeated(
     core = _compile_failure_core(core, [_source_unusable("G7"), _source_unusable("United States")])
     context = context_holding(draft())
 
-    first = await run_translate(context, core=core)
+    first = await run_translate(context.state, core=core)
     clear_referral(context.state)
-    second = await run_translate(context, core=core)
+    second = await run_translate(context.state, core=core)
 
     assert first["referral"]["repeated"] is False
     assert second["referral"]["repeated"] is False
@@ -976,18 +977,16 @@ async def test_a_transient_failure_proposed_again_is_retried_and_may_repeat_unma
     core = _compile_failure_core(core, failures)
     propose = core.propose_operations
 
-    async def counting(
-        *, translation: object, tool_context: Any, schemas: object
-    ) -> dict[str, object]:
+    async def counting(*, translation: object, state: Any, schemas: object) -> dict[str, object]:
         proposed.append(translation)
-        return await propose(translation=translation, tool_context=tool_context, schemas=schemas)
+        return await propose(translation=translation, state=state, schemas=schemas)
 
     core = dataclasses.replace(core, propose_operations=counting)
     context = context_holding(draft())
 
-    first = await run_translate(context, core=core)
+    first = await run_translate(context.state, core=core)
     clear_referral(context.state)
-    second = await run_translate(context, core=core)
+    second = await run_translate(context.state, core=core)
 
     assert len(proposed) == 2
     for result in (first, second):
@@ -1016,7 +1015,7 @@ async def test_a_read_of_the_newest_year_that_stopped_closes_on_the_referral_it_
     }
     core = _compile_failure_core(core, [stopped])
 
-    result = await run_translate(context_holding(draft()), core=core)
+    result = await run_translate(context_holding(draft()).state, core=core)
 
     referral = result["referral"]
     assert (referral["kind"], referral["requirement_id"], referral["stop_code"]) == (
@@ -1030,7 +1029,7 @@ async def test_a_read_of_the_newest_year_that_stopped_closes_on_the_referral_it_
 
 
 def _seed_settled(
-    context: Any,
+    state: Any,
     plan: Plan,
     requirement: DatasetRequirement,
     source: SelectedSource,
@@ -1051,7 +1050,7 @@ def _seed_settled(
         status=status,
         spec_ids=spec_ids,
     )
-    save_log(context.state, load_log(context.state).with_record(record, (source,)))
+    save_log(state, load_log(state).with_record(record, (source,)))
 
 
 def _spying_core(
@@ -1063,9 +1062,9 @@ def _spying_core(
     """
 
     async def propose_operations(
-        *, translation: Translation, tool_context: Any, schemas: object
+        *, translation: Translation, state: Any, schemas: object
     ) -> dict[str, object]:
-        del tool_context, schemas
+        del state, schemas
         captured.append(translation)
         return {"outcome": "ok"}
 
@@ -1102,7 +1101,7 @@ async def test_a_settled_requirement_is_not_rediscovered_on_a_later_round(
     requirement = cast(DatasetRequirement, plan.evidence_requirements[0])
     context = context_holding(plan)
     _seed_settled(
-        context,
+        context.state,
         plan,
         requirement,
         source(spec_id=SPEC_OTHER),
@@ -1118,7 +1117,7 @@ async def test_a_settled_requirement_is_not_rediscovered_on_a_later_round(
     captured: list[Translation] = []
     core = _spying_core(discover_source=discover_source, captured=captured)
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert len(captured) == 1
@@ -1159,7 +1158,7 @@ async def test_a_reused_block_whose_entities_miss_the_requirement_is_refused_at_
     )
     save_pin_sources(context.state, {SPEC_KENYA: PinSource(block=block, settled=True)})
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert search_calls == []
     if compiles:
@@ -1211,7 +1210,7 @@ async def test_a_pin_listing_a_shared_code_ends_in_the_refusal_the_code_search_r
     )
     save_pin_sources(context.state, {SPEC_KENYA: PinSource(block=block, settled=True)})
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert [call["parts"][0]["source_code"] for call in search_calls] == ["DT.NFL.MIDA.CD"]
     assert result["outcome"] == "referred", result
@@ -1255,7 +1254,7 @@ async def test_a_name_the_block_labels_otherwise_compiles_by_the_ref_the_graph_r
     )
     save_pin_sources(context.state, {SPEC_KENYA: PinSource(block=block, settled=True)})
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     workflow = load_plan(context.state).workflow
@@ -1286,7 +1285,7 @@ async def test_a_requirement_whose_searched_content_changed_is_rediscovered(
     plan = draft(evidence_requirements=[stale, derived_requirement()])
     context = context_holding(plan)
     _seed_settled(
-        context,
+        context.state,
         plan,
         stale,
         source(spec_id=SPEC_OTHER),
@@ -1299,8 +1298,8 @@ async def test_a_requirement_whose_searched_content_changed_is_rediscovered(
 
     calls: list[str] = []
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
+        del state
         calls.append(requirement_id)
         return {
             "outcome": "ok",
@@ -1312,7 +1311,7 @@ async def test_a_requirement_whose_searched_content_changed_is_rediscovered(
     captured: list[Translation] = []
     core = _spying_core(discover_source=discover_source, captured=captured)
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert calls == [changed.id]
@@ -1344,7 +1343,7 @@ async def test_a_requirement_stating_across_rediscovers_a_source_recorded_withou
     plan = draft(evidence_requirements=[across, derived_requirement()])
     context = context_holding(plan)
     _seed_settled(
-        context,
+        context.state,
         plan,
         across,
         source(spec_id=SPEC_OTHER, open_entity_axes=recorded_axes),
@@ -1354,15 +1353,15 @@ async def test_a_requirement_stating_across_rediscovers_a_source_recorded_withou
     assert requirement_revision(across) == requirement_revision(requirement())
     calls: list[str] = []
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
+        del state
         calls.append(requirement_id)
         return _ok_answer(requirement_id, SPEC_KENYA)
 
     captured: list[Translation] = []
     core = _spying_core(discover_source=discover_source, captured=captured)
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert calls == ([across.id] if rediscovered else [])
@@ -1391,7 +1390,7 @@ async def test_a_pinned_requirement_resolves_through_the_pin_path(
     )
     context = context_holding(plan)
     _seed_settled(
-        context,
+        context.state,
         plan,
         pinned,
         source(spec_id=SPEC_THIRD),
@@ -1407,7 +1406,7 @@ async def test_a_pinned_requirement_resolves_through_the_pin_path(
     captured: list[Translation] = []
     core = _spying_core(discover_source=discover_source, captured=captured)
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert _retrieved_spec_id(captured[0], pinned.id) == SPEC_THIRD
@@ -1463,9 +1462,9 @@ async def test_unsettled_requirements_discover_concurrently(
     in_flight = 0
     peak_in_flight = 0
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
         nonlocal in_flight, peak_in_flight
-        del tool_context
+        del state
         in_flight += 1
         peak_in_flight = max(peak_in_flight, in_flight)
         await asyncio.sleep(0.02)
@@ -1475,7 +1474,7 @@ async def test_unsettled_requirements_discover_concurrently(
     captured: list[Translation] = []
     core = _spying_core(discover_source=discover_source, captured=captured)
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "ok", result
     assert peak_in_flight == 2
@@ -1493,8 +1492,8 @@ async def test_a_later_requirements_stop_wins_over_an_earlier_ones_resolution(
     plan = _two_requirement_plan(requirement, derived_requirement, decision)
     context = context_holding(plan)
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
+        del state
         if requirement_id == "req_a":
             await asyncio.sleep(0.05)
             return _ok_answer(requirement_id, SPEC_KENYA)
@@ -1510,7 +1509,7 @@ async def test_a_later_requirements_stop_wins_over_an_earlier_ones_resolution(
         return_to_planner=lambda **kwargs: referred.append(kwargs) or {"outcome": "referred"},
     )
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "referred", result
     (stop,) = referred
@@ -1539,7 +1538,7 @@ async def test_a_stop_on_the_first_requirement_leaves_the_seconds_record_in_the_
     def return_to_planner(**kwargs: object) -> dict[str, object]:
         return {"outcome": "referred", "referral": kwargs}
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
         if requirement_id == "req_a":
             return {
                 "outcome": "no_data",
@@ -1547,7 +1546,7 @@ async def test_a_stop_on_the_first_requirement_leaves_the_seconds_record_in_the_
                 "message": "the data service timed out",
             }
         _seed_settled(
-            tool_context,
+            state,
             plan,
             second,
             source(spec_id=SPEC_OTHER),
@@ -1566,7 +1565,7 @@ async def test_a_stop_on_the_first_requirement_leaves_the_seconds_record_in_the_
         list_tools=_no_tools,
     )
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "referred", result
     assert result["referral"]["requirement_id"] == "req_a"
@@ -1582,10 +1581,10 @@ def _spying_return_to_planner(
 ) -> Callable[..., dict[str, object]]:
     """A `return_to_planner` fake that records every call and saves the referral for real."""
 
-    def return_to_planner(*, tool_context: Any, **kwargs: object) -> dict[str, object]:
+    def return_to_planner(*, state: Any, **kwargs: object) -> dict[str, object]:
         calls.append(kwargs)
         referral = Referral(**kwargs)
-        save_referral(tool_context.state, referral)
+        save_referral(state, referral)
         return {"outcome": "referred", "referral": referral.model_dump(mode="json")}
 
     return return_to_planner
@@ -1607,8 +1606,8 @@ async def test_two_referrals_settle_only_the_first_ones_requirement(
     plan = _two_requirement_plan(requirement, derived_requirement, decision)
     context = context_holding(plan)
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
+        del state
         kind = "no_data" if requirement_id == "req_a" else "unsupported_ask"
         return {
             "action": {
@@ -1632,7 +1631,7 @@ async def test_two_referrals_settle_only_the_first_ones_requirement(
         list_tools=_no_tools,
     )
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "referred", result
     assert result["referral"]["requirement_id"] == "req_a"
@@ -1675,8 +1674,8 @@ async def test_two_ambiguities_refer_only_the_first_ones_candidates(
         candidates = tuple(source(spec_id=spec_id, served_count=None) for spec_id in spec_ids)
         save_log(context.state, load_log(context.state).with_record(record, candidates))
 
-    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def discover_source(*, requirement_id: str, state: Any) -> dict[str, object]:
+        del state
         return {
             "action": {
                 "call": "return_to_planner",
@@ -1695,7 +1694,7 @@ async def test_two_ambiguities_refer_only_the_first_ones_candidates(
         core, discover_source=discover_source, propose_operations=propose_operations
     )
 
-    result = await run_translate(context, core=core)
+    result = await run_translate(context.state, core=core)
 
     assert result["outcome"] == "referred", result
     assert result["referral"]["requirement_id"] == "req_a"

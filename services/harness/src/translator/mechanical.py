@@ -50,7 +50,6 @@ from typing import Any, cast
 
 import rfc8785
 from compiler.surface import ToolSchema, ToolSurfaceUnavailableError
-from google.adk.tools.tool_context import ToolContext
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -77,6 +76,7 @@ from planner.plan import (
     Plan,
     QuotientRequirement,
     RankRequirement,
+    SessionState,
     ShareOfRequirement,
     SumOfRequirement,
     inputs_of,
@@ -381,18 +381,14 @@ class _Stopped:
     result: dict[str, object]
 
 
-def _internal_failure(
-    core: TranslatorCore, tool_context: ToolContext, reason: str
-) -> dict[str, object]:
+def _internal_failure(core: TranslatorCore, state: SessionState, reason: str) -> dict[str, object]:
     """Refer a step this loop was not taught to resolve as an internal failure."""
-    return core.return_to_planner(
-        tool_context=tool_context, kind=ReferralKind.INTERNAL_FAILURE, reason=reason
-    )
+    return core.return_to_planner(state=state, kind=ReferralKind.INTERNAL_FAILURE, reason=reason)
 
 
 async def _discover_answer(
     core: TranslatorCore,
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     arguments: dict[str, object],
 ) -> dict[str, object]:
@@ -406,12 +402,12 @@ async def _discover_answer(
     (`_settle_discovery`) -- settling is the part that is not safe to run
     for two requirements at once.
     """
-    return await core.discover_source(**arguments, tool_context=tool_context)
+    return await core.discover_source(**arguments, state=state)
 
 
 def _settle_discovery(
     core: TranslatorCore,
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     requirement_id: str,
     answer: dict[str, object],
@@ -437,7 +433,7 @@ def _settle_discovery(
     action = _action_of(answer)
     if action is not None:
         if action.call == "return_to_planner" and not action.needs:
-            referral = core.return_to_planner(tool_context=tool_context, **(action.arguments or {}))
+            referral = core.return_to_planner(state=state, **(action.arguments or {}))
             return _Stopped(referral)
         # An incomplete action (`needs` set), or one naming a call this loop
         # does not know how to drive itself: `discover_source` names no such
@@ -445,7 +441,7 @@ def _settle_discovery(
         return _Stopped(
             _internal_failure(
                 core,
-                tool_context,
+                state,
                 f"discover_source named an action this loop cannot complete for "
                 f"{requirement_id!r}: {action.model_dump_json()}",
             )
@@ -462,7 +458,7 @@ def _settle_discovery(
         reason = str(answer.get("message") or "discover_source could not reach the data service")
         return _Stopped(
             core.return_to_planner(
-                tool_context=tool_context,
+                state=state,
                 kind=ReferralKind.DISCOVERY_UNAVAILABLE,
                 reason=reason,
                 requirement_id=requirement_id,
@@ -471,7 +467,7 @@ def _settle_discovery(
     return _Stopped(
         _internal_failure(
             core,
-            tool_context,
+            state,
             f"discover_source answered {requirement_id!r} with no action and no single "
             f"source to use: {answer.get('code') or answer.get('outcome')}",
         )
@@ -480,7 +476,7 @@ def _settle_discovery(
 
 async def _discover_one(
     core: TranslatorCore,
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     arguments: dict[str, object],
 ) -> str | _Stopped:
@@ -492,12 +488,12 @@ async def _discover_one(
     own concurrent calls.
     """
     requirement_id = cast(str, arguments["requirement_id"])
-    answer = await _discover_answer(core, tool_context, arguments=arguments)
-    return _settle_discovery(core, tool_context, requirement_id=requirement_id, answer=answer)
+    answer = await _discover_answer(core, state, arguments=arguments)
+    return _settle_discovery(core, state, requirement_id=requirement_id, answer=answer)
 
 
 async def _resolve_dataset_sources(
-    core: TranslatorCore, tool_context: ToolContext, *, plan: Plan
+    core: TranslatorCore, state: SessionState, *, plan: Plan
 ) -> dict[str, str] | _Stopped:
     """Discover every dataset requirement's source, or the result the loop stops with.
 
@@ -531,7 +527,7 @@ async def _resolve_dataset_sources(
         if isinstance(requirement, DatasetRequirement)
     ]
     keys = dataset_keys(plan)
-    log = load_log(tool_context.state)
+    log = load_log(state)
     settled = log.selectable(
         requirement_keys=keys.requirement_keys,
         pinned=keys.pinned,
@@ -548,16 +544,13 @@ async def _resolve_dataset_sources(
             unsettled.append(requirement)
 
     answers = await asyncio.gather(
-        *(
-            _discover_answer(core, tool_context, arguments={"requirement_id": r.id})
-            for r in unsettled
-        ),
+        *(_discover_answer(core, state, arguments={"requirement_id": r.id}) for r in unsettled),
         return_exceptions=True,
     )
     for requirement, answer in zip(unsettled, answers, strict=True):
         if isinstance(answer, BaseException):
             raise answer
-        step = _settle_discovery(core, tool_context, requirement_id=requirement.id, answer=answer)
+        step = _settle_discovery(core, state, requirement_id=requirement.id, answer=answer)
         if isinstance(step, _Stopped):
             return step
         discovered[requirement.id] = step
@@ -602,7 +595,7 @@ def _seen_before(state: Any, fingerprint: str) -> bool:
 
 
 def _uncompiled(
-    core: TranslatorCore, tool_context: ToolContext, result: Mapping[str, object]
+    core: TranslatorCore, state: SessionState, result: Mapping[str, object]
 ) -> dict[str, object]:
     """Refer a `propose_operations` answer that is not a compile failure.
 
@@ -616,21 +609,21 @@ def _uncompiled(
     message = str(result.get("message") or "")
     if result.get("code") == ProblemCode.SURFACE_UNAVAILABLE.value:
         return core.return_to_planner(
-            tool_context=tool_context,
+            state=state,
             kind=ReferralKind.SURFACE_UNAVAILABLE,
             reason=message or "the tool surface could not be listed",
         )
     action = _action_of(result)
     if result.get("code") == ProblemCode.RUN_WOULD_STOP.value and action is not None:
-        return core.return_to_planner(tool_context=tool_context, **(action.arguments or {}))
+        return core.return_to_planner(state=state, **(action.arguments or {}))
     return _internal_failure(
-        core, tool_context, f"propose_operations answered {result.get('code')}: {message}"
+        core, state, f"propose_operations answered {result.get('code')}: {message}"
     )
 
 
 async def _propose_until_settled(
     core: TranslatorCore,
-    tool_context: ToolContext,
+    state: SessionState,
     *,
     plan: Plan,
     discovered: dict[str, str],
@@ -649,39 +642,39 @@ async def _propose_until_settled(
     for _round in range(MAX_ROUNDS):
         translation = build_translation(plan, discovered)
         result = await core.propose_operations(
-            translation=translation, tool_context=tool_context, schemas=schemas
+            translation=translation, state=state, schemas=schemas
         )
         if result.get("outcome") == "ok":
             return result
 
         action = _action_of(result)
         if action is None or result.get("code") != ProblemCode.COMPILE_FAILED.value:
-            return _uncompiled(core, tool_context, result)
+            return _uncompiled(core, state, result)
         if action.call == "return_to_planner":
-            repeated = _seen_before(tool_context.state, _failure_fingerprint(translation, result))
+            repeated = _seen_before(state, _failure_fingerprint(translation, result))
             return core.return_to_planner(
-                tool_context=tool_context, **(action.arguments or {}), repeated=repeated
+                state=state, **(action.arguments or {}), repeated=repeated
             )
         if action.call != "discover_source":
             return _internal_failure(
-                core, tool_context, f"propose_operations named an unknown next call {action.call!r}"
+                core, state, f"propose_operations named an unknown next call {action.call!r}"
             )
 
-        step = await _discover_one(core, tool_context, arguments=dict(action.arguments or {}))
+        step = await _discover_one(core, state, arguments=dict(action.arguments or {}))
         if isinstance(step, _Stopped):
             return step.result
         requirement_id = cast(str, (action.arguments or {})["requirement_id"])
         discovered[requirement_id] = step
 
     return _internal_failure(
-        core, tool_context, f"propose_operations did not settle within {MAX_ROUNDS} rounds"
+        core, state, f"propose_operations did not settle within {MAX_ROUNDS} rounds"
     )
 
 
 # --- the public entry point --------------------------------------------------
 
 
-async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> dict[str, object]:
+async def run_translate(state: SessionState, *, core: TranslatorCore) -> dict[str, object]:
     """Run the translator's whole discover-then-compile loop without a model turn.
 
     Drives `discover_source` for every dataset requirement, then
@@ -697,14 +690,14 @@ async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> d
         `translator.referral.OUTCOME_OF`'s; or the typed problem that stops
         a call on a plan that is not a translatable draft.
     """
-    plan = current_draft(tool_context)
+    plan = current_draft(state)
     if isinstance(plan, dict):
         return plan
 
     unsupported = _unsupported_requirement(plan)
     if unsupported is not None:
         return core.return_to_planner(
-            tool_context=tool_context,
+            state=state,
             kind=ReferralKind.NO_OPERATION_COVERS,
             requirement_id=unsupported.id,
             reason=(
@@ -713,7 +706,7 @@ async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> d
             ),
         )
 
-    resolved = await _resolve_dataset_sources(core, tool_context, plan=plan)
+    resolved = await _resolve_dataset_sources(core, state, plan=plan)
     if isinstance(resolved, _Stopped):
         return resolved.result
 
@@ -724,9 +717,9 @@ async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> d
     except ToolSurfaceUnavailableError as exc:
         return _uncompiled(
             core,
-            tool_context,
+            state,
             problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED),
         )
     return await _propose_until_settled(
-        core, tool_context, plan=plan, discovered=resolved, schemas=schemas
+        core, state, plan=plan, discovered=resolved, schemas=schemas
     )

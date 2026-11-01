@@ -4,9 +4,11 @@ analysis-mcp verb.
 apis writes a `get_data` Parquet artifact's `unit` column as text
 (`materialise.formats._cell_text` in apis): a unit ref as its own text, a
 converted unit as the JCS text of its `{currency, prices, base_year}` object.
-`data_mcp.frame_materialisation._frame_from_parquet_bytes` decodes each cell
+`data_mcp.frame_materialisation.frame_from_parquet_bytes` decodes each cell
 into the frame's own unit, so a converted-unit pin on `rank`, `aggregate` or
-`share_of` compares with the cell by currency, prices and base year.
+`share_of` compares with the cell by currency, prices and base year. The verbs
+compute on dfo-apis' analysis runner, replayed from its recorded answers
+(`conftest.runner`), and a result is read back from dfo-apis.
 
 The EUR artifact mirrors the frame a France-to-Kenya-and-Senegal gross
 disbursements `get_data` returned from apis: six rows, `unit` the text
@@ -16,8 +18,9 @@ disbursements `get_data` returned from apis: six rows, `unit` the text
 
 from __future__ import annotations
 
+import hashlib
 import io
-import secrets
+import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
@@ -25,7 +28,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from analysis_mcp import server as analysis_server
-from analysis_mcp.trace import Trace
 from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
@@ -33,10 +35,12 @@ from common.materialisation import (
     set_store,
 )
 from common.unit_refs import PERCENT_UNIT
-from data_mcp.frame_materialisation import _frame_from_parquet_bytes
-from dfo_frame_grammar import Frame
+from data_mcp.frame_materialisation import frame_from_parquet_bytes
+from dfo_frame_grammar import canonical_frame_bytes
 from dfo_frame_grammar.grammar import UnitRequest
 from fastmcp import Client
+
+from .runner_frames import result_table
 
 EUR_CURRENT = {"currency": "EUR", "prices": "current"}
 USD_CONSTANT_2024 = {"currency": "USD", "prices": "constant", "base_year": 2024}
@@ -99,15 +103,16 @@ async def store() -> AsyncIterator[InMemoryMaterialisationStore]:
 
 async def _register(store: InMemoryMaterialisationStore, artifact: bytes) -> dict[str, str]:
     """Decode `artifact` through data-mcp's own reader and hold it the way
-    `materialise_and_register` does, under a fresh frame reference."""
-    token = secrets.token_hex(16)
+    `materialise_and_register` does, under a frame reference its rows name."""
+    frame = frame_from_parquet_bytes(artifact)
+    token = hashlib.sha256(canonical_frame_bytes(frame)).hexdigest()[:32]
     ref = FrameRef(spec_id=f"spec_{token}", content_version=f"cv_{token}")
     trace = MaterialisationTrace(
         upstream_trace={"graph_revision": "g1", "facets": []},
         spec_id=ref.spec_id,
         content_version=ref.content_version,
     )
-    await store.put(ref, frame=_frame_from_parquet_bytes(artifact), trace=trace, writer="test")
+    await store.put(ref, frame=frame, trace=trace, writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
 
 
@@ -118,16 +123,10 @@ async def _call(tool: str, arguments: Mapping[str, object]) -> dict[str, Any]:
     return result.structured_content
 
 
-async def _held(store: InMemoryMaterialisationStore, result: dict[str, Any]) -> tuple[Frame, Any]:
-    """The result frame and its stored trace in the JSON form a durable store writes."""
+async def _held(result: dict[str, Any]) -> pa.Table:
+    """The result frame's rows as dfo-apis serves them."""
     assert "code" not in result, result
-    held = await store.get(
-        FrameRef(spec_id=result["spec_id"], content_version=result["content_version"])
-    )
-    assert held is not None
-    frame, trace = held
-    assert isinstance(trace, Trace)
-    return frame, trace.model_dump(mode="json")
+    return await result_table(result)
 
 
 def _verb_arguments(verb: str, frame_ref: dict[str, str], pin: object) -> dict[str, object]:
@@ -153,25 +152,25 @@ def _verb_arguments(verb: str, frame_ref: dict[str, str], pin: object) -> dict[s
     }
 
 
-def _resolved_input_unit(verb: str, trace: dict[str, Any]) -> object:
-    """The unit `verb` resolved its input in. A share states its own result in
-    per cent and records each side's resolved unit in the policy detail."""
-    policy = trace["applied_policy"]
-    if verb == "share_of":
-        assert policy["resolved_unit"] == PERCENT_UNIT
-        return policy["detail"]["numerator_resolved_unit"]
-    return policy["resolved_unit"]
+def _result_unit(frame: pa.Table) -> object:
+    """The one unit of a result's rows: a unit ref, or a converted unit's request
+    as its object."""
+    (cell,) = {json.dumps(cell, sort_keys=True) for cell in frame.column("unit").to_pylist()}
+    unit = json.loads(cell)
+    if unit["ref"] is not None:
+        return unit["ref"]
+    return {key: value for key, value in unit["request"].items() if value is not None}
 
 
 def test_a_converted_unit_text_cell_decodes_to_its_request() -> None:
-    frame = _frame_from_parquet_bytes(_artifact(_UNIT_TEXT["USD_CONSTANT_2024"]))
+    frame = frame_from_parquet_bytes(_artifact(_UNIT_TEXT["USD_CONSTANT_2024"]))
 
     units = {row[frame.columns.index("unit")] for row in frame.rows}
     assert units == {UnitRequest(currency="USD", prices="constant", base_year=2024)}
 
 
 def test_a_ref_unit_text_cell_decodes_to_the_ref() -> None:
-    frame = _frame_from_parquet_bytes(_artifact("CurrencyUSD"))
+    frame = frame_from_parquet_bytes(_artifact("CurrencyUSD"))
 
     units = {row[frame.columns.index("unit")] for row in frame.rows}
     assert units == {"CurrencyUSD"}
@@ -187,12 +186,13 @@ async def test_a_converted_pin_resolves_a_converted_frame(
 ) -> None:
     frame_ref = await _register(store, _artifact(_UNIT_TEXT[unit_key]))
 
-    frame, trace = await _held(store, await _call(verb, _verb_arguments(verb, frame_ref, pin)))
+    frame = await _held(await _call(verb, _verb_arguments(verb, frame_ref, pin)))
 
-    assert _resolved_input_unit(verb, trace) == pin
-    values = frame.table.column("value").to_pylist()
+    # A share states its result in per cent, and divides only amounts in the pin.
+    assert _result_unit(frame) == (PERCENT_UNIT if verb == "share_of" else pin)
+    values = frame.column("value").to_pylist()
     if verb == "share_of":
-        years = frame.table.column("time_period").to_pylist()
+        years = frame.column("time_period").to_pylist()
         assert dict(zip(years, values, strict=True)) == {
             year: pytest.approx(
                 100 * _VALUES[_KENYA, year] / (_VALUES[_KENYA, year] + _VALUES[_SENEGAL, year])
@@ -200,7 +200,7 @@ async def test_a_converted_pin_resolves_a_converted_frame(
             for year in ("2022", "2023", "2024")
         }
     else:
-        recipients = frame.table.column("financingRecipient").to_pylist()
+        recipients = frame.column("financingRecipient").to_pylist()
         assert dict(zip(recipients, values, strict=True)) == {
             _KENYA: pytest.approx(_KENYA_TOTAL),
             _SENEGAL: pytest.approx(_SENEGAL_TOTAL),
@@ -229,11 +229,9 @@ async def test_a_ref_unit_frame_resolves_its_ref_pin(
 ) -> None:
     frame_ref = await _register(store, _artifact("CurrencyUSD"))
 
-    _frame, trace = await _held(
-        store, await _call(verb, _verb_arguments(verb, frame_ref, "CurrencyUSD"))
-    )
+    frame = await _held(await _call(verb, _verb_arguments(verb, frame_ref, "CurrencyUSD")))
 
-    assert _resolved_input_unit(verb, trace) == "CurrencyUSD"
+    assert _result_unit(frame) == (PERCENT_UNIT if verb == "share_of" else "CurrencyUSD")
 
 
 async def test_a_converted_pin_on_a_ref_unit_frame_refuses_unit_heterogeneous(

@@ -241,6 +241,7 @@ async def bounded(
                         _record_first_chunk(span, seconds=waited)
                     else:
                         gaps.append(waited)
+                        _record_chunk_gaps(span, gaps)
                     delivered = True
                     if not delivered_thought and _has_thought(response):
                         delivered_thought = True
@@ -253,9 +254,6 @@ async def bounded(
         except asyncio.CancelledError:
             _mark_failed(span, "cancelled")
             raise
-        finally:
-            if gaps and span.is_recording():
-                span.set_attribute("dfo.model.chunk_gaps_s", gaps)
         if retry:
             budget.retry_spent = True
             if span.is_recording():
@@ -327,6 +325,17 @@ def _record_thoughts_tokens(span: trace.Span, response: LlmResponse) -> None:
     usage = response.usage_metadata
     if usage is not None and usage.thoughts_token_count is not None and span.is_recording():
         span.set_attribute("dfo.model.thoughts_token_count", usage.thoughts_token_count)
+
+
+def _record_chunk_gaps(span: trace.Span, gaps: list[float]) -> None:
+    """Stamp the gaps between the call's chunks so far as
+    `dfo.model.chunk_gaps_s`, before the latest chunk is yielded.
+
+    ADK ends the `generate_content` span when it receives the response that
+    carries a finish reason, before the stream itself ends, so the attribute
+    is rewritten at each chunk while the span is still open."""
+    if span.is_recording():
+        span.set_attribute("dfo.model.chunk_gaps_s", gaps)
 
 
 def _record_first_chunk(span: trace.Span, *, seconds: float) -> None:

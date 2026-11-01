@@ -17,7 +17,8 @@ class PlatformError(Exception):
 
     `code` is only ever read off the wire, so an unmapped code and a body
     that never parsed as a problem document (both leave `code` as `None`)
-    stay distinguishable from one another.
+    stay distinguishable from one another. `cause_code` is the problem's `cause.code`,
+    why a refusal fired beneath its `code`, `None` on a refusal with no cause.
     """
 
     def __init__(
@@ -33,6 +34,7 @@ class PlatformError(Exception):
         constraint_id: str | None = None,
         truncated: bool = False,
         trace_id: str | None = None,
+        cause_code: str | None = None,
     ) -> None:
         self.status = status
         self.code = code
@@ -44,6 +46,7 @@ class PlatformError(Exception):
         self.constraint_id = constraint_id
         self.truncated = truncated
         self.trace_id = trace_id
+        self.cause_code = cause_code
         super().__init__(f"platform call failed: status={status} code={code}")
 
 

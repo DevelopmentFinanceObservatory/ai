@@ -943,12 +943,29 @@ def _text_unit_table() -> pa.Table:
     return table.set_column(position, "unit", pa.array(texts, type=pa.string()))
 
 
+async def test_get_widens_an_object_whose_unit_is_the_two_member_struct() -> None:
+    """The grammar reads the `struct<ref, request>` layout `frames/v2/` held as the
+    canonical frame, so the object reads back as the frame it stores."""
+    client = _FakeStorageClient()
+    store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
+    ref = _ref()
+    frame = _frame()
+    _store_table(
+        client, _object_name(ref, prefix=_WRITTEN_PREFIX), _two_member_unit_table(frame), ref
+    )
+
+    result = await store.get(ref)
+
+    assert result is not None
+    assert result[0] == frame
+    assert canonical_frame_bytes(result[0]) == canonical_frame_bytes(frame)
+
+
 @pytest.mark.parametrize(
     "table",
     [
         pytest.param(_text_unit_table, id="text-unit"),
         pytest.param(_float32_value_table, id="float32-value"),
-        pytest.param(lambda: _two_member_unit_table(_frame()), id="two-member-unit"),
         pytest.param(
             lambda: _struct_composed_unit_table(_every_unit_frame()), id="struct-composed-unit"
         ),
@@ -959,9 +976,9 @@ async def test_get_refuses_an_object_whose_schema_is_not_the_canonical_one(
 ) -> None:
     """Each object passes every byte check under `frames/v4/` and holds rows the
     grammar reads in some layout: a text-layout object (JSON-text `unit`, no
-    `status`), the canonical columns with a `float32` value, the
-    two-member `unit` struct, and the struct-composed `unit` struct. The decoder
-    wraps only the canonical schema, so each refuses."""
+    `status`), the canonical columns with a `float32` value, and the
+    struct-composed `unit` struct. The decoder wraps only the canonical schema
+    and the stored `unit` layouts the grammar widens, so each refuses."""
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     ref = _ref()

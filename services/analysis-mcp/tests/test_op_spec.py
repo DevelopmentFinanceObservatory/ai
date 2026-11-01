@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import get_args
 
 import pytest
@@ -703,6 +704,59 @@ def test_a_rolling_predicate_off_a_period_threshold_is_refused(
     _filter(_threshold(value="2020", rolling=LATEST), rolling=_rolling())
     with pytest.raises(ValidationError):
         _filter(predicate, rolling=_rolling())
+
+
+_NINE_BACK = {"anchor": "latest", "offset": -9}
+_NOW = {"anchor": "latest", "offset": 0}
+
+
+def test_a_relative_year_stands_in_for_a_window_bound_or_a_period_threshold() -> None:
+    growth = GrowthOpSpec(frame_ref=SNAPSHOT_REF, window_start=_NINE_BACK, window_end=_NOW)
+    assert growth.model_dump(mode="json", include={"window_start", "window_end"}) == {
+        "window_start": _NINE_BACK,
+        "window_end": _NOW,
+    }
+    GrowthOpSpec(frame_ref=SNAPSHOT_REF, window_start=_NINE_BACK, window_end="2024")
+    _rank(window_start="2015", window_end=_NOW)
+    _filter(_threshold(value=_NINE_BACK))
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(
+            lambda: GrowthOpSpec(frame_ref=SNAPSHOT_REF, window_start=_NOW, window_end=_NOW),
+            id="growth-one-year",
+        ),
+        pytest.param(lambda: _rank(window_start=_NOW, window_end=_NINE_BACK), id="rank-reversed"),
+        pytest.param(lambda: _rank(window_end=_NOW), id="rank-one-bound"),
+        pytest.param(
+            lambda: GrowthOpSpec(
+                frame_ref=SNAPSHOT_REF,
+                window_start="2015",
+                window_end=_NOW,
+                rolling=_rolling(window_end=LATEST),
+            ),
+            id="beside-an-overlay",
+        ),
+        pytest.param(
+            lambda: _rank(window_start="2015", window_end={**_NOW, "offset": 1}),
+            id="offset-above-zero",
+        ),
+        pytest.param(
+            lambda: _rank(window_start="2015", window_end={**_NOW, "rule": "half1"}),
+            id="unknown-member",
+        ),
+        pytest.param(lambda: _filter(_threshold(column="value", value=_NOW)), id="value-column"),
+        pytest.param(
+            lambda: _filter(_threshold(value=_NOW, rolling=LATEST), rolling=_rolling()),
+            id="threshold-beside-rolling",
+        ),
+    ],
+)
+def test_a_misplaced_relative_year_is_refused(build: Callable[[], object]) -> None:
+    with pytest.raises(ValidationError):
+        build()
 
 
 @pytest.mark.parametrize("value", ["2024", "2024-03", "2024-03-01"])

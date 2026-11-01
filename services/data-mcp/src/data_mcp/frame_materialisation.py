@@ -5,14 +5,15 @@ an analysis-mcp verb's own `frame_ref` resolution.
 
 The frame held under an apis service pair `{spec_id, content_version}` is that
 version's canonical frame, the one its `content_version` names. A mint with no
-`options.columns` and no `options.groupby` registers it under the mint's own pair:
+`options.columns`, no `options.groupby` and no `options.without_party_totals`
+registers it under the mint's own pair:
 the bytes are the version's `CANONICAL_FRAME_RENDERING` artifact, which the
 snapshot route lists, and the frame is registered only when
 `mint_content_version(frame_sha256=frame_sha256(frame))` is that
 `content_version`. Every other mint registers the artifact of its own rendering
-under a pair `frame_ref_for` derives from its columns and groupby, unchecked
-against the token, since a selection or a sum is a different frame. A mint with
-`options.without_party_totals` names apis' version of the frame without group
+under a pair `frame_ref_for` derives from its columns, groupby and cut, unchecked
+against the token, since a selection, a sum or a cut is a different frame. A mint
+with `options.without_party_totals` names apis' version of the frame without group
 totals, so the pair it registers under holds the rows apis serves for it.
 
 Each mint that reads or parses the frame also writes its mint record
@@ -32,7 +33,8 @@ import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
-from itertools import combinations
+from functools import partial
+from itertools import combinations, permutations
 from types import MappingProxyType
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -41,8 +43,10 @@ import httpx2
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-import rfc8785
 from common.materialisation import (
+    DEFAULT_MINT_OPTIONS,
+    KIND_COLUMNS,
+    WITHOUT_PARTY_TOTALS,
     FrameExpired,
     FrameIntegrityError,
     FrameRef,
@@ -51,12 +55,15 @@ from common.materialisation import (
     MaterialisationTrace,
     MintRecord,
     frame_from_verified_parquet_bytes,
+    frame_ref_for,
     get_store,
+    groupby_axes,
+    normal_groupby,
+    requests_kinds,
 )
 from common.place_type import (
     FLOW_ROLE_COLUMNS,
     PARTY_ROLES,
-    PLACE_ROLE,
     TYPED_ROLES,
     UNTYPED,
     enrichment_role,
@@ -70,6 +77,7 @@ from dfo_frame_grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
+    ComposedUnit,
     Frame,
     FrameError,
     UnitRequest,
@@ -102,12 +110,21 @@ __all__ = [
     "WITHOUT_PARTY_TOTALS",
     "DegradedReason",
     "MaterialisationOutcome",
+    "frame_from_parquet_bytes",
     "frame_ref_for",
     "materialise_and_register",
+    "named_groupbys",
     "recorded_stamp",
 ]
 
 logger = logging.getLogger(__name__)
+
+# The mint option that asks apis to add the enrichment the version's own role columns take
+# (apis' `MintOptions.enrichment`). apis answers as a mint naming the columns it resolved to,
+# and the manifest's artifact lists them in its `rendering`, so a frame minted with it is
+# named by them (`resolved_options`).
+ENRICHMENT = "enrichment"
+DEFAULT_ENRICHMENT = "default"
 
 # The bare link GET has its own small retry budget (see `_fetch_artifact_bytes_uncapped`'s
 # docstring): this hop is idempotent, so a handful of quick retries costs little and buys
@@ -136,18 +153,6 @@ _MIN_FETCH_BUDGET_S = 5.0
 # rendering of its result.
 _AFTER_WRITE_RESERVE_S = 3.0
 
-# The `options` of a mint that sums nothing and selects no columns. Its frame is
-# read from the version's canonical frame (`CANONICAL_FRAME_RENDERING`), and the
-# requested rendering itself is never fetched. A mint cannot ask for the canonical
-# frame alone, since apis' `MintOptions.format` is `csv`, `xlsx` or `parquet`
-# and every mint renders one of them, so this asks for the cheapest: a bare parquet
-# file in the frame layout, written with no projection and no graph name read. A
-# mint with `columns` adds them to these options, and its frame is that rendering
-# (`_select_requested_artifact`).
-DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
-    {"format": "parquet", "bundle": False, "layout": "frame"}
-)
-
 # The `rendering` apis links every version's canonical frame under
 # (`datasets_api.render.CANONICAL_FRAME_RENDERING`). The snapshot route lists it,
 # and a mint's own response does not.
@@ -165,13 +170,10 @@ TYPE_COLUMN_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
     for selection in combinations(TYPE_COLUMNS, size)
 )
 
-# The bare tokens apis expands to a `{column}_{token}` column for every party column a flow
-# table has: the party's kind, class and whole-population mark (`common.place_type`). The
-# qualified type tokens are necessary: the door does not expand a bare `type` token. Keep the
-# two kinds of enrichment together so a country filter can distinguish countries from
+# The qualified type tokens are necessary because the door does not expand a bare `type` token. Keep
+# the two kinds of enrichment together so a country filter can distinguish countries from
 # organisations without losing the party-kind proof that excludes published group totals from
 # later sums and ranks.
-KIND_COLUMNS: tuple[str, ...] = ("party_kind", "party_class", "party_whole")
 FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
     *sorted(type_column(role) for role in PARTY_ROLES),
     *KIND_COLUMNS,
@@ -181,25 +183,51 @@ FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
 # it to the door's current `KIND_COLUMNS` while preserving the rest of the selection.
 _LEGACY_KIND_COLUMN = "kind"
 
-# The mint option that asks apis for a flow frame without the group totals of the
-# party roles its identity leaves open (apis' `MintOptions.without_party_totals`). A
-# mint sends it only when true, and apis records it in the artifact's `rendering` only
-# then. A cut that leaves rows out is a version of its own, which the manifest's pair names.
-WITHOUT_PARTY_TOTALS = "without_party_totals"
+# The coverage dimension apis counts a frame's years under, beside one per role column.
+_YEARS_DIMENSION = "years"
 
 
-def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
-    """The `options.columns` `get_data(place_types=True)` asks apis for.
+def coverage_roles(manifest: Manifest) -> tuple[str, ...]:
+    """The role columns of the frame `manifest` names: its coverage dimensions, one per
+    role the frame declares, less the years."""
+    return tuple(
+        dimension.label
+        for dimension in manifest.coverage.dimensions
+        if dimension.label != _YEARS_DIMENSION
+    )
 
-    A spec whose identity names a flow axis, as an entity or an open role, asks for each
-    party's type and kind (`FLOW_ENRICHMENT_COLUMNS`); any other spec, and a call holding
-    no identity, for the places' types. A list that names only enrichment columns adds them
-    to every default column, so the decoded `stat_var_<code system>` columns stay beside them.
+
+def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mapping[str, Any]:
+    """`options` as the rendering apis minted for them. An `enrichment: "default"` request
+    is the `rendering` of the one data artifact the mint's manifest lists for it, which
+    names the columns apis resolved the enrichment to. That artifact's rendering, its
+    columns aside, is the request's, and its columns hold every requested one. A mint
+    response lists only the rendering it served and the series statistics. Any
+    other `options`, and a manifest listing no such artifact or more than one, are returned
+    as sent, so the frame read refuses for want of its rendering.
     """
+    if options.get(ENRICHMENT) != DEFAULT_ENRICHMENT:
+        return options
+    base = {key: value for key, value in options.items() if key not in (ENRICHMENT, "columns")}
+    requested = set(options.get("columns") or ())
+    served = [
+        artifact.rendering
+        for artifact in manifest.artifacts
+        if {key: value for key, value in artifact.rendering.items() if key != "columns"} == base
+        and isinstance(columns := artifact.rendering.get("columns", []), list)
+        and requested <= set(columns)
+    ]
+    if len(served) != 1:
+        return options
+    return dict(served[0])
+
+
+def names_flow_role(identity: Mapping[str, Any] | None) -> bool:
+    """Whether `identity` names a flow axis, as an entity or an open role, by its role word
+    (`origin`) or its column (`financingRecipient`). `without_party_totals` cuts the group
+    totals from the open party roles of such a spec."""
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
-    if roles & FLOW_ROLE_COLUMNS.keys():
-        return FLOW_ENRICHMENT_COLUMNS
-    return (type_column(PLACE_ROLE),)
+    return bool(roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES))
 
 
 def replayed_mint_options(
@@ -216,13 +244,15 @@ def replayed_mint_options(
     guessing other role columns. A root recorded with `without_party_totals` and kinds
     alone is the rendering `get_data(without_party_totals=True)` mints, and replays with
     `KIND_COLUMNS`. Every other selection is unchanged. A flow frame without this metadata
-    cannot prove that a sum or rank leaves group totals out.
+    cannot prove that a sum or rank leaves group totals out. A recorded `groupby` is sent
+    with its `by` sorted, so the mint record the replay writes holds the options it sent.
     """
+    options = _sorted_by(options)
     columns = options.get("columns") or ()
     kind_tokens = {_LEGACY_KIND_COLUMN, *KIND_COLUMNS}
     if options.get(WITHOUT_PARTY_TOTALS) and columns and set(columns) <= kind_tokens:
         return {**options, "columns": list(KIND_COLUMNS)}
-    flow_root = place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
+    flow_root = names_flow_role(identity)
     flow_selection = any(
         column in kind_tokens or column in FLOW_ENRICHMENT_COLUMNS for column in columns
     )
@@ -296,8 +326,9 @@ async def materialise_and_register(
     """Fetch, parse, and register the frame `manifest` names, or report why it couldn't.
 
     `options` is the mint request's `options`. The frame registers under the
-    reference `frame_ref_for` gives the manifest's pair, `options.columns` and
-    `options.groupby`. With neither, that is the manifest's own pair, and the bytes
+    reference `frame_ref_for` gives the manifest's pair, `options.columns`,
+    `options.groupby` and `options.without_party_totals`. With none of them, that is
+    the manifest's own pair, and the bytes
     are the version's canonical frame, found on the snapshot route
     (`_locate_canonical_frame`) and checked against the pair's `content_version`
     before the write (`_parse_and_register`). Otherwise the bytes are the artifact
@@ -309,7 +340,8 @@ async def materialise_and_register(
     so a frame stored without a record gains one the next time it is minted. A refusal writes none, and neither does a degraded outcome that saw no
     frame: the record states the frame's StatVar count, the store keeps the first
     record written under a pair, and one written without the count would stand for
-    good.
+    good. The one record written without a frame in view is a bare read's
+    (`common.materialisation.record_bare_read`), which holds no `groupby`.
 
     Called once per successful `get_data` mint, after the manifest itself has already
     validated. Checks the store first: a pair already held, read back under a row claim
@@ -363,7 +395,7 @@ async def materialise_and_register(
                 dataset=FrameRef(
                     spec_id=manifest.definition.spec_id, content_version=manifest.content_version
                 ),
-                options=dict(options),
+                options=_sorted_by(options),
                 scope=dict(scope or {}),
                 stat_var_count=outcome.stat_var_count,
                 enrichment_stamp=stamp,
@@ -371,6 +403,20 @@ async def materialise_and_register(
             deadline=deadline,
         )
     return replace(outcome, frame_ref=ref)
+
+
+def _sorted_by(options: Mapping[str, Any]) -> dict[str, Any]:
+    """`options` with `groupby.by` sorted, as apis records it, the form a mint sends and
+    its record keeps.
+
+    Raises:
+        ValueError: When `by` is no list of axis names
+            (`common.materialisation.groupby_axes`).
+    """
+    groupby = options.get("groupby")
+    if groupby is None:
+        return dict(options)
+    return {**options, "groupby": normal_groupby(groupby)}
 
 
 async def _write_mint_record(record: MintRecord, *, deadline: CallDeadline | None) -> None:
@@ -751,7 +797,7 @@ async def _parse_and_register(
     schema and trusts the cells), and registered only when its `frame_sha256` mints
     `ref.content_version`, so the frame held under an apis service pair is the one its
     token names. A mismatch refuses `upstream_response_unusable`. Any other artifact
-    is a rendering, validated cell by cell (`_frame_from_parquet_bytes`) and
+    is a rendering, validated cell by cell (`frame_from_parquet_bytes`) and
     registered under its derived pair unchecked.
 
     The frame's trace keeps the mint's `options` and `stamp`, the stamp `ref` is named
@@ -768,7 +814,7 @@ async def _parse_and_register(
         frame = (
             frame_from_verified_parquet_bytes(fetched)
             if canonical
-            else _frame_from_parquet_bytes(fetched)
+            else frame_from_parquet_bytes(fetched)
         )
         minted = mint_content_version(frame_sha256=frame_sha256(frame)) if canonical else None
     except (FrameError, pa.ArrowException, KeyError) as exc:
@@ -841,70 +887,34 @@ def _read_outcome(
     )
 
 
-def requests_kinds(columns: Iterable[str]) -> bool:
-    """Whether `columns` asks apis for any of a flow party's kind, class or whole cells."""
-    return not set(KIND_COLUMNS).isdisjoint(columns)
-
-
 def recorded_stamp(columns: Iterable[str], stamp: str | None) -> str | None:
     """`stamp` as a frame minted with `columns` is named under (`frame_ref_for`) and its
     mint record keeps it: only a frame that asks for kinds is named by one."""
     return stamp if requests_kinds(columns) else None
 
 
-def frame_ref_for(
-    *,
-    spec_id: str,
-    content_version: str,
-    columns: tuple[str, ...] = (),
-    groupby: Mapping[str, Any] | None = None,
-    enrichment_stamp: str | None = None,
-) -> FrameRef:
-    """The frame reference of the frame a mint names as `{spec_id, content_version}`,
-    minted with `options.columns` set to `columns` and `options.groupby` to `groupby`.
+# The longest `by` whose every order `named_groupbys` lists: 4 axes give 24 orders. get_data
+# sums by two axes at most, and a longer `by` is listed in its sorted and recorded orders.
+_MAX_PERMUTED_BY = 4
 
-    apis keeps one `content_version` for every rendering of a materialisation,
-    so a frame minted with extra columns (`get_data(place_types=True)`), a sum that
-    keeps the version, and one minted with the default columns come back under one
-    pair. The default rendering, with no columns and no groupby, keeps the mint's own
-    pair and holds the version's canonical frame. Any other names its options in its
-    `content_version`: `cv_` and the first 32 hex digits of the SHA-256 of the
-    RFC 8785 form of `{"columns": [...], "content_version": ...}`, with `columns`
-    sorted and a `"groupby"` member holding `groupby` when it is set. Two renderings
-    of one pair are then two frames, and the store's insert-only entry for one is
-    never served for the other. A groupby sum apis mints as a version of its own
-    is still named by its groupby, since data-mcp cannot tell it from a sum that
-    keeps the version: the versions route that says so needs a first-party
-    principal this service does not hold.
 
-    A `columns` that asks for `KIND_COLUMNS` also names `enrichment_stamp`, the digest
-    of the code-index facts behind the kind cells of the artifact the frame is read
-    from (`ArtifactEntry.enrichment_stamp`, `_named_stamp`), in the preimage as an
-    `"enrichment_stamp"` member. apis keeps one
-    `content_version` across a change to a party's kind, so without it the store
-    would serve the frame holding the old kinds for as long as it keeps the entry.
-    With no stamp, or with columns that ask for no kinds, the ref is the unsalted one.
-
-    `options.without_party_totals` takes no part: apis mints a frame without
-    party totals a version of its own, so `content_version` already names it, and a
-    cut that leaves nothing out serves its base's frame under its base's version.
+def named_groupbys(groupby: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """`groupby` with `by` in each order a held frame's pair may name it in, for
+    `frame_ref_for(keep_by_order=True)`: sorted, as `frame_ref_for` names it, then as
+    `groupby` records it, then, for a `by` of at most `_MAX_PERMUTED_BY` axes, every other
+    order. A frame registered before `frame_ref_for` sorted `by` is held under the pair
+    named with the order get_data sent, which a record or a version may no longer keep.
 
     Raises:
-        pydantic.ValidationError: When `spec_id` and `content_version` do not fit
-            `FrameRef`'s pair shape.
+        ValueError: When `by` is no list of axis names
+            (`common.materialisation.groupby_axes`).
     """
-    ref = FrameRef(spec_id=spec_id, content_version=content_version)
-    if not columns and groupby is None:
-        return ref
-    preimage: dict[str, Any] = {"columns": sorted(columns), "content_version": content_version}
-    if groupby is not None:
-        preimage["groupby"] = dict(groupby)
-    if enrichment_stamp is not None and requests_kinds(columns):
-        preimage["enrichment_stamp"] = enrichment_stamp
-    rendering = rfc8785.dumps(preimage)
-    return FrameRef(
-        spec_id=spec_id, content_version=f"cv_{hashlib.sha256(rendering).hexdigest()[:32]}"
-    )
+    by = groupby_axes(groupby)
+    orders = [sorted(by), by]
+    if len(by) <= _MAX_PERMUTED_BY:
+        orders.extend(list(order) for order in permutations(by))
+    unique = dict.fromkeys(tuple(order) for order in orders)
+    return tuple({**groupby, "by": list(order)} for order in unique)
 
 
 def _ref_or_refusal(
@@ -920,6 +930,7 @@ def _ref_or_refusal(
             content_version=manifest.content_version,
             columns=tuple(options.get("columns") or ()),
             groupby=options.get("groupby"),
+            without_party_totals=options.get(WITHOUT_PARTY_TOTALS) is True,
             enrichment_stamp=stamp,
         )
     except ValidationError as exc:
@@ -1225,16 +1236,18 @@ def _check_unit_requests(column: pa.ChunkedArray) -> None:
 _UNIT_TYPE = canonical_frame_schema((UNIT_COLUMN,)).field(UNIT_COLUMN).type
 
 
-def _tagged_unit_from_text(text: object) -> object:
+def _tagged_unit_from_text(text: object, *, composed: bool) -> object:
     """One text `unit` cell as the value of the frame's tagged unit struct.
 
     apis writes a text `unit` column (`materialise.formats._cell_text`): a unit ref
-    as its own text, and a converted unit as the JCS text of its
-    `{currency, prices, base_year}` object. A unit ref never starts with `{`, so a cell
-    that does is a converted unit. It must parse as JSON, which makes it an object, and
-    the grammar's `unit_cell_from_json` must read it as a unit request, so Arrow never
-    drops an unknown member or fails on a mistyped one while building the struct. A
-    composed unit is refused `invalid_unit`: an artifact apis mints holds none.
+    as its own text, and a converted or composed unit as the JCS text of its
+    `as_json` object. A unit ref never starts with `{`, so a cell that does is an
+    object. It must parse as JSON, which makes it an object, and the grammar's
+    `unit_cell_from_json` must read it, so Arrow never drops an unknown member or fails
+    on a mistyped one while building the struct. A composed unit (`{numerator,
+    denominator}`) is accepted only when `composed` is set, for a frame the analysis
+    runner computed. Otherwise it is refused `invalid_unit`, since an artifact apis
+    mints holds none.
     """
     if text is None:
         return None
@@ -1244,9 +1257,9 @@ def _tagged_unit_from_text(text: object) -> object:
             unit = unit_cell_from_json(json.loads(cell))
         except json.JSONDecodeError as exc:
             raise FrameError(
-                "schema_violation", f"unit text {cell[:80]!r} is not a converted-unit object"
+                "schema_violation", f"unit text {cell[:80]!r} is not a JSON unit object"
             ) from exc
-        if not isinstance(unit, UnitRequest):
+        if not isinstance(unit, UnitRequest) and not (composed and isinstance(unit, ComposedUnit)):
             raise FrameError(
                 "invalid_unit", f"unit text {cell[:80]!r} is not a converted-unit object"
             )
@@ -1255,17 +1268,22 @@ def _tagged_unit_from_text(text: object) -> object:
     return unit_cell_array(unit, 1)[0].as_py()
 
 
-def _with_text_units_decoded(table: pa.Table) -> pa.Table:
+def _with_text_units_decoded(table: pa.Table, *, composed: bool) -> pa.Table:
     """`table` with a text `unit` column decoded into the frame's tagged unit struct
-    (`_tagged_unit_from_text`), each distinct cell once. A table without a `unit`
-    column, or with a struct or null one, is returned unchanged."""
+    (`_tagged_unit_from_text`, composed units accepted under `composed`), each distinct
+    cell once. A table without a `unit` column, or with a struct or null one, is
+    returned unchanged."""
     if UNIT_COLUMN not in table.schema.names:
         return table
     index = table.schema.get_field_index(UNIT_COLUMN)
     column_type = table.schema.field(index).type
     if not (pa.types.is_string(column_type) or pa.types.is_large_string(column_type)):
         return table
-    decoded = map_units(table.column(index), _tagged_unit_from_text, result_type=_UNIT_TYPE)
+    decoded = map_units(
+        table.column(index),
+        partial(_tagged_unit_from_text, composed=composed),
+        result_type=_UNIT_TYPE,
+    )
     return table.set_column(index, UNIT_COLUMN, decoded)
 
 
@@ -1289,7 +1307,7 @@ def holds_family_ref(frame: Frame, *, spec_id: str) -> bool:
     return pc.index(frame.table.column(STAT_VAR_COLUMN), f"dcid:{spec_id}").as_py() >= 0
 
 
-def _frame_from_parquet_bytes(data: bytes) -> Frame:
+def frame_from_parquet_bytes(data: bytes, *, composed_units: bool = False) -> Frame:
     """Parse `data` (a whole Parquet file's bytes) into a `Frame`.
 
     `role_keys` is every column name in the table's own schema minus the grammar's
@@ -1304,7 +1322,10 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
     `unit` column as an integer, is refused like a populated one.
 
     A text `unit` column holds unit refs and converted units as JCS object text, each
-    decoded into the frame's own unit cell (`_with_text_units_decoded`).
+    decoded into the frame's own unit cell (`_with_text_units_decoded`). A frame the
+    analysis runner computed can hold a composed unit too, the JCS text of its
+    `{numerator, denominator}` object, which `composed_units` accepts. A minted artifact
+    holds none, so it is refused `invalid_unit` by default.
 
     A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_class` or
     `{role}_party_whole` column (`common.place_type.enrichment_columns`), which
@@ -1321,7 +1342,7 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
     table = table.set_column(table.schema.get_field_index(VALUE_COLUMN), VALUE_COLUMN, value)
     if UNIT_COLUMN in table.schema.names:
         _check_unit_requests(table.column(UNIT_COLUMN))
-    table = _with_text_units_decoded(_with_null_optionals_as_text(table))
+    table = _with_text_units_decoded(_with_null_optionals_as_text(table), composed=composed_units)
     if STATUS_COLUMN in table.schema.names:
         table = table.drop_columns(STATUS_COLUMN)
     return build_frame_from_arrow(table, role_keys=role_keys)

@@ -31,14 +31,14 @@ until a deadline, and startup fails past it, or at once when the release
 answers and cannot be admitted. Local development can opt out and come up
 tool-less instead.
 
-Refusals leave as MCP error results (`isError: true`). `content` carries the
-`error`/`retry`/`detail` teaching payload, matching data-mcp and
-analysis-mcp. `describe_frame` carries the same payload in
-`structuredContent`. write_component and describe_component send it there
-too, except to a client `_view_support` answers as an MCP Apps host, which
-gets a one-line Prefab notice view in `structuredContent` instead. Every
-refusal also carries its `error` code in `_meta`
-(`common.refusal.refusal_meta`), where the harness's combined server reads it.
+Refusals leave as MCP error results (`isError: true`) in the envelope
+data-mcp and analysis-mcp answer with: `structuredContent` is `{code,
+retry_mode, message, fix}`, with `retry_after_s` when the refusal names a
+wait, and `content` is `common.refusal.refusal_text` of it. write_component
+and describe_component send a client `_view_support` answers as an MCP Apps
+host a one-line Prefab notice view in `structuredContent` instead. Every
+refusal also carries its code in `_meta` (`common.refusal.refusal_meta`),
+where the harness's combined server reads it.
 """
 
 from __future__ import annotations
@@ -54,14 +54,24 @@ from typing import Any, Literal
 
 from common.apis_auth import apis_auth_provider
 from common.auth import BearerTokenVerifier, apply_gate
+from common.declaration import declared_schema
 from common.logging import configure_logging
 from common.materialisation import install_store_if_unset
 from common.mcp_telemetry import (
+    LOOPBACK_SCOPE_KEY,
     WRITE_TOKEN_KEY,
     LangfuseSessionMiddleware,
     LangfuseToolIoMiddleware,
 )
-from common.refusal import internal_error_message, log_unexpected_error, refusal_meta
+from common.public_shape import PublicShape
+from common.refusal import (
+    REFUSAL_META_KEY,
+    detail_sentence,
+    internal_error_message,
+    log_unexpected_error,
+    refusal_meta,
+    refusal_text,
+)
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import Context, FastMCP
@@ -73,6 +83,7 @@ from fastmcp.apps import (
     app_config_to_meta_dict,
 )
 from fastmcp.resources import ResourceContent, ResourceResult
+from fastmcp.server.dependencies import get_http_request
 from fastmcp.tools import Tool, ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import ClientCapabilities, ImageContent, TextContent, ToolAnnotations
@@ -100,6 +111,7 @@ from presentation_mcp.projection import (
 from presentation_mcp.settings import Settings
 from presentation_mcp.theme import THEME_CSS, THEME_HASH, renderer_csp, renderer_html, renderer_uri
 from presentation_mcp.tool_schema import (
+    REBUILD_LOST_FRAMES,
     describe_component_schema,
     describe_frame_schema,
     write_component_schema,
@@ -109,9 +121,22 @@ logger = logging.getLogger(__name__)
 
 settings = Settings()
 
-# HTTP is the only transport this server has, and HTTP callers are always
-# external. A first-party path would need a second transport, not a flag here.
-_CALLER = Caller.EXTERNAL
+
+def _transport_caller() -> Caller:
+    """Who is writing, read from the transport the request arrived on.
+
+    `FIRST_PARTY` for a request carrying the `LOOPBACK_SCOPE_KEY` mark, which
+    the harness's loopback guard sets on its per-server mount, where only the
+    harness's own Studio clients reach this server. `EXTERNAL` for every other
+    request: one through the harness's combined server, a standalone
+    deployment of this server, or a call with no HTTP request behind it.
+    """
+    try:
+        scope = get_http_request().scope
+    except RuntimeError:  # no HTTP request in flight
+        return Caller.EXTERNAL
+    return Caller.FIRST_PARTY if scope.get(LOOPBACK_SCOPE_KEY) is True else Caller.EXTERNAL
+
 
 # The `ui://` resource serving Prefab's CDN renderer page, a stub that loads
 # renderer.js and renderer.css from jsDelivr at the installed prefab-ui version,
@@ -156,6 +181,17 @@ _PRESENTATION_ONLY_FIELDS: dict[str, frozenset[str]] = {
 
 type IncludeProjection = Literal["auto", "full", "none"]
 
+# The public form of each tool the combined server lists differently from this
+# mount (`common.public_shape`). A public describe_frame or create builds a frame
+# the platform no longer holds again. The harness keeps `frame_unavailable` and
+# replays the frame itself.
+_PUBLIC_FRAME_TOOL = PublicShape(
+    hidden=frozenset({REBUILD_LOST_FRAMES}), forced={REBUILD_LOST_FRAMES: True}
+)
+PUBLIC_SHAPES: Mapping[str, PublicShape] = dict.fromkeys(
+    ("write_component", "describe_frame"), _PUBLIC_FRAME_TOOL
+)
+
 # Draws the chart images, in a worker process the lifespan starts and stops.
 _chart_worker = ChartWorker(
     timeout_s=settings.chart_render_timeout_s, warm=settings.chart_worker_warm
@@ -166,27 +202,92 @@ _chart_worker = ChartWorker(
 _health: dict[str, Any] = {"status": "starting"}
 
 
-def _reply(
-    reply: Mapping[str, Any] | WriteReply | Refusal,
-    *,
-    view: dict[str, Any] | None = None,
-) -> ToolResult:
-    """A reply as a `ToolResult` whose `content` is the payload as JSON.
+def _reply(reply: Mapping[str, Any] | Refusal, *, tool: str) -> ToolResult:
+    """A describe_frame reply as a `ToolResult`: a refusal as
+    `_refusal_result`, and a mapping as its JSON in both `content` and
+    `structuredContent`, with `is_error` false and no `_meta`."""
+    if isinstance(reply, Refusal):
+        return _refusal_result(reply, tool=tool)
+    payload = dict(reply)
+    return ToolResult(content=payload, structured_content=payload)
 
-    `structuredContent` is `view` when given, and otherwise the identical
-    payload. `None` fields are dropped from dataclass replies, so absence
-    stays absent on the wire. A `Refusal` sets `is_error`, and its `_meta`
-    is `refusal_meta` of its `error`. `WriteReply` and a mapping reply
-    (`describe_frame`, `describe_component`) both leave `is_error` false
-    and carry no `_meta`.
+
+# Each registered tool's public arguments (`_public_arguments`), which a
+# `request_invalid` refusal's `fix.accepted` lists. `_register_tools` fills it.
+_accepted_arguments: dict[str, tuple[str, ...]] = {}
+
+
+def _refusal_result(
+    refusal: Refusal, *, tool: str, view: dict[str, Any] | None = None
+) -> ToolResult:
+    """`refusal` from `tool` as an MCP error result in the DFO refusal envelope.
+
+    `structuredContent` is the envelope, `{code, retry_mode, message, fix}`
+    and `retry_after_s` when set, or `view` when given. `content` is
+    `common.refusal.refusal_text` of it. The message is `refusal.detail`,
+    followed by `refusal.fix` when that is display text. `fix` holds only
+    what a corrected call can use. For `request_invalid` that is `tool`, one
+    `field: problem` line and the arguments `tool` accepts, as the combined
+    server's validation refusal does. Otherwise it is `refusal.fix` when that
+    is a mapping, and `{}`, with `pointer` beside it when the refusal names one.
+
+    `_meta` is `refusal_meta` of the code, beside `detail`, `advice` and
+    `values`. These are the refusal's detail, display-text fix and mapping fix
+    as the assembler gave them, which the harness reads, so a Studio retry merges
+    `values` alone and no `pointer` into its arguments.
     """
-    payload = _payload(reply)
+    advice = refusal.fix if isinstance(refusal.fix, str) else None
+    values = dict(refusal.fix) if isinstance(refusal.fix, Mapping) else None
+    message = _refusal_message(refusal)
+    if refusal.error == "request_invalid":
+        fix: dict[str, Any] = _request_invalid_fix(refusal, tool=tool)
+    else:
+        fix = {**(values or {}), **({"pointer": refusal.pointer} if refusal.pointer else {})}
+    envelope: dict[str, Any] = {
+        "code": refusal.error,
+        "retry_mode": refusal.retry.value,
+        "message": message,
+        "fix": fix,
+    }
+    if refusal.retry_after_s is not None:
+        envelope["retry_after_s"] = refusal.retry_after_s
+    meta = refusal_meta(code=refusal.error)
+    meta[REFUSAL_META_KEY] |= {"detail": refusal.detail, "advice": advice, "values": values}
     return ToolResult(
-        content=payload,
-        structured_content=payload if view is None else view,
-        meta=refusal_meta(code=reply.error) if isinstance(reply, Refusal) else None,
-        is_error=isinstance(reply, Refusal),
+        content=refusal_text(
+            message=message,
+            code=refusal.error,
+            retry_mode=refusal.retry.value,
+            fix=fix,
+            retry_after_s=refusal.retry_after_s,
+        ),
+        structured_content=envelope if view is None else view,
+        meta=meta,
+        is_error=True,
     )
+
+
+def _request_invalid_fix(refusal: Refusal, *, tool: str) -> dict[str, Any]:
+    """The fix of a `request_invalid` refusal, holding `tool`, its accepted
+    arguments, and one problem.
+
+    The problem names the field `refusal.pointer` points at when the pointer
+    starts at one of `tool`'s arguments. A pointer elsewhere, such as into a
+    publish body the caller never wrote, leaves the detail alone.
+    """
+    accepted = _accepted_arguments.get(tool, ())
+    segments = (refusal.pointer or "").strip("/").split("/")
+    if segments[0] in accepted:
+        problem = f"{'.'.join(segments)}: {refusal.detail}"
+    else:
+        problem = refusal.detail
+    return {"tool": tool, "problems": [problem], "accepted": list(accepted)}
+
+
+def _refusal_message(refusal: Refusal) -> str:
+    """`refusal.detail`, followed by `refusal.fix` when that is display text."""
+    advice = refusal.fix if isinstance(refusal.fix, str) else None
+    return " ".join(detail_sentence(text) for text in (refusal.detail, advice) if text)
 
 
 class ViewSupport(StrEnum):
@@ -281,11 +382,12 @@ def _write_result(
 async def _component_reply(
     reply: Mapping[str, Any] | WriteReply | Refusal,
     *,
+    tool: str,
     views: ViewSupport,
     include_projection: IncludeProjection,
     revise: bool = False,
 ) -> ToolResult:
-    """A write_component or describe_component reply as a `ToolResult`.
+    """A write_component or describe_component reply, from `tool`, as a `ToolResult`.
 
     A successful reply's `resolved_payload` leaves the payload and rides in
     `_meta` under `RESOLVED_PAYLOAD_META_KEY`. `content` is the projection
@@ -307,7 +409,11 @@ async def _component_reply(
     """
     app = views is not ViewSupport.UNDECLARED
     if isinstance(reply, Refusal):
-        return _reply(reply, view=_notice(app, f"The request was refused: {reply.detail}"))
+        return _refusal_result(
+            reply,
+            tool=tool,
+            view=_notice(app, f"The request was refused: {_refusal_message(reply)}"),
+        )
     payload = _payload(reply)
     write_token = payload.pop(WRITE_TOKEN_KEY, None) if isinstance(reply, WriteReply) else None
     envelope = payload.pop("resolved_payload", None)
@@ -422,8 +528,8 @@ def _notice(app: bool, text: str) -> dict[str, Any] | None:
     return notice_view(text, base_url=settings.presentation_public_url) if app else None
 
 
-def _payload(reply: Mapping[str, Any] | WriteReply | Refusal) -> dict[str, Any]:
-    if isinstance(reply, WriteReply | Refusal):
+def _payload(reply: Mapping[str, Any] | WriteReply) -> dict[str, Any]:
+    if isinstance(reply, WriteReply):
         return {k: v for k, v in asdict(reply).items() if v is not None}
     return dict(reply)
 
@@ -463,6 +569,7 @@ async def write_component(
     component_id: str | None = None,
     write_token: str | None = None,
     include_projection: IncludeProjection = "auto",
+    rebuild_lost_frames: bool = False,
 ) -> ToolResult:
     """Write a component: one of the platform's six typed members, line_chart, stat_card, bar_chart, table, note_narration, or source_card.
 
@@ -498,18 +605,24 @@ async def write_component(
     leaves it out.
     """
     assembler = get_assembler()
+    caller = _transport_caller()
     if component_id is None:
-        reply = await _safely(assembler.create_component(intent=intent, caller=_CALLER))
+        reply = await _safely(
+            assembler.create_component(
+                intent=intent, caller=caller, rebuild_lost_frames=rebuild_lost_frames
+            )
+        )
     elif write_token is None:
         reply = _missing_write_token(component_id)
     else:
         reply = await _safely(
             assembler.revise_component(
-                component_id=component_id, patch=intent, write_token=write_token, caller=_CALLER
+                component_id=component_id, patch=intent, write_token=write_token, caller=caller
             )
         )
     return await _component_reply(
         reply,
+        tool="write_component",
         views=_view_support(ctx),
         include_projection=include_projection,
         revise=component_id is not None,
@@ -520,20 +633,27 @@ async def describe_frame(
     frame_ref: dict[str, Any],
     dimension: str | None = None,
     query: str | None = None,
+    rebuild_lost_frames: bool = False,
 ) -> ToolResult:
     """Describe a frame: its dimensions, their values, and the periods it covers.
 
     frame_ref is the spec_id and content_version pair a data tool's reply
     returned. Any caller holding a frame_ref can use it, whichever caller
-    minted it.
+    minted it. A spec_id alone reads the newest version, and the reply names
+    its content_version.
 
     Use it before write_component, to see a frame's dimensions and values and
     choose what to chart.
     """
     reply = await _safely(
-        get_assembler().get_frame_view(frame_ref=frame_ref, dimension=dimension, query=query)
+        get_assembler().get_frame_view(
+            frame_ref=frame_ref,
+            dimension=dimension,
+            query=query,
+            rebuild_lost_frames=rebuild_lost_frames,
+        )
     )
-    return _reply(reply)
+    return _reply(reply, tool="describe_frame")
 
 
 async def describe_component(
@@ -560,9 +680,17 @@ async def describe_component(
     )
     return await _component_reply(
         reply,
+        tool="describe_component",
         views=_view_support(ctx),
         include_projection=include_projection,
     )
+
+
+def _public_arguments(tool: Tool) -> tuple[str, ...]:
+    """The arguments `tool`'s public listing declares, which a
+    `request_invalid` refusal's `fix.accepted` lists."""
+    shape = PUBLIC_SHAPES.get(tool.name, PublicShape())
+    return tuple(name for name in tool.parameters["properties"] if name not in shape.hidden)
 
 
 def _register_tools(
@@ -574,17 +702,18 @@ def _register_tools(
     """Publish the three tools from already-assembled schemas.
 
     FastMCP keeps parsing incoming arguments against the function signatures,
-    which stay permissive on purpose; only what is advertised changes.
+    which stay permissive on purpose. Only what is advertised changes. Each
+    advertised schema is `common.declaration.declared_schema` of the
+    assembled one, against the tool's own description.
 
     write_component and describe_component are Prefab app tools. Their
     listing carries `_meta.ui.resourceUri`, `_RENDERER_URI`.
 
-    Schema assembly happens in the caller, before any tool is added here, so
-    a `ValueError` from a divergent release document never reaches this
-    function. What this function can still fail partway through is
-    registration itself; on any such failure it unregisters whatever of the
-    three it had already added before re-raising, so a partial failure never
-    leaves `mcp` with, say, `write_component` mounted but not the others.
+    Schema assembly happens in the caller, before any tool is added here.
+    What this function can still fail partway through is registration
+    itself. On any such failure it unregisters whatever of the three it had
+    already added before re-raising, so a partial failure never leaves `mcp`
+    with, say, `write_component` mounted but not the others.
 
     Returns:
         The registered tools' names, so the lifespan can unregister exactly
@@ -598,8 +727,11 @@ def _register_tools(
             annotations=_WRITE_ANNOTATIONS,
             meta=_APP_META,
         )
-        write_tool.parameters = write_schema
+        write_tool.parameters = declared_schema(
+            write_schema, description=write_tool.description or ""
+        )
         mcp.add_tool(write_tool)
+        _accepted_arguments[write_tool.name] = _public_arguments(write_tool)
         registered.append(write_tool.name)
 
         frame_tool = Tool.from_function(
@@ -607,8 +739,11 @@ def _register_tools(
             title="Describe a result",
             annotations=READ_ONLY_CATALOGUE,
         )
-        frame_tool.parameters = frame_schema
+        frame_tool.parameters = declared_schema(
+            frame_schema, description=frame_tool.description or ""
+        )
         mcp.add_tool(frame_tool)
+        _accepted_arguments[frame_tool.name] = _public_arguments(frame_tool)
         registered.append(frame_tool.name)
 
         describe_tool = Tool.from_function(
@@ -617,8 +752,11 @@ def _register_tools(
             annotations=READ_ONLY_CATALOGUE,
             meta=_APP_META,
         )
-        describe_tool.parameters = describe_schema
+        describe_tool.parameters = declared_schema(
+            describe_schema, description=describe_tool.description or ""
+        )
         mcp.add_tool(describe_tool)
+        _accepted_arguments[describe_tool.name] = _public_arguments(describe_tool)
         registered.append(describe_tool.name)
     except Exception:
         for name in registered:

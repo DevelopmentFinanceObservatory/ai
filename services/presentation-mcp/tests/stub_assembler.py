@@ -212,8 +212,10 @@ class StubAssembler:
         *,
         intent: Mapping[str, Any],
         caller: Caller,
+        rebuild_lost_frames: bool = False,
     ) -> WriteReply | Refusal:
-        """Check completeness and bounds, then store the intent as revision 1."""
+        """Check completeness and bounds, then store the intent as revision 1.
+        The stub holds every frame, so `rebuild_lost_frames` changes nothing."""
         refusal = self._validate_create(intent)
         if refusal is not None:
             return refusal
@@ -292,8 +294,10 @@ class StubAssembler:
         frame_ref: Mapping[str, Any],
         dimension: str | None = None,
         query: str | None = None,
+        rebuild_lost_frames: bool = False,
     ) -> Mapping[str, Any] | Refusal:
-        """The built-in frame, whole. `frame_ref` and the narrowing are ignored.
+        """The built-in frame, whole. `frame_ref`, the narrowing and
+        `rebuild_lost_frames` are ignored.
 
         Ignoring `frame_ref` is the bootstrap, not an oversight: no data layer
         exists to hand out a real ref, so any ref answers with the frame and

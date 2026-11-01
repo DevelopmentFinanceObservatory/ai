@@ -43,6 +43,20 @@ callers goes. `build_combined_mcp` adds it outermost first:
 - `_ShapeResults` drops `structuredContent` and `search`'s envelope in
   `_meta` from successful results of tools that declare no MCP App view,
   and `outputSchema` from `tools/list`.
+- `_PublicArguments` lists and calls each tool in the public form its child
+  declares (`PUBLIC_SHAPES`, `common.public_shape`): `get_data` without
+  `place_types` and with it true on every call, every verb without
+  `rolling_follows_tree` and `rebuild_lost_frames` and with both true,
+  `describe_frame` and `write_component` without `rebuild_lost_frames` and
+  with it true, and `growth`, `rank` and `filter` without the harness's
+  `rolling` and `anchor_key`. A call that sends a hidden argument the public form does not
+  force is refused as an unknown argument; a forced one is accepted and
+  overwritten.
+- `_RegisterBareSpecs` registers with dfo-apis the definition of each `spec_` id a call
+  passes alone, so an id fresh from `search` reads as `get_data` would mint it
+  (`data_mcp.definition_registration`). Each id registers once a process, a failure a
+  retry may mend lets the call run, and a 4xx refuses it. Studio goes through `get_data`,
+  which registers as it mints.
 - `_RefuseRaisedErrors` answers a call that raised with a refusal: an
   unknown tool name, arguments that fail the tool's input schema, or an
   exception from the tool itself. A resource read that raised an
@@ -83,11 +97,14 @@ from contextlib import asynccontextmanager, contextmanager
 from importlib import metadata
 from typing import Any, override
 
+from analysis_mcp.server import PUBLIC_SHAPES as ANALYSIS_PUBLIC_SHAPES
 from analysis_mcp.server import healthz as analysis_healthz
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import BearerTokenVerifier
 from common.caller import current_caller
+from common.echoed_text import truncate_value
 from common.materialisation import get_store as get_frame_store
+from common.public_shape import PublicShape
 from common.refusal import (
     REFUSAL_META_KEY,
     internal_error_message,
@@ -103,8 +120,11 @@ from data_mcp.deadline import (
     EXTERNAL_CALL_LIMIT_S,
     use_call_budget,
 )
+from data_mcp.definition_registration import register_held_definition
 from data_mcp.definition_store import get_store as get_definition_store
+from data_mcp.definition_writes import SPEC_ID_PATTERN
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.server import PUBLIC_SHAPES as DATA_PUBLIC_SHAPES
 from data_mcp.server import healthz as data_healthz
 from data_mcp.server import mcp as data_mcp
 from data_mcp.skills_extension import SkillsExtension
@@ -121,9 +141,11 @@ from mcp import types as mt
 from mcp.server.context import ServerRequestContext
 from mcp.shared.exceptions import MCPError
 from mcp_types import INTERNAL_ERROR
+from presentation_mcp.server import PUBLIC_SHAPES as PRESENTATION_PUBLIC_SHAPES
 from presentation_mcp.server import healthz as presentation_healthz
 from presentation_mcp.server import mcp as presentation_mcp
 from presentation_mcp.server import view_support
+from pydantic import ValidationError as PydanticValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute
@@ -143,13 +165,12 @@ COMBINED_MCP_INSTRUCTIONS = (
     "definitions, each identified by a spec_id, and `get_data` fetches one as a frame, "
     "with its source. `sources` lists what DFO holds and how a dataset is made; "
     "`describe` explains graph ids read from a result. The analysis tools "
-    "(`aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join`, `sum_of`, "
-    "`quotient_of`) take frames and return a new frame, and `resolve_anchor` finds the "
-    "latest period a rolling `growth`, `rank` or `filter` call counts from. "
-    "`describe_frame` summarises a frame, and "
+    "(`aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join`) take frames "
+    "and return a new frame. `describe_frame` summarises a frame, and "
     "`write_component` turns a frame into a chart, table or card, which "
-    "`describe_component` reads back. A `search` result can list skills: `get_skill` "
-    "loads one, and `get_skill_file` reads a file it lists."
+    "`describe_component` reads back. `export_data` turns a frame into a CSV, Excel, "
+    "Parquet or zip file and returns a lasting link to it. A `search` result can list "
+    "skills: `get_skill` loads one, or a file it lists."
 )
 
 # data-mcp's `resolve_definition`, which resolves each Search result a Studio
@@ -158,8 +179,38 @@ COMBINED_MCP_INSTRUCTIONS = (
 # `explain_dfo` quotes. `sources` gives an outside client the same counts. The
 # harness calls both at `DATA_MCP_URL`
 # (`translator.discovery.resolve_definition`,
-# `harness.dfo_faq.read_catalogue_counts`).
-HARNESS_ONLY_TOOLS = frozenset({"resolve_definition", "catalogue_counts"})
+# `harness.dfo_faq.read_catalogue_counts`). The harness also calls
+# `sum_of`, `quotient_of` and `get_skill_file`, whose work an outside client
+# reaches through `compare`, `share_of` and `get_skill` (`_MERGED_NAMES`), and
+# `resolve_anchor`, which writes the `rolling` and `anchor_key` arguments the
+# public list leaves out (`analysis_mcp.server.PUBLIC_SHAPES`).
+HARNESS_ONLY_TOOLS = frozenset(
+    {
+        "resolve_definition",
+        "catalogue_counts",
+        "sum_of",
+        "quotient_of",
+        "get_skill_file",
+        "resolve_anchor",
+    }
+)
+
+# Each harness-only name whose work a listed tool does, with that tool and the
+# `operation` that picks the form. A call to one refuses `tool_not_found` naming
+# the listed call.
+_MERGED_NAMES: dict[str, tuple[str, str | None]] = {
+    "sum_of": ("compare", "sum"),
+    "quotient_of": ("share_of", "quotient"),
+    "get_skill_file": ("get_skill", None),
+}
+
+# How the public list shows and calls each tool whose form differs from its
+# mount's, as each child declares it beside the tool.
+_PUBLIC_SHAPES: dict[str, PublicShape] = {
+    **DATA_PUBLIC_SHAPES,
+    **ANALYSIS_PUBLIC_SHAPES,
+    **PRESENTATION_PUBLIC_SHAPES,
+}
 
 # The wait a caller is told before repeating a call the in-flight cap refused. A call
 # runs for up to `EXTERNAL_CALL_LIMIT_S`, and most finish within a few seconds.
@@ -238,6 +289,8 @@ def build_combined_mcp(
         _CallLimit(limit_s=call_limit_s),
         _ShapeResults(server=combined),
         _RefuseRaisedErrors(server=combined),
+        _PublicArguments(),
+        _RegisterBareSpecs(),
     ):
         combined.add_middleware(middleware)
     combined.add_extension(
@@ -895,6 +948,142 @@ class _ShapeResults(Middleware):
         return ToolResult(content=result.content, meta=meta or None)
 
 
+class _PublicArguments(Middleware):
+    """Lists each tool as `public_tool` declares it, and writes a tool's
+    `PublicShape.forced` arguments over every call's.
+
+    A call that sends an argument the public form hides and does not force raises
+    the `ValidationError` an unlisted name raises, so `_RefuseRaisedErrors`
+    refuses it as `request_invalid` before the child validates or runs it. A
+    forced argument the caller sends is accepted and overwritten, since clients
+    send `get_data`'s `place_types`."""
+
+    @override
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
+    ) -> Sequence[Tool]:
+        return [public_tool(tool) for tool in await call_next(context)]
+
+    @override
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        name = context.message.name
+        shape = _PUBLIC_SHAPES.get(name)
+        if shape is None:
+            return await call_next(context)
+        sent = context.message.arguments or {}
+        if hidden := [
+            argument
+            for argument in sent
+            if argument in shape.hidden and argument not in shape.forced
+        ]:
+            raise ValidationError(f"{name} takes no {', '.join(hidden)}") from (
+                PydanticValidationError.from_exception_data(
+                    name,
+                    [
+                        {
+                            "type": "unexpected_keyword_argument",
+                            "loc": (argument,),
+                            "input": sent[argument],
+                        }
+                        for argument in hidden
+                    ],
+                )
+            )
+        if not shape.forced:
+            return await call_next(context)
+        arguments = {**sent, **shape.forced}
+        message = context.message.model_copy(update={"arguments": arguments})
+        return await call_next(context.copy(message=message))
+
+
+# The arguments that name a frame, and the intent member of `write_component` that does.
+_FRAME_ARGUMENTS = ("frame_ref", "right_frame_ref", "denominator_frame_ref")
+_BARE_SPEC_ID = re.compile(SPEC_ID_PATTERN)
+
+
+def _bare_spec_ids(arguments: dict[str, Any]) -> list[str]:
+    """The `spec_` ids `arguments` pass alone, each once."""
+    intent = arguments.get("intent")
+    frames = [
+        *(arguments.get(name) for name in _FRAME_ARGUMENTS),
+        intent.get("frame_ref") if isinstance(intent, dict) else None,
+    ]
+    return list(
+        dict.fromkeys(
+            spec_id
+            for frame in frames
+            if isinstance(frame, dict)
+            and frame.get("content_version") is None
+            and isinstance(spec_id := frame.get("spec_id"), str)
+            and _BARE_SPEC_ID.match(spec_id)
+        )
+    )
+
+
+class _RegisterBareSpecs(Middleware):
+    """Registers each `spec_` id a call passes alone before the call runs. A
+    registration dfo-apis refuses with a 4xx answers the call."""
+
+    @override
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        name = context.message.name
+        outcomes = await asyncio.gather(
+            *(
+                register_held_definition(spec_id, tool=name)
+                for spec_id in _bare_spec_ids(context.message.arguments or {})
+            )
+        )
+        if refused := next((outcome for outcome in outcomes if outcome is not None), None):
+            return refused
+        return await call_next(context)
+
+
+def public_tool(tool: Tool) -> Tool:
+    """`tool` as the combined server lists it, under its child's `PublicShape`:
+    the shape's paragraphs after the mount's description, and every property the
+    shape hides left out wherever the schema holds one. A tool with no shape is
+    listed as its server declares it."""
+    shape = _PUBLIC_SHAPES.get(tool.name)
+    if shape is None:
+        return tool
+    return tool.model_copy(
+        update={
+            "description": "\n\n".join((tool.description or "", *shape.paragraphs)),
+            "parameters": _without_properties(tool.parameters, shape.hidden),
+        }
+    )
+
+
+def _without_properties(node: Any, hidden: frozenset[str]) -> Any:
+    if isinstance(node, list):
+        return [_without_properties(item, hidden) for item in node]
+    if not isinstance(node, dict):
+        return node
+    kept: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "properties" and isinstance(value, dict):
+            kept[key] = {
+                name: _without_properties(prop, hidden)
+                for name, prop in value.items()
+                if name not in hidden
+            }
+        elif key == "required" and isinstance(value, list):
+            kept[key] = [name for name in value if name not in hidden]
+        else:
+            kept[key] = _without_properties(value, hidden)
+    return kept
+
+
 def _declares_app_view(tool: Tool | None) -> bool:
     """Whether `tool` declares an MCP App view, `_meta.ui.resourceUri`, in `tools/list`."""
     ui = (tool.meta or {}).get("ui") if tool is not None else None
@@ -905,15 +1094,17 @@ class _RefuseRaisedErrors(Middleware):
     """Answers a tool call that raised with a refusal in the envelope a model reads.
 
     fastmcp reports a raised call to the client as bare text with no code or
-    retry mode. This middleware sits innermost, so it sees what the call
-    raised:
+    retry mode. This middleware sits inside every other but `_PublicArguments`,
+    so it sees what the call raised and what `_PublicArguments` raised for it:
 
     - `NotFoundError`, a name no tool carries: `tool_not_found`, naming the
       tools `server` serves. The parent resolves the name before any child
-      sees the call.
+      sees the call. A name in `_MERGED_NAMES` is answered with the listed
+      call that does its work instead.
     - `ValidationError`, arguments that fail the tool's input schema:
-      `request_invalid`, with fastmcp's account of what failed, which names
-      the argument and the rule and is written for the caller to act on.
+      `request_invalid`, whose `fix` holds `problems`, one `field: problem`
+      line per error pydantic found, and `accepted`, the arguments the tool's
+      listing (`public_tool`) declares.
     - Any other exception, which fastmcp has already wrapped in a `ToolError`
       for an exception the tool raised: `internal_error`, which repeating the
       call will not clear. Its text can hold a bucket path or a service
@@ -946,24 +1137,35 @@ class _RefuseRaisedErrors(Middleware):
         try:
             return await call_next(context)
         except NotFoundError:
+            if name in _MERGED_NAMES:
+                return _merged_name_refusal(name)
             tools = sorted(
                 tool.name for tool in await self._server.list_tools(run_middleware=False)
             )
             return _refusal(
                 code="tool_not_found",
                 retry_mode="correct_and_retry",
-                message=f"No tool is named {name!r}. Call one of: {', '.join(tools)}.",
+                message=(
+                    f"No tool is named {truncate_value(name)!r}. Call one of: {', '.join(tools)}."
+                ),
                 fix={"tools": tools},
             )
         except ValidationError as exc:
+            tool = await self._server.get_tool(name)
+            parameters = public_tool(tool).parameters if tool is not None else {}
+            problems = _problems(exc, parameters)
             return _refusal(
                 code="request_invalid",
                 retry_mode="correct_and_retry",
                 message=(
-                    f"The arguments to {name} do not match its input schema: {exc}. "
-                    "Correct them and call again."
+                    f"The arguments to {name} do not match its input schema: "
+                    f"{'; '.join(problems)}. Correct them and call again."
                 ),
-                fix={"tool": name, "detail": str(exc)},
+                fix={
+                    "tool": name,
+                    "problems": problems,
+                    "accepted": list(parameters.get("properties", {})),
+                },
             )
         except Exception:
             log_unexpected_error(logger, f"combined mcp: tool {name}")
@@ -989,6 +1191,48 @@ class _RefuseRaisedErrors(Middleware):
             raise ResourceError(
                 "internal_error: " + internal_error_message(subject="Reading this resource")
             ) from None
+
+
+def _merged_name_refusal(name: str) -> ToolResult:
+    """`tool_not_found` for `name`, naming the listed call that does its work."""
+    tool, operation = _MERGED_NAMES[name]
+    if operation is None:
+        message = (
+            f"No tool is named {name!r}. Call {tool} with the same skill_id, path, offset "
+            "and digest."
+        )
+        # `get_skill` reads one file of a skill when `path` is set.
+        fix: dict[str, Any] = {"tool": tool, "argument": "path"}
+    else:
+        message = (
+            f'No tool is named {name!r}. Call {tool} with operation="{operation}" and the '
+            "same arguments."
+        )
+        fix = {"tool": tool, "operation": operation}
+    return _refusal(code="tool_not_found", retry_mode="correct_and_retry", message=message, fix=fix)
+
+
+def _problems(exc: ValidationError, parameters: dict[str, Any]) -> list[str]:
+    """One `field: problem` line per error in the pydantic `ValidationError` fastmcp
+    raised `exc` from. A value outside a top-level enum in `parameters` names the
+    values the enum allows. What the caller sent, an argument's name included, and
+    pydantic's message, which can quote it, are echoed capped
+    (`echoed_text.truncate_value`)."""
+    cause = exc.__cause__
+    if not isinstance(cause, PydanticValidationError):
+        return [str(exc)]
+    properties = parameters.get("properties", {})
+    problems = []
+    for error in cause.errors(include_url=False):
+        field = truncate_value(".".join(str(part) for part in error["loc"]))
+        allowed = properties.get(field, {}).get("enum")
+        if error["type"] == "literal_error" and allowed:
+            values = ", ".join(str(value) for value in allowed)
+            sent = truncate_value(repr(error["input"]))
+            problems.append(f"{field}: must be one of {values}, not {sent}")
+        else:
+            problems.append(f"{field}: {truncate_value(error['msg'])}")
+    return problems
 
 
 def combined_http_app(combined: FastMCP) -> StarletteWithLifespan:

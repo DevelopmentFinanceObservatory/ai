@@ -13,10 +13,10 @@ itself (schema, dispatch, response envelope) works end to end.
 from __future__ import annotations
 
 import json
-import secrets
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from analysis_mcp import aggregate_tool
 from analysis_mcp import server as server_module
 from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.artifact import Interval, Observation
@@ -44,6 +44,7 @@ from common.materialisation import (
 from common.materialisation.memory_store import FRAME_TTL
 from dfo_frame_grammar import Frame
 from fastmcp import Client
+from runner_replay import frame_digest
 
 
 @pytest.fixture
@@ -79,7 +80,7 @@ def _minimal_trace() -> Trace:
 
 
 async def _seed_custom_frame(store: InMemoryMaterialisationStore, frame: Frame) -> dict[str, str]:
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
@@ -495,11 +496,11 @@ async def test_non_finite_result_refuses(seeded) -> None:
     assert result.structured_content["code"] == "non_finite_result"
 
 
-async def test_coverage_below_the_configured_floor_refuses(
-    seeded, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_coverage_below_the_floor_refuses(seeded, monkeypatch: pytest.MonkeyPatch) -> None:
     _store, handles = seeded
-    monkeypatch.setenv("AGGREGATE_COVERAGE_FLOOR", "0.9")  # sparse_coverage_frame realises 0.75
+    monkeypatch.setattr(
+        aggregate_tool, "COVERAGE_FLOOR", 0.9
+    )  # sparse_coverage_frame realises 0.75
     result = await aggregate(
         frame_ref=handles.sparse_coverage,
         aggregation="sum",

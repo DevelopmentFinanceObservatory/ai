@@ -5,8 +5,11 @@ builds a well-shaped `ToolRefusal`, and `to_tool_result` renders it correctly.
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import jsonschema
 import pytest
+from analysis_mcp import server
 from analysis_mcp.tool_errors import (
     _DISAMBIGUATION_CANDIDATE_CAP,
     MAX_LABEL_CHARS,
@@ -144,6 +147,7 @@ def test_every_other_code_is_correct_and_retry() -> None:
         ToolErrorCode.FRAME_INTEGRITY_FAILED,
         ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED,
         ToolErrorCode.SERVICE_UNAVAILABLE,
+        ToolErrorCode.UPSTREAM_ERROR,
     }
     for code in ToolErrorCode:
         if code in _not_correct_and_retry:
@@ -625,3 +629,229 @@ def test_unit_heterogeneous_text_stays_under_a_byte_ceiling_derived_from_its_cap
     # prefixes).
     ceiling = _DISAMBIGUATION_CANDIDATE_CAP * MAX_LABEL_CHARS * 4 + 2000
     assert len(text.encode("utf-8")) <= ceiling
+
+
+# The fix contract: a fix names only arguments, and values, its tool accepts -------
+
+_SPEC = "spec_" + "1" * 32
+_CV = "cv_" + "2" * 32
+_PAIR = {"spec_id": _SPEC, "content_version": _CV}
+
+# One refusal of each factory, and a registered tool that refuses with it.
+_FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
+    "op_spec_invalid": ("rank", {"detail": "x"}),
+    "stat_var_unresolved": ("aggregate", {"reason": "r", "distinct_stat_vars": ["a", "b"]}),
+    "composite_stat_vars_unsummed": (
+        "aggregate",
+        {"distinct_stat_vars": ["a", "b"], "components": [{"role": "r", "stat_vars": 2}]},
+    ),
+    "role_ambiguous": (
+        "aggregate",
+        {"parameter": "group_by", "columns": ["x"], "available": ["observationAbout"]},
+    ),
+    "place_level_side_unnamed": (
+        "aggregate",
+        {"columns": ["observationAbout_type"], "available": ["financingRecipient_type"]},
+    ),
+    "operation_uncovered": ("aggregate", {"aggregation": "median", "supported": ["sum", "mean"]}),
+    "frame_too_large": ("aggregate", {"row_count": 10, "ceiling": 5}),
+    "frame_too_large_before_decode": ("aggregate", {"reason": "r"}),
+    "frame_too_large_on_write": ("join", {"reason": "r"}),
+    "unit_heterogeneous": (
+        "aggregate",
+        {"parameter": "unit", "units": ["dcid:USDollar", "dcid:EUR"]},
+    ),
+    "unit_not_present": (
+        "aggregate",
+        {"parameter": "unit", "pinned_unit": "dcid:GBP", "units": ["dcid:USDollar"]},
+    ),
+    "facet_heterogeneous": ("aggregate", {"axis": "measurementMethod", "values": ["a", "b"]}),
+    "coverage_insufficient": (
+        "aggregate",
+        {"realised_coverage_fraction": 0.1, "floor": 0.5, "skipped_cell_count": 3},
+    ),
+    "non_finite_result": ("aggregate", {"group_key": {"r": "x"}, "aggregation": "sum"}),
+    "frame_not_held": ("aggregate", {"spec_id": _SPEC, "content_version": _CV}),
+    "frame_expired": ("aggregate", {"spec_id": _SPEC, "content_version": _CV}),
+    "frames_lost": ("compare", {"frame_refs": [_PAIR, _PAIR], "expired": False}),
+    "bare_frames_lost": ("compare", {"spec_ids": ["spec_" + "1" * 32], "expired": False}),
+    "frame_ref_incomplete": (
+        "compare",
+        {"argument": "right_frame_ref", "spec_id": "ops_" + "1" * 32},
+    ),
+    "mixed_time_grain": ("growth", {"grains": ["year", "month"], "periods": ["2020", "2020-01"]}),
+    "frame_integrity_failed": (
+        "aggregate",
+        {"spec_id": _SPEC, "content_version": _CV, "reason": "r"},
+    ),
+    "comparison_periods_disjoint": (
+        "compare",
+        {"left_periods": ["2020"], "right_periods": ["2021"]},
+    ),
+    "cross_frame_unit_mismatch": (
+        "compare",
+        {
+            "left_label": "left",
+            "left_unit": "dcid:USDollar",
+            "right_label": "right",
+            "right_unit": "dcid:EUR",
+        },
+    ),
+    "share_units_differ": (
+        "share_of",
+        {"numerator_unit": "dcid:USDollar", "denominator_unit": "dcid:Person"},
+    ),
+    "cross_frame_unit_unbound": (
+        "compare",
+        {"unbound_label": "left", "bound_label": "right", "bound_unit": "dcid:USDollar"},
+    ),
+    "cross_frame_facet_mismatch": (
+        "compare",
+        {
+            "left_label": "left",
+            "right_label": "right",
+            "axis": "measurementMethod",
+            "left_ref": "a",
+            "right_ref": "b",
+            "stat_vars": ["s"],
+        },
+    ),
+    "growth_gap_year": (
+        "growth",
+        {
+            "window_start": "2018",
+            "window_end": "2022",
+            "entity_count": 3,
+            "missing_start": 3,
+            "missing_end": 0,
+            "suggested_window": ["2019", "2022"],
+            "suggested_window_entities": 3,
+        },
+    ),
+    "growth_non_finite_result": (
+        "growth",
+        {"entity_count": 2, "zero_or_sign_crossing_base": 2, "non_finite": 2},
+    ),
+    "share_of_grain_mismatch": (
+        "share_of",
+        {
+            "numerator_periods": ["2020"],
+            "denominator_periods": ["2021"],
+            "key": {"observationAbout": "x"},
+        },
+    ),
+    "share_of_zero_denominator": ("share_of", {"time_period": "2020"}),
+    "share_of_key_unknown": (
+        "share_of",
+        {
+            "column": "observationAbout",
+            "numerator_by": ["observationAbout", "x"],
+            "denominator_by_keys": ["x"],
+        },
+    ),
+    "share_of_key_unmatched": (
+        "share_of",
+        {
+            "numerator_keys": [{"a": "b"}],
+            "denominator_keys": [{"a": "c"}],
+            "numerator_key_count": 1,
+            "denominator_key_count": 1,
+        },
+    ),
+    "quotient_of_zero_denominator": ("share_of", {"time_periods": ["2020"], "cell_count": 1}),
+    "quotient_of_no_key_matched": (
+        "share_of",
+        {
+            "numerator_keys": [{"a": "b"}],
+            "denominator_keys": [{"a": "c"}],
+            "numerator_key_count": 1,
+            "denominator_key_count": 1,
+        },
+    ),
+    "quotient_of_side_unit_unsupported": (
+        "share_of",
+        {"side": "numerator", "reason": "dimensionless"},
+    ),
+    "composed_unit_sum_unsupported": ("aggregate", {"verb": "aggregate", "unit": "dcid:USDollar"}),
+    "filter_predicate_type_mismatch": (
+        "filter",
+        {"column": "value", "predicate_kind": "category_match", "actual_type": "float"},
+    ),
+    "filter_predicate_value_type_mismatch": (
+        "filter",
+        {"column": "value", "actual_type": "str", "expected_type": "float"},
+    ),
+    "filter_unit_conversion_unsupported": (
+        "filter",
+        {"column": "unit", "predicate_kind": "category_match", "actual_type": "UnitRequest"},
+    ),
+    "join_output_collision": ("join", {"left_stat_var": "a", "right_stat_var": "a"}),
+    "join_no_common_key_columns": ("join", {"left_columns": ["a"], "right_columns": ["b"]}),
+    "derived_input_unusable": ("growth", {"span": "2018/2022"}),
+    "derived_input_unrecoverable": ("growth", {"engine_version": "0.2.0"}),
+    "derived_input_root_lost": (
+        "growth",
+        {"frame_refs": [_PAIR], "root": _PAIR, "upstream_code": "snapshot_not_found"},
+    ),
+    "derived_input_ordinal": ("growth", {"reason": "r"}),
+    "place_levels_mixed": (
+        "rank",
+        {"column": "observationAbout_type", "types": ["Country", "Place"]},
+    ),
+    "rolling_anchor_unresolved": (
+        "growth",
+        {
+            "detail": "anchor_record_missing",
+            "reason": "r",
+            "context": {"anchor_key": "rak_" + "1" * 32},
+        },
+    ),
+    "latest_year_unresolved": ("growth", {"fix": {"detail": "no_qualifying_period"}}),
+    "rolling_grain_unsupported": ("growth", {"reason": "r", "periods": ["2020-01"]}),
+    "rolling_reanchor_unavailable": ("compare", {"frame_refs": [_PAIR]}),
+    "row_budget_full": ("aggregate", {"requested": 10, "free": 1, "max_rows": 5}),
+    "frame_store_unavailable": (
+        "aggregate",
+        {"spec_id": _SPEC, "content_version": _CV, "retry_after_s": 5.0},
+    ),
+    "analysis_pending": ("aggregate", {"retry_after_s": 2.0, "operations": ["op_1"]}),
+    "rendering_not_recorded": (
+        "aggregate",
+        {"spec_id": _SPEC, "content_version": _CV, "options": ["currency"]},
+    ),
+    "upstream_error": ("aggregate", {"upstream_code": "x", "detail": "d", "retry_after_s": None}),
+    "internal_error": ("aggregate", {"tool": "aggregate"}),
+}
+
+# The fix keys whose value names an argument of the tool.
+_NAMING_KEYS = ("parameter", "argument")
+
+
+def test_every_factory_and_every_code_has_a_fix_sample() -> None:
+    factories = {
+        name for name, member in vars(ToolRefusal).items() if isinstance(member, classmethod)
+    }
+    assert set(_FIX_SAMPLES) == factories
+    codes = {
+        getattr(ToolRefusal, name)(**kwargs).code for name, (_, kwargs) in _FIX_SAMPLES.items()
+    }
+    assert codes == set(ToolErrorCode)
+
+
+@pytest.mark.parametrize("factory", _FIX_SAMPLES)
+async def test_a_fix_names_only_arguments_and_values_its_tool_accepts(factory: str) -> None:
+    """A fix key that is an argument of any registered tool is one of this tool's,
+    with a value its schema accepts, and a key that names an argument names one of
+    this tool's."""
+    schemas = {tool.name: tool.parameters for tool in await server.mcp.list_tools()}
+    arguments = set().union(*(schema["properties"] for schema in schemas.values()))
+    tool, kwargs = _FIX_SAMPLES[factory]
+    properties = schemas[tool]["properties"]
+    refusal = getattr(ToolRefusal, factory)(**kwargs)
+
+    for key, value in refusal.fix.items():
+        if key in arguments:
+            assert key in properties, (factory, tool, key)
+            jsonschema.validate(value, properties[key])
+        if key in _NAMING_KEYS:
+            assert value in properties, (factory, tool, key, value)

@@ -126,17 +126,52 @@ class FakeApis:
     answer lists, none when `None`. A pair keeps its first recipe and refuses one
     with another normal form or replay key, and a replay key names one frame, as
     apis' recipe store has it.
+
+    `runner` is the replayed analysis runner (`conftest.runner`), which stored
+    every frame a verb of this test returned with its recipe: a recipe or replay
+    key these dicts do not hold is read from it (`held_recipe`, `held_replay`),
+    and a recipe it holds is kept in `recipes`. A pair `withhold` names holds no
+    recipe.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, runner: Any = None) -> None:
         self.frames: dict[Pair, list[dict[str, Any]]] = {}
         self.recipes: dict[Pair, dict[str, Any]] = {}
         self.versions: dict[str, list[dict[str, Any]]] = {}
         self.enrichment_stamp: str | None = None
         self.requests: list[httpx2.Request] = []
         self.publish_answer: httpx2.Response | None = None
+        self.runner = runner
+        self.withheld: set[Pair] = set()
 
-    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+    def withhold(self, key: Pair) -> None:
+        """Answer `key` as a frame stored without a recipe."""
+        self.recipes.pop(key, None)
+        self.withheld.add(key)
+
+    async def held_recipe(self, key: Pair) -> dict[str, Any] | None:
+        """The recipe of `key`: the one published here, else the one the runner stored."""
+        if key in self.withheld:
+            return None
+        if (
+            key not in self.recipes
+            and self.runner is not None
+            and key in self.runner.stored.values()
+        ):
+            path = f"/api/datasets/frames/{key[0]}/{key[1]}/recipe"
+            answer = await self.runner.handle(httpx2.Request("GET", f"http://apis.test{path}"))
+            if answer.status_code == httpx2.codes.OK:
+                self.recipes[key] = answer.json()
+        return self.recipes.get(key)
+
+    async def held_replay(self, replay_key: str) -> Pair | None:
+        """The frame stored under `replay_key`: one published here, else the runner's."""
+        held = [pair for pair, recipe in self.recipes.items() if recipe["replay_key"] == replay_key]
+        if held:
+            return held[0]
+        return None if self.runner is None else self.runner.stored.get(replay_key)
+
+    async def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
         path = request.url.path
         # The versions route is open to every caller and answers in one page here.
@@ -164,18 +199,19 @@ class FakeApis:
                 json.loads(gzip.decompress(request.content))
             )
         if path.startswith("/api/datasets/recipes/replays/"):
-            key = path.rsplit("/", 1)[1]
-            held = [pair for pair, recipe in self.recipes.items() if recipe["replay_key"] == key]
-            if not held:
+            replayed = await self.held_replay(path.rsplit("/", 1)[1])
+            if replayed is None:
                 return problem(404, "recipe_not_found")
-            return httpx2.Response(200, json={"spec_id": held[0][0], "content_version": held[0][1]})
+            return httpx2.Response(
+                200, json={"spec_id": replayed[0], "content_version": replayed[1]}
+            )
         if path.startswith("/api/datasets/frames/") and path.endswith("/recipe"):
             spec_id, content_version = path.split("/")[-3:-1]
-            return self._recipe((spec_id, content_version))
+            return await self._recipe((spec_id, content_version))
         raise AssertionError(f"unexpected call to {path}")
 
-    def _recipe(self, key: Pair) -> httpx2.Response:
-        held = self.recipes.get(key)
+    async def _recipe(self, key: Pair) -> httpx2.Response:
+        held = await self.held_recipe(key)
         if held is None:
             return problem(404, "recipe_not_found")
         return httpx2.Response(200, json=held)

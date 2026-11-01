@@ -88,21 +88,22 @@ No token is needed. The site forwards each request to the DFO AI service with it
 
 ### Tools
 
-One endpoint serves nineteen tools:
+One endpoint serves sixteen tools:
 
-| Purpose                                        | Tools                                                                                                             |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Find, fetch and explain data                   | `search`, `get_data`, `describe`, `sources`, `get_skill`, `get_skill_file`                                        |
-| Analyse data returned by `get_data`            | `aggregate`, `compare`, `growth`, `rank`, `share_of`, `quotient_of`, `sum_of`, `filter`, `join`, `resolve_anchor` |
-| Turn a result into a chart, table or stat card | `describe_frame`, `write_component`, `describe_component`                                                         |
+| Purpose                                        | Tools                                                                  |
+| ---------------------------------------------- | ---------------------------------------------------------------------- |
+| Find, fetch and explain data                   | `search`, `get_data`, `describe`, `sources`, `get_skill`               |
+| Analyse data returned by `get_data`            | `aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join` |
+| Turn a result into a chart, table or stat card | `describe_frame`, `write_component`, `describe_component`              |
+| Take the data away as a file                   | `export_data`                                                          |
 
 A few notes:
 
 - `sources` lists the datasets the DFO holds and how each is made.
-- `get_skill_file` reads one file from a skill that `get_skill` loaded.
-- `sum_of` adds two single-series slices, period by period.
-- `quotient_of` divides one measure by another, such as GDP by population.
-- `resolve_anchor` finds the latest period of the data, which a rolling `growth`, `rank` or `filter` call counts from.
+- `get_skill` with a `path` reads one file from a skill it loaded.
+- `compare` subtracts one series from another, period by period, or adds them with `operation` set to `sum`.
+- `share_of` gives a share in per cent, or with `operation` set to `quotient` divides one measure by another, such as GDP by population.
+- `export_data` writes a fetched or derived frame as CSV, xlsx or Parquet and returns a public link that needs no key and does not expire. CSV and xlsx hold up to 250,000 rows.
 
 ### How components are returned
 

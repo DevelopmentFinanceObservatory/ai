@@ -7,7 +7,7 @@ from typing import Self
 from urllib.parse import urlsplit
 
 from common.settings import FrameServiceSettings
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from data_mcp.deadline import DIRECT_CALL_BUDGET
 from data_mcp.definition_store.caching import DEFAULT_MAX_ENTRIES
@@ -149,6 +149,12 @@ class Settings(FrameServiceSettings):
 
     `search_sends_conversation_context` gates the parsed input's `user_message`
     and `carried_entries` (its own description says why it defaults off).
+
+    `dfo_caller_principal` (`DFO_CALLER_PRINCIPAL`) is the secret dfo-apis shares
+    with the website. An `export_data` call whose caller the website named as
+    `ip:<digest>` carries it beside that caller (`x-dfo-caller-principal`,
+    `x-dfo-caller`), so dfo-apis spends that client's pin allowance. Unset or
+    blank, no caller is sent.
     """
 
     dfo_apis_url: str = "http://localhost:8083"
@@ -183,6 +189,15 @@ class Settings(FrameServiceSettings):
             "context is read and dropped."
         ),
     )
+
+    dfo_caller_principal: SecretStr | None = None
+
+    @field_validator("dfo_caller_principal", mode="before")
+    @classmethod
+    def _blank_principal_is_unset(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("dfo_site_origin", mode="before")
     @classmethod

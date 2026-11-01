@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx2
+import jsonschema
 import pytest
+from data_mcp import server
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
 from data_mcp.tool_errors import (
     _FAILED_OPERATION_CAUSES_RETRIED_IN_PLACE,
@@ -16,6 +18,7 @@ from data_mcp.tool_errors import (
     _UPSTREAM_CEILING_KINDS,
     _UPSTREAM_CODE_MAP,
     ENTITY_CANDIDATE_CAP,
+    TOOL_ARGUMENTS,
     EntityCandidate,
     FacetAlternative,
     FacetIssue,
@@ -47,8 +50,8 @@ async def test_same_upstream_retryable_flag_lands_on_different_modes() -> None:
     # The shared premise: both parsed exceptions really do carry `retryable=False`.
     assert facet_exc.retryable is False
     assert capability_exc.retryable is False
-    facet_refusal = from_upstream_error(facet_exc)
-    capability_refusal = from_upstream_error(capability_exc)
+    facet_refusal = from_upstream_error(facet_exc, tool="get_data")
+    capability_refusal = from_upstream_error(capability_exc, tool="get_data")
     assert facet_refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
     assert capability_refusal.retry_mode == RetryMode.DO_NOT_RETRY
     assert facet_refusal.retry_mode != capability_refusal.retry_mode
@@ -57,8 +60,8 @@ async def test_same_upstream_retryable_flag_lands_on_different_modes() -> None:
     upstream_exc = await _exc_from(503, code="upstream_error", retryable=True)
     assert version_exc.retryable is True
     assert upstream_exc.retryable is True
-    version_refusal = from_upstream_error(version_exc)
-    upstream_refusal = from_upstream_error(upstream_exc)
+    version_refusal = from_upstream_error(version_exc, tool="get_data")
+    upstream_refusal = from_upstream_error(upstream_exc, tool="get_data")
     assert version_refusal.retry_mode == RetryMode.REFRESH_THEN_RETRY
     assert upstream_refusal.retry_mode == RetryMode.RETRY_AFTER_DELAY
     assert version_refusal.retry_mode != upstream_refusal.retry_mode
@@ -170,7 +173,7 @@ async def _exc_from(status: int, **problem_kwargs: object) -> UpstreamError:
 
 
 async def _refusal_from(status: int, **problem_kwargs: object) -> ToolRefusal:
-    return from_upstream_error(await _exc_from(status, **problem_kwargs))
+    return from_upstream_error(await _exc_from(status, **problem_kwargs), tool="get_data")
 
 
 async def _refusal_from_body(problem: dict[str, Any]) -> ToolRefusal:
@@ -180,7 +183,7 @@ async def _refusal_from_body(problem: dict[str, Any]) -> ToolRefusal:
     async with _client(handler) as client:
         with pytest.raises(UpstreamError) as exc_info:
             await client.request("GET", "/api/datasets/operations/op_1", route="/api/datasets")
-    return from_upstream_error(exc_info.value)
+    return from_upstream_error(exc_info.value, tool="get_data")
 
 
 # apis' own bodies, rendered through the datasets code catalogue's `Envelope`.
@@ -684,8 +687,8 @@ async def test_the_first_issue_is_the_first_object_whatever_precedes_it() -> Non
         issues=["x", {"pointer": "/scope/entities/donor", "axis": "donor"}],
     )
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
-    assert refusal.fix["pointer"] == "/scope/entities/donor"
-    assert refusal.fix["role"] == "donor"
+    assert refusal.fix["problems"] == ["scope.entities.donor: because"]
+    assert "donor" in refusal.message
 
 
 async def test_a_malformed_issue_is_skipped_and_the_objects_beside_it_are_read() -> None:
@@ -783,14 +786,58 @@ async def test_request_invalid_maps_and_surfaces_the_pointer() -> None:
     )
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
     assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
-    assert refusal.fix == {"pointer": "/input/parts/0/variable_text", "detail": "because"}
-    assert "/input/parts/0/variable_text" in refusal.message
+    assert refusal.fix == {
+        "tool": "get_data",
+        "problems": ["parts.0.variable_text: because"],
+        "accepted": ["spec_id", "scope", "stat_vars", "without_party_totals", "breakdown"],
+    }
+    assert "/parts/0/variable_text" in refusal.message
+
+
+@pytest.mark.parametrize(
+    ("tool", "pointer", "problem"),
+    [
+        ("export_data", "/frame/content_version", "frame_ref.content_version: because"),
+        ("export_data", "/format", "format: because"),
+        ("get_data", "/options/groupby/levels/crsPurpose", "breakdown: because"),
+        ("get_data", "/options/columns", "without_party_totals: because"),
+        ("get_data", "/options/layout", "because"),
+        ("get_data", "/input/definition/identity/entities", "spec_id: because"),
+    ],
+)
+async def test_request_invalid_names_the_tools_own_argument(
+    tool: str, pointer: str, problem: str
+) -> None:
+    exc = await _exc_from(422, code="request_invalid", retryable=False, pointer=pointer)
+
+    assert from_upstream_error(exc, tool=tool).fix["problems"] == [problem]
+
+
+_LONG_ID = "ops_" + "x" * 5000
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ToolRefusal.frame_ref_incomplete(argument="frame_ref", spec_id=_LONG_ID),
+        ToolRefusal.provenance_unavailable(spec_id=_LONG_ID),
+        ToolRefusal.frame_unavailable(spec_id=_LONG_ID, upstream_code="spec_not_found"),
+    ],
+    ids=["frame_ref_incomplete", "provenance_unavailable", "frame_unavailable"],
+)
+def test_a_refusal_caps_the_spec_id_it_echoes(refusal: ToolRefusal) -> None:
+    assert "...(truncated)" in refusal.message
+    assert len(refusal.message) < 600
 
 
 async def test_request_invalid_without_a_pointer_still_names_the_detail() -> None:
     refusal = await _refusal_from(400, code="request_invalid", retryable=False)
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
-    assert refusal.fix == {"pointer": None, "detail": "because"}
+    assert refusal.fix == {
+        "tool": "get_data",
+        "problems": ["because"],
+        "accepted": ["spec_id", "scope", "stat_vars", "without_party_totals", "breakdown"],
+    }
     assert "because" in refusal.message
 
 
@@ -812,11 +859,14 @@ async def test_invalid_role_ref_maps_to_request_invalid_with_the_role() -> None:
     )
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
     assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
+    # apis' mint envelope wraps the scope as `/input/scope`. The problem names
+    # get_data's own `scope` argument.
     assert refusal.fix == {
-        "pointer": "/input/scope/entities/recipient",
-        "detail": "because",
-        "role": "recipient",
+        "tool": "get_data",
+        "problems": ["scope.entities.recipient: because"],
+        "accepted": ["spec_id", "scope", "stat_vars", "without_party_totals", "breakdown"],
     }
+    assert "recipient" in refusal.message
     assert "recipient" in refusal.message
 
 
@@ -833,10 +883,11 @@ async def test_role_incompatible_maps_to_request_invalid_with_the_role() -> None
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
     assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
     assert refusal.fix == {
-        "pointer": "/input/scope/entities/donor",
-        "detail": "because",
-        "role": "donor",
+        "tool": "get_data",
+        "problems": ["scope.entities.donor: because"],
+        "accepted": ["spec_id", "scope", "stat_vars", "without_party_totals", "breakdown"],
     }
+    assert "donor" in refusal.message
 
 
 async def test_definition_not_reproducible_maps_to_request_invalid_with_the_spec_id() -> None:
@@ -854,11 +905,9 @@ async def test_definition_not_reproducible_maps_to_request_invalid_with_the_spec
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
     assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
     assert refusal.fix == {
-        "spec_id": "spec-abc",
-        "upstream_code": "definition_not_reproducible",
-        "role_bound": True,
-        "roles": ["recipient"],
-        "next_tool": "search",
+        "tool": "get_data",
+        "problems": ["scope.entities.recipient: the source no longer declares this role"],
+        "accepted": list(TOOL_ARGUMENTS["get_data"]),
     }
     assert refusal.message == (
         "The stored definition could not be rebuilt for this mint because it binds the "
@@ -876,7 +925,9 @@ async def test_definition_not_reproducible_names_the_undeclared_role_however_the
 
     refusal = await _refusal_from_body(body)
 
-    assert refusal.fix["roles"] == ["recipient"]
+    assert refusal.fix["problems"] == [
+        "scope.entities.recipient: the source no longer declares this role"
+    ]
     assert refusal.message.endswith("with scope.entities, leaving out recipient.")
 
 
@@ -892,7 +943,10 @@ async def test_definition_not_reproducible_names_each_role_once() -> None:
             {"member": "spec-b", "axis": "recipient"},
         ],
     )
-    assert refusal.fix["roles"] == ["recipient", "donor"]
+    assert [problem.split(":")[0] for problem in refusal.fix["problems"]] == [
+        "scope.entities.recipient",
+        "scope.entities.donor",
+    ]
     assert refusal.message.endswith("leaving out recipient, donor.")
 
 
@@ -905,14 +959,12 @@ async def test_definition_not_reproducible_with_no_role_offers_only_search() -> 
     assert refusal.message.endswith("use the spec_id it returns.")
 
 
-async def test_definition_not_reproducible_omits_spec_id_when_no_issue_is_carried() -> None:
+async def test_definition_not_reproducible_with_no_role_names_the_spec_id() -> None:
     refusal = await _refusal_from(422, code="definition_not_reproducible", retryable=False)
     assert refusal.code == ToolErrorCode.REQUEST_INVALID
-    assert refusal.fix == {
-        "upstream_code": "definition_not_reproducible",
-        "role_bound": True,
-        "next_tool": "search",
-    }
+    assert refusal.fix["problems"] == [
+        "spec_id: the stored definition binds an entity role the source no longer declares"
+    ]
 
 
 async def test_definition_not_reproducible_message_differs_from_upstream_errors() -> None:
@@ -931,12 +983,15 @@ async def test_definition_not_reproducible_message_differs_from_upstream_errors(
 
 def test_request_invalid_with_role_names_it_in_the_fix_and_message() -> None:
     refusal = ToolRefusal.request_invalid(
-        pointer="/input/scope/entities/country", detail="not an accepted role", role="country"
+        tool="get_data",
+        pointer="/scope/entities/country",
+        detail="not an accepted role",
+        role="country",
     )
     assert refusal.fix == {
-        "pointer": "/input/scope/entities/country",
-        "detail": "not an accepted role",
-        "role": "country",
+        "tool": "get_data",
+        "problems": ["scope.entities.country: not an accepted role"],
+        "accepted": ["spec_id", "scope", "stat_vars", "without_party_totals", "breakdown"],
     }
     assert "country" in refusal.message
 
@@ -1018,7 +1073,8 @@ async def test_a_failed_operation_caused_by_member_not_resolvable_names_no_stat_
             code="operation_failed",
             retryable=False,
             cause={"code": "member_not_resolvable"},
-        )
+        ),
+        tool="get_data",
     )
 
     assert refusal.code == ToolErrorCode.MEMBER_NOT_RESOLVABLE
@@ -1031,7 +1087,7 @@ async def test_failed_operation_is_relayed_under_its_cause_code() -> None:
         500, code="operation_failed", retryable=False, cause={"code": "entities_unbound"}
     )
     assert exc.code == "operation_failed"
-    refusal = from_upstream_error(exc)
+    refusal = from_upstream_error(exc, tool="get_data")
     assert refusal.code == ToolErrorCode.UPSTREAM_ERROR
     assert refusal.upstream_code == "entities_unbound"
     assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
@@ -1104,19 +1160,19 @@ async def test_a_failed_operation_caused_by_upstream_version_changed_is_retried_
         (
             "request_invalid",
             ToolErrorCode.REQUEST_INVALID,
-            {"pointer": None},
+            {"tool": "get_data", "accepted": list(TOOL_ARGUMENTS["get_data"])},
             "The request was invalid: {detail}. Correct the argument and retry.",
         ),
         (
             "invalid_role_ref",
             ToolErrorCode.REQUEST_INVALID,
-            {"pointer": None},
+            {"tool": "get_data", "accepted": list(TOOL_ARGUMENTS["get_data"])},
             "The request was invalid: {detail}. Correct the argument and retry.",
         ),
         (
             "role_incompatible",
             ToolErrorCode.REQUEST_INVALID,
-            {"pointer": None},
+            {"tool": "get_data", "accepted": list(TOOL_ARGUMENTS["get_data"])},
             "The request was invalid: {detail}. Correct the argument and retry.",
         ),
         (
@@ -1144,15 +1200,17 @@ async def test_a_failed_operation_caused_by_upstream_version_changed_is_retried_
 async def test_a_failed_operations_refusal_carries_the_operations_own_detail(
     cause_code: str, code: ToolErrorCode, fix: dict[str, object], message: str
 ) -> None:
-    """The cause carries no detail of its own, so `fix.detail` and the message
-    hold the poll route's sentence about the operation."""
+    """The cause carries no detail of its own, so the fix and the message hold
+    the poll route's sentence about the operation, as `fix.detail` or, for a
+    `request_invalid`, as its one problem."""
     detail = f"operation 'op_1' did not complete successfully: {cause_code}"
     refusal = await _refusal_from(
         500, code="operation_failed", retryable=False, detail=detail, cause={"code": cause_code}
     )
     assert refusal.code == code
     assert refusal.upstream_code is None
-    assert refusal.fix == fix | {"detail": detail}
+    said = {"problems": [detail]} if code is ToolErrorCode.REQUEST_INVALID else {"detail": detail}
+    assert refusal.fix == fix | said
     assert refusal.message == message.format(detail=detail)
 
 
@@ -1300,7 +1358,7 @@ async def test_a_problem_with_its_own_cause_keeps_its_code(code: str, cause_code
     exc = await _exc_from(422, code=code, retryable=False, cause={"code": cause_code})
     assert exc.code == code
     assert exc.extensions["cause"] == {"code": cause_code}
-    refusal = from_upstream_error(exc)
+    refusal = from_upstream_error(exc, tool="get_data")
     assert refusal.upstream_code == code
 
 
@@ -1322,7 +1380,7 @@ def test_transport_error_routes_to_service_unavailable() -> None:
     exc = UpstreamTransportError(detail="connection reset")
     exc.elapsed_s = 2.4
 
-    refusal = from_upstream_error(exc)
+    refusal = from_upstream_error(exc, tool="get_data")
 
     assert refusal.code == ToolErrorCode.SERVICE_UNAVAILABLE
     assert refusal.retry_mode == RetryMode.RETRY_AFTER_DELAY
@@ -1335,7 +1393,7 @@ def test_surface_unavailable_routes_to_capability_unavailable() -> None:
         prefix="/api/datasets", probe_path="/api/datasets/capabilities"
     )
 
-    refusal = from_upstream_error(exc)
+    refusal = from_upstream_error(exc, tool="get_data")
 
     assert refusal.code == ToolErrorCode.CAPABILITY_UNAVAILABLE
     assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
@@ -1554,14 +1612,10 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             {"definition_id", "next_step"},
         ),
         (
-            ToolRefusal.request_invalid(pointer="/input/parts/0", detail="empty variable_text"),
-            {"pointer", "detail"},
-        ),
-        (
             ToolRefusal.request_invalid(
-                pointer="/input/scope/entities/country", detail="bad role", role="country"
+                tool="search", pointer="/parts/0", detail="empty variable_text"
             ),
-            {"pointer", "detail", "role"},
+            {"tool", "problems", "accepted"},
         ),
         (
             ToolRefusal.node_not_held(dcids=["country/ZZZ"]),
@@ -1775,3 +1829,195 @@ def test_entity_ambiguous_text_stays_under_a_byte_ceiling_derived_from_its_candi
         + 500
     )
     assert len(text.encode("utf-8")) <= ceiling
+
+
+# One sample per factory and per refusal built from an upstream body alone: the
+# tool that refuses it, and the arguments that build it.
+_SPEC = "spec_" + "1" * 32
+_FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
+    "facet_not_available": (
+        "get_data",
+        {
+            "issues": [
+                FacetIssue(
+                    axis="unit",
+                    alternatives=[FacetAlternative(ref="USDollar", label="US dollars")],
+                    truncated=False,
+                )
+            ]
+        },
+    ),
+    "default_facet_undefined": (
+        "get_data",
+        {"issues": [], "detail": "d", "retryable": False, "spec_id": _SPEC},
+    ),
+    "over_ceiling": ("get_data", {"detail": "d", "ceiling_kind": "rows", "count": 9, "cap": 5}),
+    "capability_unavailable": ("get_data", {"detail": "d", "option": "breakdown"}),
+    "upstream_version_changed": ("get_data", {"capability_version": "v2"}),
+    "entity_not_found": ("get_data", {"role": "recipient", "query": "q", "near_matches": ["a"]}),
+    "entity_ambiguous": (
+        "get_data",
+        {
+            "role": "recipient",
+            "query": "q",
+            "candidates": [EntityCandidate(dcid="country/KEN", label="Kenya", type="Country")],
+        },
+    ),
+    "upstream_error": ("get_data", {"upstream_code": "x", "detail": "d", "retry_after_s": 1.0}),
+    "upstream_response_unusable": ("search", {"detail": "d"}),
+    "service_unavailable": ("get_data", {"service": "dfo-apis", "retry_after_s": 1.0}),
+    "definition_not_held": ("get_data", {"definition_id": _SPEC}),
+    "open_role_unavailable": ("get_data", {"pointer": "/identity/open_roles", "detail": "d"}),
+    "request_invalid": ("describe", {"tool": "describe", "pointer": "/ids/0", "detail": "d"}),
+    "spec_not_registered": (
+        "export_data",
+        {
+            "tool": "export_data",
+            "spec_id": "spec_" + "1" * 32,
+            "upstream_code": "spec_id_mismatch",
+            "detail": "differs",
+        },
+    ),
+    "node_not_held": ("describe", {"dcids": ["country/ZZZ"]}),
+    "frame_integrity_failed": (
+        "get_data",
+        {"spec_id": _SPEC, "content_version": "cv_1", "reason": "r"},
+    ),
+    "spec_not_exportable": ("get_data", {"detail": "d"}),
+    "rollup_not_summable": ("get_data", {"axes": ["stat_var"], "detail": "d"}),
+    "operation_still_processing": (
+        "get_data",
+        {
+            "operation_id": "op_1",
+            "last_status": "running",
+            "last_poll_error": None,
+            "elapsed_s": 1.0,
+            "retry_after_s": 1.0,
+        },
+    ),
+    "mint_unanswered": (
+        "get_data",
+        {"spec_id": _SPEC, "elapsed_s": 1.0, "retry_after_s": 1.0, "waits_out_sync_mint": True},
+    ),
+    "mint_joined_unanswered": (
+        "get_data",
+        {"spec_id": _SPEC, "waited_s": 1.0, "retry_after_s": 1.0},
+    ),
+    "mint_still_running": (
+        "get_data",
+        {"spec_id": _SPEC, "started_s_ago": 1.0, "retry_after_s": 1.0},
+    ),
+    "mint_slots_full": ("get_data", {"limit": 4, "retry_after_s": 1.0}),
+    "row_budget_full": ("get_data", {"requested": 10, "free": 1, "max_rows": 5}),
+    "frame_ref_incomplete": ("export_data", {"argument": "frame_ref", "spec_id": "ops_1"}),
+    "export_over_ceiling": ("export_data", {"export_format": "csv", "count": 9, "cap": 5}),
+    "allowance_exhausted": ("export_data", {"retry_after_s": 60.0, "detail": "d"}),
+    "provenance_unavailable": ("export_data", {"spec_id": _SPEC}),
+    "licence_not_redistributable": ("export_data", {"detail": "d"}),
+    "rendering_not_recorded": (
+        "export_data",
+        {"spec_id": _SPEC, "content_version": "cv_1", "options": []},
+    ),
+    "frame_unavailable": ("export_data", {"spec_id": _SPEC, "upstream_code": "artifact_expired"}),
+    "skill_not_found": ("get_skill", {"skill_id": "oda-concepts"}),
+    "skill_resource_not_found": (
+        "get_skill",
+        {"skill_id": "oda-concepts", "path": "references/core-oda.md"},
+    ),
+    "skill_file_changed": (
+        "get_skill",
+        {
+            "skill_id": "oda-concepts",
+            "path": "references/core-oda.md",
+            "digest": "sha256:" + "0" * 64,
+            "current_digest": "sha256:" + "1" * 64,
+            "tool": "get_skill",
+        },
+    ),
+}
+_UPSTREAM_FIX_SAMPLES: dict[str, tuple[str, UpstreamError]] = {
+    "definition_not_reproducible": (
+        "get_data",
+        UpstreamError(
+            status=422,
+            code="definition_not_reproducible",
+            extensions={"issues": [{"member": _SPEC, "axis": "recipient"}]},
+        ),
+    ),
+    "member_not_resolvable": (
+        "get_data",
+        UpstreamError(
+            status=422,
+            code="member_not_resolvable",
+            extensions={"issues": [{"member": "dcid:sv_x"}]},
+        ),
+    ),
+}
+
+# The fix keys whose value names an argument of the tool.
+_NAMING_KEYS = ("argument",)
+
+
+def _sampled_refusals() -> dict[str, tuple[str, ToolRefusal]]:
+    built = {
+        name: (tool, getattr(ToolRefusal, name)(**kwargs))
+        for name, (tool, kwargs) in _FIX_SAMPLES.items()
+    }
+    upstream = {
+        name: (tool, from_upstream_error(exc, tool=tool))
+        for name, (tool, exc) in _UPSTREAM_FIX_SAMPLES.items()
+    }
+    return built | upstream
+
+
+async def _public_schemas() -> dict[str, dict[str, Any]]:
+    """Each data-mcp tool's declared schema, less the arguments its public form hides."""
+    schemas = {tool.name: tool.parameters for tool in await server.mcp.list_tools()}
+    for name, shape in server.PUBLIC_SHAPES.items():
+        properties = schemas[name]["properties"]
+        schemas[name] = {
+            **schemas[name],
+            "properties": {k: v for k, v in properties.items() if k not in shape.hidden},
+        }
+    return schemas
+
+
+def test_every_factory_and_every_code_has_a_fix_sample() -> None:
+    factories = {
+        name for name, member in vars(ToolRefusal).items() if isinstance(member, classmethod)
+    }
+    assert set(_FIX_SAMPLES) == factories
+    codes = {refusal.code for _, refusal in _sampled_refusals().values()}
+    assert codes == set(ToolErrorCode)
+
+
+@pytest.mark.parametrize("sample", [*_FIX_SAMPLES, *_UPSTREAM_FIX_SAMPLES])
+async def test_a_fix_names_only_arguments_and_values_its_tool_accepts(sample: str) -> None:
+    """A fix key that is an argument of any data tool is one of this tool's, with a
+    value its schema accepts. A key that names an argument names one of this tool's.
+    A `request_invalid` fix names the tool, its accepted arguments, and problems on
+    those arguments."""
+    schemas = await _public_schemas()
+    arguments = set().union(*(schema["properties"] for schema in schemas.values()))
+    tool, refusal = _sampled_refusals()[sample]
+    properties = schemas[tool]["properties"]
+
+    for key, value in refusal.fix.items():
+        if key in arguments:
+            assert key in properties, (sample, tool, key)
+            jsonschema.validate(value, properties[key])
+        if key in _NAMING_KEYS:
+            assert value in properties, (sample, tool, key, value)
+    if refusal.code is ToolErrorCode.REQUEST_INVALID:
+        assert refusal.fix["tool"] == tool
+        assert refusal.fix["accepted"] == list(properties)
+        for problem in refusal.fix["problems"]:
+            field, _, _ = problem.partition(": ")
+            assert field.split(".")[0] in properties, (sample, problem)
+
+
+async def test_tool_arguments_lists_each_tools_public_arguments() -> None:
+    schemas = await _public_schemas()
+    assert {name: tuple(schema["properties"]) for name, schema in schemas.items()} == dict(
+        TOOL_ARGUMENTS
+    )

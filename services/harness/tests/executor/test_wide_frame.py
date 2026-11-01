@@ -25,7 +25,12 @@ from common.materialisation import FrameRef, InMemoryMaterialisationStore, Mater
 from compiler.compile import CompileResult, compile_plan
 from compiler.sources import member_digest, pinned_stat_var
 from compiler.surface import McpSurface, ProgressCallback, ToolCallResult, ToolSchema
-from data_mcp.frame_materialisation import observed_shape
+from data_mcp.frame_materialisation import (
+    DEFAULT_MINT_OPTIONS,
+    KIND_COLUMNS,
+    WITHOUT_PARTY_TOTALS,
+    observed_shape,
+)
 from dfo_frame_grammar import Frame
 from executor.outcomes import (
     Accepted,
@@ -93,6 +98,7 @@ from planner.workflow import OpenAxis, OpenEntityAxis, ResolvedEntity, SelectedS
 from pydantic import JsonValue
 from translator.tool import restated_to_the_data
 
+from ..runner_frames import hold_root, result_table
 from .conftest import ScriptedSurface, ok, refusal
 
 SPEC_CRS = "spec_" + "e" * 32
@@ -339,13 +345,13 @@ def retrieved(
             "family_member_count": 1,
             "facets": [{"axis": "unit", "ref": "usd", "basis": "declared_default"}],
         }
-        await frame_store.put(
+        await hold_root(
+            frame_store,
             ref,
             frame=held,
             trace=MaterialisationTrace(
                 upstream_trace=trace, spec_id=ref.spec_id, content_version=ref.content_version
             ),
-            writer="tests",
         )
         statistics = statistics or [
             {
@@ -1209,9 +1215,7 @@ async def test_which_sectors_received_the_most_aid_in_kenya_ranks_the_frames_sec
         "group_by": ["time_period", "stat_var_crsPurpose"],
     }
     assert _analysis_call(surface, "rank")["rank_by"] == ["stat_var_crsPurpose"]
-    held = await frame_store.get(outcome.results["top_op"])
-    assert held is not None
-    ranked = held[0].table.to_pylist()
+    ranked = (await result_table(outcome.results["top_op"])).to_pylist()
     assert {row["stat_var_crsPurpose"]: row["value"] for row in ranked} == {
         "Social infrastructure": 500.0,
         "Economic infrastructure": 400.0,
@@ -1502,8 +1506,8 @@ async def test_a_share_of_two_one_figure_totals_is_one_row(
     assert _analysis_call(surface, "share_of") == {}
     assert outcome.steps[-1].role_keys == ()
     # Every donor gives alike each year, so two of the three hold two thirds.
-    held, _trace = await frame_store.get(outcome.results["share_op"])
-    assert held.table.column("value").to_pylist() == [pytest.approx(200 / 3)]
+    held = await result_table(outcome.results["share_op"])
+    assert held.column("value").to_pylist() == [pytest.approx(200 / 3)]
 
 
 async def test_a_join_keys_both_frames_by_their_shared_role_columns(
@@ -1704,7 +1708,7 @@ async def test_a_place_series_joins_the_aid_its_place_receives_by_value(
     (join,) = [record for record in records if record.step_id == "joined_op"]
     dropped = [line for line in join.digest.splitlines() if "unmatched_key" in line]
     assert isinstance(outcome, Accepted), outcome
-    held, _trace = await frame_store.get(outcome.results["joined_op"])
+    held = await result_table(outcome.results["joined_op"])
     assert held.num_rows == 48
     assert dropped == []
 
@@ -2139,6 +2143,7 @@ async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_don
     frame_store: InMemoryMaterialisationStore,
     _stats_by_manifest: dict[tuple[str, str], list[dict[str, Any]]],
     real_schemas: list[ToolSchema],
+    runner: Any,
 ) -> None:
     # "Total aid to Kenya each year": the source binds Kenya and leaves the donors open.
     # The compiled retrieval asks for the frame without donor totals, and each year's
@@ -2186,8 +2191,18 @@ async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_don
     )
     plain_ref = FrameRef(spec_id=source.spec_id, content_version=CONTENT_VERSION)
     _held, trace = await frame_store.get(plain_ref)
-    await frame_store.put(
-        without_totals_ref, frame=without_totals_frame, trace=trace, writer="tests"
+    # Minted as `get_data(without_party_totals=True)` mints a flow frame: the kinds
+    # alone, and the totals left out.
+    await hold_root(
+        frame_store,
+        without_totals_ref,
+        frame=without_totals_frame,
+        trace=trace,
+        options={
+            **DEFAULT_MINT_OPTIONS,
+            "columns": list(KIND_COLUMNS),
+            WITHOUT_PARTY_TOTALS: True,
+        },
     )
     _stats_by_manifest[(source.spec_id, _WITHOUT_TOTALS_CONTENT_VERSION)] = _stats_by_manifest[
         (source.spec_id, CONTENT_VERSION)
@@ -2211,10 +2226,14 @@ async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_don
         await engines.aclose()
 
     assert isinstance(outcome, Accepted), outcome
-    total, _trace = await frame_store.get(outcome.results["totals_op"])
-    assert set(total.table.column("value").to_pylist()) == {38.0}
+    total = await result_table(outcome.results["totals_op"])
+    assert set(total.column("value").to_pylist()) == {38.0}
     ((_, aggregated),) = [call for call in surface.calls if call[0] == "aggregate"]
     assert aggregated["frame_ref"]["content_version"] == _WITHOUT_TOTALS_CONTENT_VERSION
+    # The runner reads the root with the rendering the frame was minted with.
+    ((root,),) = [body["tree"]["inputs"].values() for body in runner.requests]
+    assert root["rendering"]["without_party_totals"] is True
+    assert set(root["rendering"]["columns"]) == set(KIND_COLUMNS)
 
 
 # --- A keyed pairing under a rolling period: the matched keys' newest year ----
@@ -2386,7 +2405,7 @@ async def test_a_rolling_share_of_disjoint_halves_answers_from_the_year_its_keys
     assert [anchor.period for anchor in outcome.anchors] == ["2023"]
     sent = _analysis_call(surface, "growth")
     assert (sent["window_start"], sent["window_end"]) == ("2018", "2023")
-    held, _trace = await frame_store.get(outcome.results["growth_op"])
+    held = await result_table(outcome.results["growth_op"])
     assert held.num_rows == len(_MATCHED_DONORS)
 
 
@@ -2565,7 +2584,7 @@ async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_place
         if name == "growth"
     ]
     assert windows == [("2018", "2023")] * 2
-    held, _trace = await frame_store.get(outcome.results["joined_op"])
+    held = await result_table(outcome.results["joined_op"])
     # Each place's growth on each side, every place matched.
     assert held.num_rows == 2 * len(_MATCHED_PLACES)
 

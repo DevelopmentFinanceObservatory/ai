@@ -18,7 +18,8 @@ in-memory servers, with canned answers for the calls a test makes.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
+from planner.call import Step
 from planner.plan import PLAN_STATE_KEY, Decision, EvidenceRequirement, Plan, PlanStatus
 
 from ..described_nodes import stat_var_node
@@ -239,8 +241,19 @@ def draft(
     return _draft
 
 
+@dataclass
+class FakeCall:
+    """A minimal `planner.call.PlannerCall`: the translator reads only `state`."""
+
+    state: dict[str, str]
+    call_id: str | None = None
+
+    def steps(self) -> Sequence[Step]:
+        return ()
+
+
 class FakeToolContext:
-    """A minimal stand-in for ADK's `ToolContext`: only `.state` is read."""
+    """A session state holder: only `.state` is read."""
 
     def __init__(self) -> None:
         self.state: dict[str, str] = {}

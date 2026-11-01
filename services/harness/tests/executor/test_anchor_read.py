@@ -154,7 +154,7 @@ def _script_analysis(surface: ScriptedSurface, plan: Plan) -> None:
 async def _propose(context: _Context, surface: ScriptedSurface) -> dict[str, Any]:
     translation = build_translation(context.plan(), context.specs)
     core = build_translator_core(surface=surface)
-    return await core.propose_operations(translation=translation, tool_context=context)
+    return await core.propose_operations(translation=translation, state=context.state)
 
 
 @pytest.mark.parametrize(
@@ -682,7 +682,7 @@ async def test_the_planner_entry_evals_stand_in_read_records_the_plan_as_written
     core = build_translator_core(surface=surface, anchor_read=entry._no_anchor_read)
 
     answer = await core.propose_operations(
-        translation=build_translation(context.plan(), context.specs), tool_context=context
+        translation=build_translation(context.plan(), context.specs), state=context.state
     )
 
     assert answer["outcome"] == "ok", answer

@@ -63,10 +63,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.workflow import START, Workflow
-from google.adk.workflow.utils._workflow_hitl_utils import (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
-    create_request_input_response,
-)
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
 from harness.graph.seams import PlannerModel
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
@@ -83,9 +80,11 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
 from planner.agent import read_full_history
+from planner.call import PlannerCall
 from planner.plan import (
     Plan,
     SessionState,
@@ -707,11 +706,11 @@ class Probe:
     # The requests the current turn budget had sent before the call in flight.
     _requests_before: int | None = None
 
-    async def translate(self, tool_context: Any) -> dict[str, object]:
-        self.plan = load_plan(tool_context.state)
-        self.plan_call = tool_context.function_call_id
+    async def translate(self, call: PlannerCall) -> dict[str, object]:
+        self.plan = load_plan(call.state)
+        self.plan_call = call.call_id
         if self.translator is not None:
-            self.translation = await self.translator(tool_context)
+            self.translation = await self.translator(call)
         raise PlanRecorded
 
     def watch(self, seam: PlannerModel) -> PlannerModel:

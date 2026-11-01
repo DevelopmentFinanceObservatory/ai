@@ -12,6 +12,7 @@ _ENV_VARS = (
     "MODEL_NAME",
     "DFO_APIS_URL",
     "DATASETS_FIRST_PARTY_PRINCIPAL",
+    "LIVE_REFRESH_PRINCIPAL",
     "PRESENTATION_PUBLIC_URL",
     "PRESENTATION_RELEASE_REQUIRED",
 )
@@ -43,6 +44,7 @@ def test_defaults_without_env() -> None:
     assert settings.release_retry_max_s == 60.0
     assert settings.release_startup_deadline_s == 90.0
     assert settings.datasets_first_party_principal is None
+    assert settings.live_refresh_principal is None
     assert settings.presentation_public_url == _PUBLIC_URL
 
 
@@ -60,6 +62,21 @@ def test_blank_datasets_first_party_principal_is_unset(monkeypatch: pytest.Monke
     settings = Settings()
 
     assert settings.datasets_first_party_principal is None
+
+
+@pytest.mark.parametrize(
+    ("value", "principal"),
+    [("live-refresh", "live-refresh"), ("   ", None)],
+    ids=["set", "blank"],
+)
+def test_reads_live_refresh_principal_from_env(
+    monkeypatch: pytest.MonkeyPatch, value: str, principal: str | None
+) -> None:
+    monkeypatch.setenv("LIVE_REFRESH_PRINCIPAL", value)
+
+    read = Settings().live_refresh_principal
+
+    assert (read and read.get_secret_value()) == principal
 
 
 def test_reads_port_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

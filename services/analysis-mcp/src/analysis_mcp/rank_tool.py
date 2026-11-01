@@ -5,7 +5,7 @@ Flow mirrors `aggregate_tool.aggregate`: parse/validate the op-spec ->
 resolve `frame_ref` via the shared `analysis_mcp.frame_ref_resolution`
 helpers -> run the engine (`analysis_mcp.engine.rank.run_rank`), translating
 each of its typed exceptions to its own refusal -> check the coverage floor
-(reusing `aggregate`'s own `settings.aggregate_coverage_floor` and
+(reusing `aggregate`'s own `engine.aggregate.COVERAGE_FLOOR` and
 `coverage_insufficient` refusal, see `analysis_mcp.engine.rank`'s own module
 docstring for why) -> mint identity, build the trace, write the store under
 the result's own pair -> render the digest. Every typed failure this
@@ -32,6 +32,7 @@ from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_rank_digest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
+    COVERAGE_FLOOR,
     ComposedUnitSumError,
     NonFiniteAggregateResultError,
     UnsupportedAggregationError,
@@ -50,6 +51,7 @@ from analysis_mcp.engine.rank import (
     RankResult,
     run_rank,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     build_interval,
     canonical_columns_and_resolved_frame,
@@ -66,9 +68,13 @@ from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import (
     ANCHOR_KEY_PATTERN,
     MAX_RANK_LIMIT,
+    RELATIVE_YEAR_ON_RUNNER_ONLY,
+    FrameRefArgument,
     PinnedUnit,
     RankOpSpec,
+    RelativeYear,
     WindowRolling,
+    WindowYear,
     with_anchor_key,
 )
 from analysis_mcp.rolling_tool import anchored_input
@@ -234,14 +240,15 @@ async def _resolve_measured_frame(
 
 
 @holds_input_rows
-async def rank(
+async def rank(  # noqa: PLR0911 -- one refusal per check the call can fail
     frame_ref: Annotated[
-        dict[str, str],
+        FrameRefArgument,
         Field(
             description=(
                 "The {spec_id, content_version} pair naming a materialised frame or a "
                 "prior verb result. Obtained from get_data's or a prior verb's own digest "
-                "-- never invented."
+                "-- never invented. "
+                "A bare spec_id also works: the server fetches the data itself."
             )
         ),
     ],
@@ -261,19 +268,23 @@ async def rank(
         ),
     ] = None,
     window_start: Annotated[
-        str | None,
+        WindowYear | None,
         Field(
             default=None,
-            pattern=r"^\d{4}$",
-            description="The window's first calendar year. Must be set together with window_end.",
+            description=(
+                "The window's first calendar year. Must be set together with window_end. "
+                "Or {anchor: 'latest', offset: -9} to follow the data."
+            ),
         ),
     ] = None,
     window_end: Annotated[
-        str | None,
+        WindowYear | None,
         Field(
             default=None,
-            pattern=r"^\d{4}$",
-            description="The window's last calendar year. Must be set together with window_start.",
+            description=(
+                "The window's last calendar year. Must be set together with window_start. "
+                "Or {anchor: 'latest', offset: 0} to follow the data."
+            ),
         ),
     ] = None,
     unit: Annotated[
@@ -338,7 +349,10 @@ async def rank(
                 "year at their offsets. population is required: one {spec_id, bindings} for "
                 "each root dataset of the question, bindings narrowing its series as {column: "
                 "[values]}; the latest period is taken over those series. Left None, the "
-                "window is fixed."
+                "window is fixed. The call ranks over the literal years it is given, as a "
+                "fixed call does, and the result's {spec_id, content_version} pair differs "
+                "from the fixed call's. Such a call runs only when the record anchor_key "
+                "names covers it, and refuses rolling_anchor_unresolved otherwise."
             ),
         ),
     ] = None,
@@ -372,6 +386,9 @@ async def rank(
     full calendar range, falls below the configured coverage floor. A
     period where no entity has any data at all is invisible to this check.
 
+    A window year given as {anchor: 'latest', offset: n} follows the data
+    as growth's window years do.
+
     Collapsed, every output row's `time_period` is the extent of the
     periods the window holds, such as `2018/2022`, or that one period when
     the window holds only one. A frame whose rows carry one span, such as
@@ -393,13 +410,6 @@ async def rank(
     measured values in either mode: a limited per-period rank writes no
     ordinal marker. Coverage and the floor check cover every ranked entity,
     and the rows left out are reported as a `beyond_limit` exclusion.
-
-    `rolling` records that a window year follows the latest period of the
-    data. The call ranks over the literal years it is given, as a fixed call
-    does, and the result's {spec_id, content_version} pair differs from the
-    fixed call's. Such a call runs only when the record `anchor_key` names
-    covers it (`rolling_tool.anchored_input`), and refuses
-    `rolling_anchor_unresolved` otherwise.
 
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.
@@ -441,6 +451,10 @@ async def rank(
     )
     if isinstance(op_spec, ToolResult):
         return op_spec
+    if isinstance(op_spec.window_start, RelativeYear) or isinstance(
+        op_spec.window_end, RelativeYear
+    ):
+        return to_tool_result(ToolRefusal.op_spec_invalid(detail=RELATIVE_YEAR_ON_RUNNER_ONLY))
 
     # `rank_by` is canonicalised before the engine runs. See
     # `aggregate_tool.aggregate`'s identical comment on its own `group_by`.
@@ -485,11 +499,11 @@ async def rank(
     ) as exc:
         return to_tool_result(composite_refusal(_refusal_for_engine_error(exc), [input_trace]))
 
-    if result.overall_coverage_fraction < settings.aggregate_coverage_floor:
+    if result.overall_coverage_fraction < COVERAGE_FLOOR:
         return to_tool_result(
             ToolRefusal.coverage_insufficient(
                 realised_coverage_fraction=result.overall_coverage_fraction,
-                floor=settings.aggregate_coverage_floor,
+                floor=COVERAGE_FLOOR,
                 skipped_cell_count=result.expected_cell_count - result.present_cell_count,
             )
         )
@@ -576,7 +590,7 @@ async def rank(
         step=_rank_step(op_spec, result, trace=output_trace),
         digest=lambda: render_rank_digest(
             rank_by=rank_by,
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

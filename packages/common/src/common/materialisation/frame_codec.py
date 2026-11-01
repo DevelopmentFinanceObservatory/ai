@@ -13,7 +13,8 @@ other column a string. Parquet keeps the Arrow schema in its footer, so
 verified the bytes: a durable store after its checksum and envelope checks, or
 data-mcp, which checks the frame against the `content_version` that names it.
 It wraps the table with `Frame.from_table`, which refuses any schema other than
-`canonical_frame_schema(columns)` but trusts the cells.
+`canonical_frame_schema(columns)` or a `unit` layout a release stored (it widens
+the two-member `struct<ref, request>`), and trusts the cells.
 
 `frame_to_parquet_bytes`'s own `metadata` parameter, when given, becomes
 the written file's file-level key-value metadata. Parquet only accepts

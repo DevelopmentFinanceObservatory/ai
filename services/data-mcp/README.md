@@ -56,8 +56,8 @@ The `get_data` tool retrieves the dataset behind a specified definition identifi
 
 - `spec_id`: String matching the pattern `^spec_[0-9a-f]{32}$`.
 - `scope`: Optional `GetDataScope` object containing optional `entities` (dictionary mapping role names to lists of entity names or `dcid:`-marked dcids), `window` (dictionary specifying time bounds), and `facets` (dictionary specifying facet references).
-- `place_types`: Optional, default `false`. Adds `observationAbout_type`, each place's Data Commons types sorted and comma-joined (`Country`, `AdministrativeArea1,State`, `Place` for Earth, `ProvisionalNode` for a World Bank group), through the mint's `options.columns`, which names no table column and so adds the type to every default column. A decoded `stat_var_<code system>` column stays. On a flow spec the call adds each party's type, kind, class and whole-population mark instead (`financingProvider_type`, `financingRecipient_type` and the party cells `party_kind`, `party_class` and `party_whole`). A spec that names no place covers every place with data at every level, and a `filter` on this column keeps one level before a rank or a total. The frame carries the column as a role, and a place with no type reads `untyped`.
-- `without_party_totals`: Optional, default `false`. On a spec with a flow side, sends `options.without_party_totals` with the party cells (`options.columns` `["party_kind", "party_class", "party_whole"]`). With `place_types` also set, `options.columns` holds each party's type and the party cells, as `place_types` asks on a flow spec. apis leaves out, on each party role the identity it serves binds no entity on, the rows whose party its code index declares a group total (the DAC total, the G7, DAC EU members), unless every row on that role is one. The cut runs before any `groupby`, so a sum adds members alone. A cut that leaves rows out is a version of its own, so the manifest's `{spec_id, content_version}`, its coverage, `series_count` and statistics describe the rows served, and its `trace.party_totals_left_out` lists `{role, provenance, entities}` for each role and dataset that lost totals (`provenance` is null for rows with no dataset, and an entry without the key comes from an older trace whose cut covered every dataset); the digest names them in one line per role and dataset, and gives the whole-side search advice once per role. A cut that leaves nothing out serves the base version. On a spec with no flow side the parameter sends nothing.
+- `place_types`: Optional, default `false`. Adds `observationAbout_type`, each place's Data Commons types sorted and comma-joined (`Country`, `AdministrativeArea1,State`, `Place` for Earth, `ProvisionalNode` for a World Bank group), through the mint's `options.enrichment: "default"`. apis adds the enrichment the version's own role columns take to every default column, and lists the columns it resolved to in the artifact's `rendering`, which names the frame. A decoded `stat_var_<code system>` column stays. A frame with a flow party role gets each party's type, kind, class and whole-population mark instead (`financingProvider_type`, `financingRecipient_type` and the party cells `party_kind`, `party_class` and `party_whole`), whatever roles the spec binds or leaves open, and an untyped role adds nothing. A spec that names no place covers every place with data at every level, and a `filter` on this column keeps one level before a rank or a total. The frame carries the column as a role, and a place with no type reads `untyped`. The combined server outside clients reach removes `place_types` from the public `get_data` and sets it on every call, so the public `get_data` always adds these columns.
+- `without_party_totals`: Optional, default `false`. On a spec with a flow side, sends `options.without_party_totals` with the party cells (`options.columns` `["party_kind", "party_class", "party_whole"]`). With `place_types` also set, the mint sends `options.enrichment` in their place, which adds each party's type and the party cells. apis leaves out, on each party role the identity it serves binds no entity on, the rows whose party its code index declares a group total (the DAC total, the G7, DAC EU members), unless every row on that role is one. The cut runs before any `groupby`, so a sum adds members alone. A cut that leaves rows out is a version of its own, so the manifest's `{spec_id, content_version}`, its coverage, `series_count` and statistics describe the rows served, and its `trace.party_totals_left_out` lists `{role, provenance, entities}` for each role and dataset that lost totals (`provenance` is null for rows with no dataset, and an entry without the key comes from an older trace whose cut covered every dataset); the digest names them in one line per role and dataset, and gives the whole-side search advice once per role. A cut that leaves nothing out serves the base version. On a spec with no flow side the parameter sends nothing.
 - `breakdown`: Optional `{code_system, level}`, for example `{"code_system": "crsPurpose", "level": 0}`. Sets `options.groupby` to `{"by": ["time_period", <code_system>], "op": "sum", "levels": {<code_system>: <level>}}`, so apis sums every StatVar into its code's ancestor at that depth of the code hierarchy, per year and entity. `stat_var_<code_system>` names that ancestor and `stat_var` is `dcid:<spec_id>` on every row. It goes with `stat_vars` `"separate"`; beside `"sum"` it refuses `request_invalid` at `/stat_vars`. Before anything else is sent, `get_data` reads `GET /api/datasets/capabilities`. A document without `groupby_level_axes` refuses `capability_unavailable` with `fix.option` `breakdown`, and a code system that list does not name refuses `request_invalid` at `/breakdown/code_system`.
 - Countries, subregions, continents, continental unions, places below a country, organisations such as the World Bank, DAC aggregates and membership groups (G7, the European Union) resolve as scope entities; a region or a group binds its member countries. "World" resolves to the world as one place. `entity_ambiguous` fires only when a name matches two or more distinct entities' own canonical or alias names, for example "Congo". Each candidate's `entity` is its dcid behind a `dcid:` marker (`dcid:country/COD`), and a `scope.entities` value carrying the marker is sent as that dcid with no resolve call, so a bare dcid such as `GroupOfSeven` passes as well as `country/COD`. An unmarked `namespace/id` such as `country/KEN`, as other tools' output shows dcids, is also sent as a dcid; any other value is a name. A not-held entity refuses `entity_not_found` with `fix.not_held` and no `entity_type`; a group or region with no member country refuses the same way and names its kind in `entity_type`.
 
@@ -90,23 +90,29 @@ Returns a `ToolResult` with the following items.
 
 ### get_skill
 
-The `get_skill` tool loads one skill a `search` result named, by id. It reads apis' Skills API (`GET /api/skills/{skill_id}`) through `data_mcp.skills_client`, as `get_skill_file` does.
+The `get_skill` tool loads one skill a `search` result named, by id, or with `path` one of its files. It reads apis' Skills API (`GET /api/skills/{skill_id}`) through `data_mcp.skills_client`. With `path` it answers as `get_skill_file` does, through the same `get_skill_file_tool.read_skill_file`, and every call its text names is a `get_skill` call.
 
 #### Parameters
 
 - `skill_id`: String of lower-case letters and digits in hyphen-separated words, at most 64 characters, as named in a search result's skills list.
+- `path`: Optional. A file's bundle-relative path exactly as listed, such as `references/core-oda.md`, or `SKILL.md`. Left out, the tool loads the skill.
+- `offset`: Where a page of the file at `path` starts, in characters. Defaults to 0. Past 0 without a `path` refuses `request_invalid` at `/path`.
+- `digest`: The file digest a previous page's closing line names. Required when `offset` is past 0.
 
 #### Return format
 
 Returns a `ToolResult` with the following items.
 
-- Text content with the first page of the skill's `SKILL.md` verbatim, front matter included, then its other files with their sizes and the `get_skill_file` call that reads one. A `SKILL.md` past 32,000 characters stops at a line break, with a closing line naming the `get_skill_file` call that reads the rest.
+- Without `path`, text content with the first page of the skill's `SKILL.md` verbatim, front matter included, then its other files with their sizes and the `get_skill` call that reads one. A `SKILL.md` past 32,000 characters stops at a line break, with a closing line naming the `get_skill` call, with `path` `SKILL.md`, that reads the rest.
 - One `resource_link` block per file after `SKILL.md`, at `skill://{skill_id}/{path}`.
 - Structured content holding the skill's SEP-2640 entry: `uri` (`skill://{skill_id}/SKILL.md`), `frontmatter`, and `resources` as the full manifest of `uri`, `digest` and `size`.
+- With `path`, the `get_skill_file` result below.
 
 ### get_skill_file
 
-The `get_skill_file` tool reads one file of a skill verbatim, from `GET /api/skills/{skill_id}/resources/{path}`.
+The `get_skill_file` tool reads one file of a skill verbatim, from `GET /api/skills/{skill_id}/resources/{path}`. `get_skill` with `path` reads the same way.
+
+The harness calls it on data-mcp's own mount. The combined server at `/mcp/` leaves it out of its list and answers a call to it with `tool_not_found` and a `fix` naming `get_skill`.
 
 #### Parameters
 
@@ -149,6 +155,26 @@ Returns a `ToolResult` with the following items.
 - With a `ref`, text content with that dataset's documentation: its name and ref, publisher and data commons, description, licence with cadence and update dates, coverage (years, granularity, currency), citation, methodology (cut at 6,000 characters with a line saying so), data notes (10, then a count), how DFO transforms it (10 steps, then a count), its latest three releases, its source and download links, and closing lines naming in plain words what the door holds but could not read (from its `document_errors`, with the door's reason) and what is not published for it (from its `gaps`, less the unreadable members). The structured content carries the ref, name, publisher, licence type, years covered, the raw `gaps` and the unreadable members.
 
 A ref the deployment does not hold refuses `node_not_held`; a ref that names a node that is not a source refuses `request_invalid` with the door's own detail; a malformed ref is refused before any read. A deployment that does not mount the Graph API's source doors refuses `capability_unavailable`.
+
+### export_data
+
+The `export_data` tool turns a frame into a file the user keeps and returns a public link to it. It asks dfo-apis to prepare the export (`POST /api/datasets/exports`), which renders the exact frame version, copies the file to the pinned tier and answers the file's facts with the link's path. The tool puts that path on `DFO_SITE_ORIGIN`, so the link reads `https://developmentfinance.org/api/datasets/exports/exp_<32 hex>`. A GET on the link answers 302 to a storage URL signed for five minutes. The tool never calls it, so no signed URL reaches its result. A `spec_` pair exports the dataset version its mint record names, a summed frame included. A pair with no readable record refuses `rendering_not_recorded`, since its file might hold other rows (a bare `spec_` export writes the record of the pair it resolved, so that pair exports by name), and a failed read of the record refuses `service_unavailable`. A new file spends one unit of the caller's daily pin allowance, and a repeat call for the same frame and options returns the same file and spends nothing. When `DFO_CALLER_PRINCIPAL` is set and the website named the caller by address (`x-dfo-caller: ip:<digest>`), the prepare carries both headers, so dfo-apis spends that client's allowance.
+
+#### Parameters
+
+- `frame_ref`: `{spec_id, content_version}` from a `get_data` or verb result, fetched (`spec_`) or derived (`ops_`). A bare `spec_` id goes to dfo-apis alone, which exports the newest version it holds and answers the pair it resolved; the result names that pair. A bare `ops_` id refuses `frame_ref_incomplete` and sends nothing. A `spec_` pair `get_data` fetched with options, such as the type columns, is held under a pair of its own that dfo-apis never stored. Its mint record in the frame store names the dataset version dfo-apis holds (`MintRecord.dataset`), and the tool exports that version.
+- `format`: `csv` (default), `xlsx` or `parquet`.
+- `bundle`: Optional, default `false`. `true` wraps the file in a zip with `README.md`, `datapackage.json` and `CITATION.cff`.
+
+#### Return format
+
+Returns a `ToolResult` with the following items.
+
+- Text content with the file name, format, rows and columns of the data table, size, SHA-256, link, citation, one line per source with its licence (or "licence not stated") and terms URL, how long the file is kept (permanently, since it is pinned), the `{spec_id, content_version}` pair named, the stored version exported when that differs, and which columns it holds: a fetched frame's long layout with a `_label` column beside each code, or a derived frame's own columns, which carry no labels.
+- A `resource_link` block to the link, with the file's media type and size.
+- Structured content `{url, file_name, media_type, bytes, rows, columns, sha256, frame_ref, exported_frame_ref, citation, licences, pinned}`, each licence `{source, label, licence, url}`. `frame_ref` is the pair the caller passed, or the one dfo-apis resolved a bare `spec_id` to. `exported_frame_ref` is the version dfo-apis exported.
+
+Refusals use the shared envelope. A CSV or xlsx request over 250,000 rows refuses `over_ceiling` with `correct_and_retry` and `fix` `{"format": "parquet"}`. A spent allowance refuses `allowance_exhausted` with `do_not_retry` and `retry_after_s` to the next UTC midnight, from dfo-apis' `Retry-After`. Backpressure or a spent daily pin budget refuses `service_unavailable` with `retry_after_delay` and dfo-apis' `Retry-After` as `retry_after_s`. A derived frame stored without a recipe refuses `provenance_unavailable`, and a source on dfo-apis' licence deny-list `licence_not_redistributable`, both `do_not_retry`. A frame dfo-apis cannot find or read back (`snapshot_not_found`, `artifact_expired`, `spec_not_found`) refuses `frame_unavailable` with `refresh_then_retry`, the upstream code in `upstream_code`, `fix` `{"next_step": "get_data"}` for a `spec_` frame, and a message naming the call that makes the frame again. The tool never exports another version in place of the one named. A `not_found` from the prepare path means the deployment serves no exports route, and refuses `capability_unavailable` with `do_not_retry`. Every other code maps as it does for `get_data`.
 
 ### resolve_definition
 
@@ -265,6 +291,8 @@ Settings load from environment variables using `data_mcp.settings.Settings`.
 | `GET_DATA_DEADLINE_S`                | `165.0`                 | Wall-clock deadline for a `get_data` call under `DIRECT_CALL_BUDGET`          |
 | `OPERATION_POLL_INTERVAL_S`          | `2.0`                   | Fallback wait between operation poll attempts                                 |
 | `EXTERNAL_MINT_CONCURRENCY`          | `1`                     | Mint slots one process holds for outside callers under `EXTERNAL_CALL_BUDGET` |
+| `DFO_SITE_ORIGIN`                    | `None`                  | Public site origin for artifact and export links; required on Cloud Run       |
+| `DFO_CALLER_PRINCIPAL`               | `None`                  | Secret sent beside a website-named caller on `export_data` prepares           |
 | `PORT`                               | `8080`                  | Port for the streamable HTTP transport                                        |
 
 ## Running tests

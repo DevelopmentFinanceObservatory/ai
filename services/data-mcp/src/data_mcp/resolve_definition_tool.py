@@ -119,7 +119,11 @@ async def resolve_definition(
     try:
         caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
     except (IdentityMismatch, IdentityUnusable) as exc:
-        return to_tool_result(ToolRefusal.request_invalid(pointer="/identity", detail=str(exc)))
+        return to_tool_result(
+            ToolRefusal.request_invalid(
+                tool="resolve_definition", pointer="/identity", detail=str(exc)
+            )
+        )
     envelope = await resolve_and_register(
         resubmit_request(
             spec_id=spec_id,
@@ -127,6 +131,7 @@ async def resolve_definition(
             entity_groups=entity_groups,
             scope_entries=scope_entries,
         ),
+        tool="resolve_definition",
         budget_s=RESUBMIT_CALL_BUDGET_S,
         read_timeout_s=RESUBMIT_READ_TIMEOUT_S,
     )

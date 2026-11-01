@@ -25,6 +25,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -45,10 +46,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import START, Workflow, node
-from google.adk.workflow.utils._workflow_hitl_utils import (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
-    create_request_input_response,
-)
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
 from harness import plan_display, planner_seam
 from harness.decision_pick import DecisionPick
@@ -85,9 +83,11 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import _elected_spec_ids
+from planner.agent import AdkCall
+from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     ALIGNMENTS_STATE_KEY,
@@ -98,12 +98,14 @@ from planner.plan import (
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
+    REFUSED_SPECS_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AlignedInput,
     AnswerMode,
+    AskAnswer,
     AskBreakdown,
     DatasetRequirement,
     Decision,
@@ -117,6 +119,7 @@ from planner.plan import (
     Plan,
     PlanStatus,
     QuotientRequirement,
+    RefusedSpec,
     RequirementSide,
     ResolvedBy,
     SessionState,
@@ -132,11 +135,13 @@ from planner.plan import (
     full_histories,
     held_sources,
     load_plan,
+    load_refused_specs,
     pin_sources,
     plan_revision,
     rolls_from_its_start,
     save_pin_sources,
     save_plan,
+    save_refused_specs,
 )
 from planner.records import GroupBy, Reduction, RelativePeriod
 from planner.settings import (
@@ -349,8 +354,8 @@ class _SeamHarness:
                 # descendants included -- to this node's own path, not just
                 # this node's direct interrupt. So the planner's own ask
                 # does resolve into this node's `ctx.resume_inputs` on a
-                # real resume (see `test_a_resumed_ask_gets_the_continuation_
-                # not_the_full_brief`, which drives one for real). Setting
+                # real resume (see `test_a_resumed_ask_and_the_amend_after_it_
+                # each_carry_the_brief_once`, which drives one for real). Setting
                 # it directly here is only for a test that needs the OTHER
                 # resume condition -- "has `__call__` already been through
                 # this session once" -- without paying for a real interrupt
@@ -389,8 +394,8 @@ class _SeamHarness:
         return cast(SessionState, session.state)
 
     async def events(self) -> list[Event]:
-        """This session's own event history -- what `planner.agent.
-        _elected_spec_ids` reads to find what the user actually chose
+        """This session's own event history -- what `planner.call.
+        elected_spec_ids` reads to find what the user actually chose
         answering `adk_request_input`, and what `ctx.run_node`'s own
         pause-and-resume depends on surviving (`harness.planner_seam`'s
         module docstring)."""
@@ -644,6 +649,32 @@ async def test_a_planner_tool_that_raises_ends_the_entry_on_a_final_refusal(
     assert record.args is not None and record.args[:2] == ("get_skill", "RuntimeError")
 
 
+def test_a_cancelled_planner_tool_call_records_no_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ADK runs `on_tool_error_callback` for cleanup when a tool call is
+    cancelled (a Stop, a cut request). A cancellation is no tool failure, so
+    the entry is left to end the way the cancellation ends it."""
+    seam = _seam()
+    (tool,) = [t for t in seam._agent.tools if isinstance(t, BaseTool) and t.name == "get_skill"]
+    tracker = _RunTracker()
+    token = planner_seam._active_call.set(
+        planner_seam._CallState(tracker=tracker, on_progress=None)
+    )
+    tool_context = SimpleNamespace(session=SimpleNamespace(id="s"), invocation_id="i")
+    try:
+        with caplog.at_level(logging.ERROR, logger=planner_seam.logger.name):
+            answer = seam._on_planner_tool_error(
+                tool, {"skill_id": "aid"}, tool_context, asyncio.CancelledError()
+            )
+    finally:
+        planner_seam._active_call.reset(token)
+
+    assert answer is None
+    assert tracker.refused is None and not tracker.ready_to_break
+    assert not [r for r in caplog.records if r.name == planner_seam.logger.name]
+
+
 async def test_an_unknown_tool_name_keeps_adks_answer_listing_the_tools(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -680,6 +711,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
+        REFUSED_SPECS_STATE_KEY: [SPEC],
     }
     harness = _SeamHarness(state=stale)
     seam = _seam()
@@ -705,6 +737,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         COMPILE_FAILURES_STATE_KEY: [],
+        REFUSED_SPECS_STATE_KEY: [] if entry == "first-draft" else [SPEC],
     }
     assert kept == (stale if resumed else fresh)
 
@@ -1067,7 +1100,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     seam node itself resolves no output. The call's own function-call
     event is still on record afterward, in the session's own event history
     rather than a state key this seam has to keep in step
-    (`planner.agent._elected_spec_ids`'s own docstring): it is built and
+    (`planner.agent._session_steps`'s own docstring): it is built and
     appended regardless of the pause, since it is the model's turn, not the
     tool's (deferred, here never built at all) response. But an offer is
     not an election: with no matching `FunctionResponse` on record, nothing
@@ -1099,7 +1132,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
     events = await harness.events()
     fake_tool_context = SimpleNamespace(state={}, session=SimpleNamespace(events=events))
-    assert _elected_spec_ids(fake_tool_context) == frozenset()
+    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset()
 
 
 async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for_an_ask(
@@ -1272,32 +1305,31 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     assert [report["tools"] for report in reports] == [["adk_request_input"], ["propose_plan"]]
 
 
-async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
+_BRIEF_MARKER = "Context for this question."
+
+
+def _brief_follows_the_question(request: Any) -> str:
+    """The one brief in `request`, after checking it directly follows the
+    turn's question. That is the latest "probe", the message `_SeamHarness`
+    opens every run on."""
+    texts = [
+        "".join(part.text or "" for part in content.parts or []) for content in request.contents
+    ]
+    (at,) = [i for i, text in enumerate(texts) if _BRIEF_MARKER in text]
+    question = max(i for i, text in enumerate(texts) if text == "probe")
+    assert at == question + 1, f"the brief does not follow the question: {texts}"
+    return texts[at]
+
+
+async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """`ctx.run_node(self._agent, ...)`'s dynamic child matches the *same*
-    node path on a resume, so the round that answers a pending
-    `adk_request_input` directly continues that already-open model turn --
-    confirmed here by inspection (`captured_requests` after the resume
-    round carries only the interrupt's own `FunctionResponse`, never a new
-    `content`); whatever `_message` built for that round never reaches the
-    model at all, fresh-vs-continuing included. `_BRIEFED_STATE_KEY`'s own
-    durability has to be checked on the *next* call that opens a genuinely
-    new dynamic child run instead -- the `amend` edge a real approval round
-    would take next -- which is a fresh `ctx.run_node` call, not a replay,
-    so whatever `_message` builds for it does reach the model
-    (`test_a_sixth_amendment_turn_still_records_its_own_version` already
-    proves a fresh call's own content lands, across separate `harness.run()`
-    calls on one session, the same shape this test reuses).
-
-    Unfixed, `_BRIEFED_STATE_KEY` is written only through
-    `ctx.session.state` -- visible in-process, never captured in an event's
-    `state_delta` -- so the fresh `get_session()` copy the amend call's own
-    `Runner.run_async` fetches reads it back `False`, `fresh` recomputes
-    `True`, and that call renders the ~10,000-character brief a second time
-    alongside the amendment ask, instead of `_message`'s `fresh=False`
-    contract: the amendment ask alone, no `_READINGS_CONTEXT` block.
-    """
+    """ADK hands a node its input only on a live run, so a planner-side ask's
+    resume would send the model no brief if the brief travelled as node
+    input. `planner.agent.prepend_brief` puts it back from state after the
+    turn's question on every request: the first request after the answer,
+    and the amend call's, which renders the plan it changes and the
+    amendment after the readings. No request carries a brief twice."""
     plan = _translated_plan(decision, requirement, derived_requirement)
     seam = _seam()
     llm = ScriptedPlannerLlm(
@@ -1324,6 +1356,7 @@ async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
         seam, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
     )
     assert paused is None, "the ask should pause this call, not resolve it"
+    asked = len(llm.captured_requests)
 
     interrupt_id = _pending_ask_interrupt_id(await harness.events())
     resume_message = types.Content(
@@ -1340,14 +1373,12 @@ async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
     assert resumed is not None, "a real answer should let the same turn finish"
     assert resumed["plan"]["version"] == plan.version
 
-    # The next call this session ever makes: a fresh `ctx.run_node`, not a
-    # resume of anything -- the `amend` edge's own shape
-    # (`approve_n -> planner_n`). `_message`'s own contract says this
-    # renders `fresh=False`: the amendment ask alone, never
-    # `_READINGS_CONTEXT`'s block, since this session was already briefed
-    # once, in the very first call above.
+    answered = llm.captured_requests[asked]
+    assert "FR:adk_request_input" in _call_and_response_names(answered)
+    assert f"Question: {plan.question}" in _brief_follows_the_question(answered)
+
     llm.script = [["noted, but not done yet"]]
-    generations_before = len(llm.captured_requests)
+    amending = len(llm.captured_requests)
     await harness.run(
         seam,
         question=plan.question,
@@ -1356,27 +1387,19 @@ async def test_a_resumed_ask_gets_the_continuation_not_the_full_brief(
         amendment="add a caveat about revisions",
     )
 
-    amend_request = llm.captured_requests[generations_before]
-    amend_prompt = _prompt_text(amend_request)
-    assert "add a caveat about revisions" in amend_prompt, "the amend call's own ask should land"
-    brief_mentions = amend_prompt.count("Context for this question.")
-    assert brief_mentions == 0, (
-        f"the amend call, on an already-briefed session, should render `fresh=False`'s "
-        f"continuing message -- the amendment ask alone, no readings section -- but saw "
-        f"{brief_mentions} occurrence(s) of the full brief's own marker text, so the seam "
-        "re-sent the full brief because `_BRIEFED_STATE_KEY` did not survive the earlier "
-        "ask-and-resume"
-    )
+    brief = _brief_follows_the_question(llm.captured_requests[amending])
+    assert brief.index(f"Question: {plan.question}") < brief.index("add a caveat about revisions")
+    assert f"version {plan.version}" in brief, "the amend brief should show the plan it changes"
 
 
 # -- a replan's refusal ---------------------------------------------------
 
 
-def _rediscovery_refusal(spec_id: str) -> dict[str, Any]:
+def _rediscovery_refusal(spec_id: str, code: str = "over_ceiling") -> dict[str, Any]:
     """A `RediscoveryNeeded` replan payload, the shape `harness.graph.execute`'s
-    `_replan_refusal` builds for the `over_ceiling`/`member_cardinality`
-    reroute -- the one refusal shape that names a `spec_id` at the top
-    level today."""
+    `_replan_refusal` builds, refusing `spec_id` for `code` with the
+    `over_ceiling`/`member_cardinality` message -- the one refusal shape that
+    names a `spec_id` at the top level today."""
     return {
         "kind": "rediscovery_needed",
         "step_id": "malaria_kenya",
@@ -1384,7 +1407,7 @@ def _rediscovery_refusal(spec_id: str) -> dict[str, Any]:
         "requirement_id": "malaria_kenya",
         "spec_id": spec_id,
         "refusal": {
-            "code": "over_ceiling",
+            "code": code,
             "message": "resolved.stat_vars.member_count = 872 against a cap of 700",
             "retry_mode": "correct_and_retry",
             "fix": {"ceiling_kind": "member_cardinality"},
@@ -1402,7 +1425,6 @@ def test_a_wave_with_two_refused_specs_names_both() -> None:
     refusal["also_stopped"] = [_rediscovery_refusal(SPEC_B)]
 
     message = seam._message(
-        fresh=False,
         question="malaria grants and population for kenya",
         prior_plan=None,
         refusal=refusal,
@@ -1422,7 +1444,6 @@ def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
     refusal = {**_rediscovery_refusal(SPEC), "computed_asks": [0, 2]}
 
     message = _seam()._message(
-        fresh=False,
         question="malaria grants for kenya",
         prior_plan=None,
         refusal=refusal,
@@ -1433,6 +1454,72 @@ def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
 
     assert "failed after it computed asks 0, 2." in message
     assert "computed_asks" not in message
+
+
+@pytest.mark.parametrize(
+    ("entry", "dropped", "said", "unsaid"),
+    [
+        (
+            "replan",
+            [1],
+            [
+                "leave it out of `answered` and `declined`",
+                "still answers every ask not marked (removed by the user).",
+            ],
+            ["to put it back"],
+        ),
+        (
+            "amendment",
+            [1],
+            ["unless the user's change asks for it again; answer it in `answered` to put it back"],
+            ["leave it out of `answered`"],
+        ),
+        ("replan_nothing_removed", [], ["still answers every ask."], ["(removed by the user)"]),
+    ],
+    ids=["replan", "amendment", "replan-nothing-removed"],
+)
+async def test_the_brief_words_each_ask_the_user_removed_for_its_entry(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    entry: str,
+    dropped: list[int],
+    said: list[str],
+    unsaid: list[str],
+) -> None:
+    """The asks section marks the ask the user's amendment removed, and no
+    other. A replan leaves it out, and its failed-run sentence holds the new
+    plan to the asks left unmarked. The user's next amendment may put it back
+    by answering it. With no ask removed, the failed-run sentence names no mark."""
+    asks = ["Kenya's debt totals", "Uganda's debt totals"]
+    plan = Plan.model_validate(
+        {
+            **_translated_plan(decision, requirement, derived_requirement).model_dump(),
+            "asks": asks,
+            "answered": [
+                AskAnswer(ask=number, outputs=("annual_totals",))
+                for number in range(len(asks))
+                if number not in dropped
+            ],
+            "dropped_asks": dropped,
+        }
+    )
+    replan = entry != "amendment"
+
+    text, _ = await _first_request_with_readings(
+        _turn_readings(),
+        plan=plan,
+        stored={ASKS_STATE_KEY: asks},
+        refusal={**_rediscovery_refusal(SPEC), "computed_asks": [0]} if replan else None,
+        amendment=None if replan else "add Uganda back",
+    )
+
+    marked = [line for line in text.splitlines() if line.endswith("(removed by the user)")]
+    assert marked == (["1. Uganda's debt totals (removed by the user)"] if dropped else [])
+    for clause in said:
+        assert clause in text
+    for clause in unsaid:
+        assert clause not in text
 
 
 # -- the conversation's search readings ------------------------------------
@@ -1479,9 +1566,11 @@ async def _first_request_with_readings(
     plan: Plan,
     stored: Mapping[str, Any] | None = None,
     refusal: dict[str, Any] | None = None,
+    amendment: str | None = None,
 ) -> tuple[str, SessionState]:
     """Run one fresh orchestrator entry over `readings`, with `stored` (the
-    blocks and warnings `search` keeps) already in session state."""
+    blocks and warnings `search` keeps) already in session state, answering
+    `refusal` or the user's `amendment`."""
     seam = _seam()
     llm = ScriptedPlannerLlm(script=[_DECLARE])
     use_compiled_proposals(seam._agent)
@@ -1493,6 +1582,7 @@ async def _first_request_with_readings(
         prior_plan=plan.model_dump(mode="json"),
         readings=readings,
         refusal=refusal,
+        amendment=amendment,
     )
     return _prompt_text(llm.captured_requests[0]), await harness.state()
 
@@ -1519,32 +1609,68 @@ async def test_the_orchestrator_planner_first_request_carries_every_search_readi
     assert list(pin_sources(state)) == [SPEC, SPEC_B, SPEC_C]
 
 
+# When `SPEC`'s definite reading was observed, and a day before.
+_SEARCHED_AT = datetime(2000, 1, 2, tzinfo=UTC)
+_REFUSED_BEFORE = datetime(2000, 1, 1, tzinfo=UTC)
+
+
 @pytest.mark.parametrize(
-    ("refusal", "kept"),
-    [(None, [SPEC, SPEC_B, SPEC_C]), (_rediscovery_refusal(SPEC), [SPEC_B, SPEC_C])],
-    ids=["no_refusal", "executor_refused_spec"],
+    ("refusal", "earlier", "kept"),
+    [
+        (None, None, [SPEC, SPEC_B, SPEC_C]),
+        (_rediscovery_refusal(SPEC), None, [SPEC_B, SPEC_C]),
+        (None, SPEC, [SPEC_B, SPEC_C]),
+        (None, "open_role_unavailable", [SPEC_B, SPEC_C]),
+        (None, "upstream_version_changed", [SPEC, SPEC_B, SPEC_C]),
+    ],
+    ids=[
+        "no_refusal",
+        "executor_refused_spec",
+        "stored_bare",
+        "refused_for_good",
+        "refreshed_since",
+    ],
 )
 async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
     refusal: dict[str, Any] | None,
+    earlier: str | None,
     kept: list[str],
 ) -> None:
     """The definite and the fetched chosen reading settle their own ids; an id
     only offered as a candidate is shown unsettled. Each carries the block and
     warning codes `search` stored for it, and the parties its settling reading asked
-    for. A spec the executor refused is left out."""
+    for. A spec the executor refused is left out and named in the brief's avoid
+    sentence. `earlier` is `SPEC` refused before its definite reading was
+    observed, stored bare or for a code, answered by an amendment: one refused
+    for a code a refreshed definition recovers from is kept and named nowhere."""
     plan = _translated_plan(decision, requirement, derived_requirement)
-    stored = {
+    stored: dict[str, Any] = {
         ORCHESTRATOR_SPECS_KEY: {
             spec_id: {"spec_id": spec_id} for spec_id in (SPEC, SPEC_B, SPEC_C)
         },
         ORCHESTRATOR_SPEC_WARNINGS_KEY: {SPEC: [{"code": "role_scope_defaulted"}]},
     }
+    if earlier is not None:
+        save_refused_specs(
+            cast(SessionState, stored),
+            [
+                RefusedSpec(spec_id=SPEC)
+                if earlier == SPEC
+                else RefusedSpec(spec_id=SPEC, code=earlier, refused_at=_REFUSED_BEFORE)
+            ],
+        )
+    readings = _turn_readings()
+    readings[0]["observed_at"] = _SEARCHED_AT.isoformat()
 
-    _, state = await _first_request_with_readings(
-        _turn_readings(), plan=plan, stored=stored, refusal=refusal
+    text, state = await _first_request_with_readings(
+        readings,
+        plan=plan,
+        stored=stored,
+        refusal=refusal,
+        amendment="only since 2015" if earlier is not None else None,
     )
 
     expected = {
@@ -1558,6 +1684,263 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
         SPEC_C: PinSource(block={"spec_id": SPEC_C}, settled=True),
     }
     assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
+    assert ("Do not propose" in text) is (SPEC not in kept)
+
+
+@pytest.mark.parametrize(
+    ("code", "also", "observed", "between", "kept"),
+    [
+        ("definition_not_held", None, "after", None, True),
+        ("upstream_version_changed", None, "after", None, True),
+        ("definition_not_held", None, "before", None, False),
+        ("over_ceiling", None, "after", None, False),
+        ("open_role_unavailable", "upstream_version_changed", "after", None, False),
+        ("upstream_version_changed", None, "after", "refused-again", False),
+        ("upstream_version_changed", None, "after", "resumed", True),
+    ],
+    ids=[
+        "re-registered",
+        "refreshed",
+        "searched-before-the-refusal",
+        "refused-for-good",
+        "refused-for-good-and-for-a-refresh",
+        "refused-again-after-the-search",
+        "resume-keeps-the-refusal-time",
+    ],
+)
+async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lifts_it(
+    code: str, also: str | None, observed: str, between: str | None, kept: bool
+) -> None:
+    """A replan answers the executor refusing `SPEC` for `code`, which is held
+    as a bare spec_id with its code and the entry's time beside it. A later
+    amendment's readings settle on `SPEC`, observed before or after that
+    replan. A refusal a refreshed or re-registered definition recovers from is
+    lifted by a reading observed after it: `SPEC` is a pin source again and the
+    brief names nothing to avoid. One observed before it, or a refusal for
+    good, keeps `SPEC` out and named. Refused again after the reading
+    (`between`), `SPEC` is held from the second refusal; a resume of the
+    replan keeps the first refusal's time. A wave that also stops on `SPEC`
+    for another code (`also`) holds it for good when either code is."""
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
+    seam._agent.model = llm
+    harness = _SeamHarness()
+    refusal = _rediscovery_refusal(SPEC, code)
+    if also is not None:
+        refusal["also_stopped"] = [_rediscovery_refusal(SPEC, also)]
+    before = datetime.now(UTC)
+
+    await harness.run(seam, question="aid to guatemala", readings=_turn_readings(), refusal=refusal)
+    state = await harness.state()
+    assert state[REFUSED_SPECS_STATE_KEY] == [SPEC]
+    (held,) = load_refused_specs(state)
+    assert held.code == code
+    assert held.refused_at is not None and held.refused_at >= before
+    after = datetime.now(UTC)
+    if between is not None:
+        await harness.run(
+            seam,
+            question="aid to guatemala",
+            readings=_turn_readings(),
+            refusal=refusal,
+            resume_inputs={"ask": {"result": "since 2015"}} if between == "resumed" else None,
+        )
+    readings = _turn_readings()
+    readings[0]["observed_at"] = (before if observed == "before" else after).isoformat()
+    calls = len(llm.captured_requests)
+    await harness.run(
+        seam, question="aid to guatemala", readings=readings, amendment="only since 2015"
+    )
+
+    state = await harness.state()
+    assert (SPEC in pin_sources(state)) is kept
+    assert ("Do not propose" in _prompt_text(llm.captured_requests[calls])) is not kept
+
+
+# A spec Search offered as another count of `SPEC`'s reading.
+_SIBLING = "spec_" + "d" * 32
+
+
+def _offering_readings(siblings: str) -> list[dict[str, Any]]:
+    """`_turn_readings` with `SPEC`'s reading offering no other count, or
+    offering `_SIBLING` unfetched, or offering it and the reading a `fetch`
+    of it gained."""
+    readings = _turn_readings()
+    if siblings == "none":
+        return readings
+    readings[0] |= {
+        "counted_as": "gross disbursements",
+        "alternatives": [{"spec_id": _SIBLING, "label": "net disbursements"}],
+    }
+    if siblings == "fetched":
+        fetched = SearchReading.model_validate(
+            {
+                "text": "aid",
+                "status": "chosen",
+                "spec_id": _SIBLING,
+                "counted_as": "net disbursements",
+                "sibling_of": {"spec_id": SPEC, "axis": "what"},
+            }
+        ).with_fetch({"spec_id": _SIBLING, "summary": "5 observations, 2020-2024"})
+        readings.append(fetched.model_dump(mode="json"))
+    return readings
+
+
+def _avoided(brief: str) -> str:
+    """The line of `brief` holding the sentence that names the refused specs."""
+    (line,) = [line for line in brief.splitlines() if "Do not propose" in line]
+    return line
+
+
+@pytest.mark.parametrize("siblings", ["none", "unfetched", "fetched"])
+async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
+    siblings: str,
+) -> None:
+    """Two replans and an amendment after one first draft, the replans
+    refusing `SPEC` and then `SPEC_C`. Every call renders the same readings,
+    refused ones and the other counts they offered included. From the first
+    refusal on, each call's brief names every spec refused so far in one
+    sentence and leaves them out of the pin sources. The next first-draft
+    entry starts clean."""
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
+    seam._agent.model = llm
+    readings = _offering_readings(siblings)
+    calls: list[dict[str, Any]] = [
+        {},
+        {"refusal": _rediscovery_refusal(SPEC)},
+        {"refusal": _rediscovery_refusal(SPEC_C)},
+        {"amendment": "only since 2015"},
+        {},
+    ]
+    pinnable: list[list[str]] = []
+    briefs: list[str] = []
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        for call in calls:
+            before = len(llm.captured_requests)
+            await seam(ctx=ctx, question="aid to guatemala", readings=readings, **call)
+            pinnable.append(list(pin_sources(cast(SessionState, ctx.session.state))))
+            briefs.append(_brief_follows_the_question(llm.captured_requests[before]))
+
+    wf = Workflow(
+        name="seam_test_wf",
+        edges=[(START, node(_node, name="seam_under_test", rerun_on_resume=True))],
+    )
+    sessions = InMemorySessionService()
+    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    content = types.Content(role="user", parts=[types.Part(text="probe")])
+    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+        pass
+
+    shown = [SPEC, SPEC_B, SPEC_C, *([_SIBLING] if siblings == "fetched" else [])]
+    refused_by_call = [(), (SPEC,), (SPEC, SPEC_C), (SPEC, SPEC_C), ()]
+    assert pinnable == [
+        [spec_id for spec_id in shown if spec_id not in refused] for refused in refused_by_call
+    ]
+    (readings_text,) = {brief.split("\nQuestion: ")[0] for brief in briefs}
+    for spec_id in (SPEC, SPEC_C, *([_SIBLING] if siblings != "none" else [])):
+        assert spec_id in readings_text
+    for brief, refused in zip(briefs, refused_by_call, strict=True):
+        if not refused:
+            assert "Do not propose" not in brief
+            continue
+        avoided = _avoided(brief)
+        assert all(spec_id in avoided for spec_id in refused)
+        assert _SIBLING not in avoided and SPEC_B not in avoided
+    # The second replan names its own refusal's reason and the earlier one's.
+    assert "member_count = 872" in _avoided(briefs[2])
+    assert planner_seam._REFUSED_EARLIER in _avoided(briefs[3])
+
+
+@pytest.mark.parametrize("siblings", ["unfetched", "fetched"])
+async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offered(
+    decision: Any, requirement: Any, siblings: str
+) -> None:
+    """A replan after the executor refused France's gross disbursements to
+    Kenya pins the net count Search offered beside them. Admission records
+    the draft with the pin as stated, whether a `fetch` of the net count gave
+    it a reading of its own, which makes it a pin source, or not."""
+    (part,) = resolver_digest(_FRANCE_KENYA)["part_digests"]
+    block = part["spec_block"]
+    gross = block["spec_id"]
+    net = block["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
+    stored = {k: v for k, v in part.items() if k not in ("spec_block", "candidate_blocks")}
+    readings = [SearchReading.from_part({**stored, **reading_facts(block)})]
+    assert net in {alternative.spec_id for alternative in readings[0].alternatives}
+    if siblings == "fetched":
+        sibling = SearchReading.model_validate(
+            {
+                "text": "aid",
+                "status": "chosen",
+                "spec_id": net,
+                "counted_as": "net disbursements",
+                "sibling_of": {"spec_id": gross, "axis": "what"},
+            }
+        )
+        readings.append(sibling.with_fetch({"spec_id": net, "summary": "5 observations"}))
+    dumped = [reading.model_dump(mode="json") for reading in readings]
+    dataset = requirement()
+    first_draft = {
+        "question": "aid",
+        "answer_mode": "series",
+        "decisions": [decision().model_dump(mode="json")],
+        "evidence_requirements": [
+            dataset.model_copy(update={"source_spec_id": gross}).model_dump(mode="json")
+        ],
+    }
+    repinned = dataset.model_copy(update={"source_spec_id": net}).model_dump(mode="json")
+    seam = _seam()
+    drafting = ScriptedPlannerLlm(script=[[("propose_plan", first_draft)]])
+    replanning = ScriptedPlannerLlm(
+        script=[[("propose_plan", {"evidence_requirements": [repinned], "amends_version": 1})]]
+    )
+    after: dict[str, Any] = {}
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        seam._agent.model = drafting
+        await seam(ctx=ctx, question="aid", readings=dumped)
+        first = load_plan(ctx.state)
+        assert first is not None
+        seam._agent.model = replanning
+        await seam(
+            ctx=ctx,
+            question="aid",
+            readings=dumped,
+            prior_plan=first.model_dump(mode="json"),
+            refusal=_rediscovery_refusal(gross),
+        )
+        after["plan"] = load_plan(ctx.state)
+        after["pinnable"] = list(pin_sources(cast(SessionState, ctx.session.state)))
+
+    wf = Workflow(
+        name="seam_test_wf",
+        edges=[(START, node(_node, name="seam_under_test", rerun_on_resume=True))],
+    )
+    sessions = InMemorySessionService()
+    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
+    session = await sessions.create_session(
+        app_name=_APP, user_id=_USER, state={ORCHESTRATOR_SPECS_KEY: {gross: block}}
+    )
+    content = types.Content(role="user", parts=[types.Part(text="probe")])
+    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+        pass
+
+    (answered,) = [
+        part.function_response.response
+        for content in replanning.captured_requests[-1].contents
+        for part in content.parts or []
+        if part.function_response and part.function_response.name == "propose_plan"
+    ]
+    assert (answered["outcome"], answered["status"], answered["version"]) == ("ok", "draft", 2)
+    assert after["pinnable"] == ([net] if siblings == "fetched" else [])
+    plan = after["plan"]
+    assert plan is not None
+    assert [r.source_spec_id for r in plan.evidence_requirements] == [net]  # type: ignore[union-attr]
+    assert gross in _avoided(_brief_follows_the_question(replanning.captured_requests[0]))
 
 
 async def test_the_shown_ids_are_exactly_the_ids_the_readings_text_names(
@@ -1832,7 +2215,6 @@ def test_the_digest_carries_what_an_amendment_has_to_preserve() -> None:
     seam = _seam()
     plan = _distinct_plan()
     message = seam._message(
-        fresh=True,
         question="QUESTION_TEXT",
         prior_plan=plan,
         refusal=None,
@@ -1899,7 +2281,6 @@ def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
     stored = stored_split_plan(decision)
 
     message = _seam()._message(
-        fresh=True,
         question="QUESTION_TEXT",
         prior_plan=planner_seam._as_authored(stored),
         refusal=None,
@@ -2023,11 +2404,10 @@ _FRANCE_KENYA = json.loads(
 )
 
 
-async def test_a_continuing_amend_call_shows_the_other_count_and_the_plan_pins_it(
+async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
     decision: Any, requirement: Any
 ) -> None:
-    """ "Use net disbursements" arrives on a continuing call, whose message is
-    the amendment alone. The fresh brief in its history named the net
+    """ "Use net disbursements" arrives on an amend call, whose brief names the net
     sibling's spec_id beside the gross reading, so the model pins it and the
     measure decision follows the pin."""
     (part,) = resolver_digest(_FRANCE_KENYA)["part_digests"]
@@ -2237,46 +2617,37 @@ async def test_an_amendment_still_works_through_the_seam(
     assert amended.previous_version == 5
 
 
-def test_a_continuing_message_omits_the_readings_and_digests_but_keeps_the_ask() -> None:
-    """A `fresh=False` render -- an `amend`/`replan` re-entry into a session this seam has already briefed -- drops the
-    search readings, both digests and the question, and carries the new thing (the
-    amendment or refusal ask) verbatim.
-    """
+@pytest.mark.parametrize(
+    "ask",
+    [{"amendment": "only since 2015"}, {"refusal": _rediscovery_refusal(SPEC)}],
+    ids=["amend", "replan"],
+)
+def test_an_amend_or_replan_brief_is_the_first_draft_brief_then_its_ask(
+    ask: dict[str, Any],
+) -> None:
+    """An amend or replan call renders the whole brief, readings, digests and
+    question as a first draft renders them, and closes on its ask, so the
+    model sees the ask in context and the brief's text up to the ask is the
+    same on every call of a turn."""
     seam = _seam()
-    canvas_digest = {"blocks": ["a block"]}
-    conversation_digest = {"turns": ["an earlier turn"]}
-
-    amend_message = seam._message(
-        fresh=False,
-        question="gdp guatemala",
-        prior_plan=None,
-        refusal=None,
-        amendment="only since 2015",
-        canvas_digest=canvas_digest,
-        conversation_digest=conversation_digest,
+    brief = {
+        "question": "gdp guatemala",
+        "prior_plan": None,
+        "canvas_digest": {"blocks": ["a block"]},
+        "conversation_digest": {"turns": ["an earlier turn"]},
+        "ledger": planner_seam._readings_ledger([]),
+    }
+    first_draft = seam._message(**brief, refusal=None, amendment=None)
+    closing = planner_seam._ask_text(
+        amendment=ask.get("amendment"), refusal=ask.get("refusal"), pick=None
     )
-    assert "only since 2015" in amend_message
-    assert SPEC not in amend_message
-    assert "Context for this question" not in amend_message
-    assert "already on the user's canvas" not in amend_message
-    assert "Earlier turns in this conversation" not in amend_message
-    assert "Question:" not in amend_message
 
-    refusal_message = seam._message(
-        fresh=False,
-        question="gdp guatemala",
-        prior_plan=None,
-        refusal=_rediscovery_refusal(SPEC),
-        amendment=None,
-        canvas_digest=canvas_digest,
-        conversation_digest=conversation_digest,
-    )
-    assert "Executing the approved plan failed" in refusal_message
-    assert "resolved.stat_vars.member_count = 872" in refusal_message
-    assert "Context for this question" not in refusal_message
-    assert "already on the user's canvas" not in refusal_message
-    assert "Earlier turns in this conversation" not in refusal_message
-    assert "Question:" not in refusal_message
+    message = seam._message(**brief, refusal=ask.get("refusal"), amendment=ask.get("amendment"))
+
+    assert message == first_draft + closing
+    assert closing and "Question: gdp guatemala" not in closing
+    for shown in ("Context for this question", "already on the user's canvas", "Earlier turns"):
+        assert shown in first_draft
 
 
 def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_invalid_plan() -> None:
@@ -2296,10 +2667,9 @@ def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_inv
 # -- user text in the brief is cut at the question cap ---------------------------
 
 
-def _render(seam: PlannerSeam, *, fresh: bool, **overrides: Any) -> str:
+def _render(seam: PlannerSeam, **overrides: Any) -> str:
     """One `_message` render with no readings, with `overrides` for what a test varies."""
     arguments: dict[str, Any] = {
-        "fresh": fresh,
         "question": "gdp guatemala",
         "prior_plan": None,
         "refusal": None,
@@ -2312,7 +2682,7 @@ def _render(seam: PlannerSeam, *, fresh: bool, **overrides: Any) -> str:
 
 def test_a_question_past_the_cap_is_cut_in_the_brief_and_says_so() -> None:
     """`TurnRequest.message` has no length limit, and a clarify reply lengthens the question."""
-    message = _render(_seam(), fresh=True, question="q" * 1_000_000)
+    message = _render(_seam(), question="q" * 1_000_000)
 
     (line,) = [line for line in message.splitlines() if line.startswith("Question: ")]
     assert line == "Question: " + "q" * (MAX_QUESTION_CHARS - len(CUT_MARKER)) + CUT_MARKER
@@ -2322,15 +2692,14 @@ def test_a_question_past_the_cap_is_cut_in_the_brief_and_says_so() -> None:
 def test_a_question_at_the_cap_is_rendered_whole() -> None:
     question = "q" * MAX_QUESTION_CHARS
 
-    message = _render(_seam(), fresh=True, question=question)
+    message = _render(_seam(), question=question)
 
     assert f"Question: {question}\n" in message
     assert CUT_MARKER not in message
 
 
-@pytest.mark.parametrize("fresh", [True, False])
-def test_an_amendment_past_the_cap_is_cut_and_says_so(fresh: bool) -> None:
-    message = _render(_seam(), fresh=fresh, amendment="a" * 1_000_000)
+def test_an_amendment_past_the_cap_is_cut_and_says_so() -> None:
+    message = _render(_seam(), amendment="a" * 1_000_000)
 
     (line,) = [
         line
@@ -2341,13 +2710,12 @@ def test_an_amendment_past_the_cap_is_cut_and_says_so(fresh: bool) -> None:
     assert asked == "a" * (MAX_QUESTION_CHARS - len(CUT_MARKER)) + CUT_MARKER
 
 
-@pytest.mark.parametrize("fresh", [True, False])
-def test_a_refusal_past_the_cap_is_cut_and_says_so(fresh: bool) -> None:
+def test_a_refusal_past_the_cap_is_cut_and_says_so() -> None:
     refusal = _rediscovery_refusal(SPEC)
     refusal["refusal"]["message"] = "m" * 1_000_000
     refusal["also_stopped"] = [_rediscovery_refusal(SPEC_B) for _ in range(1_000)]
 
-    message = _render(_seam(), fresh=fresh, refusal=refusal)
+    message = _render(_seam(), refusal=refusal)
 
     assert "Executing the approved plan failed" in message
     assert message.count(CUT_MARKER) >= 1
@@ -2422,7 +2790,7 @@ def test_a_refusal_shows_the_planner_every_error_before_its_warnings() -> None:
     """Four `window_short` warnings listed ahead of the entity errors would fill the cap
     and cut the errors off. Every error reaches the planner, and the warnings that do
     not fit are counted by code."""
-    message = _render(_seam(), fresh=False, refusal=_entities_unmet_refusal())
+    message = _render(_seam(), refusal=_entities_unmet_refusal())
 
     shown, listed = _refusal_shown(message)
     errors = [*shown["issues"], *listed]
@@ -2436,7 +2804,7 @@ def test_a_refusal_lists_its_errors_before_its_warnings_when_all_fit() -> None:
     refusal = _entities_unmet_refusal()
     refusal["issues"] = [*refusal["issues"][:2], refusal["issues"][4]]
 
-    shown, listed = _refusal_shown(_render(_seam(), fresh=False, refusal=refusal))
+    shown, listed = _refusal_shown(_render(_seam(), refusal=refusal))
 
     assert [issue["code"] for issue in shown["issues"]] == [
         "entity_missing",
@@ -2494,7 +2862,7 @@ def test_errors_past_the_cap_follow_the_cut_refusal(
     for issue in errors[: len(_DONORS)]:
         issue["found"] = ["a donor label"] * 1_000
 
-    message = _render(_seam(), fresh=False, refusal=refusal)
+    message = _render(_seam(), refusal=refusal)
 
     cut, _, listed = message.partition("\nErrors: ")
     shown, counted = _errors_and_left_out(listed)
@@ -2531,7 +2899,7 @@ def test_a_refusal_of_thousands_of_errors_renders_as_its_small_counterpart() -> 
             _Uncomparable(issue)
             for issue in [*refusal["issues"], *(_grain_ambiguous("gdp", n) for n in range(series))]
         ]
-        return _render(_seam(), fresh=False, refusal=refusal)
+        return _render(_seam(), refusal=refusal)
 
     small, large = rendered(300), rendered(12_000)
 
@@ -2545,7 +2913,7 @@ def test_a_refusal_of_thousands_of_errors_renders_as_its_small_counterpart() -> 
 
 
 def test_a_short_refusal_is_rendered_whole() -> None:
-    message = _render(_seam(), fresh=False, refusal=_rediscovery_refusal(SPEC))
+    message = _render(_seam(), refusal=_rediscovery_refusal(SPEC))
 
     assert CUT_MARKER not in message
     assert "resolved.stat_vars.member_count = 872" in message
@@ -2950,8 +3318,8 @@ async def test_the_planner_runs_on_the_model_and_translation_the_seam_is_given(
 ) -> None:
     translated: list[Plan | None] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        translated.append(load_plan(tool_context.state))
+    async def translate(call: Any) -> dict[str, object]:
+        translated.append(load_plan(call.state))
         return {"translated_by": "the caller"}
 
     proposal = {
@@ -3047,24 +3415,20 @@ async def test_every_planner_generation_runs_at_the_low_thinking_config(
     assert len(planner_llm.captured_requests) > 1
     assert all(
         request.config.thinking_config == AGENT_THINKING_CONFIG
+        and request.config.automatic_continuation is True
         for request in planner_llm.captured_requests
     )
 
 
-async def test_a_later_entry_carries_the_earlier_tool_calls(
+async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """A later entry on the same session (the `amend` edge) sends only the
-    amendment (`_message`'s `fresh=False`), so its first generation has to
-    read the first entry's tool calls from history. Run as a
-    workflow node with no explicit `include_contents`, ADK defaults the
-    planner to `'none'`, which builds every request from the latest user
-    event onwards (`_get_current_turn_contents`,
-    `google.adk.flows.llm_flows.contents`), which is the amendment alone.
-    `planner.agent.create_planner_agent` pins `include_contents='default'` to
-    stop that; reverting the pin fails this test on the later entry's first
-    generation.
-    """
+    """Two entries of one turn, each its own `run_node` child as the graph's
+    planner node runs them: the later entry's first request holds the turn's
+    question, the brief after it with the amendment, and none of the earlier
+    entry's tool calls, since a `single_turn` run reads only its own node path.
+    The skill the earlier entry read is in the later brief instead, starred on
+    the Skills named line."""
     seam = _translator_seam(
         responses={
             "search": _NO_DATA_SEARCH_RESPONSE,
@@ -3081,28 +3445,189 @@ async def test_a_later_entry_carries_the_earlier_tool_calls(
         ]
     )
     seam._agent.model = planner_llm
-    harness = _SeamHarness()
     plan_json = draft.model_dump(mode="json")
+    entries: list[dict[str, Any]] = [{}, {"amendment": "only since 2015"}]
+    readings = _skill_readings("dfo-faq")
 
-    await harness.run(seam, question="gdp guatemala", readings=[], prior_plan=plan_json)
-    await harness.run(
-        seam,
-        question="gdp guatemala",
-        readings=[],
-        prior_plan=plan_json,
-        amendment="only since 2015",
+    async def _turn(ctx: Context, node_input: Any) -> None:
+        del node_input
+        for entry in entries:
+
+            async def _entry(ctx: Context, node_input: Any, entry: dict[str, Any] = entry) -> Any:
+                del node_input
+                return await seam(
+                    ctx=ctx,
+                    question="gdp guatemala",
+                    readings=readings,
+                    prior_plan=plan_json,
+                    **entry,
+                )
+
+            await ctx.run_node(node(_entry, name="planner", rerun_on_resume=True))
+
+    wf = Workflow(
+        name="seam_test_wf", edges=[(START, node(_turn, name="turn", rerun_on_resume=True))]
     )
+    sessions = InMemorySessionService()
+    runner = Runner(node=wf, app_name=_APP, session_service=sessions)
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    content = types.Content(role="user", parts=[types.Part(text="probe")])
+    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+        pass
 
     # `captured_requests[0..2]` are the first entry: `get_skill`,
     # `propose_plan`, and the closing text. `[3]` is the later entry's first
     # generation.
+    earlier = _call_and_response_names(planner_llm.captured_requests[2])
+    assert {"FC:get_skill", "FR:get_skill", "FC:propose_plan", "FR:propose_plan"} <= set(earlier)
+    first_brief = _brief_follows_the_question(planner_llm.captured_requests[0])
+    assert _skills_named(first_brief) == "dfo-faq"
+    assert _SKILL_PAGE not in first_brief
     later = planner_llm.captured_requests[3]
-    assert "only since 2015" in _prompt_text(later)
-    names = _call_and_response_names(later)
-    assert "FC:get_skill" in names
-    assert "FR:get_skill" in names
-    assert "FC:propose_plan" in names
-    assert "FR:propose_plan" in names
+    brief = _brief_follows_the_question(later)
+    assert "only since 2015" in brief
+    assert _skills_named(brief) == "dfo-faq*"
+    assert f"get_skill('dfo-faq'):\n{_SKILL_PAGE}\n" in brief
+    assert _call_and_response_names(later) == []
+
+
+_SKILL_PAGE = "# DFO FAQ"
+
+
+def _skill_readings(*skills: str) -> list[dict[str, Any]]:
+    """One definite reading naming `skills`, as `search` stores it."""
+    reading = SearchReading(text="aid", status="definite", spec_id=SPEC, skills=skills)
+    return [reading.model_dump(mode="json")]
+
+
+def _skills_named(brief: str) -> str:
+    """The skills the brief's Skills named line lists, starred as it stars them."""
+    (line,) = [line for line in brief.splitlines() if line.startswith("Skills named")]
+    return line.removeprefix("Skills named (* = already read): ")
+
+
+def _skill_seam() -> PlannerSeam:
+    """A seam whose `get_skill` and `get_skill_file` answer one page each."""
+    return _translator_seam(
+        responses={
+            "get_skill": ToolCallResult(is_error=False, text=_SKILL_PAGE),
+            "get_skill_file": ToolCallResult(is_error=False, text="# Methods"),
+        }
+    )
+
+
+async def test_a_first_draft_carries_no_skill_an_earlier_plan_read() -> None:
+    """A first draft starts a new plan, so the skills the last plan's entries
+    read leave the brief with it, while an amend of that last plan still
+    carried them."""
+    seam = _skill_seam()
+    llm = ScriptedPlannerLlm(script=[[("get_skill", {"skill_id": "dfo-faq"})], "stop"])
+    seam._agent.model = llm
+    harness = _SeamHarness()
+    entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
+
+    await harness.run(seam, **entry)
+    amending = len(llm.captured_requests)
+    await harness.run(seam, amendment="only since 2015", **entry)
+    drafting = len(llm.captured_requests)
+    await harness.run(seam, **entry)
+
+    amend = _brief_follows_the_question(llm.captured_requests[amending])
+    assert _skills_named(amend) == "dfo-faq*" and _SKILL_PAGE in amend
+    draft = _brief_follows_the_question(llm.captured_requests[drafting])
+    assert _skills_named(draft) == "dfo-faq"
+    assert _SKILL_PAGE not in draft
+
+
+async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> None:
+    """A read stores its own page's text and a short index, so a later read's
+    state delta carries no earlier page and each text appears in one event,
+    however many reads and entries follow."""
+    first, second = "# FAQ " + "a" * 400, "# Methods " + "b" * 400
+    seam = _translator_seam(
+        responses={
+            "get_skill": ToolCallResult(is_error=False, text=first),
+            "get_skill_file": ToolCallResult(is_error=False, text=second),
+        }
+    )
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[
+            [("get_skill", {"skill_id": "dfo-faq"})],
+            [("get_skill_file", {"skill_id": "dfo-faq", "path": "methods.md"})],
+            "stop",
+            "stop",
+        ]
+    )
+    harness = _SeamHarness()
+    entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
+
+    await harness.run(seam, **entry)
+    await harness.run(seam, amendment="only since 2015", **entry)
+
+    deltas = [
+        json.dumps(event.actions.state_delta)
+        for event in await harness.events()
+        if event.actions and event.actions.state_delta
+    ]
+    # The earliest delta holding the second page is its `get_skill_file` event.
+    read_second = next(delta for delta in deltas if second in delta)
+    assert first not in read_second
+    assert sum(delta.count(first) for delta in deltas) == 1
+
+
+async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_next_entry() -> None:
+    """An amend reads a skill file, then pauses on a planner-side ask. The
+    request the answer resumes carries the skill the first draft read in its
+    brief, and the file the paused run read in its own history only. The next
+    entry's brief carries both, read back from state the resume persisted."""
+    seam = _skill_seam()
+    ask = (
+        "adk_request_input",
+        {
+            "message": "Which source did you mean?",
+            "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
+            "recommended_spec_id": SPEC,
+            "rationale": "broader coverage",
+        },
+    )
+    llm = ScriptedPlannerLlm(
+        script=[
+            [("get_skill", {"skill_id": "dfo-faq"})],
+            "stop",
+            [("get_skill_file", {"skill_id": "dfo-faq", "path": "methods.md"})],
+            [ask],
+            "stop",
+            "stop",
+        ]
+    )
+    seam._agent.model = llm
+    harness = _SeamHarness()
+    entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
+
+    await harness.run(seam, **entry)
+    paused = await harness.run(seam, amendment="only since 2015", **entry)
+    assert paused is None, "the ask should pause the amend"
+    resuming = len(llm.captured_requests)
+    answer = types.Content(
+        role="user",
+        parts=[
+            create_request_input_response(
+                _pending_ask_interrupt_id(await harness.events()), {"result": {"spec_id": SPEC}}
+            )
+        ],
+    )
+    await harness.run(seam, amendment="only since 2015", new_message=answer, **entry)
+    replanning = len(llm.captured_requests)
+    await harness.run(seam, amendment="and drop Kenya", **entry)
+
+    resumed = llm.captured_requests[resuming]
+    brief = _brief_follows_the_question(resumed)
+    assert _skills_named(brief) == "dfo-faq*"
+    assert brief.count(_SKILL_PAGE) == 1 and "# Methods" not in brief
+    assert "FR:get_skill_file" in _call_and_response_names(resumed)
+    later = _brief_follows_the_question(llm.captured_requests[replanning])
+    assert f"get_skill('dfo-faq'):\n{_SKILL_PAGE}\n" in later
+    assert "get_skill_file('dfo-faq', 'methods.md', offset=0):\n# Methods\n" in later
 
 
 # An `unsupported` `search` answer: translation refers the plan back as
@@ -3866,11 +4391,7 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     # `propose_plan` itself left behind is what this test is about.
     await harness.run(seam, question="kenya oda 2023", readings=[])
 
-    # The second call's own generation was rendered fresh -- the full
-    # brief, "Question: kenya oda 2023" line included -- not a continuing
-    # message, which a session already marked briefed would have gotten
-    # instead (see `test_the_full_brief_a_second_call_inherits_is_byte_
-    # identical_to_the_first`, which proves the other side of that split).
+    # The second call's own generation carries its own question.
     brief = _prompt_text(second_llm.captured_requests[0])
     assert "Question: kenya oda 2023" in brief
 
@@ -3958,35 +4479,13 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
     assert version == 6
 
 
-async def test_the_full_brief_a_second_call_inherits_is_byte_identical_to_the_first() -> None:
-    """The fresh/continuing split rests on one assumption: `question`,
-    `readings`, `canvas_digest` and `conversation_digest` never change
-    mid-turn, so a continuing call can safely drop them because the
-    session's own history already carries exactly what a fresh call would
-    have rendered.
-
-    This drives two `PlannerSeam.__call__`s through the *same* `ctx`,
-    inside one node function -- the shape an `amend`/`replan` edge actually
-    produces in the real graph, one continuous `Runner.run_async` for the
-    whole turn, `planner_n` re-entered as an internal node transition, not
-    two separate top-level runs. That distinction matters here:
-    `_BRIEFED_STATE_KEY` is a direct, non-delta-tracked write to
-    `ctx.session.state` (see the module docstring on why), and such a write
-    is only guaranteed visible to a later read within the same
-    `Runner.run_async` invocation (`_SeamHarness`'s own `seed_state`
-    docstring already says as much for `prior_plan`'s reseed) -- two
-    separate `_SeamHarness.run()` calls would not reliably carry it
-    forward, and would not exercise what this test is about.
-
-    With the two calls sharing one `ctx`, the second call's own generation
-    sees the first call's full brief already in its history (via
-    `include_contents="default"`, see the module docstring) -- asserting
-    that text is byte-identical to what a fresh render of the *second*
-    call's own arguments would produce is exactly the invariant the
-    fresh/continuing split rests on: if a future change ever let this seam
-    render one of these fields differently between two calls passed the
-    same values, this test would catch it before a continuing message went
-    stale on the strength of a false assumption.
+async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
+    """Two calls in one node, the shape the graph's `amend` and `replan` edges
+    take inside one `Runner.run_async`. Each call's requests carry its own
+    brief once, after the turn's question. The second brief opens with the
+    first byte for byte, since `question`, `readings`, `canvas_digest` and
+    `conversation_digest` do not change mid-turn, and only the ask is added
+    after them.
     """
     question = "kenya debt"
     readings: list[dict[str, Any]] = []
@@ -3998,7 +4497,6 @@ async def test_the_full_brief_a_second_call_inherits_is_byte_identical_to_the_fi
     second_llm = ScriptedPlannerLlm(script=["still nothing"] * 4)
 
     expected_first_message = seam._message(
-        fresh=True,
         question=question,
         prior_plan=None,
         refusal=None,
@@ -4037,14 +4535,11 @@ async def test_the_full_brief_a_second_call_inherits_is_byte_identical_to_the_fi
     async for event in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
         assert isinstance(event, Event)
 
-    seen_user_texts = [
-        part.text
-        for request_content in second_llm.captured_requests[0].contents
-        if request_content.role == "user"
-        for part in request_content.parts or []
-        if part.text is not None
-    ]
-    assert expected_first_message in seen_user_texts
+    assert _brief_follows_the_question(first_llm.captured_requests[0]) == expected_first_message
+    second = _brief_follows_the_question(second_llm.captured_requests[0])
+    assert second == expected_first_message + planner_seam._ask_text(
+        amendment="only since 2015", refusal=None, pick=None
+    )
 
 
 async def test_a_turn_that_loops_past_the_round_cap_is_refused_not_raised(
@@ -4418,7 +4913,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     candidates ends the entry the way the planner's own `ask_user` does: a
     long-running `adk_request_input` pause, built from the referral's own
     candidates with no model call. The user's answer resumes the run in a
-    request of its own and pairs by id (`planner.agent._elected_spec_ids`).
+    request of its own and pairs by id (`planner.call.elected_spec_ids`).
 
     The cap allows one model call: it proposes the plan again, and its
     translation records a `source_ambiguous` referral naming `SPEC` and
@@ -4476,7 +4971,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     fake_tool_context = SimpleNamespace(
         state={}, session=SimpleNamespace(events=await harness.events())
     )
-    assert _elected_spec_ids(fake_tool_context) == frozenset({SPEC_B})
+    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset({SPEC_B})
 
 
 async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(
@@ -4829,13 +5324,13 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
     )
     drafted: list[Plan] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        draft = load_plan(tool_context.state)
+    async def translate(call: Any) -> dict[str, object]:
+        draft = load_plan(call.state)
         assert draft is not None
         drafted.append(draft)
         assert translated.translation is not None and translated.workflow is not None
         save_plan(
-            tool_context.state,
+            call.state,
             draft.with_translation(
                 translation=translated.translation, workflow=translated.workflow
             ),
@@ -4952,8 +5447,8 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
     )
     drafted: list[Plan] = []
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        draft = load_plan(tool_context.state)
+    async def translate(call: Any) -> dict[str, object]:
+        draft = load_plan(call.state)
         assert draft is not None
         drafted.append(draft)
         assert translated.translation is not None and translated.workflow is not None
@@ -4961,7 +5456,7 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
             r.id for r in translated.evidence_requirements
         }:
             save_plan(
-                tool_context.state,
+                call.state,
                 draft.with_translation(
                     translation=translated.translation, workflow=translated.workflow
                 ),
@@ -5125,8 +5620,8 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
         }
     )
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {
             "kind": kind.value,
             "outcome": outcome,
@@ -5320,8 +5815,8 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
         ],
     )
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {"outcome": "ok"}
 
     surface = BasisCompiles()
@@ -5509,8 +6004,8 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         if total_pin is not None or block["spec_id"] != TOTAL
     }
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {"outcome": "ok"}
 
     surface = BasisCompiles()
@@ -5701,13 +6196,13 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
         ],
     )
 
-    async def translate(tool_context: Any) -> dict[str, object]:
-        del tool_context
+    async def translate(call: Any) -> dict[str, object]:
+        del call
         return {"outcome": "ok"}
 
     # Each revision is offered as recorded: what it compiles is not this test's.
     monkeypatch.setattr(
-        planner_seam, "declare_ready", lambda answer, ctx: {**answer, "summary": {}}
+        planner_seam, "end_run_when_ready", lambda answer, ctx: {**answer, "summary": {}}
     )
     compiles = fake()
     seam = PlannerSeam(

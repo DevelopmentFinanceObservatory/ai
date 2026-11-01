@@ -141,6 +141,19 @@ REDISCOVERY_CODES = frozenset(
     {"upstream_version_changed", "definition_not_held", "open_role_unavailable"}
 )
 
+# The `REDISCOVERY_CODES` whose refused spec_id can serve again once Search
+# answers it. A spec_id hashes a definition's content, so a refreshed or
+# re-registered definition keeps it, and a later Search answer settling on it
+# (`submission.service.refused_in_force`) shows it held again:
+# - `upstream_version_changed`: the upstream refreshed while the run read it;
+#   a later read meets the refreshed version.
+# - `definition_not_held`: the definition left the store; data-mcp stores the
+#   definition of every spec_id Search answers, so one answered after the
+#   refusal is held again.
+# `open_role_unavailable` is left out: the StatVars its identity elects declare
+# no role on the open axis, so the same spec_id refuses every time.
+RECOVERABLE_SPEC_CODES = frozenset({"upstream_version_changed", "definition_not_held"})
+
 TRANSIENT_CODES = frozenset(
     {
         "upstream_error",
@@ -166,6 +179,8 @@ COMPILER_PROVABLE_CODES = frozenset(
         "role_ambiguous",
         "op_spec_invalid",
         "request_invalid",
+        # The compiler writes every frame argument as a full pair.
+        "frame_ref_incomplete",
         "operation_uncovered",
         "join_no_common_key_columns",
         "filter_predicate_type_mismatch",
@@ -199,6 +214,12 @@ STOP_CODES = frozenset(
         # (`compiler.capabilities.EXCLUDED_TOOLS`).
         "skill_not_found",
         "skill_resource_not_found",
+        # `export_data`'s own refusals. No workflow step calls it
+        # (`compiler.capabilities.EXCLUDED_TOOLS`).
+        "allowance_exhausted",
+        "provenance_unavailable",
+        "licence_not_redistributable",
+        "frame_unavailable",
         # analysis-mcp
         "stat_var_unresolved",
         "frame_too_large",
@@ -214,8 +235,17 @@ STOP_CODES = frozenset(
         "join_output_collision",
         "derived_input_unusable",
         "derived_input_unrecoverable",
+        # A derived input with no stored recipe, which the runner cannot compute
+        # again inside the call's tree. Making it again is a different plan.
+        "rolling_reanchor_unavailable",
         "derived_input_ordinal",
         "quotient_of_side_unit_unsupported",
+        # A verb read a frame whose mint options hold one dfo-apis' analysis
+        # runner reads no root with: anything past the format, bundle and layout, the enrichment
+        # columns, the party-total cut and the groupby of a `breakdown` or a
+        # `stat_vars` sum (`common.materialisation.rendering.ROOT_READ_OPTIONS`). Fetching
+        # the frame another way is a different plan.
+        "rendering_not_recorded",
         # The newest period a run's rolling steps stand on, which the executor
         # resolves and writes each step's periods from. No year is held by half
         # of the series, or the periods are no calendar years. Both are facts of

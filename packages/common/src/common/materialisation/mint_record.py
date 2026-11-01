@@ -6,29 +6,47 @@ A root frame is one data-mcp's `get_data` registered from an apis service mint. 
 the request that produced it, and that trace is written inside the frame's
 insert-only object, so it can gain no field for a frame the store already holds.
 The mint record is written separately, under the same pair, on every `get_data`
-call that registers or finds the frame.
+call that registers or finds the frame. Four other writers cover a frame no `get_data`
+named: `analysis_mcp.runner_tree.record_spec_reads` records the frame a Spec root read,
+from the stored recipe's root records, `rendering.record_bare_read` records the pair a
+bare `spec_id` resolved to, `data_mcp.mint_recovery` rebuilds a lost record, and
+`presentation_mcp.client._record_moved_pair` copies a lost frame's rendering to the
+pair `frame_ref_for` derives from the version dfo-apis' frame refresh moved it to.
 
 A record holds:
 
 - `frame`: the pair the store holds the frame under. For a mint with
-  `options.columns` or `options.groupby` set this is the pair
-  `data_mcp.frame_materialisation.frame_ref_for` derives, whose
+  `options.columns`, `options.groupby` or `options.without_party_totals` set this is
+  the pair `frame_name.frame_ref_for` derives, whose
   `content_version` is a one-way hash of the apis `content_version`, the
-  columns and the groupby. For any other mint it is `dataset`, and the frame is
-  that version's canonical frame.
+  columns, the groupby and the cut. For any other mint it is `dataset`, and the frame
+  is that version's canonical frame.
 - `dataset`: the pair apis names the materialisation by, which every
   rendering of it shares.
-- `options`: the mint request's `options` as `get_data` sent them. A mint sent
-  with them again registers the same rendering under the same derivation.
+- `options`: the mint request's `options` as `get_data` sent them, with an `enrichment`
+  resolved to the columns apis named, so only a bare read's record holds `enrichment`.
+  `get_data` sends
+  `groupby.by` sorted (`normal_groupby`), as apis records it, and a record decodes
+  with the options as written, so a stored recipe root keeps the normal form it was
+  published under. A record written before `get_data` sorted `by` keeps its own
+  order, and its frame is held under the pair named with that order, which
+  `data_mcp.frame_materialisation.named_groupbys` lists. A mint sent with them
+  again registers the same rendering, since `frame_ref_for` sorts `by` before it
+  names the pair.
 - `scope`: the mint request's `scope` as `get_data` sent it. `dataset.spec_id`
   is the identity apis served after applying it, and each scope member
   replaces a whole member of the identity, so sending the same scope with
   `dataset.spec_id` leaves that identity as it is.
 - `stat_var_count`: how many distinct StatVars the frame's rows hold, read off
   the frame (`data_mcp.frame_materialisation.observed_shape`). `None` on a record
-  written before the count was kept, and on one rebuilt (`data_mcp.mint_recovery`)
+  written before the count was kept, on one rebuilt (`data_mcp.mint_recovery`)
   for a `groupby` sum with a version of its own whose frame the store no longer
-  holds.
+  holds, on one a bare read wrote (`rendering.record_bare_read`), which saw no
+  frame, and on one a frame refresh moved (`presentation_mcp.client
+  ._record_moved_pair`), which saw none of the new version. A record without the
+  count stands for good once written. A bare read's is safe, since it holds no
+  `groupby` and a pair naming a `groupby` differs from it, and a moved frame's since
+  its pair names its rendering.
 - `enrichment_stamp`: the `enrichment_stamp` of the artifact the frame was read from
   (`data_mcp.manifest.ArtifactEntry.enrichment_stamp`) when `options.columns` asks for
   a `{role}_party_kind` column, else `None`. It is also `None` on a record written
@@ -52,15 +70,20 @@ second StatVar contributes the two differ, so a later mint of a root recorded
 with a count of 1 cannot tell which one its frame was. `harness.recipe_replay`
 refuses such a root unless its frame is held under the pair that names its
 groupby.
+
+`holder.dataset_pair` maps a frame's pair to the dataset pair its record names, the
+pair apis holds, for a caller that sends a frame to apis. `rendering.frame_rendering`
+answers what a record says about the frame's rows, for a caller that recovers it.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import rfc8785
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from common.materialisation.frame_ref import FrameRef
 
@@ -98,6 +121,38 @@ class MintRecord(BaseModel):
     stat_var_count: int | None = Field(default=None, ge=0)
     enrichment_stamp: str | None = Field(default=None, exclude_if=lambda stamp: stamp is None)
 
+    @field_validator("options")
+    @classmethod
+    def _groupby_has_axes(cls, options: dict[str, Any]) -> dict[str, Any]:
+        """Refuse a `groupby` whose `by` is no list of axis names. The options are kept as
+        written."""
+        if (groupby := options.get("groupby")) is not None:
+            groupby_axes(groupby)
+        return options
+
+
+def groupby_axes(groupby: object) -> list[str]:
+    """The `by` axes of the `options.groupby` `groupby`, in the order it holds them.
+
+    Raises:
+        ValueError: When `groupby` is no mapping or its `by` is no list of strings.
+    """
+    by = groupby.get("by") if isinstance(groupby, Mapping) else None
+    if isinstance(by, list):
+        axes = [axis for axis in by if isinstance(axis, str)]
+        if len(axes) == len(by):
+            return axes
+    raise ValueError(f"a groupby's `by` must be a list of axis names, not {by!r}")
+
+
+def normal_groupby(groupby: Mapping[str, Any]) -> dict[str, Any]:
+    """`groupby` with its `by` sorted, the form apis records and names a pair by.
+
+    Raises:
+        ValueError: When `by` is no list of strings (`groupby_axes`).
+    """
+    return {**groupby, "by": sorted(groupby_axes(groupby))}
+
 
 class _LenientMintRecord(MintRecord):
     """The decode shape of a stored record: a member a later deployment added is
@@ -111,6 +166,15 @@ def encode_mint_record(record: MintRecord) -> bytes:
     return rfc8785.dumps(record.model_dump(mode="json"))
 
 
+def read_mint_record(value: object) -> MintRecord:
+    """The record `value` holds, with any member a later deployment added dropped.
+
+    Raises:
+        pydantic.ValidationError: When `value` does not fit the record's shape.
+    """
+    return MintRecord(**_LenientMintRecord.model_validate(value).model_dump())
+
+
 def decode_mint_record(data: bytes) -> MintRecord:
     """The record `encode_mint_record` wrote as `data`.
 
@@ -118,5 +182,4 @@ def decode_mint_record(data: bytes) -> MintRecord:
         ValueError: When `data` is not JSON or does not fit the record's shape
             (`pydantic.ValidationError` is a `ValueError`).
     """
-    lenient = _LenientMintRecord.model_validate(json.loads(data))
-    return MintRecord(**lenient.model_dump())
+    return read_mint_record(json.loads(data))

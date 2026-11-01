@@ -60,9 +60,6 @@ from executor.artifacts import declared_ranked_before_limit
 from executor.outcomes import RefusalKind
 from executor.run import current_step_id
 from google.adk.events import Event
-from google.adk.workflow.utils._workflow_hitl_utils import (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
-)
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.agent import PROPOSE_PLAN
@@ -95,7 +92,7 @@ from harness.provenance import (
 )
 from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
-from harness.sentences import MAX_SENTENCE_CHARS, failure_sentence
+from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -109,6 +106,7 @@ from harness.studio_state import (
     land_component as state_land_component,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
+from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
 from harness.wire import (
     ActivityStep,
@@ -560,9 +558,9 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
         "outcome": "refusal",
         "refusal": {
             "code": refusal_code(body) or HarnessCode.UNSPECIFIED.value,
-            "retry_mode": str(body.get("retry_mode") or body.get("retry") or "do_not_retry"),
+            "retry_mode": str(body.get("retry_mode") or "do_not_retry"),
             "fix": body.get("fix") if isinstance(body.get("fix"), dict) else None,
-            "message": str(body.get("message") or body.get("detail") or result.text),
+            "message": str(body.get("message") or result.text),
         },
     }
 
@@ -1877,7 +1875,9 @@ class _Translator:
                 PlanAsk(
                     ask=str(row["ask"]),
                     answered_by=cast("list[str]", row["answered_by"]),
-                    declined=cast("str | None", row["reason"]),
+                    declined=DROPPED_REASON
+                    if row["dropped"]
+                    else cast("str | None", row["reason"]),
                     not_computed=cast("str | None", row["not_computed"])
                     if row["answered_by"]
                     else None,

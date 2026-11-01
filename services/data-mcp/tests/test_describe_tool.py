@@ -140,7 +140,8 @@ async def test_malformed_id_refuses_request_invalid_with_no_upstream_call(
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["code"] == "request_invalid"
-    assert result.structured_content["fix"]["pointer"] == "/ids/0"
+    assert result.structured_content["fix"]["tool"] == "describe"
+    assert result.structured_content["fix"]["problems"][0].startswith("ids.0: ")
 
 
 # A dot-segment dcid refuses request_invalid and issues no upstream request.
@@ -161,7 +162,8 @@ async def test_dot_segment_dcid_refuses_request_invalid_with_no_upstream_call(
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["code"] == "request_invalid"
-    assert result.structured_content["fix"]["pointer"] == "/ids/0"
+    assert result.structured_content["fix"]["tool"] == "describe"
+    assert result.structured_content["fix"]["problems"][0].startswith("ids.0: ")
     assert requests == []
 
 

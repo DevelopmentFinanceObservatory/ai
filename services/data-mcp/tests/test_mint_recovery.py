@@ -192,6 +192,38 @@ async def _holding(
             _DEFAULT_OPTIONS
             | {"columns": ["party_kind"], "groupby": _GROUPBY, "without_party_totals": True},
         ),
+        (
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_CUT,
+                columns=("party_kind",),
+                without_party_totals=True,
+            ),
+            _CUT,
+            _DEFAULT_OPTIONS | {"columns": ["party_kind"], "without_party_totals": True},
+        ),
+        (
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_CUT_SUMMED,
+                columns=("party_kind",),
+                groupby=_GROUPBY,
+                without_party_totals=True,
+            ),
+            _CUT_SUMMED,
+            _DEFAULT_OPTIONS
+            | {"columns": ["party_kind"], "groupby": _GROUPBY, "without_party_totals": True},
+        ),
+        (
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_OLDER,
+                columns=("party_kind",),
+                without_party_totals=True,
+            ),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": ["party_kind"], "without_party_totals": True},
+        ),
     ],
     ids=[
         "default-columns",
@@ -208,8 +240,11 @@ async def _holding(
         "flow-party-kinds-under-the-earlier-token",
         "flow-party-types-and-kinds",
         "the-one-flow-party-type-a-table-serves-and-the-kind-without-class-and-whole",
+        "flow-party-kinds-of-a-cut-version-before-its-pair-named-the-cut",
+        "flow-party-kinds-of-a-sum-of-a-cut-version-before-its-pair-named-the-cut",
         "flow-party-kinds-of-a-cut-version",
         "flow-party-kinds-of-a-sum-of-a-cut-version",
+        "flow-party-kinds-of-a-cut-that-left-nothing-out",
     ],
 )
 async def test_a_root_is_recovered_from_the_version_that_reproduces_its_pair(
@@ -293,9 +328,13 @@ async def test_a_root_nothing_reproduces_fails_with_its_pair_and_reason(
 _KEPT_SUM = _DEFAULT_OPTIONS | {"groupby": _GROUPBY}
 
 
-@pytest.mark.parametrize("without_party_totals", [False, True], ids=["kept", "totals-left-out"])
+@pytest.mark.parametrize(
+    ("without_party_totals", "named_cut"),
+    [(False, False), (True, True), (True, False)],
+    ids=["kept", "totals-left-out", "totals-left-out-before-its-pair-named-the-cut"],
+)
 async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
-    without_party_totals: bool,
+    without_party_totals: bool, named_cut: bool
 ) -> None:
     """apis lists the version as unsummed, so only the options the held frame's
     trace keeps reproduce the pair that names the groupby."""
@@ -307,6 +346,7 @@ async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
         content_version=_OLDER,
         columns=("party_kind",) if without_party_totals else (),
         groupby=_GROUPBY,
+        without_party_totals=named_cut,
     )
     store = await _holding(ref, "dcid:A", options=kept_sum)
 
@@ -323,8 +363,12 @@ async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
 
 @pytest.mark.parametrize(
     "options",
-    [None, _DEFAULT_OPTIONS | {"groupby": {"by": ["donor"], "op": "sum"}}],
-    ids=["trace-without-options", "trace-naming-another-groupby"],
+    [
+        None,
+        _DEFAULT_OPTIONS | {"groupby": {"by": ["donor"], "op": "sum"}},
+        _DEFAULT_OPTIONS | {"groupby": {"op": "sum"}},
+    ],
+    ids=["trace-without-options", "trace-naming-another-groupby", "trace-groupby-without-by"],
 )
 async def test_a_sum_that_kept_its_version_is_unrecoverable_without_its_options(
     options: dict[str, object] | None,
@@ -336,6 +380,53 @@ async def test_a_sum_that_kept_its_version_is_unrecoverable_without_its_options(
         await recover_mint_record(ref, dataset_versions=_Versions(), store=store)
 
     assert raised.value.reason == "no_version_matches"
+
+
+# A breakdown's groupby as get_data sent it before it sorted `by`, and as apis records it.
+_SENT_BREAKDOWN = {"by": ["time_period", "crsPurpose"], "op": "sum", "levels": {"crsPurpose": 0}}
+_RECORDED_BREAKDOWN = _SENT_BREAKDOWN | {"by": ["crsPurpose", "time_period"]}
+
+
+@pytest.mark.parametrize("from_trace", [False, True], ids=["from-a-version", "from-the-trace"])
+async def test_a_breakdown_named_before_by_was_sorted_recovers_in_the_order_that_named_it(
+    from_trace: bool,
+) -> None:
+    """The pair hashes `by` in the order get_data sent. A version lists it sorted, so
+    recovery tries every order and the record keeps the one the pair was named with."""
+    content_version = _OLDER if from_trace else _SUMMED
+    ref = frame_ref_for(
+        spec_id=_SPEC_ID,
+        content_version=content_version,
+        groupby=_SENT_BREAKDOWN,
+        keep_by_order=True,
+    )
+    options = _DEFAULT_OPTIONS | {"groupby": _SENT_BREAKDOWN}
+    versions = (
+        DatasetVersion(_SUMMED, _NEWER, "groupby", _RECORDED_BREAKDOWN),
+        DatasetVersion(_OLDER, None, "plain", None),
+    )
+    store = await _holding(ref, "dcid:A", options=options if from_trace else None)
+
+    record = await recover_mint_record(ref, dataset_versions=_Versions(versions), store=store)
+
+    assert record == MintRecord(
+        frame=ref,
+        dataset=FrameRef(spec_id=_SPEC_ID, content_version=content_version),
+        options=options,
+        stat_var_count=1,
+    )
+
+
+async def test_a_version_whose_groupby_has_no_axes_is_a_sum_apis_did_not_record() -> None:
+    ref = FrameRef(spec_id=_SPEC_ID, content_version=_SUMMED)
+    versions = (DatasetVersion(_SUMMED, _NEWER, "groupby", {"by": [1, "crsPurpose"]}),)
+
+    with pytest.raises(MintRecordUnrecoverableError) as raised:
+        await recover_mint_record(
+            ref, dataset_versions=_Versions(versions), store=await _holding(ref, "dcid:A")
+        )
+
+    assert raised.value.reason == "groupby_unrecorded"
 
 
 _KINDS = ("party_kind",)

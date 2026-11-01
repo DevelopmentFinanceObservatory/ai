@@ -29,12 +29,18 @@ from common.materialisation import (
     InMemoryMaterialisationStore,
     MaterialisationTrace,
     MintRecord,
+    normal_groupby,
     set_store,
 )
 from common.recipe import build_recipe, replay_key
 from common.row_budget import RowBudget
 from data_mcp.deadline import CallDeadline
-from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for, replayed_mint_options
+from data_mcp.frame_materialisation import (
+    KIND_COLUMNS,
+    WITHOUT_PARTY_TOTALS,
+    frame_ref_for,
+    replayed_mint_options,
+)
 from data_mcp.get_data_tool import RootMint
 from data_mcp.mint_recovery import recover_mint_record
 from data_mcp.operations import QueuedOperation
@@ -114,12 +120,15 @@ class Dataset:
     its groupby by, and writes its mint record. `answers` are returned first, one for each call. `others`
     holds the frame of any other dataset, by spec id. With `names_groupby` off, a
     groupby mint registers under the version's own pair, as data-mcp did before
-    `frame_ref_for` named a groupby. With an `enrichment_stamp`, a mint also names its
-    columns and the stamp in its pair and keeps the stamp in its record, as data-mcp does
-    for a flow root minted with kinds."""
+    `frame_ref_for` named a groupby. With `sorts_by` off, a groupby mint is sent, named
+    and recorded with `by` in the order the record holds, as data-mcp did before it
+    sorted `by`. A mint with `without_party_totals` names the cut in its pair. With an
+    `enrichment_stamp`, a mint also names its columns and the stamp in its pair and keeps
+    the stamp in its record, as data-mcp does for a flow root minted with kinds."""
 
     def __init__(self, store: InMemoryMaterialisationStore) -> None:
         self.names_groupby = True
+        self.sorts_by = True
         self.enrichment_stamp: str | None = None
         self._store = store
         self.content_version = FIRST
@@ -136,6 +145,9 @@ class Dataset:
         if self.answers:
             return self.answers.pop(0)
         dataset = FrameRef(spec_id=record.dataset.spec_id, content_version=self.content_version)
+        options = record.options
+        if self.sorts_by and (groupby := options.get("groupby")) is not None:
+            options = options | {"groupby": normal_groupby(groupby)}
         ref = frame_ref_for(
             spec_id=dataset.spec_id,
             content_version=dataset.content_version,
@@ -144,8 +156,10 @@ class Dataset:
                 if self.enrichment_stamp is not None
                 else ()
             ),
-            groupby=record.options.get("groupby") if self.names_groupby else None,
+            groupby=options.get("groupby") if self.names_groupby else None,
+            without_party_totals=options.get(WITHOUT_PARTY_TOTALS) is True,
             enrichment_stamp=self.enrichment_stamp,
+            keep_by_order=True,
         )
         trace = MaterialisationTrace(
             upstream_trace={
@@ -164,13 +178,13 @@ class Dataset:
             MintRecord(
                 frame=ref,
                 dataset=dataset,
-                options=record.options,
+                options=options,
                 scope=record.scope,
                 stat_var_count=count,
                 enrichment_stamp=self.enrichment_stamp,
             )
         )
-        return RootMint(frame=ref, dataset=dataset, options=record.options, stat_var_count=count)
+        return RootMint(frame=ref, dataset=dataset, options=options, stat_var_count=count)
 
     def move(self, values: Mapping[str, Mapping[str, float]], *, to: str = SECOND) -> None:
         """Serve `values` as the dataset's next version."""
@@ -455,7 +469,10 @@ async def test_a_root_minted_without_party_totals_is_minted_with_the_option_agai
     assert (
         root["frame"]
         == frame_ref_for(
-            spec_id=SPEC, content_version=SECOND, groupby=recorded.get("groupby")
+            spec_id=SPEC,
+            content_version=SECOND,
+            groupby=recorded.get("groupby"),
+            without_party_totals=True,
         ).model_dump()
     )
     assert root["options"] == recorded
@@ -609,6 +626,23 @@ async def test_a_dataset_joined_beside_a_rolling_step_is_not_read_for_its_period
     assert scene.tools.names == ["resolve_anchor", "filter", "join"]
 
 
+async def test_the_anchor_roots_a_recipe_names_are_the_roots_its_period_is_read_over(
+    scene: Scene,
+) -> None:
+    # dfo-apis' runner stores the roots its period was taken over on the top node,
+    # here the dataset joined beside the rolling step too.
+    _, recipe = await scene.rolling_beside_fixed()
+    anchored = copy.deepcopy(recipe)
+    anchored["tree"]["anchor_roots"] = [
+        {"frame": root["frame"], "root": index} for index, root in enumerate(recipe["roots"])
+    ]
+
+    await scene.replay(anchored)
+
+    read = [root["spec_id"] for root in scene.tools.arguments("resolve_anchor")["roots"]]
+    assert sorted(read) == sorted([SPEC, _BESIDE])
+
+
 async def test_a_root_recorded_with_one_stat_var_that_now_holds_two_is_refused(
     scene: Scene,
 ) -> None:
@@ -746,6 +780,42 @@ async def test_a_summed_root_that_comes_back_as_a_collapse_is_refused_unless_rec
         assert isinstance(outcome, Replayed)
 
 
+@pytest.mark.parametrize(
+    ("recorded", "sorted_when_recorded"),
+    [
+        (OPTIONS | {"groupby": _GROUPBY, WITHOUT_PARTY_TOTALS: True}, True),
+        (OPTIONS | {"groupby": {"by": ["time_period", "reporter"], "op": "sum"}}, False),
+    ],
+    ids=["flow-breakdown-with-the-cut", "breakdown-named-before-by-was-sorted"],
+)
+async def test_a_sum_under_the_pair_naming_its_groupby_replays_when_it_comes_back_as_a_collapse(
+    scene: Scene, recorded: dict[str, Any], sorted_when_recorded: bool
+) -> None:
+    """The record's pair names its cut, and `by` in the order it was named with, so the
+    replay sees the sum and keeps the stored recipe's normal form, whatever versions
+    apis lists."""
+    scene.dataset.sorts_by = sorted_when_recorded
+    _, recipe = await scene.fixed(recorded)
+    scene.dataset.sorts_by = True
+    scene.dataset.move(SECOND_VALUES)
+    scene.apis.versions[SPEC] = [
+        {
+            "content_version": SECOND,
+            "base_content_version": "cv_" + "8" * 32,
+            "rendering": "groupby",
+            "groupby": normal_groupby(recorded["groupby"]),
+        },
+        {"content_version": FIRST, "base_content_version": None, "rendering": "plain"},
+    ]
+
+    replayed = await scene.replay(recipe)
+
+    assert isinstance(replayed, Replayed), replayed
+    (root,) = replayed.recipe["roots"]
+    assert root["options"] == recorded
+    assert replayed.normal_form_changed is False
+
+
 async def test_a_replay_whose_normal_form_moved_is_refused_and_nothing_is_published(
     scene: Scene,
 ) -> None:
@@ -868,8 +938,24 @@ async def test_rolling_op_specs_that_carry_different_populations_are_refused(
         {"schema_version": 2, "tree": {"op_spec": {}}, "roots": []},
         {"schema_version": 1, "tree": {"frame": {}, "root": 0}, "roots": []},
         {"schema_version": 1, "tree": {"op_spec": {}}, "roots": [{"frame": "nope"}]},
+        {
+            "schema_version": 1,
+            "tree": {"op_spec": {}},
+            "roots": [
+                {
+                    "frame": {"spec_id": SPEC, "content_version": FIRST},
+                    "dataset": {"spec_id": SPEC, "content_version": FIRST},
+                    "options": OPTIONS | {"groupby": {"by": [1, "reporter"], "op": "sum"}},
+                }
+            ],
+        },
     ],
-    ids=["another-schema-version", "a-root-frame", "a-root-that-is-no-mint-record"],
+    ids=[
+        "another-schema-version",
+        "a-root-frame",
+        "a-root-that-is-no-mint-record",
+        "a-root-whose-groupby-names-no-axes",
+    ],
 )
 async def test_a_recipe_this_build_cannot_read_is_refused(
     scene: Scene, recipe: dict[str, Any]

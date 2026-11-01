@@ -2,23 +2,22 @@
 dataset version is replayed after the dataset moves.
 
 `get_data`, `filter`, `growth` and `resolve_anchor` run through the mounted
-data-mcp and analysis-mcp apps, as in `test_executor_integration.py`. The replay
-mints its root through data-mcp's `mint_recorded_root`, whose upstream is a
-canned apis mint with the artifact fetch patched at the seam nothing threads
-a transport into, and publishes through presentation-mcp's client over a fake
-publish door, so no socket opens.
+data-mcp and analysis-mcp apps, as in `test_executor_integration.py`, and the
+verbs compute on dfo-apis' analysis runner, replayed from its recorded answers
+(`conftest.runner`), which stores each frame with its recipe. The replay mints
+its root through data-mcp's `mint_recorded_root`, whose upstream is a canned
+apis mint with the artifact fetch patched at the seam nothing threads a
+transport into, and reads recipes and replay keys from a fake apis that defers
+to the runner for the frames it stored, so no socket opens.
 """
 
 from __future__ import annotations
 
-import gzip
-import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 import pytest
 from common.materialisation import FrameRef, get_store
-from common.recipe import build_recipe
 from common.row_budget import RowBudget
 from compiler.surface import McpSurface, ToolCallResult
 from data_mcp import client_holder, frame_materialisation
@@ -40,6 +39,7 @@ from .replay_support import (
     pair,
     yearly,
 )
+from .runner_frames import result_table
 
 _KEPT = ["dcid:FRA", "dcid:GBR"]
 _LATEST = {"anchor": "latest", "offset": 0, "rule": "half1"}
@@ -63,10 +63,10 @@ async def _reset_data_mcp_client() -> AsyncIterator[None]:
 class Services:
     """The mounted services' tools, the canned upstream, and the apis service's publish door."""
 
-    def __init__(self, surface: McpSurface, upstream: Upstream) -> None:
+    def __init__(self, surface: McpSurface, upstream: Upstream, runner: Any) -> None:
         self.surface = surface
         self.upstream = upstream
-        self.apis = FakeApis()
+        self.apis = FakeApis(runner)
         self.assembler = self.apis.assembler()
         self.verbs: list[tuple[str, dict[str, Any]]] = []
 
@@ -87,23 +87,11 @@ class Services:
         )
 
     async def published(self, content: Mapping[str, Any]) -> tuple[FrameRef, dict[str, Any]]:
-        """The frame a verb answered with, published with its recipe."""
+        """The frame a verb answered with, and the recipe the runner stored with it."""
         ref = FrameRef(spec_id=content["spec_id"], content_version=content["content_version"])
-        recipe = await build_recipe(ref, store=get_store())
-        assert await self.assembler.publish_frame(
-            spec_id=ref.spec_id, content_version=ref.content_version, recipe=recipe
-        )
+        recipe = await self.apis.held_recipe(pair(ref))
+        assert recipe is not None
         return ref, recipe
-
-    def steps_of(self, frame: FrameRef) -> list[dict[str, Any]]:
-        """The steps of the last publish of `frame`."""
-        bodies = [json.loads(gzip.decompress(request.content)) for request in self.apis.published()]
-        (body, *_) = [
-            body
-            for body in reversed(bodies)
-            if pair(frame) == (body["spec_id"], body["content_version"])
-        ]
-        return body["steps"]
 
     async def replay(self, recipe: Mapping[str, Any]) -> Replayed | Pending | Refused:
         async with self.apis.client() as client:
@@ -120,8 +108,9 @@ class Services:
     def called(self, name: str) -> list[dict[str, Any]]:
         return [arguments for verb, arguments in self.verbs if verb == name]
 
-    def growth_of(self, frame: FrameRef) -> dict[str, float]:
-        return {row["reporter"]: row["value"] for row in self.apis.frames[pair(frame)]}
+    async def growth_of(self, frame: FrameRef) -> dict[str, float]:
+        rows = (await result_table(frame)).to_pylist()
+        return {row["reporter"]: row["value"] for row in rows}
 
 
 @pytest.fixture
@@ -129,6 +118,7 @@ async def services(
     monkeypatch: pytest.MonkeyPatch,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., Any],
+    runner: Any,
 ) -> AsyncIterator[Services]:
     upstream = Upstream()
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", upstream.fetch)
@@ -145,7 +135,7 @@ async def services(
                 ),
             }
         )
-        made = Services(surface, upstream)
+        made = Services(surface, upstream, runner)
         yield made
         await made.assembler.aclose()
         await surface.aclose()
@@ -181,31 +171,22 @@ async def test_a_filter_then_growth_recipe_is_replayed_after_its_dataset_moves(
 
     assert isinstance(replayed, Replayed), replayed
     assert replayed.frame != original
-    assert replayed.newly_published is True
+    # The runner stored the replayed frame as it computed it, so nothing is published.
+    assert replayed.newly_published is False
+    assert services.apis.published() == []
     assert replayed.recipe["normal_form_hash"] == recipe["normal_form_hash"]
     assert replayed.recipe["replay_key"] != recipe["replay_key"]
+    assert recipe["roots"][0]["dataset"] == {"spec_id": SPEC, "content_version": FIRST}
     assert replayed.recipe["roots"][0]["dataset"] == {"spec_id": SPEC, "content_version": SECOND}
     assert replayed.recipe["anchor"] is None
     # 2019 to 2022 is 100 to 130 in the first version and 150 to 180 in the second.
-    assert services.growth_of(original) == pytest.approx({"dcid:FRA": 0.3, "dcid:GBR": 0.15})
-    assert services.growth_of(replayed.frame) == pytest.approx({"dcid:FRA": 0.2, "dcid:GBR": 0.1})
-    assert [name for name, _ in services.verbs] == ["filter", "growth"]
-    # The replayed frame publishes the steps of its own trace, over the moved root.
-    original_steps, replayed_steps = map(services.steps_of, (original, replayed.frame))
-    assert [step["op"] for step in replayed_steps] == ["retrieve", "filter", "growth"]
-    assert [
-        step["input"]["content_version"] for step in (original_steps[0], replayed_steps[0])
-    ] == [
-        FIRST,
-        SECOND,
-    ]
-    assert replayed_steps[2]["kept"] == original_steps[2]["kept"] == {"entities": 2}
-
-    verbs, posts, mints = (
-        len(services.verbs),
-        len(services.apis.published()),
-        services.upstream.mints,
+    assert await services.growth_of(original) == pytest.approx({"dcid:FRA": 0.3, "dcid:GBR": 0.15})
+    assert await services.growth_of(replayed.frame) == pytest.approx(
+        {"dcid:FRA": 0.2, "dcid:GBR": 0.1}
     )
+    assert [name for name, _ in services.verbs] == ["filter", "growth"]
+
+    mints = services.upstream.mints
     again = await services.replay(recipe)
 
     assert isinstance(again, Replayed)
@@ -214,8 +195,9 @@ async def test_a_filter_then_growth_recipe_is_replayed_after_its_dataset_moves(
         replayed.recipe,
         False,
     )
-    assert len(services.verbs) == verbs
-    assert len(services.apis.published()) == posts
+    # The verbs run again, and the runner answers them from the frames it stored.
+    assert [name for name, _ in services.verbs] == ["filter", "growth"] * 2
+    assert services.apis.published() == []
     # The root is minted again on every replay.
     assert services.upstream.mints == mints + 1
 
@@ -268,7 +250,7 @@ async def test_a_rolling_recipe_keeps_its_latest_year_until_half_the_series_hold
     (stood,) = services.called("growth")
     assert (stood["window_start"], stood["window_end"]) == ("2019", "2022")
     assert stood["anchor_key"].startswith("rak_")
-    assert services.growth_of(held.frame) == pytest.approx(
+    assert await services.growth_of(held.frame) == pytest.approx(
         {france: 0.2, britain: 0.1, america: 30.0 / 450.0}
     )
 
@@ -295,6 +277,6 @@ async def test_a_rolling_recipe_keeps_its_latest_year_until_half_the_series_hold
     assert (rolled["window_start"], rolled["window_end"]) == ("2020", "2023")
     assert rolled["anchor_key"] != stood["anchor_key"]
     # 2020 to 2023 is 160 to 190 for France and 310 to 340 for Britain.
-    assert services.growth_of(moved.frame) == pytest.approx(
+    assert await services.growth_of(moved.frame) == pytest.approx(
         {france: 30.0 / 160.0, britain: 30.0 / 310.0}
     )
