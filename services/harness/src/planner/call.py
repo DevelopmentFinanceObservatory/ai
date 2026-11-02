@@ -53,6 +53,7 @@ from planner.plan import (
     record_reduction_refused_asks,
     record_unsupported,
     save_alignments,
+    save_pin_verdicts,
     save_plan,
     save_plan_rounds,
     save_windowed_pins,
@@ -688,6 +689,7 @@ class CallSession:
         if admission.windowed_pins is not None:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
+        save_pin_verdicts(state, admission.pin_verdicts)
         save_plan(state, admission.plan)
         save_plan_rounds(state, admission.rounds)
         # A new proposal supersedes whatever the translator referred back.

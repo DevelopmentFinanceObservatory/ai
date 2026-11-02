@@ -584,6 +584,53 @@ async def test_a_pin_cannot_resurrect_an_answer_search_reached_by_dropping_a_phr
     assert log.selectable(requirement_keys=keys, pinned={"annual_debt_service": SPEC_KENYA}) == {}
 
 
+@pytest.mark.parametrize(
+    ("measure", "settled"),
+    [("dropped role debt service", False), ("external debt service paid", True)],
+    ids=["search-narrows-again", "search-confirms"],
+)
+async def test_a_pin_from_a_narrowed_part_is_settled_only_by_a_search_confirming_it(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    measure: str,
+    settled: bool,
+) -> None:
+    # The planner was shown the pin from a search part that dropped the roles
+    # asked, so its block, though over the requirement's period, is not read.
+    # The translator's own search settles the pin only when it answers with
+    # it and drops nothing; otherwise the plan goes back to the planner. A
+    # plan card therefore lists rows of such a pin only for a dataset that
+    # search confirmed for the requirement, and a switch of one may be
+    # honoured (`harness.graph.switch._pin_source`).
+    pinned = requirement(measure=measure, source_spec_id=SPEC_KENYA)
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    _shown(
+        context,
+        SPEC_KENYA,
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+        "role_text_not_recognised",
+    )
+
+    result = await _discover(surface, context)
+
+    assert len(search_calls) == 1
+    if settled:
+        assert result["status"] == "definite", result
+        assert [source["spec_id"] for source in result["sources"]] == [SPEC_KENYA]
+    else:
+        assert result["code"] == "ask_not_understood", result
+
+
 async def test_an_advisory_warning_rides_out_with_the_answer(
     surface: McpSurface,
     draft: DraftFactory,
@@ -1536,7 +1583,15 @@ def test_resolved_spec_names_how_a_part_is_not_the_dataset(
     assert raised.value.part == part
 
 
-async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dropped_time_text(
+@pytest.mark.parametrize(
+    ("coverage", "searches"),
+    [
+        (_matching_window(), 0),
+        ({"kind": "exact", "has_data": True, "window": {"start_year": 2010, "end_year": 2020}}, 1),
+    ],
+    ids=["over-its-period", "over-other-years"],
+)
+async def test_a_pin_whose_resolve_dropped_time_text_is_honoured_over_its_own_period(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
     draft: DraftFactory,
@@ -1544,12 +1599,14 @@ async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dro
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    coverage: dict[str, Any],
+    searches: int,
 ) -> None:
-    # The resolve's own part carried a blocking warning: `search` dropped
-    # the time text and answered a narrower ask than the requirement states,
-    # so reusing the block would relabel that narrower answer as DEFINITE
-    # for the whole requirement. Falls through to the existing search path,
-    # which applies `ask_not_understood` itself.
+    # The resolve's own part dropped only the time text
+    # (`time_text_not_parsed`). The planner states the requirement's period,
+    # so a pin retrieved over that period answers the whole ask: a block
+    # covering it is honoured with no search. A block over other years, with
+    # no copy over the period, falls through to a fresh search.
     pinned = requirement(source_spec_id=SPEC_KENYA)
     context = context_holding(
         draft(
@@ -1560,13 +1617,13 @@ async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dro
     _shown(
         context,
         SPEC_KENYA,
-        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=coverage),
         "time_text_not_parsed",
     )
 
     await _discover(surface, context)
 
-    assert len(search_calls) == 1
+    assert len(search_calls) == searches
 
 
 @pytest.mark.parametrize(

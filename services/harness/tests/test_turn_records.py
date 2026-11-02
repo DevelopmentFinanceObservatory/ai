@@ -495,7 +495,7 @@ def test_plan_record_loses_steps_then_measures_then_sources_before_any_decision(
 _KENYA = """\
 Search readings (oldest first):
 1. "aid by sector" no_data
-   warnings: retrieval_score_weak, !time_text_not_parsed, !role_text_not_recognised, skills_not_matchable
+   warnings: retrieval_score_weak, time_text_not_parsed, !role_text_not_recognised, skills_not_matchable
 2. "official development assistance by sector" definite spec_ab788eeca3bf5fc6bddb31cef15936e3
    Gross disbursements (nominal; US dollar) for official development assistance to Kenya, latest values, 1990 to 2024, according to OECD Creditor Reporting System (CRS). In 2024, the latest year with data, there are 1,852 observations across 1,852 series, covering 75 donors and 1 recipient. No year was named.
    wide
@@ -1664,7 +1664,7 @@ def test_readings_fold_the_oldest_first_and_keep_ids_and_blocking_codes() -> Non
     lines = text.splitlines()
     assert lines[1] == (
         '1. "aid by sector" no_data; warnings: retrieval_score_weak, '
-        "!time_text_not_parsed, !role_text_not_recognised, skills_not_matchable"
+        "time_text_not_parsed, !role_text_not_recognised, skills_not_matchable"
     )
     assert lines[2].startswith(
         '2. "official development assistance by sector" definite '
