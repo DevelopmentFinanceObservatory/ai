@@ -66,7 +66,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from harness.turn_budget import bounded
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from pydantic import Field
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
@@ -188,7 +188,7 @@ async def accepted_run(
         answers: list[Mapping[str, Any]] = []
     else:
         ask = (
-            REQUEST_INPUT_FUNCTION_CALL_NAME,
+            PLANNER_ASK,
             {
                 "message": "Do these two datasets add up without counting a flow twice?",
                 "options": [dict(option) for option in COMBINATION_OPTIONS],
@@ -252,7 +252,7 @@ def _faults(
                 f"first proposal answered {first.get('outcome')}/{first.get('code')}: "
                 f"{str(first.get('message'))[:300]}, not {refusal}"
             )
-        if REQUEST_INPUT_FUNCTION_CALL_NAME not in [call["name"] for call in calls]:
+        if PLANNER_ASK not in [call["name"] for call in calls]:
             faults.append("the entry never asked the user")
     plan = run.probe.plan
     if plan is None:

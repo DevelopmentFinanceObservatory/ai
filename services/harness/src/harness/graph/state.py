@@ -545,10 +545,12 @@ def store_search(
 
     Each part's spec blocks, its own and its candidates', go under
     `ORCHESTRATOR_SPECS_KEY`, each candidate's marked as one whose scope
-    choices Search has not stated (`planner.plan.scope_unread`), which leaves
-    an unmarked block of its spec_id standing (`planner.plan.with_blocks`),
-    and the part's warnings under
-    `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch` finds them, and each part
+    choices Search has not stated (`planner.plan.scope_unread`), and the
+    part's warnings under `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch`
+    finds them. The part holds each of its spec_ids with its own record and
+    warnings, and an earlier block of the spec_id that says more about its
+    scope choices keeps its scope content standing
+    (`planner.plan.with_blocks`). Each part
     joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
     `asked` holds each part's asked flow parties by position, and
     `held_open` those it asked to hold open, and `share_sides` the sides

@@ -63,7 +63,10 @@ class PlannerModel(Protocol):
     "code": <refusal code>}}` when the seam ends the entry without one
     (`harness.planner_seam.PlannerSeam._refused`); `final` says no other plan
     for the same ask can succeed, and `code` names the refusal for a caller
-    that tells refusals apart. The node validates a drafted
+    that tells refusals apart. It returns `{"asked": {"call_id", "args"}}`
+    when the planner's run ended on a question for the user, which the node
+    pauses on under `call_id`; the resume calls the seam again with the
+    answer in `ctx.resume_inputs`. The node validates a drafted
     plan itself, so a malformed one fails here rather than at the approve
     gate; a refusal never writes `ctx.state["plan"]`, so whatever plan was
     already there is exactly what this call leaves behind. Where that

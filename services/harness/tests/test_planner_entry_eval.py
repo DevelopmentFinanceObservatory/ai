@@ -33,7 +33,7 @@ from typing import Any, get_args
 import pytest
 from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
 from planner.plan import EvidenceRequirement
 from pydantic import ValidationError
@@ -445,11 +445,11 @@ _PLAIN = "aggregate-total-oda-kenya"
 # Its first proposal is refused with `combination_unasked`.
 _REFUSAL = "sum-net-flows-aid-debt-ghana"
 _COMBINATION_ASK = (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
+    PLANNER_ASK,
     {"message": "Add these?", "options": [dict(option) for option in COMBINATION_OPTIONS]},
 )
 _UNOFFERED_ASK = (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
+    PLANNER_ASK,
     {"message": "Add these?", "options": [{"label": "Yes", "spec_id": "yes"}]},
 )
 _ADDED = [{"result": {"spec_id": COMBINE_OPTION}}]
@@ -463,8 +463,9 @@ _ADDED = [{"result": {"spec_id": COMBINE_OPTION}}]
         # Two proposals in one response: the first records the plan, the second is rejected.
         (_PLAIN, [["plan", "empty plan"]], [], "accepted", "ok"),
         (_REFUSAL, [["plan"], [_COMBINATION_ASK]], [], "asked_user", "refused"),
-        # The tool rejects an ask whose options no refusal offered.
-        (_REFUSAL, [["plan"], [_UNOFFERED_ASK]], [], "no_plan", "refused"),
+        # The tool rejects an ask whose options no refusal offered, and the planner then
+        # ends its turns with no plan.
+        (_REFUSAL, [["plan"], [_UNOFFERED_ASK]], [], "plan_not_ready", "refused"),
         # The user answers the ask, and the planner then ends its turns with no plan.
         (_REFUSAL, [["plan"], [_COMBINATION_ASK]], _ADDED, "plan_not_ready", "refused"),
     ],

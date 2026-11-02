@@ -23,24 +23,35 @@ import pytest
 from compiler.sources import outcome_from_envelope
 from compiler.surface import ToolCallResult
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, store_search, stored_mapping
+from harness import planner_seam
+from harness.graph.state import (
+    ORCHESTRATOR_SPEC_WARNINGS_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+    store_search,
+    stored_mapping,
+)
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.tool_contracts import resolver_digest
 from planner import agent as planner_agent
 from planner.agent import build_planner_tools
 from planner.plan import (
+    ALIGNED_PINS_STATE_KEY,
     ASKS_STATE_KEY,
     SCOPE_UNREAD_BLOCK_KEY,
+    AlignedPin,
     DatasetRequirement,
     DecisionFixes,
     PinSource,
     ResolvedBy,
     alignments,
     found_sources,
+    held_sources,
     load_plan,
     pin_sources,
     plan_revision,
     save_found_sources,
     save_pin_sources,
+    scope_unread,
 )
 from planner.workflow import ToolId
 from translator.discovery import (
@@ -69,7 +80,8 @@ class RecordedSearch:
     """A tool surface answering each `resolve_definition` call with the envelope
     dev Search answered it with in `resolves`, matched on its arguments, and
     answering every call as `answer` says when given: `refused`, as data-mcp
-    refuses one Search rejects, or `candidates`, an answer that is not
+    refuses one Search rejects, `unavailable`, as data-mcp refuses one it
+    could not get to Search, or `candidates`, an answer that is not
     definite. A read of a spec_id in `definite`, posting no scope entries,
     is answered with the definite part it maps to. `calls` holds each call's
     arguments."""
@@ -78,7 +90,7 @@ class RecordedSearch:
         self,
         resolves: list[Mapping[str, Any]],
         *,
-        answer: Literal["refused", "candidates"] | None = None,
+        answer: Literal["refused", "unavailable", "candidates"] | None = None,
         definite: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.resolves = resolves
@@ -99,6 +111,14 @@ class RecordedSearch:
             return ToolCallResult(
                 is_error=True,
                 structured_content={"code": "upstream_error", "upstream_code": "spec_not_found"},
+            )
+        if self.answer == "unavailable":
+            return ToolCallResult(
+                is_error=True,
+                structured_content={
+                    "code": "service_unavailable",
+                    "retry_mode": "retry_after_delay",
+                },
             )
         if self.answer == "candidates":
             envelope = as_candidates()
@@ -353,15 +373,20 @@ def test_a_candidate_found_with_no_scope_choices_is_held_as_unread() -> None:
 
 def test_a_candidate_leaves_a_definite_block_of_its_series_standing() -> None:
     """A later search answering `FOUND` as a candidate keeps the scope choices
-    an earlier definite answer stated for it, and holds the candidate it
-    found nothing for marked unread."""
+    an earlier definite answer stated for it, under the later answer's own
+    record, and holds the candidate it found nothing for marked unread."""
     state = _FakeToolContext().state
     save_found_sources(state, found_blocks(outcome_from_envelope(RECORDED["translator"])))
 
     save_found_sources(state, found_blocks(outcome_from_envelope(as_candidates())))
 
     held = found_sources(state)
-    assert held[FOUND] == found_blocks(outcome_from_envelope(RECORDED["translator"]))[FOUND]
+    definite = _definite_found()
+    candidate = found_blocks(outcome_from_envelope(as_candidates()))[FOUND]
+    assert held[FOUND] == {
+        **{key: value for key, value in definite.items() if key != "_bound_refs"},
+        "_bound_refs": candidate["_bound_refs"],
+    }
     assert held[_TOTAL][SCOPE_UNREAD_BLOCK_KEY] is True
 
 
@@ -386,9 +411,10 @@ def test_reading_a_candidates_scope_resolves_its_identity_once() -> None:
     a definite part: `FOUND` is counted on the OECD headline basis, with a
     net choice the share can compile it on."""
     search = RecordedSearch(RECORDED["resolves"])
-    candidate = found_blocks(outcome_from_envelope(as_candidates()))[FOUND]
+    state = _FakeToolContext().state
+    save_found_sources(state, found_blocks(outcome_from_envelope(as_candidates())))
 
-    read = asyncio.run(read_found_scope(search, FOUND, candidate))
+    read = asyncio.run(read_found_scope(search, FOUND, state=state))
 
     (call,) = search.calls
     assert call["scope_entries"] == []
@@ -424,23 +450,32 @@ def test_a_re_pin_to_a_candidate_lands_on_net_once_its_scope_is_read() -> None:
     assert {"scope_measure_basis_of_uk_total_oda", _PRICES_SLOT} <= set(requirement.decision_ids)
 
 
-@pytest.mark.parametrize("answer", ["refused", "candidates"])
+@pytest.mark.parametrize(
+    ("answer", "outcome", "code"),
+    [
+        ("refused", "unsupported", "operation_unsupported"),
+        ("candidates", "unsupported", "operation_unsupported"),
+        ("unavailable", "refused", "surface_unavailable"),
+    ],
+)
 def test_a_re_pin_to_a_candidate_whose_basis_cannot_be_read_is_refused(
-    answer: Literal["refused", "candidates"],
+    answer: Literal["refused", "unavailable", "candidates"], outcome: str, code: str
 ) -> None:
     """Search offered `FOUND` as a candidate, whose block states no scope
-    choices, and will not answer its identity as one definite dataset.
-    Admitted as it stands, the share would divide net DAC2a disbursements by
-    `FOUND`'s OECD headline total. The re-pin is refused, and no plan is
-    recorded in its place."""
+    choices, and will not answer its identity as one definite dataset, or
+    could not be reached. Admitted as it stands, the share would divide net
+    DAC2a disbursements by `FOUND`'s OECD headline total. The re-pin is
+    refused for good when Search answered, and as retryable when it was not
+    reached, and no plan is recorded in its place."""
     search = RecordedSearch(RECORDED["resolves"], answer=answer)
     tools, ctx = after_hand_back(envelope=as_candidates(), search=search)
     (call,) = [call for call in RECORDED["calls"] if call["at"] == "11:22:56.327"]
 
     answer_ = _propose(tools, ctx, call["arguments"])
 
-    assert (answer_["outcome"], answer_["code"]) == ("unsupported", "operation_unsupported")
-    assert answer_["detail"]["basis"]["requirement_id"] == "uk_total_oda"
+    assert (answer_["outcome"], answer_["code"]) == (outcome, code), answer_
+    read = answer_["detail"]["basis" if code == "operation_unsupported" else "read"]
+    assert read["requirement_id"] == "uk_total_oda"
     assert [one["spec_id"] for one in search.calls] == [FOUND]
     plan = load_plan(ctx.state)
     assert plan is not None
@@ -451,17 +486,18 @@ def test_a_read_that_leaves_a_candidate_unread_is_made_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A read whose answer still states no scope choices is not made again in
-    the call: the proposal answers the refusal asking for it."""
+    the call: Search answered it, so the re-pin is refused for good, naming
+    the input it cannot count as the share's other input is."""
 
     reads: list[str] = []
 
-    async def unread(
-        surface: Any, spec_id: str, block: Mapping[str, Any]
-    ) -> dict[str, dict[str, Any]]:
+    async def unread(surface: Any, spec_id: str, *, state: Any) -> dict[str, Mapping[str, Any]]:
         del surface
         reads.append(spec_id)
         assert len(reads) == 1, reads
-        return {spec_id: dict(block)}
+        block = held_sources(state)[spec_id].spec_block(spec_id)
+        assert block is not None
+        return {spec_id: block}
 
     monkeypatch.setattr(planner_agent, "read_found_scope", unread)
     tools, ctx = after_hand_back(envelope=as_candidates())
@@ -469,8 +505,8 @@ def test_a_read_that_leaves_a_candidate_unread_is_made_once(
 
     answer = _propose(tools, ctx, call["arguments"])
 
-    assert answer["code"] == "scope_unread", answer
-    assert [item["spec_id"] for item in answer["detail"]["read"]] == [FOUND]
+    assert (answer["outcome"], answer["code"]) == ("unsupported", "operation_unsupported"), answer
+    assert answer["detail"]["basis"]["spec_id"] == FOUND
     assert reads == [FOUND]
 
 
@@ -509,6 +545,117 @@ def test_a_share_whose_every_input_is_an_unread_candidate_has_each_read_first() 
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.requirement("uk_total_oda").source_spec_id == aligned.spec_id
+
+
+_IDRC = "spec_7bd087a1236928118ebac9ded4141694"
+
+
+def _re_pin(**extra: Any) -> dict[str, Any]:
+    """The re-pin of `uk_total_oda` to `FOUND` made at 11:22:56, with `extra`
+    requirements appended."""
+    (call,) = [call for call in RECORDED["calls"] if call["at"] == "11:22:56.327"]
+    arguments = copy.deepcopy(call["arguments"])
+    arguments["evidence_requirements"].extend(extra.values())
+    return arguments
+
+
+def test_a_comparison_whose_other_input_carries_no_choice_reads_no_candidate() -> None:
+    """The share becomes `FOUND`, a candidate stating no scope choices, minus
+    the UK's in-donor refugee costs, here a series stating none either.
+    Alignment needs two inputs carrying a choice, so whatever `FOUND`'s read
+    answers, nothing moves: the plan is recorded with no Search call."""
+    search = RecordedSearch(RECORDED["resolves"])
+    tools, ctx = after_hand_back(envelope=as_candidates(), search=search)
+    shown = pin_sources(ctx.state)
+    block = copy.deepcopy(dict(shown[_IDRC].block or {}))
+    block["resolved"]["scope_choices"]["choices"] = []
+    save_pin_sources(ctx.state, {**shown, _IDRC: shown[_IDRC].model_copy(update={"block": block})})
+    comparison = {
+        "kind": "comparison",
+        "id": "share_africa",
+        "decision_ids": ["share_denominator"],
+        "minuend": {"input_id": "uk_total_oda", "entity": "United Kingdom"},
+        "subtrahend": {"input_id": "uk_idrc", "entity": "United Kingdom"},
+    }
+
+    answer = _propose(tools, ctx, _re_pin(comparison=comparison))
+
+    assert answer["outcome"] == "ok", answer
+    assert search.calls == []
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("uk_total_oda").source_spec_id == FOUND
+
+
+def test_two_inputs_pinning_one_candidate_have_it_read_once() -> None:
+    """`FOUND` is pinned by the share's denominator and by a second total over
+    later years, compared with the UK's in-donor refugee costs. Both inputs
+    want `FOUND`'s scope read, and Search resolves its identity once."""
+    search = RecordedSearch(RECORDED["resolves"])
+    tools, ctx = after_hand_back(envelope=as_candidates(), search=search)
+    (total,) = _re_pin()["evidence_requirements"]
+    recent = {**total, "id": "uk_recent_oda", "period": {"start": 2009, "end": 2024}}
+    gap = {
+        "kind": "comparison",
+        "id": "uk_gap",
+        "decision_ids": [],
+        "minuend": {"input_id": "uk_recent_oda", "entity": "United Kingdom"},
+        "subtrahend": {"input_id": "uk_idrc", "entity": "United Kingdom"},
+    }
+
+    _propose(tools, ctx, _re_pin(recent=recent, gap=gap))
+
+    assert [one["spec_id"] for one in search.calls if not one["scope_entries"]] == [FOUND]
+
+
+def test_a_candidate_with_no_search_to_read_it_asks_for_another_pin() -> None:
+    """With no tool surface reaching Search, `FOUND`'s scope cannot be read,
+    so proposing the same plan again would be refused again. The refusal
+    asks for the share's input pinned otherwise."""
+    _, ctx = after_hand_back(envelope=as_candidates())
+    (propose,) = [tool for tool in build_planner_tools() if tool.name == "propose_plan"]
+
+    answer = propose.func(**_re_pin(), tool_context=ctx)
+
+    assert (answer["outcome"], answer["code"]) == ("refused", "scope_unread"), answer
+    assert answer["action"]["needs"] == ["evidence_requirements"]
+    assert [item["spec_id"] for item in answer["detail"]["read"]] == [FOUND]
+
+
+@pytest.mark.parametrize("restated", [True, False], ids=["restated", "cited"])
+def test_a_citation_of_the_users_prices_on_a_requirement_not_reading_the_part_is_dropped(
+    restated: bool,
+) -> None:
+    """A first draft whose only requirement, the UK's in-donor refugee costs,
+    cites the decision of the prices the user chose for the ODA part, which
+    it does not read, so code writes no such decision. The citation names
+    nothing, and code owns it as it owns the decision, so the draft is
+    recorded without it, whether the draft restates the decision or not."""
+    tools = {
+        tool.name: tool
+        for tool in build_planner_tools(surface=RecordedSearch(RECORDED["resolves"]))
+    }
+    ctx = _FakeToolContext()
+    _turn_so_far(ctx)
+    ctx.state[ASKS_STATE_KEY] = [RECORDED["asks"][1]]
+    (_, *later) = RECORDED["calls"]
+    arguments = copy.deepcopy(later[0]["arguments"])
+    (idrc,) = [r for r in arguments["evidence_requirements"] if r["id"] == "uk_idrc"]
+    idrc["decision_ids"] = [_PRICES_SLOT]
+    (restatement,) = [d for d in later[-1]["arguments"]["decisions"] if d["slot"] == _PRICES_SLOT]
+    arguments |= {
+        "evidence_requirements": [idrc],
+        "answered": [{"ask": 0, "outputs": ["uk_idrc"]}],
+        "decisions": [restatement] if restated else [],
+    }
+
+    answer = _propose(tools, ctx, arguments)
+
+    assert answer["outcome"] == "ok", answer
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert _PRICES_SLOT not in plan.requirement("uk_idrc").decision_ids
+    assert _PRICES_SLOT not in {decision.slot for decision in plan.decisions}
 
 
 def _shown_as_candidate(ctx: _FakeToolContext) -> None:
@@ -571,3 +718,139 @@ def test_a_candidate_read_as_stating_no_choices_is_admitted_on_that_answer() -> 
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.requirement("uk_total_oda").source_spec_id == FOUND
+
+
+def _definite_found(**extra: Any) -> dict[str, Any]:
+    """Discovery's block of `FOUND` from translation's recorded `definite`
+    answer, which states `FOUND`'s scope choices, with `extra` keys."""
+    return {**found_blocks(outcome_from_envelope(RECORDED["translator"]))[FOUND], **extra}
+
+
+@pytest.mark.parametrize(("rival", "marks"), [("found", ["measure_basis"]), ("compiled", None)])
+def test_a_shown_candidate_reads_the_scope_of_a_block_that_says_more_and_keeps_its_showing(
+    rival: Literal["found", "compiled"], marks: list[str] | None
+) -> None:
+    """The planner was shown `FOUND` as a candidate, whose block states no
+    scope choices, and a found or compiled block of `FOUND` states them. The
+    shown entry reads those choices, and keeps what its own search recorded:
+    its warnings and the entity rows it bound. A found block's planner marks
+    move with its choices; a compile's name the axes alignment moved for
+    another pin, and stay off the shown entry."""
+    shown = scope_unread({**_served_as_candidate(_definite_found()), "_bound_refs": []})
+    better = _definite_found(**{PLANNER_AXES_BLOCK_KEY: ["measure_basis"]})
+    state = _FakeToolContext().state
+    save_pin_sources(state, {FOUND: PinSource(block=shown, warnings=("default_not_declared",))})
+    if rival == "found":
+        save_found_sources(state, {FOUND: better})
+    else:
+        compile_ = AlignedPin(
+            origin=_TOTAL,
+            option_ids=("measure_basis:net",),
+            spec_id=FOUND,
+            digest={"spec_block": better},
+        )
+        state[ALIGNED_PINS_STATE_KEY] = [compile_.model_dump(mode="json")]
+
+    held = held_sources(state)[FOUND]
+
+    assert held.block is not None
+    assert held.block["resolved"] == better["resolved"]
+    assert SCOPE_UNREAD_BLOCK_KEY not in held.block
+    assert (held.warnings, held.block["_bound_refs"]) == (("default_not_declared",), [])
+    assert held.block.get(PLANNER_AXES_BLOCK_KEY) == marks
+
+
+def test_a_plan_sentence_reads_the_block_admission_reads() -> None:
+    """This turn's search stored `FOUND` as a candidate, marked unread, and
+    the planner was shown it; discovery holds a definite block of `FOUND`.
+    The block a sentence about the plan names `FOUND`'s pin from is the one
+    admission reads, stating `FOUND`'s scope choices."""
+    ctx = _FakeToolContext()
+    store_search(ctx.state, resolver_digest(as_candidates()))
+    block = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)[FOUND]
+    save_pin_sources(ctx.state, {FOUND: PinSource(block=dict(block))})
+    save_found_sources(ctx.state, {FOUND: _definite_found()})
+
+    blocks = planner_seam._spec_blocks(ctx.state)
+
+    assert blocks[FOUND]["resolved"] == _definite_found()["resolved"]
+    assert SCOPE_UNREAD_BLOCK_KEY not in blocks[FOUND]
+
+
+def test_a_later_search_offering_a_series_as_a_candidate_holds_it_with_its_own_record() -> None:
+    """One search answered `FOUND` definite, stating its scope choices and
+    binding the United Kingdom as donor, and a later one offered it as a
+    candidate, with no choices and no rows bound. `FOUND` stays held with
+    the choices the first stated, and with the later search's record and
+    warnings together, the search the planner reads it by."""
+    state = _FakeToolContext().state
+    store_search(state, resolver_digest(RECORDED["translator"]))
+    candidates = as_candidates()
+    warning = {"code": "default_not_declared", "message": "fell back to a default"}
+    candidates["parts"][0]["warnings"] = [warning]
+    store_search(state, resolver_digest(candidates))
+
+    block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)[FOUND]
+
+    assert block["resolved"] == _definite_found()["resolved"]
+    assert SCOPE_UNREAD_BLOCK_KEY not in block
+    assert "_bound_refs" not in block
+    assert [w["code"] for w in state[ORCHESTRATOR_SPEC_WARNINGS_KEY][FOUND]] == [
+        "default_not_declared"
+    ]
+
+
+def test_a_scope_read_marks_no_axis_as_the_planners() -> None:
+    """A scope read resolves the source's own definition, which no words of
+    the planner's chose. A choice Search's answer states as explicit is not
+    read as the planner's, and the block on record keeps its own record."""
+    (part,) = copy.deepcopy(RECORDED["translator"]["parts"])
+    for choice in part["spec"]["resolved"]["scope_choices"]["choices"]:
+        choice["provenance"] = "explicit"
+    search = RecordedSearch(RECORDED["resolves"], definite={FOUND: part})
+    state = _FakeToolContext().state
+    candidate = found_blocks(outcome_from_envelope(as_candidates()))[FOUND]
+    save_found_sources(state, {FOUND: {**candidate, "_bound_refs": []}})
+
+    read = asyncio.run(read_found_scope(search, FOUND, state=state))[FOUND]
+
+    assert read["resolved"] == part["spec"]["resolved"]
+    assert PLANNER_AXES_BLOCK_KEY not in read
+    assert read["_bound_refs"] == []
+
+
+@pytest.mark.parametrize("held_definition", ["none", "another series'"])
+def test_a_scope_read_resolves_the_definition_discovery_recorded(held_definition: str) -> None:
+    """The block held for `FOUND` carries no definition, or one that does not
+    hash to `FOUND`. The read resolves the definition discovery recorded for
+    `FOUND`, the same call a block carrying its own makes."""
+    search = RecordedSearch(RECORDED["resolves"])
+    state = _FakeToolContext().state
+    _discovered_as_candidates(state)
+    candidate = dict(found_blocks(outcome_from_envelope(as_candidates()))[FOUND])
+    if held_definition == "none":
+        del candidate["definition"]
+    else:
+        candidate["definition"] = _searched(_TOTAL)["spec"]["definition"]
+    save_found_sources(state, {FOUND: candidate})
+
+    read = asyncio.run(read_found_scope(search, FOUND, state=state))
+
+    (call,) = search.calls
+    assert call["identity"] == _definite_found()["definition"]["identity"]
+    assert "scope_choices" in read[FOUND]["resolved"]
+
+
+def _discovered_as_candidates(state: Any) -> None:
+    """Record translation's search for `uk_total_oda` as having answered `as_candidates()`."""
+    outcome = outcome_from_envelope(as_candidates())
+    record = DiscoveryRecord(
+        revision="r1",
+        requirement_id="uk_total_oda",
+        requirement_key="k1",
+        tool="search",
+        variable_sent="ODA",
+        status=outcome.status,
+        spec_ids=tuple(source.spec_id for source in outcome.sources),
+    )
+    save_log(state, DiscoveryLog().with_record(record, outcome.sources))

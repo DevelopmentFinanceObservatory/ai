@@ -37,7 +37,7 @@ from typing import Any, Literal, NamedTuple
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
 from compiler.evidence import requested_unit as requested_unit_of
 from compiler.sources import readable_source
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     BaseYearUnstatedError,
@@ -490,11 +490,11 @@ def _refusal(
         return problem(
             code,
             f"{lead} No series shown serves it in {choice.label}. Ask the user through "
-            f"`{REQUEST_INPUT_FUNCTION_CALL_NAME}`, with the action's `options`, which prices "
+            f"`{PLANNER_ASK}`, with the action's `options`, which prices "
             "to go on in; once they pick, a patch states those.",
             outcome=outcome,
             action=Action(
-                call=REQUEST_INPUT_FUNCTION_CALL_NAME,
+                call=PLANNER_ASK,
                 arguments={"options": [dict(option) for option in PRICES_OPTIONS]},
                 needs=("message",),
             ),

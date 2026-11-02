@@ -708,12 +708,13 @@ async def test_an_answer_that_is_not_definite_arrives_with_the_action_to_take(
         "discover_source answered unsupported for 'annual_debt_service'"
     )
     # Each source a referral may offer by spec_id has its block held: a
-    # `definite` answer's source for a `source_mismatch` referral, and a
-    # `candidates` answer's. A nearest series is offered with no spec_id to pin.
+    # `candidates` answer's. A `definite` answer's source is offered only by
+    # a `source_mismatch` referral, which a requirement stating no source
+    # never draws, and a nearest series is offered with no spec_id to pin.
     assert [
         list(found_sources(context.state))
         for context in (definite_context, candidates_context, no_data_context, unsupported_context)
-    ] == [[SPEC_KENYA], [SPEC_OTHER, SPEC_THIRD], [], []]
+    ] == [[], [SPEC_OTHER, SPEC_THIRD], [], []]
 
 
 async def test_a_re_pin_to_the_source_a_source_mismatch_referral_offers_reads_its_block(
@@ -736,17 +737,65 @@ async def test_a_re_pin_to_the_source_a_source_mismatch_referral_offers_reads_it
     offered = load_log(context.state).pinnable_for(_requirement_key(context), stated.id)
     assert [source.spec_id for source in offered] == [SPEC_KENYA]
     repinned = stated.model_copy(update={"source": None, "source_spec_id": SPEC_KENYA})
+    plan = draft(evidence_requirements=[repinned, derived_requirement()])
     keep_found_sources(
         context.state,
-        draft(evidence_requirements=[repinned, derived_requirement()]),
+        plan,
         alignments=(),
         windowed_pins=(),
+        offered=load_log(context.state).offered_for(plan),
     )
     held = held_sources(context.state)
     for source in offered:
         block = held[source.spec_id].block
         assert block is not None
         assert source_from_spec_block(block) == source.model_copy(update={"searched_as": None})
+
+
+@pytest.mark.parametrize("referral", ["stale pin", "source mismatch"])
+async def test_a_plan_a_referral_can_still_offer_a_found_source_from_keeps_its_block(
+    referral: str,
+    surface: McpSurface,
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # Discovery found SPEC_KENYA, in place of a stale pin or for a
+    # requirement stating a source SPEC_KENYA does not name, and the next plan
+    # leaves that requirement as it was. Its translation offers SPEC_KENYA
+    # again from the log with no search made for it: beside another
+    # referral when the stale pin's own search fails, or in a
+    # `source_mismatch` referral once the compile reads the source the log
+    # settled. Recording that plan keeps the block a re-pin to it reads.
+    if referral == "stale pin":
+        kept = requirement(source_spec_id=SPEC_OTHER)
+        plan = draft(
+            decisions=[pinning_decision(SPEC_OTHER)],
+            evidence_requirements=[kept, derived_requirement()],
+        )
+    else:
+        kept = requirement(source="World Development Indicators")
+        plan = draft(evidence_requirements=[kept, derived_requirement()])
+    context = context_holding(plan)
+    await _discover(surface, context)
+    log = load_log(context.state)
+    key = _requirement_key(context)
+    offered = (
+        log.stale_pin_sources(key, kept.id, SPEC_OTHER)
+        if referral == "stale pin"
+        else log.pinnable_for(key, kept.id)
+    )
+    assert [source.spec_id for source in offered or ()] == [SPEC_KENYA]
+
+    keep_found_sources(
+        context.state, plan, alignments=(), windowed_pins=(), offered=log.offered_for(plan)
+    )
+
+    block = held_sources(context.state)[SPEC_KENYA].block
+    assert block is not None
+    assert source_from_spec_block(block).spec_id == SPEC_KENYA
 
 
 async def test_no_data_and_unsupported_carry_the_servers_detail(

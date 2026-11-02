@@ -230,7 +230,7 @@ metric.
 
 A case that asks the planner to plan a real question ends up grading its choice
 of measure, which the planner has no way to earn. Its tools as
-`harness-planner-v2` builds it are `adk_request_input`,
+`harness-planner-v2` builds it are `ask_user_question`,
 `propose_plan` and `reject_plan`, and a compiled `propose_plan` only declares
 the plan ready for whatever approves and runs it elsewhere. Nothing in `planner` fetches or computes a figure.
 `harness-pair-v1` attaches the translator to `propose_plan`, and still none

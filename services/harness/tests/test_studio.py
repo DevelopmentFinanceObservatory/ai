@@ -24,7 +24,7 @@ import copy
 import hashlib
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,10 +60,9 @@ from data_mcp.server import mcp as data_mcp
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from google.adk import Context
-from google.adk.events import Event, EventActions, RequestInput
+from google.adk.events import Event, EventActions
 from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import BaseSessionService, DatabaseSessionService, InMemorySessionService
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
 from harness.conversation import current_conversation_id
 from harness.early_mint import EarlyMints
@@ -103,6 +102,7 @@ from harness.studio_state import (
 from harness.studio_translate import _RecordingExecutor, _stream_fatal
 from harness.tool_contracts import HarnessCode, ResolverError
 from harness.turn_budget import bounded
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
     MAX_SEED_SPEC_BYTES,
@@ -166,6 +166,8 @@ from .orchestrator_fakes import (
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
 from .test_graph import _hashed_scope, _switched_answer
+from .test_planner_seam import ScriptedPlannerLlm
+from .test_planner_seam import _seam as _planner_seam
 
 SPEC_A = "spec_" + "a" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -2235,6 +2237,47 @@ async def test_an_ask_elicits_and_the_answer_resumes_on_a_new_stream() -> None:
     assert "The user chose: reading B" in request_text(_model(app).requests[-1])
     (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
     assert record["user"] == "ambiguous q\n(then: reading B)"
+
+
+async def test_the_planner_s_ask_elicits_and_its_answer_resumes_the_planner() -> None:
+    """The planner's own ask, through a real `PlannerSeam`, pauses the turn
+    on its question. Studio's answer runs the planner again with the pick in
+    its brief, the resumed stream asks nothing again, and the turn ends."""
+    seam = _planner_seam()
+    asked = {
+        "message": "Which source did you mean?",
+        "candidates": [
+            {"spec_id": "spec_a", "label": "reading A"},
+            {"spec_id": "spec_b", "label": "reading B"},
+        ],
+    }
+    llm = ScriptedPlannerLlm(script=[[(PLANNER_ASK, asked)], "done"])
+    seam._agent.model = llm
+    app = _app(*_plan(), _text("No plan came of it."), planner=seam)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+
+        assert _events(first)[-1] == "elicitation.request"
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        assert question["question"] == asked["message"]
+        assert [option["id"] for option in question["options"]] == ["spec_a", "spec_b"]
+
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(elicitation["interrupt_id"], "answer", answers={"q1": _pick("spec_b")}),
+        )
+
+    assert "elicitation.request" not in _events(second)
+    assert _events(second)[-1] == "done"
+    assert len(llm.captured_requests) == 2
+    brief = "".join(
+        part.text or ""
+        for content in llm.captured_requests[-1].contents
+        for part in content.parts or []
+    )
+    assert "They picked 'reading B', id `spec_b`." in brief
 
 
 async def test_a_search_after_the_answer_reads_the_message_the_answer_refined() -> None:
@@ -4929,16 +4972,6 @@ async def test_a_planner_decision_switch_is_checked_as_a_scope_switch_and_resume
     assert conversation.turn_user_message.endswith("(then: use the top 10 donors)")
 
 
-def _ask_while_replanning(ctx: Context) -> Iterator[Any]:
-    """A node asking the user one question, the way the planner's ask pauses a draft."""
-    if (ctx.resume_inputs or {}).get("replan_ask") is None:
-        yield create_request_input_event(
-            RequestInput(interrupt_id="replan_ask", message="Which years?")
-        )
-        return
-    yield Event(output="answered")
-
-
 class _AskingPickPlanner(ScriptedPlannerModel):
     """`ScriptedPlannerModel` whose measure decision fixes the measure, so the
     card offers it to switch, and whose replan for a pick asks the user a
@@ -4954,7 +4987,8 @@ class _AskingPickPlanner(ScriptedPlannerModel):
             (measure,) = drafted["plan"]["decisions"]
             measure["fixes"] = {"measure": measure["chosen"]}
             return drafted
-        await ctx.run_node(_ask_while_replanning)
+        if not ctx.resume_inputs:
+            return {"asked": {"call_id": "replan_ask", "args": {"message": "Which years?"}}}
         self.replanning.set()
         await asyncio.sleep(5)
         raise AssertionError("a stopped replan is cancelled")

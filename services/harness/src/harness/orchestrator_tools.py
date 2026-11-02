@@ -99,6 +99,7 @@ from planner.plan import (
     earlier_block,
     recorded_identity,
     scope_unread,
+    with_blocks,
 )
 from planner.skills import GET_SKILL, GET_SKILL_FILE
 from planner.workflow import ToolId
@@ -2052,10 +2053,9 @@ def build_orchestrator_tools(
                 logger.warning("fetch: no block for %s on record: %s", spec_id, exc)
                 return _unresolved_refusal(spec_id, exc)
             if block is not None:
-                tool_context.state[ORCHESTRATOR_SPECS_KEY] = {
-                    **stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY),
-                    spec_id: block,
-                }
+                tool_context.state[ORCHESTRATOR_SPECS_KEY] = with_blocks(
+                    stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY), {spec_id: block}
+                )
         source = None
         if block:
             try:

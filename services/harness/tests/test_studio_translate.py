@@ -12,10 +12,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, cast
 
 import aiohttp
+import anyio
 import asyncpg
 import httpx2
 import pytest
@@ -26,13 +27,18 @@ from google.adk.events import Event, EventActions
 from google.adk.events.event import NodeInfo
 from google.adk.models.google_llm import _ResourceExhaustedError
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, Session
 from google.adk.workflow import START, Workflow, node
+from google.adk.workflow.utils._workflow_hitl_utils import (
+    create_request_input_response,
+)
+from google.auth import exceptions as google_auth_errors
 from google.genai import errors as genai_errors
 from google.genai import types
 from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.decision_pick import DecisionPick, decision_pick
+from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
@@ -59,7 +65,7 @@ from harness.studio_translate import (
     plan_approved,
 )
 from harness.tool_contracts import HarnessCode, ResolverError
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from harness.wire import (
     CompositionActor,
     MessageComplete,
@@ -74,7 +80,7 @@ from harness.wire import (
 )
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
-from planner.agent import COMBINATION_OPTIONS
+from planner.agent import COMBINATION_OPTIONS, _session_steps
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
@@ -193,9 +199,9 @@ def test_two_codes_of_different_classes_read_differently_on_a_failed_step() -> N
 
 
 def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() -> None:
-    # `planner.agent`'s `adk_request_input` tool call has no `payload`
-    # wrapper -- `candidates`, `recommended_spec_id` and `rationale` are its
-    # own call args directly (`_interrupt_frames`'s own comment).
+    # The planner's ask carries its call's own arguments as its
+    # `RequestInput`'s `payload`: `candidates`, `recommended_spec_id` and
+    # `rationale` are the question directly.
     args = {
         "message": "Which source did you mean?",
         "candidates": [
@@ -206,7 +212,7 @@ def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() 
         "rationale": "broader coverage of the requested years",
     }
 
-    (frame,) = _translator()._interrupt_frames("call_1", args)
+    (frame,) = _translator()._interrupt_frames("call_1", {"payload": args})
 
     assert frame.event == "elicitation.request"
     assert frame.skippable is True
@@ -228,7 +234,7 @@ def test_a_combination_ask_offers_its_options_and_takes_no_free_text() -> None:
         "options": [dict(option) for option in COMBINATION_OPTIONS],
     }
 
-    (frame,) = _translator()._interrupt_frames("call_1", args)
+    (frame,) = _translator()._interrupt_frames("call_1", {"payload": args})
 
     (question,) = frame.questions
     assert [(o.id, o.label) for o in question.options] == [
@@ -1837,54 +1843,37 @@ def test_the_seams_late_progress_reports_are_not_shown() -> None:
 def test_a_pause_completes_the_running_line_before_its_card() -> None:
     translator = _translator()
     translator.translate(_planner_call("propose_plan", question="q"))
-    ask = Event(
-        author="dfo_planner",
-        content=types.Content(
-            role="model",
-            parts=[
-                types.Part(
-                    function_call=types.FunctionCall(
-                        id="ask-1",
-                        name=REQUEST_INPUT_FUNCTION_CALL_NAME,
-                        args={"message": "Which source?", "candidates": []},
-                    )
-                )
-            ],
-        ),
-    )
+    ask = _planner_ask({"message": "Which source?", "candidates": []})
 
-    assert translator.translate(ask) == []
-    frames = translator.finish()
+    frames = translator.translate(ask)
 
     assert [f.event for f in frames] == ["activity.step", "elicitation.request"]
     assert frames[0].status is StepStatus.COMPLETE
+    assert translator.finish() == []
 
 
-def _planner_ask(message: str, *, partial: bool | None = None) -> Event:
-    """The planner's `adk_request_input` call asking `message`, as a streamed
-    chunk when `partial`."""
-    call = types.FunctionCall(
-        id="ask-1", name=REQUEST_INPUT_FUNCTION_CALL_NAME, args={"message": message}
-    )
-    return Event(
-        author="dfo_planner",
-        partial=partial,
-        content=types.Content(role="model", parts=[types.Part(function_call=call)]),
-    )
+def _planner_ask(args: dict[str, Any], *, partial: bool | None = None) -> Event:
+    """The pause the graph's planner node makes on the planner's ask with the
+    call arguments `args` (`harness.graph.planning.planner_ask_interrupt`), as
+    a streamed chunk when `partial`."""
+    event = planner_ask_interrupt({"call_id": "ask-1", "args": args})
+    return event.model_copy(update={"author": "planner", "partial": partial})
 
 
 def test_a_streamed_ask_pauses_only_on_its_final_event() -> None:
-    """A streamed model call reaches the translator as partial chunks and then
-    one aggregated non-partial event, the only one the runner saves. Only that
+    """A streamed event reaches the translator as partial chunks and then one
+    aggregated non-partial event, the only one the runner saves. Only that
     event may announce the call `/interrupt` will answer."""
     chunked, whole = _translator(), _translator()
 
-    chunked.translate(_planner_ask("Which donors?", partial=True))
-    whole.translate(_planner_ask("Which donors?", partial=True))
-    whole.translate(_planner_ask("Which donors?", partial=False))
+    chunked_frames = chunked.translate(_planner_ask({"message": "Which donors?"}, partial=True))
+    whole_frames = [
+        *whole.translate(_planner_ask({"message": "Which donors?"}, partial=True)),
+        *whole.translate(_planner_ask({"message": "Which donors?"}, partial=False)),
+    ]
 
-    assert [f.event for f in chunked.finish() if f.event == "elicitation.request"] == []
-    assert [f.event for f in whole.finish() if f.event == "elicitation.request"] == [
+    assert [f.event for f in chunked_frames if f.event == "elicitation.request"] == []
+    assert [f.event for f in whole_frames if f.event == "elicitation.request"] == [
         "elicitation.request"
     ]
 
@@ -1893,8 +1882,7 @@ def test_a_question_after_a_draft_that_named_no_drop_is_asked_as_is() -> None:
     translator = _translator()
     translator.translate(_node_event("planner", planner_started={"revising": False}))
 
-    translator.translate(_planner_ask("Which donors?"))
-    (*_, asked) = translator.finish()
+    (*_, asked) = translator.translate(_planner_ask({"message": "Which donors?"}))
 
     assert asked.questions[0].question == "Which donors?"
 
@@ -2011,34 +1999,66 @@ async def _asked_through_the_seam(
     *,
     beside: Sequence[tuple[str, dict[str, Any]]] = (),
     then: Sequence[list[tuple[str, dict[str, Any]]]] = (),
+    returned: list[Any] | None = None,
+    answer: dict[str, Any] | None = None,
+    sessions: list[Session] | None = None,
 ) -> tuple[_Translator, list[Any], ScriptedPlannerLlm]:
     """`ask`, with the calls `beside` it, as the planner's first model
     response in a real `PlannerSeam` run, and each of `then` as a later
-    response, every event through the translator, then the segment's end."""
+    response, every event through the translator, then the segment's end.
+    The node pauses on an accepted ask as the graph's planner node does
+    (`harness.graph.planning.planner_ask_interrupt`). `returned`, given, gets
+    the plan or refusal the planner node outputs, and stays empty while the
+    run waits on an ask. With `answer`, a segment paused on the planner's
+    question resumes with it the way Studio's `/interrupt` route resumes one,
+    through a translator of its own over the same conversation, and the
+    frames of both segments come back with the second translator.
+    `sessions`, given, gets the session the run left."""
     seam = _seam()
-    calls = [*([("adk_request_input", ask)] if ask is not None else []), *beside]
+    calls = [*([(PLANNER_ASK, ask)] if ask is not None else []), *beside]
     llm = ScriptedPlannerLlm(script=[calls, *then, "done"])
     seam._agent.model = llm
 
-    async def planner(ctx: Context, node_input: Any) -> Any:
+    async def planner(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
         del node_input
-        return await seam(ctx=ctx, question="uk oda", readings=[])
+        result = await seam(ctx=ctx, question="uk oda", readings=[])
+        if "asked" in result:
+            yield planner_ask_interrupt(result["asked"])
+            return
+        if returned is not None:
+            returned.append(result)
+        yield Event(output=result)
 
     workflow = Workflow(
         name="ask_test_wf", edges=[(START, node(planner, name="planner", rerun_on_resume=True))]
     )
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name="ask_test", user_id="u", state=state)
-    runner = Runner(node=workflow, app_name="ask_test", session_service=sessions)
+    service = InMemorySessionService()
+    session = await service.create_session(app_name="ask_test", user_id="u", state=state)
+    runner = Runner(node=workflow, app_name="ask_test", session_service=service)
     translator = _translator()
     frames: list[Any] = []
-    async for event in runner.run_async(
-        user_id="u",
-        session_id=session.id,
-        new_message=types.Content(role="user", parts=[types.Part(text="probe")]),
-    ):
-        frames.extend(translator.translate(event))
-    frames.extend(translator.finish())
+    message = types.Content(role="user", parts=[types.Part(text="probe")])
+    while True:
+        async for event in runner.run_async(
+            user_id="u", session_id=session.id, new_message=message
+        ):
+            frames.extend(translator.translate(event))
+        frames.extend(translator.finish())
+        if answer is None or not translator.paused:
+            break
+        (pending,) = translator._conversation.pending.values()
+        message = types.Content(
+            role="user",
+            parts=[create_request_input_response(pending.adk_id, {"result": answer})],
+        )
+        answer = None
+        translator = _Translator(
+            conversation=translator._conversation, recorder=translator._recorder
+        )
+    if sessions is not None:
+        left = await service.get_session(app_name="ask_test", user_id="u", session_id=session.id)
+        assert left is not None
+        sessions.append(left)
     return translator, frames, llm
 
 
@@ -2056,29 +2076,30 @@ async def _asked_through_the_seam(
 async def test_an_ask_the_planner_s_tool_refuses_asks_nothing_and_the_run_goes_on(
     ask: dict[str, Any], state: dict[str, Any]
 ) -> None:
-    """ADK yields the planner's ask before its tool runs. The tool refuses
-    it, on its arguments or on the session's pending referral, and the run
-    carries on with the refusal in the model's next request, within the same
-    entry. Studio asks nothing and does not pause."""
-    translator, frames, llm = await _asked_through_the_seam(ask, state)
+    """The tool refuses the planner's ask, on its arguments or on the
+    session's pending referral, with an ordinary response, so the run
+    carries on with the refusal in the model's next request and the planner
+    node returns. Studio asks nothing and does not pause."""
+    returned: list[Any] = []
+    translator, frames, llm = await _asked_through_the_seam(ask, state, returned=returned)
 
     assert [f.event for f in frames if f.event == "elicitation.request"] == []
     assert translator.paused is False
     assert len(llm.captured_requests) == 2
-    (answer,) = [
-        part.function_response.response
-        for content in llm.captured_requests[1].contents
-        for part in content.parts or []
-        if part.function_response is not None
+    assert len(returned) == 1
+    assert [a["code"] for a in _ask_answers(llm.captured_requests[1])] == [
+        ProblemCode.INVALID_ARGUMENTS.value
     ]
-    assert answer["code"] == ProblemCode.INVALID_ARGUMENTS.value
 
 
 async def test_an_ask_the_planner_s_tool_accepts_pauses_on_its_question() -> None:
-    """The segment ends on the ask, which asks the call's own question."""
-    translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {})
+    """The segment ends on the ask, which asks the call's own question, and
+    the planner node waits on it."""
+    returned: list[Any] = []
+    translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, returned=returned)
 
     assert len(llm.captured_requests) == 1
+    assert returned == []
     assert translator.paused is True
     assert frames[-1].event == "elicitation.request"
     assert [f.event for f in frames].count("elicitation.request") == 1
@@ -2089,16 +2110,48 @@ async def test_an_ask_the_planner_s_tool_accepts_pauses_on_its_question() -> Non
     assert pending.questions[0].options == {"spec_a": "reading A", "spec_b": "reading B"}
 
 
+# The answer Studio's `/interrupt` route resumes with for a pick of `spec_b`.
+_PICKED_B = {"answers": {"q1": {"kind": "option", "spec_id": "spec_b"}}}
+
+
+async def test_an_answer_resumes_the_planner_with_the_user_s_pick_and_asks_nothing_more() -> None:
+    """The user's answer runs the planner again with the question and the
+    pick in its brief. The resumed segment asks nothing again, the planner
+    node returns, and the session pairs the ask with the answer, as the
+    planner's readers of what the user picked walk it."""
+    returned: list[Any] = []
+    sessions: list[Session] = []
+    translator, frames, llm = await _asked_through_the_seam(
+        _SOURCE_ASK, {}, answer=_PICKED_B, returned=returned, sessions=sessions
+    )
+
+    assert len(llm.captured_requests) == 2
+    resumed = llm.captured_requests[1]
+    brief = "".join(part.text or "" for content in resumed.contents for part in content.parts or [])
+    assert _SOURCE_ASK["message"] in brief
+    assert "They picked 'reading B', id `spec_b`." in brief
+    assert _ask_answers(resumed) == []
+    assert len(returned) == 1
+    assert [f.event for f in frames].count("elicitation.request") == 1
+    assert translator.paused is False
+    (session,) = sessions
+    asks = [
+        (step.kind, step.args, dict(step.body))
+        for step in _session_steps(session.events)
+        if step.kind in ("call", "answer")
+    ]
+    assert asks == [("call", _SOURCE_ASK, {}), ("answer", _SOURCE_ASK, {"result": _PICKED_B})]
+
+
 async def test_an_ask_made_beside_another_call_loses_none_of_that_call_s_activity() -> None:
     """ADK answers `propose_plan`, made beside an ask the tool accepts, and
-    calls the model again before the planner's run stops paused on the ask.
-    Studio shows `propose_plan`'s lines as it does with no ask beside it,
-    then asks the question."""
+    the planner's run stops paused on the ask. Studio shows `propose_plan`'s
+    lines as it does with no ask beside it, then asks the question."""
     proposal = [("propose_plan", {"question": "uk oda"})]
     translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, beside=proposal)
     _, alone, _ = await _asked_through_the_seam(None, {}, beside=proposal)
 
-    assert len(llm.captured_requests) == 2
+    assert len(llm.captured_requests) == 1
     assert translator.paused is True
     assert frames[-1].event == "elicitation.request"
     assert frames[-1].questions == [_planner_question(_SOURCE_ASK)]
@@ -2117,90 +2170,52 @@ def _ask_answers(request: Any) -> list[dict[str, Any]]:
         part.function_response.response or {}
         for content in request.contents
         for part in content.parts or []
-        if part.function_response is not None
-        and part.function_response.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+        if part.function_response is not None and part.function_response.name == PLANNER_ASK
     ]
-
-
-@pytest.mark.parametrize(
-    "later", [_AUTHORED_OPTIONS_ASK, _FREE_TEXT_ASK], ids=["refused-on-its-arguments", "valid"]
-)
-async def test_an_accepted_ask_survives_a_later_ask_the_tool_refuses(
-    later: dict[str, Any],
-) -> None:
-    """ADK runs `propose_plan`, made beside an ask the tool accepts, and calls
-    the model again. That response asks again, and the tool refuses it, a
-    valid ask too since the first still waits for its answer, so the model
-    runs a third time before the planner's run stops paused on the first ask.
-    Studio asks the first ask's question alone."""
-    proposal = [("propose_plan", {"question": "uk oda"})]
-    translator, frames, llm = await _asked_through_the_seam(
-        _SOURCE_ASK, {}, beside=proposal, then=[[("adk_request_input", later)]]
-    )
-
-    assert len(llm.captured_requests) == 3
-    assert [a["code"] for a in _ask_answers(llm.captured_requests[2])] == [
-        ProblemCode.INVALID_ARGUMENTS.value
-    ]
-    assert translator.paused is True
-    assert "done" not in [f.event for f in frames]
-    (asked,) = [f for f in frames if f.event == "elicitation.request"]
-    assert asked.questions == [_planner_question(_SOURCE_ASK)]
-    assert list(translator._conversation.pending) == [asked.interrupt_id]
 
 
 async def test_a_second_ask_in_the_same_response_is_refused() -> None:
     """The calls of one model response run concurrently, so the tool refuses
     an ask made after another in the same response, valid as it is. The run
-    pauses on the first, the only question Studio asks."""
-    sibling = [("adk_request_input", _FREE_TEXT_ASK)]
-    translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, beside=sibling)
+    pauses on the first, the only question Studio asks, and the answer
+    resumes it to the end."""
+    sibling = [(PLANNER_ASK, _FREE_TEXT_ASK)]
+    returned: list[Any] = []
+    sessions: list[Session] = []
+    translator, frames, llm = await _asked_through_the_seam(
+        _SOURCE_ASK, {}, beside=sibling, answer=_PICKED_B, returned=returned, sessions=sessions
+    )
 
     assert len(llm.captured_requests) == 2
-    assert [a["code"] for a in _ask_answers(llm.captured_requests[1])] == [
-        ProblemCode.INVALID_ARGUMENTS.value
+    (session,) = sessions
+    answers = [
+        response.response or {}
+        for event in session.events
+        if event.author != "user"
+        for response in event.get_function_responses()
+        if response.name == PLANNER_ASK
     ]
-    assert translator.paused is True
+    assert [a.get("code", a.get("status")) for a in answers] == [
+        "asked",
+        ProblemCode.INVALID_ARGUMENTS.value,
+    ]
     (asked,) = [f for f in frames if f.event == "elicitation.request"]
     assert asked.questions == [_planner_question(_SOURCE_ASK)]
-    assert list(translator._conversation.pending) == [asked.interrupt_id]
+    assert len(returned) == 1
+    assert translator.paused is False
 
 
 async def test_an_ask_after_a_refused_ask_pauses_on_its_question() -> None:
     """A refused ask has its answer, so it waits for nothing, and a valid ask
     in a later response is accepted."""
     translator, frames, llm = await _asked_through_the_seam(
-        _AUTHORED_OPTIONS_ASK, {}, then=[[("adk_request_input", _FREE_TEXT_ASK)]]
+        _AUTHORED_OPTIONS_ASK, {}, then=[[(PLANNER_ASK, _FREE_TEXT_ASK)]]
     )
 
     assert len(llm.captured_requests) == 2
     assert translator.paused is True
     (asked,) = [f for f in frames if f.event == "elicitation.request"]
     assert asked.questions == [_planner_question(_FREE_TEXT_ASK)]
-
-
-def test_a_resumed_segment_that_replays_the_ask_does_not_ask_it_again() -> None:
-    """The ask's question is on the conversation, pending its answer. A
-    resumed segment that yields the ask's call event again before the run
-    goes on asks nothing more."""
-    conversation = ConversationState(conversation_id="c1")
-    recorder = _RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService()))
-    call = types.FunctionCall(id="ask-1", name=REQUEST_INPUT_FUNCTION_CALL_NAME, args=_SOURCE_ASK)
-    ask = Event(
-        author="dfo_planner",
-        content=types.Content(role="model", parts=[types.Part(function_call=call)]),
-    )
-    first = _Translator(conversation=conversation, recorder=recorder)
-    first.translate(ask)
-    asked = [f for f in first.finish() if f.event == "elicitation.request"]
-
-    resumed = _Translator(conversation=conversation, recorder=recorder)
-    resumed.translate(ask)
-    again = [f for f in resumed.finish() if f.event == "elicitation.request"]
-
-    assert len(asked) == 1
-    assert again == []
-    assert list(conversation.pending) == [asked[0].interrupt_id]
 
 
 def _timed_out(tool: str) -> Exception:
@@ -2393,8 +2408,58 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
             ),
             False,
         ),
+        (asyncpg.AdminShutdownError("terminating connection due to administrator command"), True),
+        (asyncpg.CrashShutdownError("terminating connection due to crash of another"), True),
+        (asyncpg.CannotConnectNowError("the database system is starting up"), True),
+        (
+            asyncpg.IdleSessionTimeoutError("terminating connection due to idle-session timeout"),
+            True,
+        ),
         (MCPError(code=CONNECTION_CLOSED, message="Connection closed"), True),
         (MCPError(code=INTERNAL_ERROR, message="Internal error"), False),
+        (
+            _raised_from(
+                RuntimeError("Server session was closed unexpectedly"), anyio.ClosedResourceError()
+            ),
+            True,
+        ),
+        (RuntimeError("Session task completed unexpectedly"), True),
+        (anyio.BrokenResourceError(), True),
+        (RuntimeError("Event loop is closed"), False),
+        (
+            ExceptionGroup(
+                "unhandled errors in a TaskGroup",
+                [httpx2.ConnectError("refused"), ExceptionGroup("inner", [TimeoutError()])],
+            ),
+            True,
+        ),
+        (
+            ExceptionGroup(
+                "unhandled errors in a TaskGroup", [httpx2.ConnectError("refused"), KeyError("id")]
+            ),
+            False,
+        ),
+        (
+            google_auth_errors.TransportError(
+                "Failed to retrieve http://metadata.google.internal/computeMetadata/v1/"
+                "instance/service-accounts/default/token from the Google Compute Engine "
+                "metadata service."
+            ),
+            True,
+        ),
+        (
+            _raised_from(
+                google_auth_errors.RefreshError("metadata service unavailable"),
+                google_auth_errors.TransportError("metadata service unavailable"),
+            ),
+            True,
+        ),
+        (
+            google_auth_errors.RefreshError(
+                "invalid_grant: Bad Request", {"error": "invalid_grant"}, retryable=False
+            ),
+            False,
+        ),
         (_raised_while_handling(KeyError("id"), TimeoutError("slow")), False),
         # An `OSError` or aiohttp error that is no link fault is a bug.
         (FileNotFoundError("charts/missing.json"), False),
@@ -2416,8 +2481,21 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         "sqlalchemy-connection-invalidated",
         "sqlalchemy-wrapping-a-connection-error",
         "sqlalchemy-sql-error",
+        "postgres-admin-shutdown",
+        "postgres-crash-shutdown",
+        "postgres-starting-up",
+        "postgres-idle-session-timeout",
         "mcp-connection-closed",
         "mcp-server-error",
+        "fastmcp-session-closed",
+        "fastmcp-session-ended",
+        "anyio-broken-stream",
+        "runtime-error",
+        "group-of-link-faults",
+        "group-with-a-bug",
+        "google-auth-transport-error",
+        "google-auth-refresh-on-transport-error",
+        "google-auth-refresh-refused",
         "bug-while-handling-a-timeout",
         "file-not-found",
         "aiohttp-invalid-url",

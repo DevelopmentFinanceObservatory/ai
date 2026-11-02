@@ -24,7 +24,7 @@ import copy
 import json
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +51,7 @@ from google.genai import types
 from harness import plan_display, planner_seam
 from harness.decision_pick import DecisionPick
 from harness.graph import switch
+from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -59,6 +60,7 @@ from harness.graph.state import (
 )
 from harness.orchestrator_tools import _search_context
 from harness.planner_seam import (
+    _ASKED_REFERRAL_INTRO,
     _PLANNER_BRANCH,
     _SHARE_UNIT_CODES,
     _WHICH_INSTEAD,
@@ -83,7 +85,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn_budget
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AdkCall
@@ -336,36 +338,25 @@ class _SeamHarness:
         `_unless_stopped` when `stoppable`, as the planner node runs a pick's
         replan."""
 
-        async def _node(ctx: Context, node_input: Any) -> Any:
+        async def _node(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
             del node_input
             if resume_inputs is not None:
                 # `ctx.resume_inputs` reflects a genuine pause-and-resume of
-                # THIS node's own interrupt -- `clarify`/`approve`'s own
-                # `yield RequestInput(...)` -- and, confirmed directly
-                # against the installed ADK (2.9.1), a nested one too: a
-                # planner-side `adk_request_input` call (`planner.agent`'s
-                # tool) pauses a `ctx.run_node(self._agent, ...)` call
-                # several levels down, but `_create_child_context`
-                # (`workflow/_node_runner.py`) reconstructs resume state
-                # through `_reconstruct_node_states` with
-                # `group_by_direct_child=False`
-                # (`workflow/utils/_rehydration_utils.py`'s own default),
-                # which attributes any event under this node's own path --
-                # descendants included -- to this node's own path, not just
-                # this node's direct interrupt. So the planner's own ask
-                # does resolve into this node's `ctx.resume_inputs` on a
-                # real resume (see `test_a_resumed_ask_and_the_amend_after_it_
-                # each_carry_the_brief_once`, which drives one for real). Setting
-                # it directly here is only for a test that needs the OTHER
-                # resume condition -- "has `__call__` already been through
-                # this session once" -- without paying for a real interrupt
-                # round trip, the same way a hand-built `Context` elsewhere
-                # in this suite stands in for one the framework would
-                # otherwise build.
+                # THIS node's own interrupt, the planner's ask this node
+                # pauses on (below) included. Setting it directly here is
+                # only for a test that needs the OTHER resume condition --
+                # "has `__call__` already been through this session once" --
+                # without paying for a real interrupt round trip, the same
+                # way a hand-built `Context` elsewhere in this suite stands
+                # in for one the framework would otherwise build.
                 ctx._resume_inputs = resume_inputs
-            if stoppable:
-                return await switch._unless_stopped(ctx, seam(ctx=ctx, **kwargs))
-            return await seam(ctx=ctx, **kwargs)
+            drafting = seam(ctx=ctx, **kwargs)
+            drafted = await (switch._unless_stopped(ctx, drafting) if stoppable else drafting)
+            # The pause the graph's planner node makes on an accepted ask.
+            if isinstance(drafted, dict) and "asked" in drafted:
+                yield planner_ask_interrupt(drafted["asked"])
+                return
+            yield Event(output=drafted)
 
         node_fn = node(_node, name="seam_under_test", rerun_on_resume=True)
         wf = Workflow(name="seam_test_wf", edges=[(START, node_fn)])
@@ -396,7 +387,7 @@ class _SeamHarness:
     async def events(self) -> list[Event]:
         """This session's own event history -- what `planner.call.
         elected_spec_ids` reads to find what the user actually chose
-        answering `adk_request_input`, and what `ctx.run_node`'s own
+        answering the planner's asks, and what `ctx.run_node`'s own
         pause-and-resume depends on surviving (`harness.planner_seam`'s
         module docstring)."""
         assert self._session_id is not None, "run() has not been called yet"
@@ -1063,7 +1054,7 @@ async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused
     }
     script = [[("propose_plan", draft)]]
     if paused:
-        script.insert(0, [("adk_request_input", {"message": "Which period?"})])
+        script.insert(0, [(PLANNER_ASK, {"message": "Which period?"})])
     llm = ScriptedPlannerLlm(script=script)
     seam = _seam()
     seam._agent.model = llm
@@ -1090,28 +1081,24 @@ async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused
     assert load_plan(await harness.state()) is None
 
 
-# -- asking the user (`adk_request_input`) ---------------------------------
+# -- asking the user (`ask_user_question`) ---------------------------------
 
 
 async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() -> None:
-    """`planner.agent`'s `adk_request_input` tool call is a real,
-    long-running HITL pause -- through a real `ctx.run_node`, not a mock --
-    so this turn's own `_propose` call never gets a result back and the
-    seam node itself resolves no output. The call's own function-call
-    event is still on record afterward, in the session's own event history
-    rather than a state key this seam has to keep in step
-    (`planner.agent._session_steps`'s own docstring): it is built and
-    appended regardless of the pause, since it is the model's turn, not the
-    tool's (deferred, here never built at all) response. But an offer is
-    not an election: with no matching `FunctionResponse` on record, nothing
-    the call offered counts as something the user chose.
+    """`planner.agent`'s `ask_user_question` call, accepted, ends the
+    planner's run, and the seam answers the ask, which the node pauses on, so
+    the node resolves no output. The call's own function-call event is on
+    record afterward, in the session's own event history
+    (`planner.agent._session_steps`'s own docstring). But an offer is not an
+    election: with no answer from the user on record, nothing the call
+    offered counts as something the user chose.
     """
     seam = _seam()
     seam._agent.model = ScriptedPlannerLlm(
         script=[
             [
                 (
-                    "adk_request_input",
+                    PLANNER_ASK,
                     {
                         "message": "Which source did you mean?",
                         "candidates": [
@@ -1135,12 +1122,68 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset()
 
 
+async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_runs_once() -> None:
+    """The planner's run ends on its accepted ask only once every call of the
+    same response has answered, with no model call after. A slow
+    `propose_plan` made beside the ask answers before the pause, and the run
+    the answer resumes does not run it again: one proposal is on record."""
+    proposals: list[int] = []
+
+    async def propose_plan(tool_context: ToolContext) -> dict[str, object]:
+        del tool_context
+        # Slower than the ask's own call, which answers at once.
+        await asyncio.sleep(0.05)
+        proposals.append(1)
+        return ok(status="draft", version=1)
+
+    seam = _seam()
+    seam._agent.tools = [
+        FunctionTool(propose_plan) if getattr(tool, "name", None) == "propose_plan" else tool
+        for tool in seam._agent.tools
+    ]
+    llm = ScriptedPlannerLlm(
+        script=[[(PLANNER_ASK, {"message": "Which years?"}), ("propose_plan", {})], "stop"]
+    )
+    seam._agent.model = llm
+    harness = _SeamHarness()
+
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    assert len(llm.captured_requests) == 1
+    events = await harness.events()
+    answered = [
+        at
+        for at, event in enumerate(events)
+        for response in event.get_function_responses()
+        if response.name == "propose_plan"
+    ]
+    (paused,) = [
+        at
+        for at, event in enumerate(events)
+        for call in event.get_function_calls()
+        if call.name == "adk_request_input"
+    ]
+    assert proposals == [1]
+    assert len(answered) == 1 and answered[0] < paused
+
+    answer = types.Content(
+        role="user",
+        parts=[
+            create_request_input_response(
+                _pending_ask_interrupt_id(events), {"result": {"text": "since 2015"}}
+            )
+        ],
+    )
+    await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+
+    assert proposals == [1]
+    assert len(llm.captured_requests) == 2
+
+
 async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for_an_ask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A planner-side ask suspends the run by raising through `ctx.run_node`, and
-    the resumed half reads the events the first half appended. The check runs
-    over those events as well as over the ones a completed run appends."""
+    """A run that ends on a planner-side ask has the events it appended
+    checked, as a run that ends on a plan does."""
     checked: list[list[Event]] = []
     real_check = planner_seam._check_branches
 
@@ -1151,7 +1194,7 @@ async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for
     monkeypatch.setattr(planner_seam, "_check_branches", spy)
     seam = _seam()
     seam._agent.model = ScriptedPlannerLlm(
-        script=[[("adk_request_input", {"message": "Which source did you mean?"})]]
+        script=[[(PLANNER_ASK, {"message": "Which source did you mean?"})]]
     )
 
     output = await _SeamHarness().run(seam, question="kenya debt", readings=[])
@@ -1224,7 +1267,7 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_seam_s_own_ask(
 ) -> None:
     """The translation refers a requirement back with candidates the user
     picks from, so the seam asks them itself: the run pauses on an
-    `adk_request_input` call led by the referral's table sentence, and no
+    `ask_user_question` call led by the referral's table sentence, and no
     model turn composes it."""
     seam = _seam()
     _referring_proposals(seam._agent, referral)
@@ -1240,8 +1283,7 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_seam_s_own_ask(
         part.function_call.args
         for event in await harness.events()
         for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_call is not None
-        and part.function_call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+        if part.function_call is not None and part.function_call.name == PLANNER_ASK
     ]
     mismatch = referral.get("source_mismatch", False)
     lead = referral_sentence(referral["kind"], source_mismatch=mismatch)
@@ -1251,8 +1293,9 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_seam_s_own_ask(
 
 def _pending_ask_interrupt_id(events: list[Event]) -> str:
     """The `interrupt_id` (the function call's own `id`) of the most recent
-    `adk_request_input` call on record -- what a real resume answers with
-    `create_request_input_response`, the same way `harness.studio`'s own
+    `adk_request_input` call on record, the pause the planner node makes on
+    the planner's ask under the ask's call id -- what a real resume answers
+    with `create_request_input_response`, the same way `harness.studio`'s own
     `/interrupt` route builds one for the wire equivalent."""
     for event in reversed(events):
         if not event.content or not event.content.parts:
@@ -1277,7 +1320,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     plan = _translated_plan(decision, requirement, derived_requirement)
     seam = _seam()
     seam._agent.model = ScriptedPlannerLlm(
-        script=[[("adk_request_input", {"message": "Which source did you mean?"})], _DECLARE]
+        script=[[(PLANNER_ASK, {"message": "Which source did you mean?"})], _DECLARE]
     )
     use_compiled_proposals(seam._agent)
     harness = _SeamHarness()
@@ -1302,7 +1345,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     resumed = await harness.run(seam, new_message=resume, **entry)
     assert resumed is not None and resumed["plan"]["version"] == plan.version
     assert decision_pick(await harness.state()) == _PICKED
-    assert [report["tools"] for report in reports] == [["adk_request_input"], ["propose_plan"]]
+    assert [report["tools"] for report in reports] == [[PLANNER_ASK], ["propose_plan"]]
 
 
 _BRIEF_MARKER = "Context for this question."
@@ -1328,15 +1371,16 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
     resume would send the model no brief if the brief travelled as node
     input. `planner.agent.prepend_brief` puts it back from state after the
     turn's question on every request: the first request after the answer,
-    and the amend call's, which renders the plan it changes and the
-    amendment after the readings. No request carries a brief twice."""
+    which runs the planner again with the user's pick in its brief, and the
+    amend call's, which renders the plan it changes and the amendment after
+    the readings. No request carries a brief twice."""
     plan = _translated_plan(decision, requirement, derived_requirement)
     seam = _seam()
     llm = ScriptedPlannerLlm(
         script=[
             [
                 (
-                    "adk_request_input",
+                    PLANNER_ASK,
                     {
                         "message": "Which source did you mean?",
                         "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
@@ -1374,8 +1418,10 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
     assert resumed["plan"]["version"] == plan.version
 
     answered = llm.captured_requests[asked]
-    assert "FR:adk_request_input" in _call_and_response_names(answered)
-    assert f"Question: {plan.question}" in _brief_follows_the_question(answered)
+    brief = _brief_follows_the_question(answered)
+    assert f"Question: {plan.question}" in brief
+    assert f"They picked 'a candidate', id `{SPEC}`." in brief
+    assert _call_and_response_names(answered) == []
 
     llm.script = [["noted, but not done yet"]]
     amending = len(llm.captured_requests)
@@ -3577,12 +3623,13 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
 
 async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_next_entry() -> None:
     """An amend reads a skill file, then pauses on a planner-side ask. The
-    request the answer resumes carries the skill the first draft read in its
-    brief, and the file the paused run read in its own history only. The next
-    entry's brief carries both, read back from state the resume persisted."""
+    answer runs the planner again, which sees none of the paused run's calls,
+    so its brief carries the skill the first draft read and the file the
+    paused run read, each once. The next entry's brief carries both, read back
+    from state the resume persisted."""
     seam = _skill_seam()
     ask = (
-        "adk_request_input",
+        PLANNER_ASK,
         {
             "message": "Which source did you mean?",
             "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
@@ -3622,9 +3669,9 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
 
     resumed = llm.captured_requests[resuming]
     brief = _brief_follows_the_question(resumed)
-    assert _skills_named(brief) == "dfo-faq*"
-    assert brief.count(_SKILL_PAGE) == 1 and "# Methods" not in brief
-    assert "FR:get_skill_file" in _call_and_response_names(resumed)
+    assert brief.count(_SKILL_PAGE) == 1 and brief.count("# Methods") == 1
+    assert "get_skill_file('dfo-faq', 'methods.md', offset=0):\n# Methods\n" in brief
+    assert _call_and_response_names(resumed) == []
     later = _brief_follows_the_question(llm.captured_requests[replanning])
     assert f"get_skill('dfo-faq'):\n{_SKILL_PAGE}\n" in later
     assert "get_skill_file('dfo-faq', 'methods.md', offset=0):\n# Methods\n" in later
@@ -3656,23 +3703,23 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
     """The user's answer resumes a run whose earlier proposal was translated.
 
     The planner proposes the plan again, whose translation refers
-    `unsupported_ask`, then asks the user through `adk_request_input` and
-    pauses. The answer resumes the same model turn: the next generation reads
-    the answer off the session and `propose_plan` passes the referral guard
-    as version 2. The `unsupported_ask` decline it owes survives the resume,
-    so the amendment carries it. The amendment's translation refers again,
-    so the entry ends with no plan ready.
+    `unsupported_ask`, then asks the user through `ask_user_question` and
+    pauses. The answer runs the planner again, and `propose_plan` reads the
+    answer off the session and passes the referral guard. The `unsupported_ask`
+    decline it owes survives the resume, so the amendment carries it. The
+    amendment's translation refers again, so the entry ends with no plan
+    ready.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
     seam = _translator_seam(responses={"search": _UNSUPPORTED_SEARCH_RESPONSE})
-    # The resumed entry seeds the planner from `prior_plan` again, so the
-    # amendment patches the seeded version.
+    # The resumed entry keeps the version the entry drafted before it asked,
+    # so the amendment patches that one.
     amend = [
         (
             "propose_plan",
             {
                 "question": draft.question,
-                "amends_version": draft.version,
+                "amends_version": draft.version + 1,
                 "decisions": [draft.decisions[0].model_dump(mode="json")],
                 "evidence_requirements": [],
                 "declined": [{"ask": draft.question, "code": "unsupported_ask"}],
@@ -3682,7 +3729,7 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
     planner_llm = ScriptedPlannerLlm(
         script=[
             _propose_again_step(start_version=draft.version),
-            [("adk_request_input", {"message": "what can be measured instead?", "candidates": []})],
+            [(PLANNER_ASK, {"message": "what can be measured instead?", "candidates": []})],
             amend,
             "stop",
         ]
@@ -3714,7 +3761,7 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
         if part.function_response is not None and part.function_response.name == "propose_plan"
     ]
     assert [(p or {}).get("outcome") for p in proposals] == ["ok", "ok"], proposals
-    assert (proposals[1] or {})["version"] == draft.version + 1
+    assert (proposals[1] or {})["version"] == draft.version + 2
 
 
 _CONGO_ROWS = [{"text": "Congo", "role": "donor"}, {"text": "Congo", "role": "recipient"}]
@@ -3796,16 +3843,28 @@ class _RecordingSearch(FixtureSurface):
         return self._answers[min(len(self.sent), len(self._answers)) - 1]
 
 
+def _translation_seen(request: Any) -> dict[str, Any]:
+    """The one translation `request` shows the model: a `propose_plan` answer's
+    in the run's own history, or else the referral the brief of a run an
+    answer resumed renders after `_ASKED_REFERRAL_INTRO`."""
+    seen = [
+        part.function_response.response["translation"]
+        for content in request.contents
+        for part in content.parts or []
+        if part.function_response is not None and part.function_response.name == "propose_plan"
+    ]
+    brief = _brief_follows_the_question(request).splitlines()
+    if _ASKED_REFERRAL_INTRO in brief:
+        seen.append(json.loads(brief[brief.index(_ASKED_REFERRAL_INTRO) + 1]))
+    (translation,) = seen
+    return translation
+
+
 def _ask_about_congo(role: str) -> Any:
     """A script entry asking about one end's Congo, offering the picks the referral carries."""
 
     def step(request: Any) -> list[tuple[str, dict[str, Any]]]:
-        (translation,) = [
-            part.function_response.response["translation"]
-            for content in request.contents
-            for part in content.parts or []
-            if part.function_response is not None and part.function_response.name == "propose_plan"
-        ]
+        translation = _translation_seen(request)
         (reading,) = [
             reading
             for reading in translation["ambiguous_entities"]
@@ -3815,9 +3874,7 @@ def _ask_about_congo(role: str) -> Any:
             {"spec_id": candidate["pick"], "label": candidate["label"]}
             for candidate in reading["candidates"]
         ]
-        return [
-            ("adk_request_input", {"message": f"Which Congo, as {role}?", "candidates": candidates})
-        ]
+        return [(PLANNER_ASK, {"message": f"Which Congo, as {role}?", "candidates": candidates})]
 
     return step
 
@@ -3915,7 +3972,7 @@ async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_pic
         part.function_call.args["candidates"]
         for event in await harness.events()
         for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_call is not None and part.function_call.name == "adk_request_input"
+        if part.function_call is not None and part.function_call.name == PLANNER_ASK
     ]
     assert [[c["spec_id"] for c in candidates] for candidates in asked] == [
         [f"{dataset.id}|{role}|Congo|country/{code}" for code in ("COD", "COG")]
@@ -4609,12 +4666,9 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
 ) -> None:
     """A mid-turn resume re-enters `__call__` with `ctx.resume_inputs`
     carrying the interrupt's own answer. Driven through a real planner ask
-    and a real `create_request_input_response` answer -- not the hand-set
-    `ctx._resume_inputs` this test used before `adk_request_input` pausing
-    existed (see `_SeamHarness.run`'s own comment on why that condition is
-    genuine, confirmed against the installed ADK's `_reconstruct_node_states`)
-    -- so this is the same boundary a live pause-and-resume crosses, not a
-    double standing in for one.
+    and a real `create_request_input_response` answer, so this is the same
+    boundary a live pause-and-resume crosses, not a double standing in for
+    one.
 
     Three rounds are spent for real, through `propose_plan`'s own
     persisted write, in the same continuous planner turn that then asks
@@ -4646,7 +4700,7 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
             step,
             [
                 (
-                    "adk_request_input",
+                    PLANNER_ASK,
                     {
                         "message": "Which source did you mean?",
                         "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
@@ -4665,15 +4719,17 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     # `propose_plan` runs twice more -- the fourth and fifth cumulative
     # rounds if the three spent before the ask survived, only the first and
     # second if an ungated reset wiped them. Gated correctly, the fourth is
-    # still within the cap and the fifth goes past it. Both calls amend the
-    # version the session's own call history last answered with, which is
-    # version 3 when the three rounds survived this resume.
+    # still within the cap and the fifth goes past it. The answer runs the
+    # planner again, whose brief shows the version the paused run recorded,
+    # version 3, which the fourth call amends.
     interrupt_id = _pending_ask_interrupt_id(await harness.events())
     resume_message = types.Content(
         role="user",
         parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": SPEC}})],
     )
-    seam._agent.model = ScriptedPlannerLlm(script=[step, step])
+    resumed_step = _amend_step(proposal, start_version=3)
+    resumed_llm = ScriptedPlannerLlm(script=[resumed_step, resumed_step])
+    seam._agent.model = resumed_llm
     result = await harness.run(
         seam,
         question="kenya debt",
@@ -4686,6 +4742,9 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     text = result["refused"]["text"]
     assert f"budget of {MAX_PLAN_ROUNDS} plan drafts" in text
     assert "fresh budget" in text
+    # The resumed run sees none of the paused run's calls, so its brief shows
+    # the draft the paused run recorded as the plan being changed.
+    assert "version 3" in _brief_follows_the_question(resumed_llm.captured_requests[0])
 
 
 # -- the request's budget ---------------------------------------------------
@@ -4855,7 +4914,7 @@ def test_a_referral_resolved_by_a_later_ok_translation_lets_the_budget_refuse_in
     """Once a later `ok` translation has cleared `tracker.last_referral`
     (`test_last_referral_is_cleared_once_a_later_translation_resolves_the_requirement`),
     a call the budget closes finds no pinnable candidates: its closing text
-    stands and the entry refuses on the bound, never the `adk_request_input`
+    stands and the entry refuses on the bound, never the `ask_user_question`
     ask a still-open referral would get."""
     seam = _seam()
     tracker = _RunTracker()
@@ -4870,7 +4929,7 @@ def test_a_referral_resolved_by_a_later_ok_translation_lets_the_budget_refuse_in
 
     response = _after_model_on(seam, tracker, _closing_response(SeamCode.TURN_MODEL_TIME_SPENT))
 
-    assert response is None, "a cleared referral must not surface an adk_request_input ask"
+    assert response is None, "a cleared referral must not surface an ask"
     assert tracker.refused == {"code": SeamCode.TURN_MODEL_TIME_SPENT, "detail": {}}
 
 
@@ -4880,7 +4939,7 @@ def test_a_referral_surviving_a_malformed_translation_still_gets_asked_when_the_
     """A translation with no `outcome` settles nothing
     (`test_last_referral_survives_a_translation_carrying_no_outcome`), so a
     call the budget closes after it still finds the earlier referral's
-    candidates and asks through `adk_request_input`, the same as if the
+    candidates and asks through `ask_user_question`, the same as if the
     malformed response had never arrived."""
     seam = _seam()
     tracker = _RunTracker()
@@ -4898,7 +4957,7 @@ def test_a_referral_surviving_a_malformed_translation_still_gets_asked_when_the_
     assert response is not None
     (part,) = response.content.parts
     assert part.function_call is not None
-    assert part.function_call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+    assert part.function_call.name == PLANNER_ASK
     assert {c["spec_id"] for c in part.function_call.args["candidates"]} == {
         "spec_nominal",
         "spec_per_capita",
@@ -4910,8 +4969,8 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """A call the request's budget closes on a referral carrying pinnable
-    candidates ends the entry the way the planner's own `ask_user` does: a
-    long-running `adk_request_input` pause, built from the referral's own
+    candidates ends the entry the way the planner's own ask does: an
+    `ask_user_question` pause, built from the referral's own
     candidates with no model call. The user's answer resumes the run in a
     request of its own and pairs by id (`planner.call.elected_spec_ids`).
 
@@ -4949,7 +5008,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
         part.function_call
         for event in events
         for part in (event.content.parts if event.content and event.content.parts else [])
-        if part.function_call is not None and part.function_call.id == interrupt_id
+        if part.function_call is not None and part.function_call.name == PLANNER_ASK
     ]
     assert {c["spec_id"] for c in ask_call.args["candidates"]} == {SPEC, SPEC_B}
     assert "recommended_spec_id" not in ask_call.args

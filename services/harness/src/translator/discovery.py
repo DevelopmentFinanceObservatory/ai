@@ -124,7 +124,6 @@ from compiler.sources import (
     bound_codes,
     outcome_from_envelope,
     pinned_stat_var,
-    readable_wire_groups,
     source_from_spec_block,
     stat_var_count,
     stat_var_count_is_floor,
@@ -148,6 +147,7 @@ from planner.plan import (
     PlanStatus,
     QuotientRequirement,
     RankRequirement,
+    RecordedDefinition,
     SessionState,
     ShareOfRequirement,
     Unit,
@@ -170,6 +170,7 @@ from planner.plan import (
     scope_unread,
     side_entities,
     split_of,
+    standing_block,
     windowed_pins,
     with_authored_requirements,
 )
@@ -746,6 +747,29 @@ class DiscoveryLog(StrictModel):
             found = self.sources.get(requirement_id, {})
             return tuple(found[spec_id] for spec_id in record.spec_ids)
         return None
+
+    def offered_for(self, plan: Plan) -> frozenset[str]:
+        """The spec_ids a referral of `plan` can offer from this log with no search made for them.
+
+        A requirement that already has a settled record at its key is not
+        searched again (`selectable`), and a search that fails records no
+        status, so a referral reads the latest answer an earlier translation
+        recorded: the sources found in place of a stale pin, offered beside
+        another referral (`stale_pin_sources`), and the sources found for a
+        requirement stating a `source`, which a `source_mismatch` referral
+        offers when the source found names another (`pinnable_for`).
+        """
+        offered: set[str] = set()
+        for requirement in plan.evidence_requirements:
+            if not isinstance(requirement, DatasetRequirement):
+                continue
+            key = requirement_revision(requirement)
+            if requirement.source_spec_id is not None:
+                stale = self.stale_pin_sources(key, requirement.id, requirement.source_spec_id)
+                offered.update(source.spec_id for source in stale or ())
+            if requirement.source is not None:
+                offered.update(source.spec_id for source in self.pinnable_for(key, requirement.id))
+        return frozenset(offered)
 
     def nearest_for(self, requirement_key: str, requirement_id: str) -> tuple[SelectedSource, ...]:
         """The nearest real sources the latest matching `no_data` answer for `requirement_id` named.
@@ -2491,6 +2515,20 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
     return spec
 
 
+def definition_on_record(state: SessionState, spec_id: str) -> RecordedDefinition | None:
+    """The definition on record for `spec_id` (`planner.plan.identity_on_record`),
+    hashing to it: one a search in the conversation recorded, else one this
+    session's discovery holds (`DiscoveryLog.recorded_definition`), else the
+    one its block on record carries (`planner.plan.held_sources`); `None`
+    when none is."""
+    return identity_on_record(
+        spec_id,
+        shown=held_sources(state),
+        end_open=True,
+        definition_lookup=load_log(state).recorded_definition,
+    )
+
+
 async def _recorded_source(
     state: SessionState,
     *,
@@ -2520,12 +2558,7 @@ async def _recorded_source(
     back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
-    recorded = windowed_pins(state).get(spec_id) or identity_on_record(
-        spec_id,
-        shown=held_sources(state),
-        end_open=True,
-        definition_lookup=load_log(state).recorded_definition,
-    )
+    recorded = windowed_pins(state).get(spec_id) or definition_on_record(state, spec_id)
     identity = recorded.identity if recorded is not None else None
     if (
         recorded is None
@@ -3284,8 +3317,9 @@ def _ask_not_understood(
 
 
 def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
-    """The block of each source `outcome` names, by spec_id, held so a pin of one
-    a referral offers reads its block as a shown one's (`planner.plan.held_sources`).
+    """The block of each source `outcome`, an answer to discovery's search, names,
+    by spec_id, held so a pin of one a referral offers reads its block as a
+    shown one's (`planner.plan.held_sources`).
 
     Discovery searches the planner's own words, so each axis a block's scope
     choices settled other than by default is marked as the planner's
@@ -3312,34 +3346,43 @@ def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
 
 
 async def read_found_scope(
-    surface: ToolSurface, spec_id: str, block: Mapping[str, Any]
-) -> dict[str, dict[str, Any]]:
-    """The block Search answers for `spec_id`, a candidate found with no scope
-    choices (`SCOPE_UNREAD_BLOCK_KEY`), resolved from its own identity and the
-    sets its block names, as `found_blocks` holds it.
+    surface: ToolSurface, spec_id: str, *, state: SessionState
+) -> dict[str, Mapping[str, Any]]:
+    """The block on record for `spec_id`, a source held with no scope choices
+    (`SCOPE_UNREAD_BLOCK_KEY`), with the scope content Search answers for its
+    definition on record (`definition_on_record`), by spec_id.
 
     Search states a part's scope choices on a definite answer to a resubmit
     posting scope entries, so the resolve posts none (`compile_scope`) and
-    says how the candidate counts its flow, or that it has no choice. One
-    call, made once a turn (`resolve_definition_at`).
+    says how the source counts its flow, or that it has no choice. One
+    call, made once a turn (`resolve_definition_at`). The answer resolves
+    the source's own definition, which no words of the planner's chose, so
+    it marks no axis as the planner's. Only its scope content stands in the
+    block on record (`planner.plan.standing_block`), whose record of the
+    answer that served it stays.
 
     Raises:
         DefinitionNotResolvedError: If the call did not complete or Search
             refused it.
         PartNotResolvedError: If Search does not answer it as the one
             dataset `spec_id` names (`resolved_spec`).
-        ValueError: If the block states no identity, or its named sets
-            are not readable.
+        ValueError: If no definition of `spec_id` is on record.
     """
-    identity = (block.get("definition") or {}).get("identity")
-    groups = readable_wire_groups(block)
-    if not isinstance(identity, Mapping) or groups is None:
-        raise ValueError(f"{spec_id}'s block states no identity and sets a resolve can post")
+    recorded = definition_on_record(state, spec_id)
+    if recorded is None:
+        raise ValueError(f"no definition of {spec_id} is on record")
     part, _ = await resolve_definition_at(
-        surface, spec_id=spec_id, identity=identity, groups=groups, compile_scope=True
+        surface,
+        spec_id=spec_id,
+        identity=recorded.identity,
+        groups=recorded.groups,
+        compile_scope=True,
     )
     resolved_spec(part, spec_id=spec_id)
-    return found_blocks(outcome_from_envelope({"parts": [part]}))
+    (read,) = outcome_from_envelope({"parts": [part]}).blocks
+    held = held_sources(state).get(spec_id)
+    block = held.spec_block(spec_id) if held is not None else None
+    return {spec_id: read if block is None else standing_block(block, read)}
 
 
 def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[dict[str, object]]]:
@@ -3609,18 +3652,22 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
                 },
             )
 
-        # A re-pin to a source a referral offers reads its block as a shown
-        # one's (`planner.plan.held_sources`). Every referral that offers a
-        # source by spec_id offers it from the latest answer a pin may be
-        # taken from (`DiscoveryLog.candidates_for`, `pinnable_for` and
-        # `stale_pin_sources`): a `source_ambiguous` one, a
-        # `pinned_source_not_found` one or a stale pin beside another
-        # referral, and a `source_mismatch` one for the source a `definite`
-        # answer named. So each such source's block is held while the pin
-        # is not honoured, and the next admission drops those the plan does
-        # not pin (`planner.plan.keep_found_sources`). A `no_data` answer's
-        # nearest series are offered with no spec_id to pin.
-        if not pin_honoured and honoured:
+        # A re-pin to a source a referral offers by spec_id reads its block
+        # as a shown one's (`planner.plan.held_sources`). Each such referral
+        # offers the sources of the latest answer a pin may be taken from
+        # (`DiscoveryLog.candidates_for`, `pinnable_for` and
+        # `stale_pin_sources`): a `pinned_source_not_found` one or a stale
+        # pin beside another referral, for a pin this answer does not name;
+        # a `source_ambiguous` one, for a `candidates` answer to a
+        # requirement with no pin it names; and a `source_mismatch` one,
+        # which arises only for a requirement stating a `source`. A `no_data`
+        # answer's nearest series are offered with no spec_id to pin. The
+        # next admission drops the blocks its plan neither pins nor can be
+        # offered again (`planner.plan.keep_found_sources`).
+        referable = not pin_honoured and (
+            requirement.source_spec_id is not None or outcome.status is DiscoveryStatus.CANDIDATES
+        )
+        if honoured and (referable or requirement.source is not None):
             blocks = found_blocks(outcome)
             save_found_sources(state, {s.spec_id: blocks[s.spec_id] for s in sources})
 

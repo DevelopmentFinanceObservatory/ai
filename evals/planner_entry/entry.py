@@ -80,10 +80,9 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
-from planner.agent import read_full_history
+from planner.agent import load_pending_ask, read_full_history
 from planner.call import PlannerCall
 from planner.plan import (
     Plan,
@@ -917,12 +916,13 @@ async def run_entry(
                 current_turn_budget.reset(token)
             content = None
             if probe.plan is None and pending:
-                events = _entry_events(await _session(sessions, session.id))
-                ask = _last_call(events, REQUEST_INPUT_FUNCTION_CALL_NAME)
-                if ask is not None and ask.id is not None and not _answered(events, ask.id):
+                # The ask the entry paused on, under its call id
+                # (`harness.graph.planning`).
+                ask = load_pending_ask((await _session(sessions, session.id)).state)
+                if ask is not None:
                     content = types.Content(
                         role="user",
-                        parts=[create_request_input_response(ask.id, dict(pending.pop(0)))],
+                        parts=[create_request_input_response(ask.call_id, dict(pending.pop(0)))],
                     )
 
     # Only this scope's expiry is the eval's timeout: a `TimeoutError` raised inside the
@@ -1002,26 +1002,14 @@ def _entry_events(session: Session) -> list[Event]:
     ]
 
 
-def _last_call(events: Sequence[Event], name: str) -> types.FunctionCall | None:
-    calls = [call for event in events for call in event.get_function_calls() if call.name == name]
-    return calls[-1] if calls else None
-
-
-def _answered(events: Sequence[Event], call_id: str) -> bool:
-    return any(
-        response.id == call_id for event in events for response in event.get_function_responses()
-    )
-
-
 # --- The record of one run -----------------------------------------------------------
 
 RECORD_SCHEMA = 4
 
 
 def tool_calls(events: Sequence[Event]) -> list[dict[str, Any]]:
-    """Every tool call the planner made, in order, with the response it got: the tool's,
-    or the user's answer to an ask. A call with no response is one the entry ended
-    before it answered, or an ask still awaiting the user."""
+    """Every tool call the planner made, in order, with the response its tool gave. A
+    call with no response is one the entry ended before it answered."""
     calls: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -1133,20 +1121,17 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
     return plan_period_reduction(period_reductions(plan))
 
 
-def stop_reason(run: EntryRun, calls: Sequence[Mapping[str, Any]]) -> str:
-    """How the entry ended: `accepted`, `asked_user` (an ask the tool took, still awaiting
-    the user's answer), `timeout` (the eval's own limit), `error`, or the seam's refusal
-    code. An ask the tool rejected, or one the user answered, carries a response."""
+def stop_reason(run: EntryRun) -> str:
+    """How the entry ended: `accepted`, `asked_user` (an ask the tool took, which the
+    entry paused on, still awaiting the user's answer), `timeout` (the eval's own limit),
+    `error`, or the seam's refusal code."""
     if run.probe.plan is not None:
         return "accepted"
     if run.timed_out:
         return "timeout"
     if run.error is not None:
         return "error"
-    if any(
-        call["name"] == REQUEST_INPUT_FUNCTION_CALL_NAME and call["response"] is None
-        for call in calls
-    ):
+    if load_pending_ask(run.state) is not None:
         return "asked_user"
     return run.probe.refused_code or "no_plan"
 
@@ -1182,7 +1167,7 @@ def entry_record(
         "inputs": run.inputs,
         "status": "error" if run.error else "ok",
         "error": run.error,
-        "stop_reason": stop_reason(run, calls),
+        "stop_reason": stop_reason(run),
         "accepted": plan is not None,
         "plan_kinds": sorted({r.kind for r in plan.evidence_requirements}) if plan else None,
         "plan": plan.model_dump(mode="json", exclude={"translation", "workflow"}) if plan else None,

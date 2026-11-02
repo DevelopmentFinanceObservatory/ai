@@ -11,7 +11,7 @@ def response_event(name: str, response: dict[str, Any]) -> Any:
 
     The shape `planner.call.answered_since_referral` reads: the planner's own
     tool responses (`propose_plan`, whose `translation` carries a referral) and the user's answers
-    (`adk_request_input`) are all `FunctionResponse` parts on session events.
+    (`ask_user_question`) are all `FunctionResponse` parts on session events.
     """
     part = SimpleNamespace(
         function_call=None,

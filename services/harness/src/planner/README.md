@@ -19,11 +19,11 @@ tests live in `services/harness/tests/planner/`.
 Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 `create_planner_agent()`:
 
-| Tool                | Behaviour                                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `adk_request_input` | Asks the user to choose among a referral's candidates or a refusal's options, suspending the turn until they answer |
-| `propose_plan`      | Records a drafted plan as a `DRAFT`. Called again for every revision                                                |
-| `reject_plan`       | Marks the current plan `REJECTED`, which blocks a declaration of readiness until a new version                      |
+| Tool                | Behaviour                                                                                                                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ask_user_question` | Asks the user to choose among a referral's candidates or a refusal's options, ending the planner's run; the turn pauses on the question, and the answer runs the planner again with the question and answer in its brief |
+| `propose_plan`      | Records a drafted plan as a `DRAFT`. Called again for every revision                                                                                                                                                     |
+| `reject_plan`       | Marks the current plan `REJECTED`, which blocks a declaration of readiness until a new version                                                                                                                           |
 
 A `propose_plan` whose translation compiles declares the plan ready for the
 user's answer in code (`declare_ready`) and adds the approval summary to its
@@ -210,7 +210,7 @@ well as the node (`planner.records.entity_pick`), as
 settles a reading itself when the question or brief decides it and asks the
 user otherwise, one ask per reading offering its candidates by `pick`, and
 states the node in the entity's `dcid`, keeping its name and role. While the
-referral is pending, `adk_request_input` refuses an ask whose candidates are
+referral is pending, `ask_user_question` refuses an ask whose candidates are
 not all the picks of one reading. The referral's
 `repair` carries that instruction (`translator.referral.REPAIR_OF`), so the
 planner reads it only when such a referral is pending, and the planner's
@@ -378,7 +378,7 @@ a plan that is still a `DRAFT` or carries no workflow, answering
 draft states what to do rather than what to run, so declaring one ready would
 put nothing real in front of the user. A pending referral is checked first and
 refused the same way, as `referral_pending`, with the referral itself in
-`detail`. Its `action.call` is `adk_request_input` for an `unsupported_ask` or
+`detail`. Its `action.call` is `ask_user_question` for an `unsupported_ask` or
 `requirement_unmeetable` referral the user has not answered, and
 `propose_plan` for every other case.
 
@@ -409,7 +409,7 @@ since the operations were translated from decisions this version may no longer
 make. A successful `propose_plan` also clears any pending referral: a new
 proposal supersedes whatever the translator referred back about the version it
 replaces. For an `unsupported_ask` or `requirement_unmeetable` referral,
-`propose_plan` refuses until the user has answered an `adk_request_input` call
+`propose_plan` refuses until the user has answered an `ask_user_question` call
 made after the referral, since a patch replaces a requirement whole and would
 otherwise drop what the referral names. Under `harness.planner_seam` that ask
 is made in code for a referral the user decides that carries candidates (a
@@ -525,7 +525,7 @@ they made it (`_user_decision_refused`). A patch removing one or leaving no
 requirement citing it is refused as `user_decision_dropped`, and one changing
 its `chosen`, `resolved_by` or `fixes`, or citing it from a requirement that
 states another value, as `user_decision_contradicted`. Both point at
-`adk_request_input`. Once the user has spoken, their decisions go the way a
+`ask_user_question`. Once the user has spoken, their decisions go the way a
 planner's do. The prices the user picks for a part, a search reading whose
 prices were open, answering the orchestrator's prices question are their
 decision too (`submission.prices_choice`): `propose_plan` writes one per part,

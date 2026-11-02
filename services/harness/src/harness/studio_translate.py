@@ -48,6 +48,7 @@ from http import HTTPStatus
 from typing import Any, cast
 
 import aiohttp
+import anyio
 import asyncpg
 import httpx2
 from common.mcp_telemetry import WRITE_TOKEN_KEY
@@ -67,6 +68,7 @@ from executor.classify import ExecutorCode
 from executor.outcomes import RefusalKind
 from executor.run import current_step_id
 from google.adk.events import Event
+from google.auth import exceptions as google_auth_errors
 from google.genai import errors as genai_errors
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
@@ -278,16 +280,36 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
 # `mcp_client._call_tool` does not tag.
 _TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
 
+# What fastmcp's `Client._await_with_session_monitoring` raises, a bare
+# `RuntimeError` with no cause, when the MCP session's task ends on its own
+# while a call waits on it: the server closed the stream. The message is all
+# that tells it from any other `RuntimeError`.
+_FASTMCP_SESSION_ENDED = "Session task completed unexpectedly"
+
+# The Postgres errors that end the connection itself: the server shutting
+# down or crashing, starting up, or closing an idle session. A later turn
+# opens a new connection.
+_POSTGRES_CONNECTION_ENDED = (
+    asyncpg.AdminShutdownError,
+    asyncpg.CrashShutdownError,
+    asyncpg.CannotConnectNowError,
+    asyncpg.IdleSessionTimeoutError,
+)
+
 
 def _transient_fault(exc: BaseException) -> bool:
     """Whether `exc`, raised with no refusal, or an exception it was raised
     from (`__cause__`), is a fault a later turn may not meet. A wrapper such
     as `executor.run.RunAbandonedError` keeps the class of the transport
     error under it. An exception merely raised while another was handled is
-    its own fault, such as a bug in an `except` block."""
+    its own fault, such as a bug in an `except` block. An exception group,
+    as anyio's task groups raise, is transient when every exception in it
+    is, so one bug among dropped connections still reads as a fault."""
     seen: set[int] = set()
     link: BaseException | None = exc
     while link is not None and id(link) not in seen:
+        if isinstance(link, BaseExceptionGroup):
+            return all(_transient_fault(leaf) for leaf in link.exceptions)
         if _transient_link(link):
             return True
         seen.add(id(link))
@@ -305,13 +327,18 @@ def _transient_link(exc: BaseException) -> bool:
     """Whether `exc` alone is transient: a timeout, the session store's pool
     timeout among them (`sqlalchemy.exc.TimeoutError`, every pooled
     connection busy under load); a connection that failed or dropped, a
-    Postgres one included (`ConnectionError`), or one SQLAlchemy invalidated
-    as a disconnect (`DBAPIError.connection_invalidated`); a name lookup or
-    TLS failure; a transport error, httpx2's or aiohttp's connection or
-    payload error (the Gemini SDK's transport, under which a peer's reset
-    reads as `ClientPayloadError`); an HTTP or model answer of 429 or 5xx
-    after the client's retries; or an MCP call whose connection closed or
-    that timed out. Any other `OSError`, such as `FileNotFoundError`, and any
+    Postgres one included (`PostgresConnectionError`, or a server ending
+    the connection, `_POSTGRES_CONNECTION_ENDED`), or one SQLAlchemy
+    invalidated as a disconnect (`DBAPIError.connection_invalidated`); a
+    name lookup or TLS failure; a transport error, httpx2's, aiohttp's
+    connection or payload error (the Gemini SDK's transport, under which a
+    peer's reset reads as `ClientPayloadError`), or google-auth's while
+    fetching a token (a `RefreshError` raised from one is read by its
+    cause); an HTTP or model answer of 429 or 5xx after the client's
+    retries; or an MCP call whose connection closed or that timed out,
+    fastmcp's session ending under a call included (anyio's closed or
+    broken stream, under its "Server session was closed unexpectedly", or
+    `_FASTMCP_SESSION_ENDED`). Any other `OSError`, such as `FileNotFoundError`, and any
     other aiohttp error, such as `InvalidURL`, is a fault in this code, and
     any other MCP error an answer the server or this client got wrong, which
     a later turn meets again. Any other `DBAPIError` is read by the asyncpg
@@ -325,6 +352,8 @@ def _transient_link(exc: BaseException) -> bool:
         return exc.error.code in _TRANSIENT_MCP_CODES
     if isinstance(exc, sa_exc.DBAPIError):
         return exc.connection_invalidated
+    if type(exc) is RuntimeError:
+        return exc.args == (_FASTMCP_SESSION_ENDED,)
     return isinstance(
         exc,
         (
@@ -333,10 +362,14 @@ def _transient_link(exc: BaseException) -> bool:
             socket.gaierror,
             ssl.SSLError,
             asyncpg.PostgresConnectionError,
+            *_POSTGRES_CONNECTION_ENDED,
             sa_exc.TimeoutError,
             httpx2.TransportError,
             aiohttp.ClientConnectionError,
             aiohttp.ClientPayloadError,
+            google_auth_errors.TransportError,
+            anyio.ClosedResourceError,
+            anyio.BrokenResourceError,
         ),
     )
 
@@ -1326,10 +1359,10 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
 
 
 def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
-    """The planner's ask as the frame's one question, `q1`. Its
-    `adk_request_input` call args, which its tool accepted
-    (`planner.agent.ask_refusal`), are the question directly: `message`,
-    `candidates`, `options`, `recommended_spec_id` and `rationale`.
+    """The planner's ask as the frame's one question, `q1`. Its call's
+    arguments, which its tool accepted (`planner.agent.ask_refusal`) and
+    carries as its `RequestInput`'s `payload`, are the question directly:
+    `message`, `candidates`, `options`, `recommended_spec_id` and `rationale`.
     `options` are fixed choices that are no source, such as whether to add
     two datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
     only a pick of one, so they take no free text."""
@@ -1430,10 +1463,6 @@ class _Translator:
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
         self.paused = False
-        # The planner's asks, each call's args by its call id (the interrupt
-        # id), in call order, from its call event until its tool's answer
-        # refuses it (`_await_ask`) or the segment ends paused on it (`finish`).
-        self._asks: dict[str, dict[str, Any]] = {}
         # Whether the planner's latest entry replans for a pick on the plan
         # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
         # resumes a stoppable replan.
@@ -1488,19 +1517,6 @@ class _Translator:
             return [*self._close_starting(), self._running_step(step_progress)]
         frames: list[Any] = list(self._drain_recorder())
         interrupt = _request_input_call(event)
-        if interrupt is not None and event.author == PLANNER_AGENT_NAME:
-            # ADK yields the planner's asks before their tool runs, so whether
-            # the run pauses on one is known only later (`_await_ask`). An ask
-            # the conversation already shows, pending its answer, is not held
-            # again. The other calls of the response open their lines.
-            shown = {held.adk_id for held in self._conversation.pending.values()}
-            for call in event.get_function_calls():
-                if call.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
-                    if call.id and call.id not in shown:
-                        self._asks[call.id] = dict(call.args or {})
-                    continue
-                frames.extend(self._planner_call_status(call.name or ""))
-            return frames
         if interrupt is not None:
             adk_id, args = interrupt
             frames.extend(self._close_status())
@@ -2067,8 +2083,9 @@ class _Translator:
         # The workflow's own `ask` node raises a `RequestInput` whose `payload`
         # carries one to three `questions`, each with its `candidates`. A
         # lone question is dismissed with the whole pause. Each of several
-        # may be left to the agent instead. The planner's `adk_request_input`
-        # call asks one question (`_planner_question`).
+        # may be left to the agent instead. The planner node's pause on the
+        # planner's ask carries the ask call's arguments as `payload`, one
+        # question (`_planner_question`).
         asked = payload.get("questions")
         if asked:
             several = len(asked) > 1
@@ -2091,7 +2108,7 @@ class _Translator:
             skippable = not several
             pick_replan = False
         else:
-            questions = [_planner_question(args)]
+            questions = [_planner_question(payload)]
             skippable = True
             pick_replan = self._pick_replan
         frame = ElicitationRequest(
@@ -2193,7 +2210,6 @@ class _Translator:
         # queued progress after pausing.
         if self.paused:
             return []
-        self._await_ask(event)
         status = (
             event.custom_metadata.get(ORCHESTRATOR_STATUS_KEY) if event.custom_metadata else None
         )
@@ -2525,23 +2541,6 @@ class _Translator:
             },
         )
 
-    def _await_ask(self, event: Event) -> None:
-        """Drop each held ask `event` answers: the tool refused it, and the
-        run goes on with the refusal. An answer drops only the ask whose call
-        id it carries.
-
-        An ask the tool accepts gets no answer. ADK still runs the other calls
-        of its model response and may call the model again on their answers,
-        all translated as they come, and that model may ask again, before the
-        planner's run stops paused on the accepted ask. A run ends without
-        raising, so with `finish`, only by finishing or by pausing, and it
-        cannot finish with an ask open: the planner node passes the pause on
-        (`harness.graph.planning`). A run that raises, such as a planner that
-        runs past its event bound, ends the stream with no `finish`, and so
-        asks nothing."""
-        for response in event.get_function_responses():
-            self._asks.pop(response.id or "", None)
-
     def finish(self) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
@@ -2554,12 +2553,6 @@ class _Translator:
         (`ConversationState.close_turn`), so a later turn's model reads the
         answer alone, with no text of the code's own to restate."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
-        # The run ended paused on the planner's ask still held. The ask tool
-        # accepts at most one while another waits (`planner.agent._ask_waiting`),
-        # since ADK resumes the run only once every accepted ask has its answer.
-        asks, self._asks = self._asks, {}
-        for adk_id, args in asks.items():
-            frames.extend(self._interrupt_frames(adk_id, args))
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
             self._step(

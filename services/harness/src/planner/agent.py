@@ -47,9 +47,17 @@ import asyncio
 import copy
 import functools
 import logging
-from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from compiler.sources import block_group, party_class, readable_wire_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
@@ -64,7 +72,6 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from harness.scope_choices import (
@@ -78,7 +85,7 @@ from harness.scope_choices import (
     switch_entries,
 )
 from harness.tool_contracts import resolver_digest
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
+from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
 from submission.prices_choice import PRICES_OPTIONS
@@ -201,7 +208,7 @@ _PLANNING = (
     "A `time_window_defaulted` warning means the question gave no time "
     "text, and the resolver has already settled the answer's coverage. "
     "That is not a decision. Do not weigh candidate ranges, do not call "
-    "`adk_request_input` over it, and do not invent a specific range from "
+    f"`{PLANNER_ASK}` over it, and do not invent a specific range from "
     "memory.\n\n"
     "The period follows observed coverage. When a result carries a "
     "`window`, state the dataset requirement's `period` from it verbatim, "
@@ -485,7 +492,7 @@ _TRANSLATING = (
     "Where several are offered, settle it yourself when the question, the "
     "brief or the candidates' coverage make one the clear answer, a "
     "source the question or the brief names included. When the choice is "
-    "the user's to make, call `adk_request_input` with the candidates. "
+    f"the user's to make, call `{PLANNER_ASK}` with the candidates. "
     "Either way, record a `Decision` whose `options` name every candidate "
     "and whose rationale says why, resolved by `planner_default` when you "
     "chose and by `user` when the user's answer did. Pin that `spec_id` "
@@ -500,7 +507,7 @@ _TRANSLATING = (
     "requirement itself is what has to change.\n\n"
     "An `unsupported_ask` or `requirement_unmeetable` referral means the "
     "requirement cannot be met as stated. Tell the user what cannot be "
-    "done and ask, through `adk_request_input`, before you propose again, "
+    f"done and ask, through `{PLANNER_ASK}`, before you propose again, "
     "since what to change is theirs to choose.\n\n"
     "A `requirement_unmeetable` referral with `candidates` means the "
     "source the requirement states holds none of the data, and the "
@@ -614,7 +621,7 @@ def _execution_blocked(plan: Plan, call: PlannerCall) -> dict[str, object] | Non
 
     Checked in order: a rejected plan; a pending referral, which the planner settles by
     proposing again, after asking the user where the referral is of a kind in `USER_DECIDES`
-    (the refusal's `action` names `adk_request_input` until they answer, `propose_plan`
+    (the refusal's `action` names `PLANNER_ASK` until they answer, `propose_plan`
     otherwise); a plan not yet translated and compiled; and, last, an allowlist on `plan.status`
     itself. Only `PENDING_APPROVAL` may be declared ready, so a plan already `APPROVED`,
     `EXECUTING`, `COMPLETED` or `FAILED` is refused too, even though none of those carries a
@@ -638,9 +645,7 @@ def _execution_blocked(plan: Plan, call: PlannerCall) -> dict[str, object] | Non
             "and propose again before executing.",
             outcome=Outcome.REFUSED,
             detail={"referral": authored_answer(referral.model_dump(mode="json"), split_of(plan))},
-            action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME)
-            if asks_user
-            else PROPOSE_PLAN_PROPOSER.action(),
+            action=Action(call=PLANNER_ASK) if asks_user else PROPOSE_PLAN_PROPOSER.action(),
         )
     if plan.status is PlanStatus.DRAFT or plan.workflow is None:
         # A draft states the methodology; what runs arrives with
@@ -776,29 +781,28 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
     The only reader of ADK events in the planner. A message the user typed
     (`_user_message`) is one `message` step; the event's other parts are not
     read, and no producer in the harness sends a user-typed event that also
-    carries a function part. Every other event yields a step for each
-    `adk_request_input` call carrying an id, each response to one, paired
-    with the `args` of the nearest preceding call sharing its id, and each
-    other tool's response.
+    carries a function part. Every other event yields a `call` step for each
+    ask carrying an id, an `answer` step for each response to one, paired
+    with the `args` of the nearest preceding call sharing its id, and a
+    `response` step for each other tool's response.
 
-    How ADK records an ask: `create_request_input_event` builds the call with
-    `id=interrupt_id` and dumps the whole `RequestInput` into its `args`, so a
-    graph interrupt's own `payload` nests under `args["payload"]`, and
-    `create_request_input_response` builds the answer
-    with `FunctionResponse.id` set to that same `interrupt_id`;
-    `harness.studio`'s `/interrupt` route sends it. A long-running tool call
-    that pauses (returns `None`) never gets a response built for that call
-    (`_tool_caller.py`'s `is_long_running`-and-falsy rule), so nothing written
-    to the call's state from inside it survives the pause: there is no
-    response for the write's delta to ride, and no commit to trigger for a
-    plain mutation. The call itself, carrying its offered candidates in
-    `args`, is recorded regardless (it is the model's own turn, not the
-    tool's response), which is what `ctx.run_node`'s own pause-and-resume
-    depends on surviving (`harness.planner_seam`'s module docstring). The
-    matching response, once it exists, is built by ADK from the resumed
-    run's own input message.
+    An ask is the planner's own (`PLANNER_ASK`) or one of the workflow's
+    interrupts. The planner's call holds its question flat in `args`. A
+    refused one's answer is its tool's refusal. An accepted one's tool
+    answers `ASK_ACCEPTED`, which says nothing the user did and is not read,
+    and the graph's planner node pauses on it with a `RequestInput` under
+    the call's own id, so the user's answer to that interrupt is the
+    answer to the call, and the interrupt's own call repeats the question.
+    A workflow interrupt is a `RequestInput` its node yields:
+    `create_request_input_event` builds the call with `id=interrupt_id` and
+    dumps the whole `RequestInput` into its `args`, so the node's own
+    `payload` nests under `args["payload"]`, and
+    `create_request_input_response`, which `harness.studio`'s `/interrupt`
+    route sends, builds the answer with `FunctionResponse.id` set to that
+    same `interrupt_id`.
     """
     calls: dict[str, dict[str, Any]] = {}
+    planner_asks: set[str] = set()
     for event in events:
         if not (event.content and event.content.parts):
             continue
@@ -807,11 +811,11 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
             continue
         for part in event.content.parts:
             call = part.function_call
-            if (
-                call is not None
-                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-                and call.id is not None
-            ):
+            if call is not None and call.id is not None:
+                if call.name == PLANNER_ASK:
+                    planner_asks.add(call.id)
+                elif call.name != REQUEST_INPUT_FUNCTION_CALL_NAME or call.id in planner_asks:
+                    continue
                 calls[call.id] = call.args or {}
                 yield Step("call", call.id, call.args or {})
                 continue
@@ -819,7 +823,9 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
             if response is None:
                 continue
             body = response.response or {}
-            if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
+            if response.name == PLANNER_ASK and body.get("outcome") == Outcome.OK.value:
+                continue
+            if response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
                 yield Step("answer", response.id, calls.get(response.id or ""), body)
             else:
                 yield Step("response", body=body, name=response.name)
@@ -1200,20 +1206,12 @@ async def read_scope(surface: ToolSurface, read: ScopeRead, *, state: SessionSta
     block = source.spec_block(read.spec_id) if source is not None else None
 
     def unservable(reason: str) -> SourceRead:
-        return lambda into: basis_unservable(
-            spec_id=read.spec_id,
-            option_ids=(),
-            requirement_id=read.requirement_id,
-            step_id=read.step_id,
-            reason=reason,
-            record=lambda operation: record_unsupported(into, operation),
-            proposer=PROPOSE_PLAN_PROPOSER,
-        )
+        return lambda into: _scope_unservable(read, reason, state=into)
 
     if block is None:
         return unservable(f"{read.requirement_id!r}'s dataset has no block on record")
     try:
-        found = await read_found_scope(surface, read.spec_id, block)
+        found = await read_found_scope(surface, read.spec_id, state=state)
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
             return _refusing(_scope_not_read(read, str(exc)))
@@ -1226,6 +1224,21 @@ async def read_scope(surface: ToolSurface, read: ScopeRead, *, state: SessionSta
             f"Search does not say how {read.requirement_id!r}'s dataset is counted: {exc}"
         )
     return lambda into: save_found_sources(into, found)
+
+
+def _scope_unservable(read: ScopeRead, reason: str, *, state: SessionState) -> dict[str, object]:
+    """Record in `state` and return the `OPERATION_UNSUPPORTED` problem for
+    `read`'s input, whose scope Search does not state, so it cannot be counted
+    as its calculation's other inputs are. `reason` says why, as a clause."""
+    return basis_unservable(
+        spec_id=read.spec_id,
+        option_ids=(),
+        requirement_id=read.requirement_id,
+        step_id=read.step_id,
+        reason=reason,
+        record=lambda operation: record_unsupported(state, operation),
+        proposer=PROPOSE_PLAN_PROPOSER,
+    )
 
 
 async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
@@ -1774,8 +1787,9 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
     one compile (`BASES_UNALIGNED`, `compile_on_basis`), and a declared
     whole needs its part compiled with the axis left open (`compile_whole`).
     An input pinned to a candidate Search offered with no scope choices needs
-    them read first (`SCOPE_UNREAD`, `read_scope`), once a call, so a
-    refusal naming a pin already read is answered as it stands;
+    them read first (`SCOPE_UNREAD`, `read_scope`), once a pin, however many
+    inputs pin it, and once a call: a refusal naming a pin already read
+    answers `OPERATION_UNSUPPORTED`, since Search's answer left it unread;
     a pin already compiled on a set of options, or a whole already compiled,
     is asked for once, so a refusal naming one
     is answered as it stands, and inputs sharing a pin and a set of options
@@ -1815,15 +1829,23 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
             continue
         reads = scopes_wanted(result)
         if reads:
-            # A pin is read once a call, so a read that left it unread is answered.
-            refused = (
-                result
-                if any(item.spec_id in scopes_read for item in reads)
-                else await _held_in_order(
-                    (read_scope(surface, item, state=state) for item in reads), state=state
+            # A pin is read once a call: Search answered a read that left it
+            # unread, and will answer it so again.
+            again = next((item for item in reads if item.spec_id in scopes_read), None)
+            if again is not None:
+                return _scope_unservable(
+                    again,
+                    f"Search's answer does not say how {again.requirement_id!r}'s dataset "
+                    "is counted",
+                    state=state,
                 )
+            by_pin: dict[str, ScopeRead] = {}
+            for item in reads:
+                by_pin.setdefault(item.spec_id, item)
+            refused = await _held_in_order(
+                (read_scope(surface, item, state=state) for item in by_pin.values()), state=state
             )
-            scopes_read.update(item.spec_id for item in reads)
+            scopes_read.update(by_pin)
             if refused is not None:
                 return refused
             continue
@@ -1884,8 +1906,9 @@ def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
 
     ADK hands the model's arguments over unchecked. A refusal answers the
     call at once, so the run goes on and Studio asks nothing; an ask this
-    accepts gets no answer and pauses the run, and Studio builds its question
-    from these arguments (`harness.studio_translate._planner_question`).
+    accepts ends the planner's run, and the graph's planner node pauses on
+    it with these arguments as its `RequestInput`'s `payload`, from which
+    Studio builds its question (`harness.studio_translate._planner_question`).
     `message` is the question as text. Each of `candidates` is a
     mapping, read by its `spec_id` and `label`. `options` are
     `COMBINATION_OPTIONS` or `PRICES_OPTIONS` exactly, as a refusal's action
@@ -1960,7 +1983,7 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
         return problem(
             ProblemCode.INVALID_ARGUMENTS,
             "These candidates come from more than one reading in `ambiguous_entities`. Ask "
-            "about one reading per `adk_request_input` call, and the next once the user has "
+            f"about one reading per `{PLANNER_ASK}` call, and the next once the user has "
             "answered.",
             outcome=Outcome.INVALID_INPUT,
         )
@@ -1974,78 +1997,131 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
     return None
 
 
-def _ask_waiting(tool_context: ToolContext) -> dict[str, object] | None:
-    """The refusal for an ask made while another planner ask may be waiting, or `None`.
+def _ask_beside_ask(tool_context: ToolContext) -> dict[str, object] | None:
+    """The refusal for an ask made after another in the same model response, or `None`.
 
-    An ask the tool accepts gets no response, and ADK resumes the run only
-    once every such ask has its answer, so the tool lets at most one through.
-    `tool_context.session.events` holds this call's own model response by the
-    time its tool runs. An ask is refused when an earlier `adk_request_input`
-    call sits in the same response, since the calls of one response run
-    concurrently and none sees whether another was accepted. It is also
-    refused when an earlier event of the planner's branch in this invocation
-    holds one that no function response in the session answers: a refused
-    ask's response arrives with its response's other answers, before the
-    model is called again, so such an ask is one the tool accepted.
+    The user answers one question at a time. The calls of one response run
+    concurrently, and an accepted ask ends the run before the model is
+    called again, so the only way two asks can wait together is two in one
+    response. The first is the one the response puts to the user.
+    `tool_context.session.events` holds the call's own model response by the
+    time its tool runs.
     """
     own = tool_context.function_call_id
-    events = tool_context.session.events
-    answered = {r.id for event in events for r in event.get_function_responses() if r.id}
-    waiting = False
-    for event in events:
-        if event.invocation_id != tool_context.invocation_id or event.branch != tool_context.branch:
-            continue
+    for event in reversed(tool_context.session.events):
         calls = event.get_function_calls()
         ids = [call.id for call in calls]
-        if own in ids:
-            waiting = any(
-                call.name == REQUEST_INPUT_FUNCTION_CALL_NAME for call in calls[: ids.index(own)]
-            )
-            break
-        waiting = any(
-            call.name == REQUEST_INPUT_FUNCTION_CALL_NAME and call.id not in answered
-            for call in calls
+        if own not in ids:
+            continue
+        if not any(call.name == PLANNER_ASK for call in calls[: ids.index(own)]):
+            return None
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            f"This response already calls `{PLANNER_ASK}`, and the user answers one "
+            "question at a time. Ask this one once that answer arrives, if it still "
+            "needs asking.",
+            outcome=Outcome.INVALID_INPUT,
         )
-        if waiting:
-            break
-    if not waiting:
-        return None
-    return problem(
-        ProblemCode.INVALID_ARGUMENTS,
-        "Another `adk_request_input` call already waits for the user's answer, and the "
-        "user answers one question at a time. Ask this one once that answer arrives, if "
-        "it still needs asking.",
-        outcome=Outcome.INVALID_INPUT,
-    )
+    return None
 
 
-class _AskTool(LongRunningFunctionTool):
-    """The planner's ask, refusing a call made while another ask may be waiting
-    (`_ask_waiting`) or that would not bind its answer to one entity reading.
+# Where an accepted ask waits for the graph's planner node to put it to the
+# user (`AcceptedAsk`). `harness.planner_seam.PlannerSeam` reads it once the
+# planner's run ends and clears it when the next entry starts.
+PENDING_ASK_STATE_KEY = "planner:pending_ask"
 
-    The function and so the declaration the model reads are `ask_user`'s. The
-    session's events decide whether another ask waits, and the referral
-    pending in the call's session what the ask may offer
-    (`_entity_ask_unbound`), which the function, holding no `ToolContext`,
-    cannot read.
+
+class AcceptedAsk(NamedTuple):
+    """An ask the planner made and its tool accepted, waiting for the user.
+
+    `call_id` is the id of the planner's `PLANNER_ASK` call, which the graph's
+    planner node pauses on as the interrupt id, so the user's answer carries
+    it. `args` are the call's arguments, the question as Studio shows it
+    (`harness.studio_translate._planner_question`).
     """
 
-    @override
-    async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        waiting = _ask_waiting(tool_context)
-        if waiting is not None:
-            return waiting
-        state = tool_context.state
-        referral = load_referral(state)
-        plan = load_plan(state)
-        if referral is not None and plan is not None and plan.rolling_copies:
-            referral = Referral.model_validate(
-                authored_answer(referral.model_dump(mode="json"), split_of(plan))
-            )
-        refusal = _entity_ask_unbound(referral, args.get("candidates"))
-        if refusal is not None:
-            return refusal
-        return await super().run_async(args=args, tool_context=tool_context)
+    call_id: str
+    args: dict[str, Any]
+
+
+def load_pending_ask(state: SessionState) -> AcceptedAsk | None:
+    """The ask waiting for the user, or `None`."""
+    held = state.get(PENDING_ASK_STATE_KEY)
+    return AcceptedAsk(held["call_id"], dict(held["args"])) if isinstance(held, dict) else None
+
+
+def clear_pending_ask(state: SessionState) -> None:
+    """Forget the ask waiting for the user."""
+    state[PENDING_ASK_STATE_KEY] = None
+
+
+# What an accepted ask answers. Its call has a response, and the user's answer
+# reaches the planner in the brief of the entry that resumes it.
+ASK_ACCEPTED = ok(
+    status="asked",
+    message="The question is with the user. Their answer arrives with your next brief.",
+)
+
+
+def ask_user_question(
+    tool_context: ToolContext,
+    message: str,
+    candidates: list[dict[str, str]] = [],  # noqa: B006
+    options: list[dict[str, str]] = [],  # noqa: B006
+    recommended_spec_id: str | None = None,
+    rationale: str | None = None,
+) -> dict[str, object]:
+    """Ask the user a question a referral or a refusal leaves to them, ending your turn.
+
+    The user's answer arrives with your next brief, after the question it
+    answers, naming the candidate or option they picked, or in their own
+    words if they answered outside them. The choices offered come from the
+    referral's candidates, or from the `options` a refusal's action carries;
+    with neither, the question says what cannot be done and asks what to
+    change.
+
+    Args:
+        message: The question to show the user, naming what is
+            ambiguous and, briefly, what each candidate is, in plain
+            words: never a requirement id, spec_id or code.
+        candidates: The referral's own candidates, each
+            `{"spec_id": ..., "label": ...}` -- `label` is the
+            candidate's own `sentence`, not invented text. Omit it for
+            a referral that carries none.
+        options: The `options` a refusal's action carries, unchanged.
+            Omit it otherwise.
+        recommended_spec_id: The candidate you favour, when you favour
+            one -- must name one of `candidates`.
+        rationale: Why you favour it, for the user to read, when
+            `recommended_spec_id` is given.
+    """
+    args: dict[str, Any] = {
+        "message": message,
+        "candidates": candidates,
+        "options": options,
+        "recommended_spec_id": recommended_spec_id,
+        "rationale": rationale,
+    }
+    refusal = ask_refusal(args) or _ask_beside_ask(tool_context)
+    if refusal is not None:
+        return refusal
+    state = tool_context.state
+    referral = load_referral(state)
+    plan = load_plan(state)
+    if referral is not None and plan is not None and plan.rolling_copies:
+        referral = Referral.model_validate(
+            authored_answer(referral.model_dump(mode="json"), split_of(plan))
+        )
+    refusal = _entity_ask_unbound(referral, candidates)
+    if refusal is not None:
+        return refusal
+    call_id = tool_context.function_call_id
+    assert call_id is not None, "ADK gives every function call an id"
+    state[PENDING_ASK_STATE_KEY] = {"call_id": call_id, "args": args}
+    # The run ends on this response, as on a plan declared ready
+    # (`end_run_when_ready`), once the calls made beside it have answered.
+    tool_context.actions.skip_summarization = True
+    return dict(ASK_ACCEPTED)
 
 
 def build_planner_tools(
@@ -2080,56 +2156,6 @@ def build_planner_tools(
     user's own words in every entry, so `propose_plan`'s `across_years` may
     name a step in any of them.
     """
-
-    # Named `ask_user` here, for readability, but renamed below (once
-    # defined) to `adk_request_input` -- the function-call name ADK's own
-    # `google.adk.tools.request_input` uses for exactly this pausing shape
-    # (`REQUEST_INPUT_FUNCTION_CALL_NAME`), reused rather than duplicated so
-    # `harness.studio_translate._request_input_call` recognises this pause
-    # the same way it already recognises the graph's own `ask`/`approve`
-    # interrupts, with no change to that recognition code. The model sees
-    # and calls this tool under that reused name, not `ask_user`, so the
-    # instruction above names it that way too.
-    def ask_user(
-        message: str,
-        candidates: list[dict[str, str]] = [],  # noqa: B006
-        options: list[dict[str, str]] = [],  # noqa: B006
-        recommended_spec_id: str | None = None,
-        rationale: str | None = None,
-    ) -> dict[str, object] | None:
-        """Ask the user a question a referral or a refusal leaves to them, pausing the turn.
-
-        Returns nothing here: the user's answer arrives as this call's own
-        response on your next turn, naming under `spec_id` the candidate or
-        option id they picked, or free text if they answered outside them.
-        The choices offered come from the referral's
-        candidates, or from the `options` a refusal's action carries; with
-        neither, the question says what cannot be done and asks what to change.
-
-        Args:
-            message: The question to show the user, naming what is
-                ambiguous and, briefly, what each candidate is, in plain
-                words: never a requirement id, spec_id or code.
-            candidates: The referral's own candidates, each
-                `{"spec_id": ..., "label": ...}` -- `label` is the
-                candidate's own `sentence`, not invented text. Omit it for
-                a referral that carries none.
-            options: The `options` a refusal's action carries, unchanged.
-                Omit it otherwise.
-            recommended_spec_id: The candidate you favour, when you favour
-                one -- must name one of `candidates`.
-            rationale: Why you favour it, for the user to read, when
-                `recommended_spec_id` is given.
-        """
-        return ask_refusal(
-            {
-                "message": message,
-                "candidates": candidates,
-                "options": options,
-                "recommended_spec_id": recommended_spec_id,
-                "rationale": rationale,
-            }
-        )
 
     # `= []` rather than `None`. ADK builds this tool's declaration from the
     # signature, and an optional list declared `list[X] | None` reaches the
@@ -2251,7 +2277,6 @@ def build_planner_tools(
             return result
         return end_run_when_ready({**result, "translation": await translate(call)}, call)
 
-    ask_user.__name__ = REQUEST_INPUT_FUNCTION_CALL_NAME
     proposing: Callable[..., Any] = propose_plan
     if translate is not None:
         proposing = propose_plan_translating
@@ -2261,7 +2286,7 @@ def build_planner_tools(
         _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS if question_fixed else _PROPOSE_PLAN_ARGUMENTS
     )
     return [
-        _AskTool(ask_user),
+        FunctionTool(ask_user_question),
         PlanTool(proposing, arguments=arguments),
         FunctionTool(reject_plan),
     ]

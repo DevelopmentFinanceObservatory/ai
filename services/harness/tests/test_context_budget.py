@@ -191,7 +191,7 @@ PLANNER_DECLARATIONS_TOTAL_CEILING = 42_000
 # the planner writes a plan from. The margin is 1.1%.
 PROPOSE_PLAN_DECLARATION_CEILING = 37_700
 
-# The smaller planner declarations at once: `adk_request_input`,
+# The smaller planner declarations at once: `ask_user_question`,
 # `get_skill_file`, `get_skill` and `reject_plan`, measured 4,031 together.
 MINOR_DECLARATIONS_TOTAL_CEILING = 5_070
 
@@ -785,7 +785,7 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
     `get_skill` answer past its own.
     """
     request = _request(
-        tool_names=["propose_plan", "adk_request_input", "reject_plan"],
+        tool_names=["propose_plan", "ask_user_question", "reject_plan"],
         texts=["t" * _INFLATED] * 3,
         seam=_INFLATED,
         skill=SKILL_PAGE_CEILING + 1,
@@ -988,7 +988,7 @@ def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
     past the ceiling), and requires the bound to report.
     """
     request = _request(
-        tool_names=["propose_plan", "adk_request_input", "reject_plan"],
+        tool_names=["propose_plan", "ask_user_question", "reject_plan"],
         texts=["t" * _INFLATED] * 3,
         seam=_INFLATED,
     )
