@@ -39,11 +39,17 @@ import asyncio
 import functools
 import json
 import logging
+import socket
+import ssl
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from http import HTTPStatus
+from typing import Any, NamedTuple, cast
 
+import aiohttp
+import asyncpg
+import httpx2
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
 from common.refusal import refusal_code
@@ -57,9 +63,13 @@ from compiler.surface import (
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
+from executor.classify import ExecutorCode
 from executor.outcomes import RefusalKind
 from executor.run import current_step_id
 from google.adk.events import Event
+from google.genai import errors as genai_errors
+from mcp import MCPError
+from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.agent import PROPOSE_PLAN
@@ -262,6 +272,75 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
     }
 
 
+# The MCP error codes of a call that did not complete: the session's
+# connection closed under it, or it ran past its deadline on a path
+# `mcp_client._call_tool` does not tag.
+_TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
+
+
+def _transient_fault(exc: BaseException) -> bool:
+    """Whether `exc`, raised with no refusal, or an exception it was raised
+    from (`__cause__`), is a fault a later turn may not meet. A wrapper such
+    as `executor.run.RunAbandonedError` keeps the class of the transport
+    error under it. An exception merely raised while another was handled is
+    its own fault, such as a bug in an `except` block."""
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        if _transient_link(link):
+            return True
+        seen.add(id(link))
+        link = link.__cause__
+    return False
+
+
+def _status_transient(status: int | None) -> bool:
+    """Whether an HTTP `status` says to try again later (a rate limit or a
+    server error). A 4xx other than 429 repeats for the same request."""
+    return status is not None and (status == HTTPStatus.TOO_MANY_REQUESTS or status >= 500)
+
+
+def _transient_link(exc: BaseException) -> bool:
+    """Whether `exc` alone is transient: a timeout; a connection that failed
+    or dropped, a Postgres one included (`ConnectionError`); a name lookup or
+    TLS failure; a transport error, httpx2's or aiohttp's connection or
+    payload error (the Gemini SDK's transport, under which a peer's reset
+    reads as `ClientPayloadError`); an HTTP or model answer of 429 or 5xx
+    after the client's retries; or an MCP call whose connection closed or
+    that timed out. Any other `OSError`, such as `FileNotFoundError`, and any
+    other aiohttp error, such as `InvalidURL`, is a fault in this code, and
+    any other MCP error an answer the server or this client got wrong, which
+    a later turn meets again."""
+    if isinstance(exc, genai_errors.APIError):
+        return _status_transient(exc.code)
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return _status_transient(exc.status)
+    if isinstance(exc, MCPError):
+        return exc.error.code in _TRANSIENT_MCP_CODES
+    return isinstance(
+        exc,
+        (
+            TimeoutError,
+            ConnectionError,
+            socket.gaierror,
+            ssl.SSLError,
+            asyncpg.PostgresConnectionError,
+            httpx2.TransportError,
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+        ),
+    )
+
+
+# What `_stream_fatal` reads for an exception that states no refusal and is no
+# `_transient_fault`: a fault of the system, such as a bug, which the same turn
+# meets again.
+_INTERNAL_FAULT: Mapping[str, Any] = {
+    "code": ExecutorCode.INTERNAL_ERROR.value,
+    "retry_mode": RetryMode.DO_NOT_RETRY.value,
+}
+
+
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
     """A stream-fatal error frame. A resolver refusal keeps its real code
     when the wire grammar knows it (e.g. `capability_unavailable` on an
@@ -274,18 +353,20 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     `executor.outcomes.RefusalKind.SURFACE_CHANGED`, which fires when a
     plan step's tool has changed since the plan was compiled, still
     honours the refusal's own `retry_mode` rather than defaulting to a
-    transient one: `retry_after_delay` (or no `retry_mode` at all, for an
-    exception that carries no refusal shape) becomes `transient_unavailable`
-    as before, anything else becomes `capability_unavailable`, the closest
-    true member, so a do-not-retry refusal is never told to the user as a
-    reason to retry.
+    transient one: `retry_after_delay` (or no `retry_mode` at all, for a
+    `_transient_fault`) becomes `transient_unavailable`, anything else
+    becomes `capability_unavailable`, the closest true member, so a
+    do-not-retry refusal is never told to the user as a reason to retry.
+
+    An exception that states no refusal reads as `internal_error`, not to be
+    retried, unless it is a `_transient_fault`, which reads as `raised` and
+    `retry_after_delay`.
 
     The frame's `detail`, which Studio shows as the reply, is the sentence
-    for the refusal's own code, or `raised` for an exception that states
-    none, under the retry mode the frame states (`failure_detail`). The
-    refusal's `fix.detail` and `message` are written for a model or an
-    operator and stay in the log the caller writes, as the turn's trace id
-    does.
+    for the refusal's own code under the retry mode the frame states
+    (`failure_detail`). The refusal's `fix.detail` and `message` are written
+    for a model or an operator and stay in the log the caller writes, as the
+    turn's trace id does.
     """
     timeout_tool = getattr(exc, "timeout_tool", None)
     if timeout_tool is not None:
@@ -293,7 +374,9 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
         refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key)
         wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
     else:
-        refusal = getattr(exc, "refusal", None) or {}
+        refusal = getattr(exc, "refusal", None) or (
+            {} if _transient_fault(exc) else _INTERNAL_FAULT
+        )
         wire_code = refusal.get("code")
     try:
         error_code = ErrorCode(wire_code)
@@ -323,6 +406,13 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
             retry_after_seconds=30 if retry is RetryMode.RETRY_AFTER_DELAY else None,
         ),
     )
+
+
+class _HeldAsk(NamedTuple):
+    """The planner's ask a `_Translator` holds: its interrupt id and its call args."""
+
+    adk_id: str
+    args: dict[str, Any]
 
 
 @dataclass
@@ -1235,7 +1325,8 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
 
 def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
     """The planner's ask as the frame's one question, `q1`. Its
-    `adk_request_input` call args are the question directly: `message`,
+    `adk_request_input` call args, which its tool accepted
+    (`planner.agent.ask_refusal`), are the question directly: `message`,
     `candidates`, `options`, `recommended_spec_id` and `rationale`.
     `options` are fixed choices that are no source, such as whether to add
     two datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
@@ -1337,6 +1428,9 @@ class _Translator:
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
         self.paused = False
+        # The planner's ask, from its call event until its tool's answer
+        # refuses it (`_await_ask`) or the segment ends paused on it (`finish`).
+        self._ask: _HeldAsk | None = None
         # Whether the planner's latest entry replans for a pick on the plan
         # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
         # resumes a stoppable replan.
@@ -1391,6 +1485,17 @@ class _Translator:
             return [*self._close_starting(), self._running_step(step_progress)]
         frames: list[Any] = list(self._drain_recorder())
         interrupt = _request_input_call(event)
+        if interrupt is not None and event.author == PLANNER_AGENT_NAME:
+            # ADK yields the planner's ask before its tool runs, so whether
+            # the run pauses on it is known only later (`_await_ask`). An ask
+            # the conversation already shows, pending its answer, is not held
+            # again. The other calls of the response open their lines.
+            adk_id, args = interrupt
+            if not any(held.adk_id == adk_id for held in self._conversation.pending.values()):
+                self._ask = _HeldAsk(adk_id, args)
+            for call in event.get_function_calls():
+                frames.extend(self._planner_call_status(call.name or ""))
+            return frames
         if interrupt is not None:
             adk_id, args = interrupt
             frames.extend(self._close_status())
@@ -2083,6 +2188,7 @@ class _Translator:
         # queued progress after pausing.
         if self.paused:
             return []
+        self._await_ask(event)
         status = (
             event.custom_metadata.get(ORCHESTRATOR_STATUS_KEY) if event.custom_metadata else None
         )
@@ -2414,6 +2520,23 @@ class _Translator:
             },
         )
 
+    def _await_ask(self, event: Event) -> None:
+        """Drop the held ask when `event` answers it: the tool refused it,
+        and the run goes on with the refusal.
+
+        An ask the tool accepts gets no answer. ADK still runs the other calls
+        of its model response and may call the model again on their answers,
+        all translated as they come, before the planner's run stops paused on
+        the ask. A run ends without raising, so with `finish`, only by
+        finishing or by pausing, and it cannot finish with the ask open: the
+        planner node passes the pause on (`harness.graph.planning`). A run
+        that raises, such as a planner that runs past its event bound, ends
+        the stream with no `finish`, and so asks nothing."""
+        if self._ask is not None and any(
+            response.id == self._ask.adk_id for response in event.get_function_responses()
+        ):
+            self._ask = None
+
     def finish(self) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
@@ -2426,6 +2549,10 @@ class _Translator:
         (`ConversationState.close_turn`), so a later turn's model reads the
         answer alone, with no text of the code's own to restate."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
+        if self._ask is not None:
+            # The run ended paused on the planner's ask.
+            ask, self._ask = self._ask, None
+            frames.extend(self._interrupt_frames(ask.adk_id, ask.args))
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
             self._step(

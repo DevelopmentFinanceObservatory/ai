@@ -47,6 +47,7 @@ from planner.plan import (
     SessionState,
     UnsupportedOperation,
     decision_pick,
+    keep_found_sources,
     load_plan,
     pin_sources,
     record_optional_decline,
@@ -689,6 +690,12 @@ class CallSession:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
         save_plan(state, admission.plan)
+        keep_found_sources(
+            state,
+            admission.plan,
+            alignments=admission.alignments,
+            windowed_pins=admission.windowed_pins or (),
+        )
         save_plan_rounds(state, admission.rounds)
         # A new proposal supersedes whatever the translator referred back.
         clear_referral(state)

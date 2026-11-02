@@ -1478,6 +1478,7 @@ name = "harness"
 version = "0.1.0"
 source = { editable = "services/harness" }
 dependencies = [
+    { name = "aiohttp" },
     { name = "analysis-mcp" },
     { name = "asyncpg" },
     { name = "cloud-sql-python-connector", extra = ["asyncpg"] },
@@ -1507,6 +1508,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.14.3" },
     { name = "analysis-mcp", editable = "services/analysis-mcp" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "cloud-sql-python-connector", extras = ["asyncpg"], specifier = ">=1.15" },

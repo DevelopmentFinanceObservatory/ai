@@ -118,11 +118,13 @@ from compiler.shapes import BREAKDOWN_CODE_SYSTEMS
 from compiler.sources import (
     EXACT_COVERAGE,
     SOURCE_CODE_REFUSALS,
+    DiscoveryOutcome,
     DiscoveryStatus,
     PartWarning,
     bound_codes,
     outcome_from_envelope,
     pinned_stat_var,
+    readable_wire_groups,
     source_from_spec_block,
     stat_var_count,
     stat_var_count_is_floor,
@@ -136,8 +138,10 @@ from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import CodeNode
 from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness.scope_choices import PartScope, mark_planner_axes
 from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
+    SCOPE_UNREAD_BLOCK_KEY,
     AggregateRequirement,
     DatasetRequirement,
     Entity,
@@ -162,6 +166,7 @@ from planner.plan import (
     pin_sources,
     plan_revision,
     retrieves_period,
+    save_found_sources,
     save_plan,
     side_entities,
     split_of,
@@ -2358,6 +2363,7 @@ async def resolve_definition_at(
     identity: Mapping[str, Any],
     groups: Sequence[ResolvedGroup] = (),
     scope_entries: Sequence[Mapping[str, Any]] = (),
+    compile_scope: bool = False,
 ) -> tuple[Mapping[str, Any], datetime | None]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`, and the time that call was made.
 
@@ -2376,7 +2382,10 @@ async def resolve_definition_at(
     `scope_entries`, the explicit and carried entries of a part's stored
     scope choices (`data_mcp.scope.ScopeEntry` as JSON), are posted beside
     a part's base identity, and Search answers with the identity they
-    compile to, under that identity's own spec_id.
+    compile to, under that identity's own spec_id. `compile_scope` posts
+    them even when there are none, so Search states the identity's scope
+    choices on its answer, which it states on a resubmit only where entries
+    are posted.
 
     data-mcp stores the definition the part carries, on the service `surface`
     reaches, which is the one whose `get_data` retrieves it. The part is
@@ -2391,7 +2400,7 @@ async def resolve_definition_at(
     arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
     if groups:
         arguments["entity_groups"] = wire_groups(groups)
-    if scope_entries:
+    if scope_entries or compile_scope:
         arguments["scope_entries"] = [dict(entry) for entry in scope_entries]
 
     def call() -> Awaitable[ToolCallResult]:
@@ -3274,6 +3283,68 @@ def _ask_not_understood(
     )
 
 
+def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
+    """The block of each source `outcome` names, by spec_id, held so a pin of one
+    a referral offers reads its block as a shown one's (`planner.plan.held_sources`).
+
+    Discovery searches the planner's own words, so each axis a block's scope
+    choices settled other than by default is marked as the planner's
+    (`harness.scope_choices.mark_planner_axes`), as for a search the planner
+    makes itself. A block whose scope choices this release cannot read marks none.
+    A block of an answer that is not definite, a candidate or a nearest
+    series, is marked `SCOPE_UNREAD_BLOCK_KEY`, since Search states no scope
+    choices on one, whatever choices its series has.
+    """
+    unread = (
+        {SCOPE_UNREAD_BLOCK_KEY: True} if outcome.status is not DiscoveryStatus.DEFINITE else {}
+    )
+    found: dict[str, dict[str, Any]] = {}
+    for source, block in zip(outcome.sources, outcome.blocks, strict=True):
+        digest: dict[str, Any] = {"spec_block": {**block, **unread}}
+        raw = (block.get("resolved") or {}).get("scope_choices")
+        try:
+            scope = PartScope.from_search(raw) if raw is not None else None
+        except ValidationError:
+            scope = None
+        if scope is not None:
+            mark_planner_axes(
+                digest, (choice.axis for choice in scope.choices if choice.provenance != "default")
+            )
+        found[source.spec_id] = digest["spec_block"]
+    return found
+
+
+async def read_found_scope(
+    surface: ToolSurface, spec_id: str, block: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """The block Search answers for `spec_id`, a candidate found with no scope
+    choices (`SCOPE_UNREAD_BLOCK_KEY`), resolved from its own identity and the
+    sets its block names, as `found_blocks` holds it.
+
+    Search states a part's scope choices on a definite answer to a resubmit
+    posting scope entries, so the resolve posts none (`compile_scope`) and
+    says how the candidate counts its flow, or that it has no choice. One
+    call, made once a turn (`resolve_definition_at`).
+
+    Raises:
+        DefinitionNotResolvedError: If the call did not complete or Search
+            refused it.
+        PartNotResolvedError: If Search does not answer it as the one
+            dataset `spec_id` names (`resolved_spec`).
+        ValueError: If the block states no identity, or its named sets
+            are not readable.
+    """
+    identity = (block.get("definition") or {}).get("identity")
+    groups = readable_wire_groups(block)
+    if not isinstance(identity, Mapping) or groups is None:
+        raise ValueError(f"{spec_id}'s block states no identity and sets a resolve can post")
+    part, _ = await resolve_definition_at(
+        surface, spec_id=spec_id, identity=identity, groups=groups, compile_scope=True
+    )
+    resolved_spec(part, spec_id=spec_id)
+    return found_blocks(outcome_from_envelope({"parts": [part]}))
+
+
 def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[dict[str, object]]]:
     """Build `discover_source`, closing over `surface` for the call."""
 
@@ -3540,6 +3611,21 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
                     ),
                 },
             )
+
+        # A re-pin to a source a referral offers reads its block as a shown
+        # one's (`planner.plan.held_sources`). Every referral that offers a
+        # source by spec_id offers it from the latest answer a pin may be
+        # taken from (`DiscoveryLog.candidates_for`, `pinnable_for` and
+        # `stale_pin_sources`): a `source_ambiguous` one, a
+        # `pinned_source_not_found` one or a stale pin beside another
+        # referral, and a `source_mismatch` one for the source a `definite`
+        # answer named. So each such source's block is held while the pin
+        # is not honoured, and the next admission drops those the plan does
+        # not pin (`planner.plan.keep_found_sources`). A `no_data` answer's
+        # nearest series are offered with no spec_id to pin.
+        if not pin_honoured and honoured:
+            blocks = found_blocks(outcome)
+            save_found_sources(state, {s.spec_id: blocks[s.spec_id] for s in sources})
 
         fields: dict[str, object] = {
             "requirement_id": requirement_id,

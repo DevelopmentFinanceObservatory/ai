@@ -113,6 +113,7 @@ from planner.plan import (
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
+    SCOPE_UNREAD_BLOCK_KEY,
     AggregateRequirement,
     AlignedInput,
     AlignedPin,
@@ -493,13 +494,22 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             }
         )
     except ValidationError as exc:
-        shown = pin_sources(view.state)
-        readings = SourceReadings.of_shown(shown)
+        held = held_sources(view.state)
+        readings = SourceReadings.of_shown(held)
         return base_year_refusal(
             exc,
             proposal.evidence_requirements,
             choices=view.prices_chosen(),
-            parts=Parts.of_shown(shown, readings.get, readings.block),
+            parts=Parts.of_shown(
+                pin_sources(view.state),
+                readings.get,
+                readings.block,
+                pinned=[
+                    pin
+                    for raw in proposal.evidence_requirements or ()
+                    if isinstance(raw, dict) and isinstance(pin := raw.get("source_spec_id"), str)
+                ],
+            ),
             propose=proposer.call,
         ) or _invalid_data(exc, proposer)
     reads_user_words = reads_user_words or amendment_entry(view.state)
@@ -593,7 +603,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 pick,
                 _decisions_after(
                     previous,
-                    settle_decisions(patch.decisions, written),
+                    settle_decisions(_without_user_prices(patch.decisions), written),
                     removed=removed_decisions,
                 ),
                 written,
@@ -635,7 +645,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     wholes = {rid: pin for rid, pin in targets.items() if pin.whole_axis is not None}
     moved = {rid: pin for rid, pin in targets.items() if pin.whole_axis is None}
     settled, evidence_requirements = _without_replaced_whole_decisions(
-        settle_decisions(patch.decisions, aligned_after),
+        settle_decisions(_without_user_prices(patch.decisions), aligned_after),
         evidence_requirements,
         carried=previous.decisions if previous is not None else (),
         after=aligned_after,
@@ -888,6 +898,16 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         windowed_pins=tuple(copies) if copies or held_copies else None,
         alignments=tuple(entries.values()),
     )
+
+
+def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]:
+    """`drafts` less any under a slot of the prices the user chose (`PRICES_SLOT_PREFIX`).
+
+    Code alone writes those (`prices_decisions`). A draft there can only copy
+    the user's decision or change it, and none may change it, so the user's
+    decision stands as code derives or carries it, whatever a draft restates.
+    """
+    return [draft for draft in drafts if not draft.slot.startswith(PRICES_SLOT_PREFIX)]
 
 
 def _draft_unreferenced(
@@ -4319,6 +4339,34 @@ def unpinned_wanted(result: Mapping[str, object]) -> list[Unpinned]:
     return [Unpinned.model_validate(entry) for entry in detail.get("search") or ()]
 
 
+class ScopeRead(NamedTuple):
+    """One input of an aligning calculation pinned to a candidate whose scope
+    choices Search has not stated (`planner.plan.SCOPE_UNREAD_BLOCK_KEY`).
+
+    `spec_id` is the pin, `requirement_id` the dataset requirement pinning
+    it and `step_id` the calculation that aligns it.
+    """
+
+    spec_id: str
+    requirement_id: str
+    step_id: str
+
+
+def scopes_wanted(result: Mapping[str, object]) -> list[ScopeRead]:
+    """The pins a `SCOPE_UNREAD` refusal asks to read; empty for any other answer."""
+    if result.get("code") != ProblemCode.SCOPE_UNREAD.value:
+        return []
+    detail = cast("Mapping[str, Any]", result.get("detail") or {})
+    return [
+        ScopeRead(
+            spec_id=entry["spec_id"],
+            requirement_id=entry["requirement_id"],
+            step_id=entry["step_id"],
+        )
+        for entry in detail.get("read") or ()
+    ]
+
+
 class Realignment(NamedTuple):
     """One input a calculation needs compiled on another measure basis, provider scope, or both.
 
@@ -4973,6 +5021,9 @@ def _aligned_bases(
     if unpinned:
         return _basis_unknown(list(unpinned.values()))
     try:
+        unread = _scope_unread(steps, groups, by_axis, aligning, sources=sources)
+        if unread:
+            raise _Unservable(_scope_unread_problem(unread))
         targets = _alignment_targets(
             steps,
             groups,
@@ -4998,6 +5049,47 @@ def _aligned_bases(
     if itself is not None:
         return itself
     return _with_found(evidence_requirements, requirements, found, restated=moved.keys()), moved
+
+
+def _scope_unread(
+    steps: Sequence[EvidenceRequirement],
+    groups: Mapping[str, Sequence[_InputGroup]],
+    by_axis: Mapping[str, Mapping[str, _InputBasis]],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    sources: SourceReadings,
+) -> list[ScopeRead]:
+    """The read each input of an aligning calculation needs whose pin's block is a
+    found candidate's (`planner.plan.SCOPE_UNREAD_BLOCK_KEY`), in plan order.
+
+    Search states no scope choices on a candidate, so how the input is counted
+    is unknown, and left unread it would keep the basis its dataset counts it
+    on whatever its calculation's other inputs share. A calculation aligns when
+    an input under it carries a choice on an axis it reads on.
+    `planner.agent.read_scope` makes each read.
+    """
+    pins = {
+        requirement.id: requirement.source_spec_id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
+    }
+    unread: dict[str, ScopeRead] = {}
+    for step in steps:
+        under = set().union(*(group.members for group in groups[step.id]))
+        if not any(
+            bases.keys() & under for axis, bases in by_axis.items() if _reads_on(step, axis)
+        ):
+            continue
+        for requirement_id in sorted(under & pins.keys()):
+            block = sources.block(pins[requirement_id])
+            if block is not None and block.get(SCOPE_UNREAD_BLOCK_KEY):
+                unread.setdefault(
+                    requirement_id,
+                    ScopeRead(
+                        spec_id=pins[requirement_id], requirement_id=requirement_id, step_id=step.id
+                    ),
+                )
+    return [unread[r.id] for r in requirements if r.id in unread]
 
 
 def _share_of_itself(
@@ -7016,6 +7108,32 @@ def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
         "recorded, and could not be reached to do so; propose the plan again.",
         outcome=Outcome.REFUSED,
         detail={"search": [item.model_dump(mode="json") for item in unpinned]},
+    )
+
+
+def _scope_unread_problem(reads: Sequence[ScopeRead]) -> dict[str, object]:
+    """Return the `SCOPE_UNREAD` problem naming each candidate pin to read before alignment.
+
+    `planner.agent.with_source_reads` answers it by reading each
+    (`planner.agent.read_scope`) and proposing again, so the planner sees it
+    only where no tool surface reaches Search. `detail.requirement_id` names
+    the first input for the refusal's sentence (`harness.sentences`).
+    """
+    named = "; ".join(
+        f"{item.requirement_id!r}, an input of {item.step_id!r}, pins {item.spec_id}"
+        for item in reads
+    )
+    return problem(
+        ProblemCode.SCOPE_UNREAD,
+        f"A calculation's inputs must share one measure basis and provider scope, and Search "
+        f"offered these as candidates without saying how each is counted: {named}. Search is "
+        "asked for each before the plan is recorded, and could not be reached to do so; "
+        "propose the plan again.",
+        outcome=Outcome.REFUSED,
+        detail={
+            "requirement_id": reads[0].requirement_id,
+            "read": [item._asdict() for item in reads],
+        },
     )
 
 

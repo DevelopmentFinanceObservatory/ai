@@ -147,10 +147,11 @@ class Parts:
         unless it was fetched as another count of one (`PinSource.other_count_of`).
 
         A dataset a requirement pins (`pinned`) that the planner was not shown,
-        a pin compiled for another input that the planner pins directly
-        (`planner.plan.held_sources`), is a reading of its own too, its
-        measure read off the block `block_of` holds for it. So the user's
-        prices choice on that measure holds it."""
+        a pin compiled for another input that the planner pins directly, or a
+        source translation's discovery found that a referral offers in place
+        of a pin (`planner.plan.held_sources`), is a reading of its own too,
+        its measure read off the block `block_of` holds for it. So the
+        user's prices choice on that measure holds it."""
         compiled = [
             spec_id
             for spec_id in dict.fromkeys(pinned)

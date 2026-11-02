@@ -5833,7 +5833,8 @@ async def test_a_failed_turn_is_recorded_with_its_error() -> None:
     conversation = store.current(PRINCIPAL, CONVERSATION)
     (record,) = conversation.turns
     assert record["user"] == "q that dies"
-    assert record["error"] == "transient_unavailable"
+    # A surface that raises is a defect, which the same turn meets again.
+    assert record["error"] == "capability_unavailable"
 
 
 def test_the_conversation_digest_is_bounded() -> None:

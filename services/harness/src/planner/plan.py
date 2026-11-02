@@ -244,6 +244,19 @@ WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 # `planner.agent.with_source_reads` writes (`submission.service.save_aligned_pin`).
 ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 
+# The session-state slot holding the spec block of each source a referral
+# offers the planner in place of a pin (`translator.discovery.discover_source`),
+# or that a scope read answered (`planner.agent.read_scope`), by spec_id.
+# `held_sources` reads it. Recording a plan drops each block it
+# cannot pin (`keep_found_sources`).
+FOUND_SOURCES_STATE_KEY = "planner:found_sources"
+
+# The key a found source's block carries when Search served it as a candidate
+# or a nearest series, with no `resolved.scope_choices`: Search states a part's
+# scope choices on a definite answer alone, so whether it has any is unknown
+# until its identity is resolved (`submission.service._aligned_bases`).
+SCOPE_UNREAD_BLOCK_KEY = "_scope_unread"
+
 # The session-state slot holding an `AlignedInput` for every dataset
 # requirement of the plan `planner.agent.propose_plan` last recorded that
 # admission pinned to a compiled pin (`AlignedPin`) in place of the pin it
@@ -6374,14 +6387,73 @@ def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
     return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
 
 
+def found_sources(state: SessionState) -> dict[str, dict[str, Any]]:
+    """The spec blocks `FOUND_SOURCES_STATE_KEY` holds, by spec_id; empty when unset."""
+    return dict(state.get(FOUND_SOURCES_STATE_KEY) or {})
+
+
+def save_found_sources(state: SessionState, blocks: Mapping[str, Mapping[str, Any]]) -> None:
+    """Hold `blocks`, by spec_id, beside the found sources' blocks already held.
+
+    A block marked `SCOPE_UNREAD_BLOCK_KEY` leaves one held for the same
+    spec_id that states its scope choices standing.
+    """
+    held = found_sources(state)
+    state[FOUND_SOURCES_STATE_KEY] = {
+        **held,
+        **{
+            spec_id: dict(block)
+            for spec_id, block in blocks.items()
+            if not (
+                block.get(SCOPE_UNREAD_BLOCK_KEY)
+                and spec_id in held
+                and not held[spec_id].get(SCOPE_UNREAD_BLOCK_KEY)
+            )
+        },
+    }
+
+
+def keep_found_sources(
+    state: SessionState,
+    plan: Plan,
+    *,
+    alignments: Iterable[AlignedInput],
+    windowed_pins: Iterable[WindowedPin],
+) -> None:
+    """Drop each found source's block `plan` cannot pin, as it is recorded.
+
+    Kept are the block of each requirement's pin, of the pin each compile in
+    `alignments` was compiled from (`AlignedInput.origin`), and of the pin
+    each copy in `windowed_pins` copies (`WindowedPin.windowed_from`).
+    Recording a plan clears the referral, so none offers another, and
+    translation of `plan` holds the blocks its referral offers after this.
+    Writes nothing when nothing drops.
+    """
+    held = found_sources(state)
+    pinned = {
+        *(
+            requirement.source_spec_id
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+        ),
+        *(alignment.origin for alignment in alignments),
+        *(pin.windowed_from for pin in windowed_pins),
+    }
+    kept = {spec_id: block for spec_id, block in held.items() if spec_id in pinned}
+    if len(kept) < len(held):
+        state[FOUND_SOURCES_STATE_KEY] = kept
+
+
 def held_sources(state: SessionState) -> dict[str, PinSource]:
     """The spec block on record for each spec_id `state` holds one for: the datasets
     the planner was shown (`pin_sources`), then each compiled pin's
-    (`AlignedPin.block`) the planner was not shown.
+    (`AlignedPin.block`) the planner was not shown, then each source
+    translation's discovery found (`found_sources`) that neither holds.
 
     Read for what a spec_id is, its identity, years and codes, which every
-    holder of the spec_id shares. A compiled pin's entry states that block
-    alone, so nothing about how the pin was chosen is read from it.
+    holder of the spec_id shares. A compiled pin's or found source's entry
+    states that block alone, so nothing about how the pin was chosen is read
+    from it.
     """
     shown = pin_sources(state)
     compiled = {
@@ -6389,7 +6461,13 @@ def held_sources(state: SessionState) -> dict[str, PinSource]:
         for pin in aligned_pins(state)
         if pin.spec_id not in shown and (block := pin.block) is not None
     }
-    return {**compiled, **shown}
+    held = {**compiled, **shown}
+    found = {
+        spec_id: PinSource(block=block)
+        for spec_id, block in found_sources(state).items()
+        if spec_id not in held
+    }
+    return {**held, **found}
 
 
 class AlignedInput(StrictModel):

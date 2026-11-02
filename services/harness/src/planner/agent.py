@@ -88,6 +88,7 @@ from submission.service import (
     AlignedPin,
     Proposal,
     Realignment,
+    ScopeRead,
     SearchedPin,
     Unpinned,
     aligned_pins,
@@ -99,6 +100,7 @@ from submission.service import (
     realignments_wanted,
     save_aligned_pin,
     save_searched_pin,
+    scopes_wanted,
     share_whole_underivable,
     submit,
     unpinned_wanted,
@@ -113,6 +115,7 @@ from translator.discovery import (
     answered_once_at,
     call_within_entry,
     load_log,
+    read_found_scope,
     refusal_retryable,
     resolve_definition,
     resolve_definition_at,
@@ -157,6 +160,7 @@ from planner.plan import (
     plan_revision,
     record_spec_searched,
     record_unsupported,
+    save_found_sources,
     save_full_history,
     save_pin_sources,
     save_plan,
@@ -1178,6 +1182,52 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     return hold
 
 
+async def read_scope(surface: ToolSurface, read: ScopeRead, *, state: SessionState) -> SourceRead:
+    """Read how `read`'s pin, a candidate Search offered with no scope choices,
+    is counted, and hold the block Search answers in its place.
+
+    Resolves the pin's identity once (`translator.discovery.read_found_scope`)
+    and holds the definite block Search answers with its scope choices
+    (`planner.plan.save_found_sources`), so the next proposal aligns the input
+    as any other (`submission.service._aligned_bases`). It answers `None` once
+    the block is held, or the refusal the proposal answers:
+    `SURFACE_UNAVAILABLE` when Search did not answer and can later, and
+    `OPERATION_UNSUPPORTED` when it refuses the identity or answers with no
+    one dataset, since the input cannot then be counted as its calculation's
+    other inputs are.
+    """
+    source = held_sources(state).get(read.spec_id)
+    block = source.spec_block(read.spec_id) if source is not None else None
+
+    def unservable(reason: str) -> SourceRead:
+        return lambda into: basis_unservable(
+            spec_id=read.spec_id,
+            option_ids=(),
+            requirement_id=read.requirement_id,
+            step_id=read.step_id,
+            reason=reason,
+            record=lambda operation: record_unsupported(into, operation),
+            proposer=PROPOSE_PLAN_PROPOSER,
+        )
+
+    if block is None:
+        return unservable(f"{read.requirement_id!r}'s dataset has no block on record")
+    try:
+        found = await read_found_scope(surface, read.spec_id, block)
+    except DefinitionNotResolvedError as exc:
+        if exc.retryable:
+            return _refusing(_scope_not_read(read, str(exc)))
+        return unservable(
+            f"Search does not say how {read.requirement_id!r}'s dataset is counted "
+            f"({exc.code or 'refused'})"
+        )
+    except (PartNotResolvedError, ValueError) as exc:
+        return unservable(
+            f"Search does not say how {read.requirement_id!r}'s dataset is counted: {exc}"
+        )
+    return lambda into: save_found_sources(into, found)
+
+
 async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
     surface: ToolSurface,
     realignment: Realignment,
@@ -1674,6 +1724,20 @@ def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
     )
 
 
+def _scope_not_read(read: ScopeRead, cause: str) -> dict[str, object]:
+    """Return the `SURFACE_UNAVAILABLE` problem for a read of a candidate's scope that did not complete.
+
+    The same proposal can succeed later, so nothing in it needs changing.
+    """
+    return problem(
+        ProblemCode.SURFACE_UNAVAILABLE,
+        f"How {read.requirement_id!r} is counted could not be read from Search: {cause}. "
+        "The plan is sound and nothing was recorded; propose it again.",
+        outcome=Outcome.REFUSED,
+        detail={"read": read._asdict()},
+    )
+
+
 def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:
     """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis or provider scope that did not complete.
 
@@ -1689,7 +1753,7 @@ def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]
     )
 
 
-async def with_source_reads(
+async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a refusal asks for
     propose: Callable[[], dict[str, object]], *, state: SessionState, surface: ToolSurface
 ) -> dict[str, object]:
     """`propose`'s answer, once every read of a source it was refused for is made.
@@ -1708,7 +1772,10 @@ async def with_source_reads(
     counted on different measure bases or provider scopes needs each input
     it names compiled on their shared options, every option of one input in
     one compile (`BASES_UNALIGNED`, `compile_on_basis`), and a declared
-    whole needs its part compiled with the axis left open (`compile_whole`);
+    whole needs its part compiled with the axis left open (`compile_whole`).
+    An input pinned to a candidate Search offered with no scope choices needs
+    them read first (`SCOPE_UNREAD`, `read_scope`), once a call, so a
+    refusal naming a pin already read is answered as it stands;
     a pin already compiled on a set of options, or a whole already compiled,
     is asked for once, so a refusal naming one
     is answered as it stands, and inputs sharing a pin and a set of options
@@ -1722,6 +1789,7 @@ async def with_source_reads(
     its answer for the invocation (`pin_by_search`), so the next proposal
     searches only for what was refused.
     """
+    scopes_read: set[str] = set()
     while True:
         result = propose()
         pin = _first_year_wanted(result)
@@ -1742,6 +1810,20 @@ async def with_source_reads(
             refused = await _held_in_order(
                 (pin_by_search(surface, item) for item in unpinned), state=state
             )
+            if refused is not None:
+                return refused
+            continue
+        reads = scopes_wanted(result)
+        if reads:
+            # A pin is read once a call, so a read that left it unread is answered.
+            refused = (
+                result
+                if any(item.spec_id in scopes_read for item in reads)
+                else await _held_in_order(
+                    (read_scope(surface, item, state=state) for item in reads), state=state
+                )
+            )
+            scopes_read.update(item.spec_id for item in reads)
             if refused is not None:
                 return refused
             continue
@@ -1795,6 +1877,53 @@ def _alignment_key(
     options in another order is the same work.
     """
     return spec_id, tuple(sorted(set(option_ids))), whole_axis
+
+
+def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
+    """The refusal the planner's ask earns on its arguments alone, or `None` for one that pauses.
+
+    ADK hands the model's arguments over unchecked. A refusal answers the
+    call at once, so the run goes on and Studio asks nothing; an ask this
+    accepts gets no answer and pauses the run, and Studio builds its question
+    from these arguments (`harness.studio_translate._planner_question`).
+    `message` is the question as text. Each of `candidates` is a
+    mapping, read by its `spec_id` and `label`. `options` are
+    `COMBINATION_OPTIONS` or `PRICES_OPTIONS` exactly, as a refusal's action
+    carries them, offered without `candidates`. A `recommended_spec_id` names
+    one of `candidates`.
+    """
+    if not isinstance(args.get("message"), str):
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            "`message` must be the question to show the user, as text.",
+            outcome=Outcome.INVALID_INPUT,
+        )
+    candidates = args.get("candidates") or []
+    if not isinstance(candidates, list) or not all(isinstance(c, dict) for c in candidates):
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            '`candidates` must be a list of `{"spec_id": ..., "label": ...}`.',
+            outcome=Outcome.INVALID_INPUT,
+        )
+    options = args.get("options") or []
+    fixed = ([dict(o) for o in COMBINATION_OPTIONS], [dict(o) for o in PRICES_OPTIONS])
+    if options and (candidates or options not in fixed):
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            "`options` must be the ones a refusal's action carries, unchanged, "
+            "and offered without `candidates`. With no such refusal, leave `options` "
+            "out and ask in `message` alone.",
+            outcome=Outcome.INVALID_INPUT,
+        )
+    offered = [str(c["spec_id"]) for c in candidates if c.get("spec_id")]
+    recommended_spec_id = args.get("recommended_spec_id")
+    if recommended_spec_id and recommended_spec_id not in offered:
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            f"recommended_spec_id {recommended_spec_id!r} names no candidate in {offered!r}",
+            outcome=Outcome.INVALID_INPUT,
+        )
+    return None
 
 
 def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:
@@ -1941,23 +2070,15 @@ def build_planner_tools(
             rationale: Why you favour it, for the user to read, when
                 `recommended_spec_id` is given.
         """
-        del message, rationale  # carried through to the wire frame, not read back here
-        fixed = ([dict(o) for o in COMBINATION_OPTIONS], [dict(o) for o in PRICES_OPTIONS])
-        if options and (candidates or options not in fixed):
-            return problem(
-                ProblemCode.INVALID_ARGUMENTS,
-                "`options` must be the ones a refusal's action carries, unchanged, "
-                "and offered without `candidates`.",
-                outcome=Outcome.INVALID_INPUT,
-            )
-        offered = [str(c["spec_id"]) for c in candidates if c.get("spec_id")]
-        if recommended_spec_id and recommended_spec_id not in offered:
-            return problem(
-                ProblemCode.INVALID_ARGUMENTS,
-                f"recommended_spec_id {recommended_spec_id!r} names no candidate in {offered!r}",
-                outcome=Outcome.INVALID_INPUT,
-            )
-        return None
+        return ask_refusal(
+            {
+                "message": message,
+                "candidates": candidates,
+                "options": options,
+                "recommended_spec_id": recommended_spec_id,
+                "rationale": rationale,
+            }
+        )
 
     # `= []` rather than `None`. ADK builds this tool's declaration from the
     # signature, and an optional list declared `list[X] | None` reaches the
