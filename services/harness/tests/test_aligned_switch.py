@@ -13,10 +13,15 @@ import json
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from compiler.evidence import RetrievalEvidence, check_evidence
+from compiler.sources import source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurface
+from data_mcp.definition_store import canonicalize, spec_id_for
+from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.graph import switch as switch_module
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY
@@ -26,12 +31,15 @@ from harness.planner_seam import PlannerSeam
 from harness.settings import Settings
 from harness.turn_records import SearchReading
 from planner.plan import (
+    ASK_BREAKDOWNS_STATE_KEY,
     ASKS_STATE_KEY,
     AnswerMode,
     AskAnswer,
+    AskBreakdown,
     DatasetRequirement,
     Decision,
     Entity,
+    EvidenceRequirement,
     Period,
     PinSource,
     Plan,
@@ -39,22 +47,31 @@ from planner.plan import (
     RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
+    WholeOf,
+    aligned_pins,
     alignments,
     definitions_on_record,
+    identity_on_record,
     load_plan,
     period_window,
     pin_sources,
     save_pin_sources,
+    windowed_pins,
 )
+from planner.records import EvidenceIssueCode
 from planner.tool_results import Outcome
 from planner.workflow import ResolvedGroup, ToolId
+from submission.service import statement
 
 from .basis_alignment import (
     HEALTH,
     TOTAL,
     TOTAL_GROSS_BILATERAL,
     ProviderCompiles,
+    WholeCompiles,
+    basis_block,
     provider_block,
+    us_2023_block,
 )
 from .decision_drafts import drafts
 from .planner.test_agent import (
@@ -670,3 +687,481 @@ async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_com
     )
     held = pin_sources(ctx.state)[_TOTAL_GROSS_INCLUSIVE]
     assert (held.provenance_ref, held.asked_roles) == (None, ("donor",))
+
+
+class _Resolves:
+    """A tool surface answering each resubmit as Search does, recording each call's
+    arguments in `calls`; every other call is refused. The answer is the block, among
+    `blocks`, of the dataset whose base it posts from, with each posted option active
+    and explicit. Its identity is the base identity posted, its window kept, with a
+    slot binding each posted option, and its spec_id is the one that identity hashes
+    to, so its block puts it on record (`planner.plan.shown_identity`)."""
+
+    def __init__(self, *blocks: Mapping[str, Any]) -> None:
+        self.blocks = {b["resolved"]["scope_choices"]["base"]["spec_id"]: b for b in blocks}
+        self.calls: list[Mapping[str, Any]] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        if tool.name != "resolve_definition" or "scope_entries" not in arguments:
+            return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
+        self.calls.append(arguments)
+        posted = {e["axis"]: e["option_id"] for e in arguments["scope_entries"]}
+        identity = json.loads(json.dumps(arguments["identity"]))
+        identity["slots"] = [
+            *identity["slots"],
+            *(
+                {"property": f"scope_{axis}", "binding": {"state": "value", "ref": option}}
+                for axis, option in sorted(posted.items())
+            ),
+        ]
+        spec_id = spec_id_for(canonicalize(identity))
+        block = json.loads(json.dumps(self.blocks[arguments["spec_id"]]))
+        block["spec_id"] = spec_id
+        block["definition"] = {**block["definition"], "identity": identity}
+        scope = block["resolved"]["scope_choices"]
+        scope["base"]["identity"] = arguments["identity"]
+        scope["compiled"] = {**scope["compiled"], "spec_id": spec_id, "identity": identity}
+        scope["entries"] = arguments["scope_entries"]
+        for choice in scope["choices"]:
+            if choice["axis"] in posted:
+                choice["active"], choice["provenance"] = posted[choice["axis"]], "explicit"
+        part = {"status": "definite", "spec": block}
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+@dataclass(frozen=True)
+class _ClosedShare:
+    """A share over one year whose inputs Search found over another window, and
+    the session that proposed it: `aligned` is the input admission compiled, through
+    `surface`, from the base identity Search gave."""
+
+    ctx: _FakeToolContext
+    surface: _Resolves | WholeCompiles
+    recorded: dict[str, _Recorded]
+    period: Period
+    aligned: str
+    requirements: tuple[EvidenceRequirement, ...]
+    question: str
+
+
+def _over_latest(*blocks: dict[str, Any]) -> dict[str, _Recorded]:
+    """Set each of `blocks`' base identity over the latest year, as Search answers a
+    question naming none, and return each base identity as the search recorded it."""
+    for block in blocks:
+        block["resolved"]["scope_choices"]["base"]["identity"]["requested_window"] = {
+            "kind": "latest"
+        }
+    return {
+        block["spec_id"]: _Recorded(block["resolved"]["scope_choices"]["base"]["identity"])
+        for block in blocks
+    }
+
+
+def _closed_share(kind: str) -> _ClosedShare:
+    """The closed share `kind` names. `provider-and-basis`: US bilateral health aid
+    over the US total, inclusive and in grant equivalents, both over the latest year
+    and read over 2024; alignment compiles the total gross and bilateral in one
+    resubmit. `basis`: US health aid counted gross over the total in grant
+    equivalents, compiled gross. `whole`: US health aid Search found over 2023, read
+    over 2022, as a share of its whole over every sector, compiled from it
+    (`planner.agent.compile_whole`)."""
+    ctx = _FakeToolContext()
+    if kind == "whole":
+        part = us_2023_block("health")
+        _show_blocks(ctx, part)
+        period = Period(start=2022, end=2022)
+        health = DatasetRequirement(
+            id="health",
+            decision_ids=["measure"],
+            measure="US aid to health",
+            entities=[Entity(name="United States", role="donor")],
+            period=period,
+            source_spec_id=part["spec_id"],
+        )
+        whole = health.model_copy(
+            update={
+                "id": "whole",
+                "measure": "US total ODA",
+                "source_spec_id": None,
+                "whole_of": WholeOf(part="health", axis="sector"),
+            }
+        )
+        return _ClosedShare(
+            ctx=ctx,
+            surface=WholeCompiles(),
+            recorded={part["spec_id"]: _Recorded(part["definition"]["identity"])},
+            period=period,
+            aligned="whole",
+            requirements=(health, whole, _share_of("whole")),
+            question="What share of US aid went to health in 2022?",
+        )
+    if kind == "basis":
+        health = basis_block(HEALTH, narrow=True, active="measure_basis:gross")
+        total = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
+    else:
+        health = provider_block(
+            HEALTH, narrow=True, active="provider:bilateral", provenance="explicit"
+        )
+        total = provider_block(
+            TOTAL, narrow=False, active="provider:inclusive", basis="measure_basis:grant_equivalent"
+        )
+    recorded = _over_latest(health, total)
+    _show_blocks(ctx, health, total)
+    period = Period(start=2024, end=2024)
+
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return _us_dataset(requirement_id, measure, pin).model_copy(update={"period": period})
+
+    return _ClosedShare(
+        ctx=ctx,
+        surface=_Resolves(health, total),
+        recorded=recorded,
+        period=period,
+        aligned="total",
+        requirements=(
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total ODA", TOTAL),
+            _share_of("total"),
+        ),
+        question="What share of US bilateral aid goes to health in 2024?",
+    )
+
+
+def _share_of(denominator: str) -> ShareOfRequirement:
+    """Health's share of `denominator`."""
+    return ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="health"),
+        denominator=RequirementSide(input_id=denominator),
+    )
+
+
+async def _propose(
+    share: _ClosedShare, decision: DecisionFactory, *, amends: Plan | None = None
+) -> Plan:
+    """Propose `share`'s requirements, as an amendment of `amends` when given, with
+    its searches' definitions on record, and return the plan admission recorded."""
+    share.ctx.state[ASKS_STATE_KEY] = [share.question]
+    propose = _tools_reading(cast(ToolSurface, share.surface))["propose_plan"].func
+    stated: dict[str, Any] = (
+        {"amends_version": amends.version}
+        if amends is not None
+        else {
+            "question": share.question,
+            "answer_mode": AnswerMode.COMPUTED,
+            "decisions": drafts([decision()]),
+        }
+    )
+    with definitions_on_record(share.recorded):
+        result = await propose(
+            **stated,
+            answered=[AskAnswer(ask=0, outputs=("share",))],
+            evidence_requirements=list(share.requirements),
+            tool_context=share.ctx,
+        )
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(share.ctx.state)
+    assert plan is not None
+    return plan
+
+
+def _dataset_pins(plan: Plan) -> dict[str, str | None]:
+    """Each dataset requirement of `plan` with its pin."""
+    return {
+        r.id: r.source_spec_id
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    }
+
+
+@pytest.mark.parametrize("kind", ["provider-and-basis", "basis", "whole"])
+async def test_an_aligned_input_keeps_the_requirements_period_when_the_search_was_over_another(
+    decision: DecisionFactory, kind: str
+) -> None:
+    """Search found both inputs of a share over another window than the one the
+    share reads. Alignment compiles one input from the base identity Search gave,
+    whose window is Search's; the compile is held in the session and in no
+    search record. Every dataset the admitted plan pins is moved to a copy
+    over the share's period (`submission.service._window_pins`), and the compiled
+    input's copy is the compile's identity, its bindings kept, over that period."""
+    share = _closed_share(kind)
+
+    plan = await _propose(share, decision)
+
+    assert set(alignments(share.ctx.state)) == {share.aligned}
+    (compiled,) = share.surface.calls
+    window = period_window(share.period)
+    assert compiled["identity"]["requested_window"] != window
+    copies = windowed_pins(share.ctx.state)
+    pins = _dataset_pins(plan)
+    windows = {
+        rid: copies[pin].identity["requested_window"] if pin in copies else None
+        for rid, pin in pins.items()
+    }
+    assert windows == dict.fromkeys(pins, window)
+    (held,) = aligned_pins(share.ctx.state)
+    aligned_copy = copies[pins[share.aligned] or ""]
+    assert aligned_copy.windowed_from == held.spec_id
+    assert aligned_copy.identity == {
+        **held.block["definition"]["identity"],
+        "requested_window": window,
+    }
+
+
+async def test_a_restated_closed_share_keeps_its_compile_and_its_copies(
+    decision: DecisionFactory,
+) -> None:
+    """The planner restates the share the first proposal admitted, pinning the
+    datasets it was shown. The plan as the planner states it reads those pins;
+    admission takes the same compile with no second resubmit, pins the same copies
+    over 2024, and records the same copies and alignment."""
+    share = _closed_share("provider-and-basis")
+    first = await _propose(share, decision)
+    copies = windowed_pins(share.ctx.state)
+    aligned = alignments(share.ctx.state)
+    assert _dataset_pins(first)["total"] in copies
+
+    stated = statement(
+        first,
+        to_origin={copy.spec_id: copy.windowed_from for copy in copies.values()},
+        alignments=aligned,
+    )
+    again = await _propose(share, decision, amends=first)
+
+    assert _dataset_pins(stated) == {"health": HEALTH, "total": TOTAL}
+    assert len(share.surface.calls) == 1
+    assert again.version > first.version
+    assert _dataset_pins(again) == _dataset_pins(first)
+    assert windowed_pins(share.ctx.state) == copies
+    assert alignments(share.ctx.state) == aligned
+
+
+async def test_a_switch_on_a_closed_share_moves_both_inputs_to_copies_over_its_period(
+    decision: DecisionFactory,
+) -> None:
+    """The user switches health's provider row of the 2024 share to imputed
+    multilateral flows. The switch resubmits health from the dataset Search found
+    over the latest year, and the revision compiles the total gross again from the
+    total Search found, so neither has a search record. Both requirements the
+    revision admits read copies over 2024."""
+    share = _closed_share("provider-and-basis")
+    plan = await _propose(share, decision)
+    shown = pin_sources(share.ctx.state)
+    share.ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
+        _searched(shown[HEALTH].block),
+        _searched(shown[TOTAL].block),
+    ]
+    planner = _RevisingPlanner(cast(ToolSurface, share.surface))
+
+    with definitions_on_record(share.recorded), suppress(SwitchFailedError):
+        await switch_module._switched_plan(
+            cast(Any, share.ctx),
+            plan,
+            choice_id=choice_id(plan, _provider_row(plan, "health")),
+            option_id="provider:inclusive",
+            planner=cast(Any, planner),
+            surface=cast(ToolSurface, share.surface),
+        )
+
+    switched, recompiled = share.surface.calls[1:]
+    assert (switched["spec_id"], recompiled["spec_id"]) == (f"{HEALTH}_base", f"{TOTAL}_base")
+    (admitted,) = planner.admitted
+    copies = windowed_pins(share.ctx.state)
+    pins = _dataset_pins(admitted)
+    window = period_window(share.period)
+    assert {
+        rid: copies[pin].identity["requested_window"] if pin in copies else None
+        for rid, pin in pins.items()
+    } == dict.fromkeys(pins, window)
+
+
+@pytest.mark.parametrize("padding", [0, MAX_IDENTITY_BYTES], ids=["under-cap", "past-cap"])
+def test_a_shown_block_puts_its_identity_on_record_only_within_the_size_cap(
+    padding: int,
+) -> None:
+    """A shown block whose identity hashes to its spec_id puts that identity on
+    record, so a compile held only as a block is windowed. Past `MAX_IDENTITY_BYTES`
+    as compact JSON it puts none, since data-mcp's `resolve_definition` would refuse
+    a copy of it (`caller_definition`)."""
+    block = json.loads(json.dumps(us_2023_block("health")))
+    identity = block["definition"]["identity"]
+    if padding:
+        identity["padding"] = "x" * padding
+    spec_id = spec_id_for(canonicalize(identity))
+    block["spec_id"] = spec_id
+
+    recorded = identity_on_record(spec_id, shown={spec_id: PinSource(block=block, settled=True)})
+
+    assert (recorded.identity if recorded is not None else None) == (None if padding else identity)
+
+
+# Dev Search's answers for the share of Kenya's ODA that goes to health, by name:
+# the CRS health part counted gross, the DAC2a total counted net, both over the
+# latest year, and the total compiled gross (the fixture's `comment` key says where
+# the data came from).
+_KENYA = json.loads(
+    (Path(__file__).parent / "fixtures" / "share_kenya_health_2024.json").read_text()
+)
+
+# The plan for that question as `propose_plan` receives it: health aid summed over
+# providers as a share of the net total, both over 2024.
+_KENYA_PLAN: dict[str, Any] = {
+    "question": (
+        "What share of the ODA Kenya receives goes to health in the latest year with data "
+        "(2024)? ODA to health from OECD CRS and total ODA from OECD DAC2a or CRS."
+    ),
+    "across_years": [],
+    "amends_version": 0,
+    "answered": [{"ask": 0, "outputs": ["share_health"]}],
+    "evidence_requirements": [
+        {
+            "kind": "dataset",
+            "source_spec_id": _KENYA["health"]["spec"]["spec_id"],
+            "coverage": {"on_missing": "report_gaps"},
+            "measure": "Gross ODA disbursements to Kenya for health",
+            "id": "health_oda",
+            "frequency": "annual",
+            "entities": [{"role": "recipient", "name": "Kenya"}],
+            "period": {"end": 2024, "start": 2024},
+        },
+        {
+            "group_by": ["entity", "period"],
+            "decision_ids": ["sum_health_providers"],
+            "input_id": "health_oda",
+            "kind": "aggregate",
+            "id": "aggregate_health",
+            "reduction": "sum",
+        },
+        {
+            "source_spec_id": _KENYA["total"]["spec"]["spec_id"],
+            "entities": [{"role": "recipient", "name": "Kenya"}],
+            "period": {"start": 2024, "end": 2024},
+            "id": "total_oda",
+            "kind": "dataset",
+            "measure": "Net disbursements to Kenya for official development assistance",
+            "coverage": {"on_missing": "report_gaps"},
+            "frequency": "annual",
+        },
+        {
+            "kind": "share_of",
+            "decision_ids": [],
+            "denominator": {"entity": "Kenya", "input_id": "total_oda"},
+            "numerator": {"input_id": "aggregate_health", "entity": "Kenya"},
+            "accept_provider_difference": True,
+            "id": "share_health",
+        },
+    ],
+    "decisions": [
+        {
+            "slot": "sum_health_providers",
+            "chosen": "aggregate_health_across_providers",
+            "description": "Sum health ODA across providers for Kenya",
+            "fixes": ["reduction", "group_by"],
+            "rationale": (
+                "Kenya receives health aid from multiple bilateral providers, which must be "
+                "summed across providers to compute the national total health aid."
+            ),
+            "options": ["aggregate_health_across_providers", "keep_providers_separate"],
+            "resolved_by": "planner_default",
+        }
+    ],
+    "answer_mode": "computed",
+}
+
+
+class _KenyaCompiles:
+    """A tool surface answering the resubmit of `_KENYA`'s total counted gross with
+    the compile dev Search gave, recording each call's arguments in `calls`. The
+    answer is looked up under the spec_id the posted identity hashes to; every
+    other call is refused."""
+
+    def __init__(self) -> None:
+        self.calls: list[Mapping[str, Any]] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        self.calls.append(arguments)
+        posted = (
+            spec_id_for(canonicalize(arguments["identity"])),
+            tuple(e["option_id"] for e in arguments.get("scope_entries") or ()),
+        )
+        compiled = {(_KENYA["total"]["spec"]["spec_id"], ("measure_basis:gross",)): "total_gross"}
+        if tool.name != "resolve_definition" or posted not in compiled:
+            return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
+        part = json.loads(json.dumps(_KENYA[compiled[posted]]))
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+async def test_the_kenya_share_reads_its_compiled_total_over_the_year_it_asks_for() -> None:
+    """Dev Search found Kenya's health aid counted gross and its ODA total counted
+    net, both over the latest year, and the planner proposed health's share of the
+    total over 2024. Admission compiles the total gross, and Search's compile keeps
+    the latest-year window. The admitted plan pins the compile's copy over 2024, and
+    no dataset it pins is refused by the compiler for a window short of the year."""
+    blocks = {name: _KENYA[name]["spec"] for name in ("health", "total")}
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = ["Share of ODA received by Kenya that goes to health"]
+    ctx.state[ASK_BREAKDOWNS_STATE_KEY] = [
+        AskBreakdown(ask=0, over=("donor",)).model_dump(mode="json")
+    ]
+    _show_blocks(ctx, *blocks.values())
+    recorded = {
+        block["spec_id"]: _Recorded(
+            block["definition"]["identity"], source_from_spec_block(block).groups
+        )
+        for block in blocks.values()
+    }
+    surface = _KenyaCompiles()
+    propose = _tools_reading(cast(ToolSurface, surface))["propose_plan"].func
+
+    with definitions_on_record(recorded):
+        result = await propose(**_KENYA_PLAN, tool_context=ctx)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (compiled,) = surface.calls
+    assert compiled["spec_id"] == blocks["total"]["spec_id"]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    gross = _KENYA["total_gross"]["spec"]
+    assert gross["definition"]["identity"]["requested_window"] == {"kind": "latest"}
+    window = period_window(Period(start=2024, end=2024))
+    # The copy is spec_c42ddfe77c8918ecf475449ebac6d270, which dev Search answers
+    # `definite` when it is posted on its own.
+    copy, _ = windowed_identity(gross["definition"]["identity"], window)
+    pins = _dataset_pins(plan)
+    assert pins["total_oda"] == copy
+    copies = windowed_pins(ctx.state)
+    assert copies[copy].windowed_from == gross["spec_id"]
+    identities = {
+        **{
+            block["spec_id"]: block["definition"]["identity"] for block in (*blocks.values(), gross)
+        },
+        **{pin: held.identity for pin, held in copies.items()},
+    }
+    issues = [
+        issue
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+        for issue in check_evidence(
+            requirement,
+            RetrievalEvidence(
+                origin="discovery",
+                spec_id=requirement.source_spec_id,
+                has_data=True,
+                identity=dict(identities[requirement.source_spec_id]),
+            ),
+        )
+    ]
+    assert EvidenceIssueCode.SCOPE_WINDOW_SHORT not in {issue.code for issue in issues}

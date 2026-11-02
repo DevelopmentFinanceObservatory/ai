@@ -147,6 +147,7 @@ from planner.plan import (
     load_plan_rounds,
     load_unsupported,
     open_window,
+    period_window,
     pin_slot_moves,
     pin_sources,
     plan_revision,
@@ -4137,6 +4138,22 @@ _GROSS = _FRANCE_KENYA["spec_id"]
 _NET = _FRANCE_KENYA["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
 
 
+def _over_period(block: dict[str, Any], period: Period) -> str:
+    """The spec_id a requirement over `period` pins in place of `block`'s.
+
+    A shown block whose identity hashes to its spec_id is on record, so a pin of
+    it moves to its definition over `period` (`submission.service._window_pins`).
+    That is the spec_id itself when the definition is over `period` already.
+    Computed from the block's own identity, with no call to the code under test,
+    so a block production fails to put on record fails the test that expects it
+    windowed.
+    """
+    identity = block["definition"]["identity"]
+    assert spec_id_for(canonicalize(identity)) == block["spec_id"], "the block is not on record"
+    spec_id, _ = windowed_identity(identity, period_window(period))
+    return spec_id
+
+
 def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET)) -> list[Any]:
     """The orchestrator's `ask_user` on how to count the aid, through the clarify
     interrupt, each option offered under `offered`, and the user's pick of `picked`."""
@@ -4264,7 +4281,9 @@ def test_a_pin_of_an_aid_measure_states_how_the_flow_is_counted(
     assert result["outcome"] == Outcome.OK.value, result
     plan = load_plan(ctx.state)
     assert plan is not None
-    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == pin]
+    # Only the shown block's own pin has an identity on record, so only it moves to a copy.
+    pinned = _over_period(_FRANCE_KENYA, dataset.period) if pin == _GROSS else pin
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == pinned]
     assert measure.options == ("gross disbursements", "net disbursements")
     assert (measure.chosen, measure.resolved_by) == (chosen, resolved_by)
     assert measure in shown_decisions(plan)
@@ -4360,7 +4379,8 @@ def test_a_pick_after_the_plan_pinned_the_measure_makes_its_decision_the_users(
     assert second["outcome"] == Outcome.OK.value, second
     plan = load_plan(ctx.state)
     assert plan is not None
-    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == _GROSS]
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == copied]
     assert (measure.chosen, measure.resolved_by) == ("gross disbursements", ResolvedBy.USER)
 
 
@@ -4558,7 +4578,8 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
     assert first["outcome"] == Outcome.OK.value
     plan = load_plan(ctx.state)
     assert plan is not None
-    synthesized = next(d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == _GROSS)
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
+    synthesized = next(d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == copied)
 
     second = tools["propose_plan"].func(
         question="q",
@@ -4572,7 +4593,7 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
     assert second["outcome"] == Outcome.OK.value
     amended = load_plan(ctx.state)
     assert amended is not None
-    assert [d.slot for d in amended.decisions if d.fixes and d.fixes.source_spec_id == _GROSS] == [
+    assert [d.slot for d in amended.decisions if d.fixes and d.fixes.source_spec_id == copied] == [
         synthesized.slot
     ]
     assert synthesized.slot in amended.requirement(dataset.id).decision_ids
@@ -4636,11 +4657,12 @@ def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
     assert result["outcome"] == Outcome.OK.value, result
     plan = load_plan(ctx.state)
     assert plan is not None
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
     scoped = [d for d in plan.decisions if is_scope_choice(d)]
     assert [d.slot for d in plan.decisions] == [
         "measure",
-        search_pin_slot(_GROSS),
-        *(scope_choice_slot(_GROSS, axis) for axis in axes),
+        search_pin_slot(copied),
+        *(scope_choice_slot(copied, axis) for axis in axes),
     ]
     assert [(d.chosen, d.resolved_by) for d in scoped] == [
         ("health (CRS 120)", ResolvedBy.USER),
@@ -4656,7 +4678,7 @@ def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
     ][: len(axes)]
     assert plan.requirement(dataset.id).decision_ids == (
         "measure",
-        search_pin_slot(_GROSS),
+        search_pin_slot(copied),
         *(d.slot for d in scoped),
     )
     assert set(scoped) <= set(shown_decisions(plan))
@@ -4681,7 +4703,8 @@ def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_
         tool_context=ctx,
     )
     assert first["outcome"] == Outcome.OK.value, first
-    scope_slots = tuple(scope_choice_slot(_GROSS, axis) for axis in ("sector", "region"))
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
+    scope_slots = tuple(scope_choice_slot(copied, axis) for axis in ("sector", "region"))
 
     second = tools["propose_plan"].func(
         evidence_requirements=[
@@ -4694,7 +4717,7 @@ def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_
     assert second["outcome"] == Outcome.OK.value, second
     plan = load_plan(ctx.state)
     assert plan is not None
-    assert search_pin_slot(_GROSS) in plan.requirement(dataset.id).decision_ids
+    assert search_pin_slot(copied) in plan.requirement(dataset.id).decision_ids
 
 
 def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
@@ -4725,12 +4748,13 @@ def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
     plan = load_plan(ctx.state)
     assert plan is not None
     assert len(plan.decisions) == MAX_PLAN_DECISIONS
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
     assert [d.slot for d in plan.decisions if is_scope_choice(d)] == [
-        scope_choice_slot(_GROSS, "sector")
+        scope_choice_slot(copied, "sector")
     ]
     assert plan.requirement(dataset.id).decision_ids[-2:] == (
-        search_pin_slot(_GROSS),
-        scope_choice_slot(_GROSS, "sector"),
+        search_pin_slot(copied),
+        scope_choice_slot(copied, "sector"),
     )
 
 
@@ -6666,7 +6690,9 @@ def test_an_amendment_restating_a_measure_beside_no_second_flow_decision_is_reco
     recorded = load_plan(ctx.state)
     assert recorded is not None
     if code_slot:
-        restated = next(d for d in recorded.decisions if d.slot == search_pin_slot(_GROSS))
+        # The planner reads the slot on record, the windowed copy's (`shown_plan`).
+        slot = search_pin_slot(_over_period(_FRANCE_KENYA, dataset.period))
+        restated = next(d for d in recorded.decisions if d.slot == slot)
     else:
         _show_block(ctx, _FRANCE_KENYA)
         restated = first_decision
@@ -6684,6 +6710,46 @@ def test_an_amendment_restating_a_measure_beside_no_second_flow_decision_is_reco
         "measure",
         *([search_pin_slot(_GROSS)] if code_slot else []),
     ]
+
+
+@pytest.mark.parametrize("named_by", ["copy", "original_pin"])
+def test_an_amendment_removing_a_windowed_pins_decision_by_its_recorded_slot_is_recorded(
+    decision: DecisionFactory, requirements: RequirementPair, named_by: str
+) -> None:
+    """The plan on record, and the digest the planner reads it from, name a
+    windowed pin's decision by its copy's slot. An amendment that unpins the
+    requirement and removes that decision, by the slot it was shown or by the
+    slot of the pin the planner stated, removes the decision the planner stated."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[pinned, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    copy_slot = search_pin_slot(_over_period(_FRANCE_KENYA, dataset.period))
+    assert copy_slot != search_pin_slot(_GROSS)
+    assert copy_slot in {d.slot for d in recorded.decisions}
+
+    amended = tools["propose_plan"].func(
+        evidence_requirements=[dataset],
+        removed_decisions=[copy_slot if named_by == "copy" else search_pin_slot(_GROSS)],
+        amends_version=recorded.version,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.slot for d in plan.decisions] == ["measure"]
 
 
 def test_a_stored_decision_over_a_pins_flow_count_loads_and_stands_through_an_amendment(
@@ -9894,7 +9960,11 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
 
     assert result["outcome"] == Outcome.OK.value, result
     whole_pin = surface.recorded["whole"]["spec_id"]
-    assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
+    year = Period(start=2023, end=2023)
+    assert _pins(ctx) == [
+        (_PART, _over_period(block, year)),
+        (_WHOLE, _over_period(surface.recorded["whole"], year)),
+    ]
     whole_block = held_sources(ctx.state)[whole_pin].spec_block(whole_pin)
     assert whole_block is not None
     held = reading_facts(whole_block)["scope"]["dropped_entries"]
@@ -9936,7 +10006,8 @@ async def test_a_donor_whole_names_on_its_opened_side_only_the_total_search_boun
 
     if not refused:
         assert result["outcome"] == Outcome.OK.value, result
-        assert dict(_pins(ctx))[_WHOLE] == surface.recorded["whole"]["spec_id"]
+        year = Period(start=2023, end=2023)
+        assert dict(_pins(ctx))[_WHOLE] == _over_period(surface.recorded["whole"], year)
         return
     assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
     assert result["detail"]["whole"]["cause"] == "whole_names_another_total"
@@ -10823,7 +10894,9 @@ def test_two_sides_never_read_one_series(
         ]
         return
     assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == [(rid, block["spec_id"]) for rid, block in blocks.items()]
+    assert _pins(ctx) == [
+        (rid, _over_period(block, Period(start=2019, end=2019))) for rid, block in blocks.items()
+    ]
     plan = load_plan(ctx.state)
     assert plan is not None
     differ = {d.slot for d in plan.decisions if d.caveat == "providers_differ"}
@@ -10910,7 +10983,11 @@ def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
     )
 
     assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == [("first", numerator["spec_id"]), ("second", _US_TOTAL["spec_id"])]
+    year = Period(start=2019, end=2019)
+    assert _pins(ctx) == [
+        ("first", _over_period(numerator, year)),
+        ("second", _over_period(_US_TOTAL, year)),
+    ]
     plan = load_plan(ctx.state)
     assert plan is not None
     differ = {d.slot for d in plan.decisions if d.caveat == "providers_differ"}
@@ -17232,9 +17309,7 @@ def test_a_pin_read_from_the_block_the_planner_was_shown_keeps_its_set() -> None
     block = json.loads(fixture.read_text())["spec"]
     spec_id = block["spec_id"]
 
-    recorded = identity_on_record(
-        spec_id, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
-    )
+    recorded = identity_on_record(spec_id, shown={spec_id: PinSource(block=block, settled=True)})
 
     assert recorded is not None
     assert recorded.identity == block["definition"]["identity"]
@@ -17247,9 +17322,7 @@ def test_a_shown_block_with_a_set_of_an_unknown_class_puts_no_pin_on_record() ->
     block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = ["party"]
     spec_id = block["spec_id"]
 
-    recorded = identity_on_record(
-        spec_id, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
-    )
+    recorded = identity_on_record(spec_id, shown={spec_id: PinSource(block=block, settled=True)})
 
     assert recorded is None
 

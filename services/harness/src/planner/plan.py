@@ -55,8 +55,8 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
 from compiler.sources import source_from_spec_block
-from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.definition_writes import windowed_identity
+from data_mcp.definition_store import IdentityMismatch
+from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
@@ -6111,17 +6111,21 @@ def save_full_history(state: SessionState, spec_id: str, history: FullHistory | 
 
 
 def shown_identity(spec_id: str, source: PinSource) -> Mapping[str, Any] | None:
-    """The identity the block the planner was shown for `spec_id` carries, when it hashes to it."""
+    """The identity `source`'s block for `spec_id` carries; `None` when
+    data-mcp's `resolve_definition` would refuse it (`caller_definition`:
+    it does not hash to `spec_id`, has no RFC 8785 form, or its compact
+    JSON is past `MAX_IDENTITY_BYTES`). `harness.studio_state._turn_identities`
+    leaves such an identity off the record too."""
     block = source.spec_block(spec_id)
     definition = block.get("definition") if block is not None else None
     identity = definition.get("identity") if isinstance(definition, Mapping) else None
     if not isinstance(identity, Mapping):
         return None
     try:
-        hashed = spec_id_for(canonicalize(identity))
-    except rfc8785.CanonicalizationError:
+        caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
+    except (IdentityMismatch, IdentityUnusable):
         return None
-    return identity if hashed == spec_id else None
+    return identity
 
 
 def windowed_pin(
@@ -6202,10 +6206,10 @@ def recorded_identity(spec_id: str) -> RecordedDefinition | None:
 def definitions_on_record(definitions: Mapping[str, RecordedDefinition]) -> Iterator[None]:
     """Put `definitions`, by spec_id, on record inside the block (`recorded_identity`).
 
-    Each is looked up before what the conversation recorded. A plan card
-    switch (`harness.graph.switch`) puts the datasets Search compiled for it
-    on record while the plan is revised, since the conversation records a
-    search only once the node that made it yields.
+    Each is looked up before what the conversation recorded. Tests use it to
+    stand in for a Studio conversation's record, which `harness.studio` puts
+    in `current_recorded_identity`
+    (`harness.studio_state.ConversationState.recorded_identity`).
     """
     outer = current_recorded_identity.get()
 
@@ -6235,7 +6239,6 @@ def identity_on_record(
     pin: str,
     *,
     shown: Mapping[str, PinSource],
-    end_open: bool,
     definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
 ) -> RecordedDefinition | None:
     """The definition on record for `pin`; `None` when none is.
@@ -6244,22 +6247,20 @@ def identity_on_record(
     (`recorded_identity`), else the one `definition_lookup` answers:
     `submission.service.admit` and the translator pass the discovery log's
     (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
-    each source the translator offered. With `end_open` it is otherwise the
-    one the block the planner was shown carries (`shown_identity`). Admission
-    asks for it only for a requirement stating `period_end_open`: the
-    translator can find a closed requirement's pin by searching its stated
-    years, and no search finds a definition with no end year. The translator
-    always asks for it, since a pin compiled in code during the request (a
-    scope choice switched on the plan card, `harness.graph.switch`, or an
-    input put on its calculation's basis, `planner.agent.compile_on_basis`)
-    is held there and nowhere a search recorded it. A shown block that is
+    each source the translator offered. Otherwise it is the one `pin`'s
+    block in `shown` carries, when data-mcp would take it
+    (`shown_identity`). A pin compiled in code is on record through that
+    block alone: a scope choice switched on the plan card
+    (`harness.graph.switch`) or an input put on its calculation's basis
+    (`planner.agent.compile_on_basis`, `planner.agent.compile_whole`) is
+    held in `held_sources` and in no search record. A shown block that is
     not readable as a source (`compiler.sources.source_from_spec_block`)
     puts none on record.
     """
     recorded: RecordedDefinition | None = recorded_identity(pin)
     if recorded is None and definition_lookup is not None:
         recorded = definition_lookup(pin)
-    if recorded is not None or not end_open or pin not in shown:
+    if recorded is not None or pin not in shown:
         return recorded
     identity = shown_identity(pin, shown[pin])
     block = shown[pin].spec_block(pin)

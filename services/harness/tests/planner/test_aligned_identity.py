@@ -116,18 +116,38 @@ def _left_on_net() -> dict[str, Any]:
 class _Compiles:
     """A tool surface whose `resolve_definition` answers `block` to a resubmit of the
     part `base` names on the options `option_ids`, as dev Search answered that post,
-    recording each call's arguments in `calls`. Search refuses every other call."""
+    recording each call's arguments in `calls`. With `translates` it lists the tools
+    data-mcp and analysis-mcp serve, which the translator compiles against; otherwise
+    it lists none.
+
+    A call with no `scope_entries` is a plan's windowed copy of a pin read back: it
+    posts the copy's identity under the spec_id it hashes to, and dev Search answers
+    with the block of the pin it copies (`copies`, by copy spec_id) under that identity.
+    Search refuses every other call.
+    """
 
     def __init__(
-        self, block: Mapping[str, Any], *, base: Mapping[str, Any], option_ids: list[str]
+        self,
+        block: Mapping[str, Any],
+        *,
+        base: Mapping[str, Any],
+        option_ids: list[str],
+        copies: Mapping[str, Mapping[str, Any]] | None = None,
+        translates: bool = False,
     ) -> None:
         self._block = block
         self._base = base
         self._option_ids = option_ids
+        self._copies = copies or {}
+        self._translates = translates
         self.calls: list[Mapping[str, Any]] = []
 
     async def list_tools(self) -> list[Any]:
-        return []
+        if not self._translates:
+            return []
+        return await McpSurface(
+            sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
+        ).list_tools()
 
     async def call_tool(
         self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
@@ -136,10 +156,25 @@ class _Compiles:
         if tool.name != "resolve_definition":
             return ToolCallResult(is_error=True, structured_content={"code": "refused"})
         self.calls.append(arguments)
+        if not arguments.get("scope_entries"):
+            return self._copy(arguments)
         assert arguments["spec_id"] == self._base["spec_id"]
         assert arguments["identity"] == self._base["identity"]
         assert [e["option_id"] for e in arguments["scope_entries"]][-1:] == self._option_ids
         part = {"status": "definite", "spec": json.loads(json.dumps(self._block))}
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+    def _copy(self, arguments: Mapping[str, Any]) -> ToolCallResult:
+        """The part of the pin `arguments` posts a copy of, with the posted identity."""
+        spec_id, identity = arguments["spec_id"], arguments["identity"]
+        hashed = spec_id_for(canonicalize(identity))
+        source = self._copies.get(spec_id)
+        if hashed != spec_id or source is None:
+            return ToolCallResult(is_error=True, structured_content={"code": "refused"})
+        spec = json.loads(json.dumps(source))
+        spec["spec_id"] = spec_id
+        spec["definition"]["identity"] = identity
+        part = {"status": "definite", "spec": spec}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
@@ -303,12 +338,22 @@ async def test_the_card_shows_the_averages_basis_as_the_planners_and_the_totals_
 # --- US ODA compared with France's multilateral ODA ---------------------------------
 
 
-def _multilateral_compiles() -> _Compiles:
+def _multilateral_compiles(
+    copies: Mapping[str, Mapping[str, Any]] | None = None, *, translates: bool = False
+) -> _Compiles:
     """`_US_MULTILATERAL` answering a resubmit of `_US_TOTAL`'s part on the
     multilateral row: spec_ids are canonical over the identity, so the compile is
-    US multilateral ODA's own spec_id."""
+    US multilateral ODA's own spec_id. `copies` are the windowed copies of pins it
+    answers a read of, and `translates` lets the translator compile against the tools
+    (`_Compiles`)."""
     scope = _US_TOTAL["resolved"]["scope_choices"]
-    return _Compiles(_US_MULTILATERAL, base=scope["base"], option_ids=["provider:multilateral"])
+    return _Compiles(
+        _US_MULTILATERAL,
+        base=scope["base"],
+        option_ids=["provider:multilateral"],
+        copies=copies,
+        translates=translates,
+    )
 
 
 def _proposing() -> Callable[..., Any]:

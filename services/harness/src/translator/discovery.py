@@ -2514,7 +2514,6 @@ async def _recorded_source(
     recorded = windowed_pins(state).get(spec_id) or identity_on_record(
         spec_id,
         shown=held_sources(state),
-        end_open=True,
         definition_lookup=load_log(state).recorded_definition,
     )
     identity = recorded.identity if recorded is not None else None
@@ -2572,6 +2571,12 @@ def _resolve_pin_block(
     narrower one, and when no block was carried forward for it. An earlier
     turn's source reads the block that turn stored (`PinSource.spec_block`).
     The compiler checks the reused source's entities and window against the requirement.
+
+    A pin admission moved to a copy over the requirement's period
+    (`planner.plan.windowed_pins`) is neither shown nor compiled, so it
+    reads `None`, whether its origin was a search pin or a compile. Search
+    confirms the copy (`_recorded_source`) without a check of the origin's
+    blocking warnings.
     """
     pin = requirement.source_spec_id
     if pin is None:

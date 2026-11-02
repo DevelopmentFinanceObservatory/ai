@@ -974,7 +974,6 @@ def _first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | N
     recorded = identity_on_record(
         pin,
         shown=held_sources(state),
-        end_open=True,
         definition_lookup=load_log(state).recorded_definition,
     )
     return recorded.identity if recorded is not None else None

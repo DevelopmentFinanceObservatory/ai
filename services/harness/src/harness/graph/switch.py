@@ -9,11 +9,11 @@ It posts the scope's base identity with its entries and the switch
 `resolve_definition` (`translator.discovery.resolve_definition`), which
 registers the identity they compile to. That answer is the switched pin.
 The plan pins it, and its reading and pin source state the dataset over
-the years the question asked for. Admission finds it on record
-(`planner.plan.definitions_on_record`), so where the plan reads it over a
-window of its own, admission copies it over that window
-(`submission.service._window_pins`) and the translation resolves the copy.
-The turn keeps Search's answers
+the years the question asked for. Admission finds it on record through
+its saved pin source (`planner.plan.identity_on_record`), so where the
+plan reads it over a window of its own, admission copies it over that
+window (`submission.service._window_pins`) and the translation resolves
+the copy. The turn keeps Search's answers
 (`translator.discovery.resolving_once`), so a switch repeating one the
 turn made posts nothing. The
 plan is then revised by the planner seam with no model call
@@ -90,11 +90,9 @@ from planner.plan import (
     SessionState,
     alignments,
     compiled_pin,
-    definitions_on_record,
     earlier_block,
     exact_codes,
     held_sources,
-    identity_on_record,
     is_scope_choice,
     pin_sources,
     plan_revision,
@@ -458,12 +456,6 @@ async def _switched_plan(
             },
         },
     )
-    shown = pin_sources(state)
-    on_record = {
-        item.spec_id: recorded
-        for item in switched
-        if (recorded := identity_on_record(item.spec_id, shown=shown, end_open=True)) is not None
-    }
     codes = {
         item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
     }
@@ -482,15 +474,14 @@ async def _switched_plan(
         )
         is not None
     ]
-    # Admission finds each switched dataset on record, so it copies the dataset
-    # over the plan's years.
-    with definitions_on_record(on_record):
-        revised = await planner.revise(
-            ctx=ctx,
-            prior_plan=plan.model_dump(mode="json"),
-            evidence_requirements=requirements,
-            inherits={item.spec_id: item.pin for item in switched},
-        )
+    # Admission finds each switched dataset on record through its saved pin source
+    # (`planner.plan.held_sources`), so it copies the dataset over the plan's years.
+    revised = await planner.revise(
+        ctx=ctx,
+        prior_plan=plan.model_dump(mode="json"),
+        evidence_requirements=requirements,
+        inherits={item.spec_id: item.pin for item in switched},
+    )
     if "plan" not in revised:
         refused = revised.get("refused") or {}
         logger.warning("plan switch not revised: %s", refused)
