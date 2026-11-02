@@ -6400,6 +6400,12 @@ def save_found_sources(state: SessionState, blocks: Mapping[str, Mapping[str, An
     state[FOUND_SOURCES_STATE_KEY] = with_blocks(found_sources(state), blocks)
 
 
+def _states_scope_choices(block: Mapping[str, Any]) -> bool:
+    """Whether `block` states `resolved.scope_choices`, so it says how its series
+    is counted: as a choice, or as no choice where it has none."""
+    return (block.get("resolved") or {}).get("scope_choices") is not None
+
+
 def scope_unread(block: Mapping[str, Any]) -> dict[str, Any]:
     """`block`, a spec block Search served other than as a `definite` search
     part's own spec, marked `SCOPE_UNREAD_BLOCK_KEY` where it states no
@@ -6411,7 +6417,7 @@ def scope_unread(block: Mapping[str, Any]) -> dict[str, Any]:
     admission reads them first (`submission.service._aligned_bases`). A
     block stating them says how it is counted wherever it came from.
     """
-    if (block.get("resolved") or {}).get("scope_choices") is not None:
+    if _states_scope_choices(block):
         return dict(block)
     return {**block, SCOPE_UNREAD_BLOCK_KEY: True}
 
@@ -6494,7 +6500,7 @@ def _scope_rank(block: Mapping[str, Any] | None) -> int:
         return -1
     if block.get(SCOPE_UNREAD_BLOCK_KEY):
         return 0
-    return 2 if (block.get("resolved") or {}).get("scope_choices") is not None else 1
+    return 2 if _states_scope_choices(block) else 1
 
 
 def with_blocks(

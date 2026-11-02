@@ -2336,6 +2336,14 @@ def _invalid_search_part() -> ValidationError:
     raise AssertionError("the part validated")
 
 
+def _http_status_error(status: int) -> httpx2.HTTPStatusError:
+    """The error httpx2 raises for an answer of `status`."""
+    request = httpx2.Request("GET", "https://search.example/resolve")
+    return httpx2.HTTPStatusError(
+        f"{status}", request=request, response=httpx2.Response(status, request=request)
+    )
+
+
 def _raised_from(exc: BaseException, cause: BaseException) -> BaseException:
     exc.__cause__ = cause
     return exc
@@ -2387,6 +2395,10 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         # Their neighbours in the same clients.
         (aiohttp.ClientResponseError(None, (), status=403), False),
         (aiohttp.ClientResponseError(None, (), status=503), True),
+        (_http_status_error(503), True),
+        (_http_status_error(429), True),
+        (_http_status_error(404), False),
+        (asyncpg.TooManyConnectionsError("sorry, too many clients already"), True),
         (asyncpg.ConnectionDoesNotExistError("connection was closed"), True),
         (sa_exc.TimeoutError("QueuePool limit of size 2 overflow 10 reached"), True),
         (
@@ -2476,6 +2488,10 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         "run-abandoned-on-read-error",
         "aiohttp-client-status",
         "aiohttp-server-status",
+        "httpx-server-status",
+        "httpx-rate-limited",
+        "httpx-not-found",
+        "postgres-too-many-connections",
         "asyncpg-connection-gone",
         "session-pool-timeout",
         "sqlalchemy-connection-invalidated",

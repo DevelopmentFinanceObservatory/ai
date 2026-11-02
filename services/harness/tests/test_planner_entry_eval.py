@@ -35,6 +35,7 @@ from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
+from planner.agent import PENDING_ASK_STATE_KEY
 from planner.plan import EvidenceRequirement
 from pydantic import ValidationError
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
@@ -499,6 +500,27 @@ async def test_a_record_credits_the_proposal_that_recorded_the_plan_and_an_ask_l
     )
 
     assert (record["stop_reason"], record["first_proposal"]["outcome"]) == (stop, first)
+
+
+@pytest.mark.parametrize(("refused_code", "stop"), [(None, "asked_user"), ("gave_up", "gave_up")])
+def test_a_refusal_the_entry_ended_on_wins_over_an_ask_left_on_record(
+    refused_code: str | None, stop: str
+) -> None:
+    probe = entry.Probe()
+    probe.refused_code = refused_code
+    run = entry.EntryRun(
+        events=[],
+        state={PENDING_ASK_STATE_KEY: {"call_id": "c1", "args": {"message": "Which years?"}}},
+        probe=probe,
+        inputs="",
+        budget_closed=None,
+        surface_misses=[],
+        error=None,
+        timed_out=False,
+        wall_s=0.0,
+    )
+
+    assert entry.stop_reason(run) == stop
 
 
 def _summing_years(payload: dict[str, Any]) -> dict[str, Any]:

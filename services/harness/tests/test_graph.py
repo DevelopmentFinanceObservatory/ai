@@ -56,7 +56,6 @@ from executor.run import StepProgressCallback, execute_approved_plan
 from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, State
-from google.adk.workflow._errors import NodeInterruptedError
 from google.genai import types
 from harness import scripted
 from harness.chart_binding import (
@@ -4444,24 +4443,25 @@ async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
     assert stopped.value.code == SWITCH_CANCELLED
 
 
-async def test_a_revision_that_paused_in_the_same_wait_as_the_stop_stays_paused() -> None:
-    """The revision pauses on a question to the user as the Stop lands. ADK
-    has streamed the question, so the pause stands and no `switch_failed`
-    follows it."""
+async def test_a_replan_that_asked_in_the_same_wait_as_the_stop_stays_paused() -> None:
+    """A pick's replan ends on the planner's question to the user as the Stop
+    lands. The question is the user's to answer, so `_unless_stopped` answers
+    it for the planner node to pause on, and no `switch_failed` follows."""
     stop = asyncio.Event()
     stop.set()
 
-    async def revision() -> dict[str, Any]:
-        raise NodeInterruptedError()
+    async def replan() -> dict[str, Any]:
+        return _ASKED
 
     token = SWITCH_STOP.set(stop)
     try:
-        with pytest.raises(NodeInterruptedError):
-            await asyncio.wait_for(
-                switch_module._unless_stopped(cast(Any, None), revision()), timeout=5
-            )
+        answered = await asyncio.wait_for(
+            switch_module._unless_stopped(cast(Any, None), replan()), timeout=5
+        )
     finally:
         SWITCH_STOP.reset(token)
+
+    assert answered == _ASKED
 
 
 @_UNWIND_ERRORS

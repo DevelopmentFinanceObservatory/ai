@@ -67,8 +67,10 @@ from planner import agent as planner_agent
 from planner.agent import (
     ASK_ACCEPTED,
     BRIEF_STATE_KEY,
+    PENDING_ASK_STATE_KEY,
     AdkCall,
     ask_refusal,
+    ask_user_question,
     build_planner_tools,
     create_planner_agent,
     end_run_when_ready,
@@ -3776,6 +3778,20 @@ def test_propose_plan_rejects_a_null_list(
 
 
 # --- Asking the user (`ask_user_question`) ---------------------------------------------
+
+
+def test_an_accepted_ask_records_lists_its_call_does_not_share() -> None:
+    """The record an accepted ask leaves in durable state holds its own
+    lists: a later write to it changes neither the tool's defaults nor the
+    next ask's record."""
+    first = _FakeToolContext()
+    ask_user_question(cast(Any, first), message="Which years?")
+    first.state[PENDING_ASK_STATE_KEY]["args"]["candidates"].append({"spec_id": "s", "label": "l"})
+
+    second = _FakeToolContext()
+    ask_user_question(cast(Any, second), message="Which years?")
+
+    assert second.state[PENDING_ASK_STATE_KEY]["args"]["candidates"] == []
 
 
 def test_the_ask_tool_is_not_long_running() -> None:

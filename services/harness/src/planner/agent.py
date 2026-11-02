@@ -1188,56 +1188,77 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     return hold
 
 
-async def read_scope(surface: ToolSurface, read: ScopeRead, *, state: SessionState) -> SourceRead:
+async def read_scope(
+    surface: ToolSurface, read: ScopeRead, *, held: Mapping[str, PinSource], state: SessionState
+) -> SourceRead:
     """Read how `read`'s pin, a candidate Search offered with no scope choices,
     is counted, and hold the block Search answers in its place.
 
-    Resolves the pin's identity once (`translator.discovery.read_found_scope`)
-    and holds the definite block Search answers with its scope choices
-    (`planner.plan.save_found_sources`), so the next proposal aligns the input
-    as any other (`submission.service._aligned_bases`). It answers `None` once
-    the block is held, or the refusal the proposal answers:
-    `SURFACE_UNAVAILABLE` when Search did not answer and can later, and
-    `OPERATION_UNSUPPORTED` when it refuses the identity or answers with no
-    one dataset, since the input cannot then be counted as its calculation's
-    other inputs are.
+    `held` is the blocks on record (`planner.plan.held_sources`), taken
+    before any read of the refusal waits. Resolves the pin's identity once
+    (`translator.discovery.read_found_scope`) and holds the definite block
+    Search answers with its scope choices (`planner.plan.save_found_sources`),
+    so the next proposal aligns the input as any other
+    (`submission.service._aligned_bases`). It answers `None` once the block
+    is held, or the refusal the proposal answers: `SURFACE_UNAVAILABLE` when
+    Search did not answer and can later, and `OPERATION_UNSUPPORTED` when it
+    refuses the identity or answers with no one dataset, since the input
+    cannot then be counted as its calculation's other inputs are
+    (`_scope_unservable`).
     """
-    source = held_sources(state).get(read.spec_id)
+    source = held.get(read.spec_id)
     block = source.spec_block(read.spec_id) if source is not None else None
-
-    def unservable(reason: str) -> SourceRead:
-        return lambda into: _scope_unservable(read, reason, state=into)
-
     if block is None:
-        return unservable(f"{read.requirement_id!r}'s dataset has no block on record")
+        return _refusing(
+            _scope_unservable(read, f"{read.requirement_id!r}'s dataset has no block on record")
+        )
     try:
-        found = await read_found_scope(surface, read.spec_id, state=state)
+        found = await read_found_scope(surface, read.spec_id, held=held, state=state)
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
             return _refusing(_scope_not_read(read, str(exc)))
-        return unservable(
-            f"Search does not say how {read.requirement_id!r}'s dataset is counted "
-            f"({exc.code or 'refused'})"
+        return _refusing(
+            _scope_unservable(
+                read,
+                f"Search does not say how {read.requirement_id!r}'s dataset is counted "
+                f"({exc.code or 'refused'})",
+            )
         )
     except (PartNotResolvedError, ValueError) as exc:
-        return unservable(
-            f"Search does not say how {read.requirement_id!r}'s dataset is counted: {exc}"
+        return _refusing(
+            _scope_unservable(
+                read, f"Search does not say how {read.requirement_id!r}'s dataset is counted: {exc}"
+            )
         )
     return lambda into: save_found_sources(into, found)
 
 
-def _scope_unservable(read: ScopeRead, reason: str, *, state: SessionState) -> dict[str, object]:
-    """Record in `state` and return the `OPERATION_UNSUPPORTED` problem for
-    `read`'s input, whose scope Search does not state, so it cannot be counted
-    as its calculation's other inputs are. `reason` says why, as a clause."""
-    return basis_unservable(
-        spec_id=read.spec_id,
-        option_ids=(),
-        requirement_id=read.requirement_id,
-        step_id=read.step_id,
-        reason=reason,
-        record=lambda operation: record_unsupported(state, operation),
-        proposer=PROPOSE_PLAN_PROPOSER,
+def _scope_unservable(read: ScopeRead, reason: str) -> dict[str, object]:
+    """Return the `OPERATION_UNSUPPORTED` problem for `read`'s input, whose scope
+    Search does not state, so it cannot be counted as its calculation's other
+    inputs are. `reason` says why, as a clause.
+
+    It refuses this proposal alone and records nothing: the pin cannot be
+    aligned, and another series of the input, or a plan leaving it out of
+    the calculation, can be, so the ask stays answerable.
+    `detail.basis` names the input as `submission.service.basis_unservable`
+    does, for the refusal's sentence (`harness.sentences`).
+    """
+    return problem(
+        ProblemCode.OPERATION_UNSUPPORTED,
+        f"{reason}, so {read.step_id!r} would mix figures counted different ways. Pin "
+        f"{read.requirement_id!r} to another series a search answered in full, or leave it "
+        f"out of {read.step_id!r}.",
+        outcome=Outcome.UNSUPPORTED,
+        action=PROPOSE_PLAN_PROPOSER.action(needs=("evidence_requirements",)),
+        detail={
+            "basis": {
+                "spec_id": read.spec_id,
+                "option_ids": [],
+                "requirement_id": read.requirement_id,
+                "step_id": read.step_id,
+            }
+        },
     )
 
 
@@ -1837,13 +1858,14 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
                     again,
                     f"Search's answer does not say how {again.requirement_id!r}'s dataset "
                     "is counted",
-                    state=state,
                 )
             by_pin: dict[str, ScopeRead] = {}
             for item in reads:
                 by_pin.setdefault(item.spec_id, item)
+            held = held_sources(state)
             refused = await _held_in_order(
-                (read_scope(surface, item, state=state) for item in by_pin.values()), state=state
+                (read_scope(surface, item, held=held, state=state) for item in by_pin.values()),
+                state=state,
             )
             scopes_read.update(by_pin)
             if refused is not None:
@@ -1997,15 +2019,36 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
     return None
 
 
+def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object] | None:
+    """The refusal an ask with `args` earns on its arguments and the pending
+    referral, or `None` for one its tool accepts unless an earlier ask in the
+    same response is (`_ask_beside_ask`).
+
+    A history copy's referral is read as the model wrote the plan
+    (`translator.tool.authored_answer`), so its picks are the origin's.
+    """
+    refusal = ask_refusal(args)
+    if refusal is not None:
+        return refusal
+    referral = load_referral(state)
+    plan = load_plan(state)
+    if referral is not None and plan is not None and plan.rolling_copies:
+        referral = Referral.model_validate(
+            authored_answer(referral.model_dump(mode="json"), split_of(plan))
+        )
+    return _entity_ask_unbound(referral, args.get("candidates"))
+
+
 def _ask_beside_ask(tool_context: ToolContext) -> dict[str, object] | None:
-    """The refusal for an ask made after another in the same model response, or `None`.
+    """The refusal for an ask made after an accepted one in the same model response, or `None`.
 
     The user answers one question at a time. The calls of one response run
     concurrently, and an accepted ask ends the run before the model is
     called again, so the only way two asks can wait together is two in one
-    response. The first is the one the response puts to the user.
-    `tool_context.session.events` holds the call's own model response by the
-    time its tool runs.
+    response. The first that its own checks accept (`_ask_check`) is the one
+    the response puts to the user; an earlier ask they refuse leaves a later
+    one free. `tool_context.session.events` holds the call's own model
+    response by the time its tool runs.
     """
     own = tool_context.function_call_id
     for event in reversed(tool_context.session.events):
@@ -2013,7 +2056,8 @@ def _ask_beside_ask(tool_context: ToolContext) -> dict[str, object] | None:
         ids = [call.id for call in calls]
         if own not in ids:
             continue
-        if not any(call.name == PLANNER_ASK for call in calls[: ids.index(own)]):
+        earlier = [call for call in calls[: ids.index(own)] if call.name == PLANNER_ASK]
+        if all(_ask_check(call.args or {}, tool_context.state) is not None for call in earlier):
             return None
         return problem(
             ProblemCode.INVALID_ARGUMENTS,
@@ -2095,24 +2139,18 @@ def ask_user_question(
         rationale: Why you favour it, for the user to read, when
             `recommended_spec_id` is given.
     """
+    # `= []` defaults keep the declaration's arrays flat, as `propose_plan`'s
+    # do. Copied here, so the durable record shares no list with the defaults
+    # or the model's call.
     args: dict[str, Any] = {
         "message": message,
-        "candidates": candidates,
-        "options": options,
+        "candidates": copy.deepcopy(candidates),
+        "options": copy.deepcopy(options),
         "recommended_spec_id": recommended_spec_id,
         "rationale": rationale,
     }
-    refusal = ask_refusal(args) or _ask_beside_ask(tool_context)
-    if refusal is not None:
-        return refusal
     state = tool_context.state
-    referral = load_referral(state)
-    plan = load_plan(state)
-    if referral is not None and plan is not None and plan.rolling_copies:
-        referral = Referral.model_validate(
-            authored_answer(referral.model_dump(mode="json"), split_of(plan))
-        )
-    refusal = _entity_ask_unbound(referral, candidates)
+    refusal = _ask_check(args, state) or _ask_beside_ask(tool_context)
     if refusal is not None:
         return refusal
     call_id = tool_context.function_call_id

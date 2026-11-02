@@ -1122,18 +1122,21 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 
 
 def stop_reason(run: EntryRun) -> str:
-    """How the entry ended: `accepted`, `asked_user` (an ask the tool took, which the
-    entry paused on, still awaiting the user's answer), `timeout` (the eval's own limit),
-    `error`, or the seam's refusal code."""
+    """How the entry ended: `accepted`, `timeout` (the eval's own limit), `error`, the
+    seam's refusal code, or `asked_user` (an ask the tool took, which the entry paused
+    on, still awaiting the user's answer). A refusal wins over an ask, since the entry
+    it ends pauses on nothing."""
     if run.probe.plan is not None:
         return "accepted"
     if run.timed_out:
         return "timeout"
     if run.error is not None:
         return "error"
+    if run.probe.refused_code is not None:
+        return run.probe.refused_code
     if load_pending_ask(run.state) is not None:
         return "asked_user"
-    return run.probe.refused_code or "no_plan"
+    return "no_plan"
 
 
 def entry_record(

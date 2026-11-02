@@ -44,6 +44,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
+from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
@@ -88,7 +89,7 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import AdkCall
+from planner.agent import AdkCall, load_pending_ask
 from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -1177,6 +1178,141 @@ async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_r
 
     assert proposals == [1]
     assert len(llm.captured_requests) == 2
+
+
+async def test_a_terminal_refusal_beside_an_accepted_ask_ends_the_entry_on_the_refusal(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A proposal refused `QUESTION_FIXED` beside an accepted ask ends the
+    entry: no answer could undo the refusal, so the entry ends on it and
+    leaves no ask waiting."""
+    seeded = _translated_plan(decision, requirement, derived_requirement)
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[
+            [
+                (PLANNER_ASK, {"message": "Which years?"}),
+                ("propose_plan", {"starts_new_plan": True, "question": "a different question"}),
+            ]
+        ]
+    )
+    harness = _SeamHarness()
+
+    result = await harness.run(
+        seam,
+        question="kenya debt",
+        readings=[],
+        prior_plan=seeded.model_dump(mode="json"),
+        amendment="actually, tell me about Kenya's ODA instead",
+    )
+
+    assert result is not None
+    assert result["refused"]["code"] == ProblemCode.QUESTION_FIXED
+    assert load_pending_ask(await harness.state()) is None
+
+
+async def test_an_ask_after_a_refused_ask_in_the_same_response_is_put_to_the_user() -> None:
+    """The first ask of a response offers options it wrote itself, which its
+    tool refuses, so the second, valid, is the one the response puts to the
+    user."""
+    authored = {
+        "message": "Constant or current dollars?",
+        "options": [{"spec_id": "constant_2024_usd", "label": "Constant 2024 US dollars"}],
+    }
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[[(PLANNER_ASK, authored), (PLANNER_ASK, {"message": "Which years?"})]]
+    )
+    harness = _SeamHarness()
+
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+
+    asked = load_pending_ask(await harness.state())
+    assert asked is not None and asked.args["message"] == "Which years?"
+    answers = [
+        (response.response or {}).get("code", (response.response or {}).get("status"))
+        for event in await harness.events()
+        for response in event.get_function_responses()
+        if response.name == PLANNER_ASK
+    ]
+    assert answers == [ProblemCode.INVALID_ARGUMENTS, "asked"]
+
+
+async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The planner's run accepts an ask, and the branch check on its events
+    then raises, which the served planner hands back as a refusal
+    (`harness.wiring.handing_back_planner_failures`). The entry ends on it, so
+    the state it leaves holds no ask for a resume or a reader of the state to
+    find."""
+
+    def stray(events: Any, **kwargs: Any) -> None:
+        del events, kwargs
+        raise PlannerSeamError("a planner event carries another branch")
+
+    monkeypatch.setattr(planner_seam, "_check_branches", stray)
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=[[(PLANNER_ASK, {"message": "Which years?"})]])
+    harness = _SeamHarness()
+
+    result = await harness.run(
+        cast(PlannerSeam, handing_back_planner_failures(seam)), question="kenya debt", readings=[]
+    )
+
+    assert result is not None and "refused" in result
+    assert load_pending_ask(await harness.state()) is None
+
+
+def adk_request_input(
+    message: str,
+    candidates: list[dict[str, str]] = [],  # noqa: B006
+) -> dict[str, object]:
+    """The planner's ask as it was before the planner node paused on it: a
+    long-running tool under ADK's own request-input name, whose call the
+    planner's run paused on."""
+    del message, candidates
+    return {}
+
+
+async def test_an_answer_to_a_pause_from_before_the_node_level_ask_re_enters_the_planner() -> None:
+    """A turn paused on the planner's long-running `adk_request_input` call,
+    as the planner asked before its node paused on its asks, holds no pending
+    ask. The answer re-enters the planner in a fresh run with the question and
+    the pick in its brief, as a node-level ask's does."""
+    seam = _seam()
+    legacy = LongRunningFunctionTool(adk_request_input)
+    tools = list(seam._agent.tools)
+    seam._agent.tools = [*tools, legacy]
+    question = {
+        "message": "Which source did you mean?",
+        "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
+    }
+    seam._agent.model = ScriptedPlannerLlm(script=[[("adk_request_input", question)]])
+    harness = _SeamHarness()
+
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    assert load_pending_ask(await harness.state()) is None
+
+    seam._agent.tools = tools
+    resumed = ScriptedPlannerLlm(script=["stop"])
+    seam._agent.model = resumed
+    answer = types.Content(
+        role="user",
+        parts=[
+            create_request_input_response(
+                _pending_ask_interrupt_id(await harness.events()), {"result": {"spec_id": SPEC}}
+            )
+        ],
+    )
+    result = await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+
+    assert result is not None
+    (request,) = resumed.captured_requests
+    assert _call_and_response_names(request) == []
+    brief = _brief_follows_the_question(request)
+    assert question["message"] in brief
+    assert f"They picked 'a candidate', id `{SPEC}`." in brief
 
 
 async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for_an_ask(

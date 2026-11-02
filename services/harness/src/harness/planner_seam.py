@@ -61,7 +61,7 @@ from typing import Any, NamedTuple, cast
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
-from executor.classify import RECOVERABLE_SPEC_CODES, ExecutorCode
+from executor.classify import RECOVERABLE_SPEC_CODES, internal_fault
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.base_llm import BaseLlm
@@ -170,7 +170,7 @@ from harness.sentences import (
 )
 from harness.settings import Settings
 from harness.turn_budget import CLOSED_BY_KEY, current_turn_budget
-from harness.turn_events import PLANNER_ASK
+from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import (
     SETTLED_STATUSES,
     CandidateReading,
@@ -337,11 +337,7 @@ class PlannerSeamError(RuntimeError):
 
     def __init__(self, message: str, *, refusal: dict[str, Any] | None = None) -> None:
         super().__init__(message)
-        self.refusal = refusal or {
-            "code": ExecutorCode.INTERNAL_ERROR.value,
-            "retry_mode": "do_not_retry",
-            "fix": {"detail": message},
-        }
+        self.refusal = refusal or internal_fault(message)
 
 
 class _RunTracker:
@@ -575,6 +571,8 @@ class PlannerSeam:
         # answer, which the resume carries under that id. The ask is put to
         # the user once: every entry starts with none waiting.
         asked = load_pending_ask(cast(SessionState, ctx.session.state))
+        if asked is None or asked.call_id not in ctx.resume_inputs:
+            asked = self._legacy_ask(ctx) or asked
         answered = (
             _Answered(
                 asked,
@@ -584,8 +582,7 @@ class PlannerSeam:
             if asked is not None and asked.call_id in ctx.resume_inputs
             else None
         )
-        clear_pending_ask(cast(SessionState, ctx.session.state))
-        ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = None
+        _forget_ask(ctx)
         if not ctx.resume_inputs:
             # One `__call__` is one entry into the planner, EXCEPT when it
             # re-enters with the user's answer to the ask a run of this entry
@@ -744,11 +741,13 @@ class PlannerSeam:
                 )
                 # A run that ended on an accepted ask pauses the entry on it
                 # (`harness.graph.planning`), unless a plan declared ready
-                # beside it answers the entry.
+                # beside it answers the entry or a refusal the run met ends
+                # it, which no answer could undo (`_propose` sets none of its
+                # own on an ask).
                 asking = load_pending_ask(cast(SessionState, ctx.session.state))
-                if asking is not None and submitted is None:
+                if asking is not None and submitted is None and refused is None:
                     return {"asked": asking._asdict()}
-                clear_pending_ask(cast(SessionState, ctx.session.state))
+                _forget_ask(ctx)
                 if refused is not None:
                     if pick is not None:
                         # The card shows why under the decision the user
@@ -775,6 +774,12 @@ class PlannerSeam:
                         "pending_approval; refusing to report it ready"
                     )
                 return {"plan": plan.model_dump(mode="json"), "summary": submitted["summary"]}
+            except BaseException:
+                # An entry that raises asks nothing: the turn ends on the
+                # failure, so no ask is left for a resume or a reader of the
+                # state to find.
+                _forget_ask(ctx)
+                raise
             finally:
                 # Every exit of this method runs through here: a normal return,
                 # an ask the planner's run ended on included, and a raised
@@ -788,6 +793,24 @@ class PlannerSeam:
                 finally:
                     current_cut_calls.reset(cut_calls_token)
                     await cut_calls.close()
+
+    def _legacy_ask(self, ctx: Context) -> AcceptedAsk | None:
+        """The ask a turn paused on before the planner node paused on its
+        planner's asks, which the resume answers, or `None`.
+
+        Such a turn paused inside the planner's run, on the planner's own
+        `REQUEST_INPUT_FUNCTION_CALL_NAME` call, whose arguments were the
+        question, and records no `PENDING_ASK_STATE_KEY`. Its answer
+        re-enters the planner as a new ask's does, in the brief of a fresh run
+        (`_answer_text`).
+        """
+        for event in reversed(ctx.session.events):
+            if event.author != self._agent.name:
+                continue
+            for call in event.get_function_calls():
+                if call.name == REQUEST_INPUT_FUNCTION_CALL_NAME and call.id in ctx.resume_inputs:
+                    return AcceptedAsk(call.id, dict(call.args or {}))
+        return None
 
     @staticmethod
     def _persist_durable(ctx: Context) -> None:
@@ -1576,6 +1599,12 @@ def _ask_text(
             "requirement cited from at least one of them.\n"
         )
     return ask
+
+
+def _forget_ask(ctx: Context) -> None:
+    """Clear the ask the planner's run ended on and the referral kept with it."""
+    clear_pending_ask(cast(SessionState, ctx.session.state))
+    ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = None
 
 
 # The line before the referral `_answer_text` renders.

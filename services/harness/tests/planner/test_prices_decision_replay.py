@@ -47,6 +47,7 @@ from planner.plan import (
     found_sources,
     held_sources,
     load_plan,
+    load_unsupported,
     pin_sources,
     plan_revision,
     save_found_sources,
@@ -414,7 +415,7 @@ def test_reading_a_candidates_scope_resolves_its_identity_once() -> None:
     state = _FakeToolContext().state
     save_found_sources(state, found_blocks(outcome_from_envelope(as_candidates())))
 
-    read = asyncio.run(read_found_scope(search, FOUND, state=state))
+    read = asyncio.run(read_found_scope(search, FOUND, held=held_sources(state), state=state))
 
     (call,) = search.calls
     assert call["scope_entries"] == []
@@ -476,6 +477,7 @@ def test_a_re_pin_to_a_candidate_whose_basis_cannot_be_read_is_refused(
     assert (answer_["outcome"], answer_["code"]) == (outcome, code), answer_
     read = answer_["detail"]["basis" if code == "operation_unsupported" else "read"]
     assert read["requirement_id"] == "uk_total_oda"
+    assert load_unsupported(ctx.state) == frozenset()
     assert [one["spec_id"] for one in search.calls] == [FOUND]
     plan = load_plan(ctx.state)
     assert plan is not None
@@ -491,11 +493,13 @@ def test_a_read_that_leaves_a_candidate_unread_is_made_once(
 
     reads: list[str] = []
 
-    async def unread(surface: Any, spec_id: str, *, state: Any) -> dict[str, Mapping[str, Any]]:
-        del surface
+    async def unread(
+        surface: Any, spec_id: str, *, held: Any, state: Any
+    ) -> dict[str, Mapping[str, Any]]:
+        del surface, state
         reads.append(spec_id)
         assert len(reads) == 1, reads
-        block = held_sources(state)[spec_id].spec_block(spec_id)
+        block = held[spec_id].spec_block(spec_id)
         assert block is not None
         return {spec_id: block}
 
@@ -507,6 +511,8 @@ def test_a_read_that_leaves_a_candidate_unread_is_made_once(
 
     assert (answer["outcome"], answer["code"]) == ("unsupported", "operation_unsupported"), answer
     assert answer["detail"]["basis"]["spec_id"] == FOUND
+    assert answer["action"]["needs"] == ["evidence_requirements"]
+    assert load_unsupported(ctx.state) == frozenset()
     assert reads == [FOUND]
 
 
@@ -812,11 +818,33 @@ def test_a_scope_read_marks_no_axis_as_the_planners() -> None:
     candidate = found_blocks(outcome_from_envelope(as_candidates()))[FOUND]
     save_found_sources(state, {FOUND: {**candidate, "_bound_refs": []}})
 
-    read = asyncio.run(read_found_scope(search, FOUND, state=state))[FOUND]
+    found = asyncio.run(read_found_scope(search, FOUND, held=held_sources(state), state=state))
+    read = found[FOUND]
 
     assert read["resolved"] == part["spec"]["resolved"]
     assert PLANNER_AXES_BLOCK_KEY not in read
     assert read["_bound_refs"] == []
+
+
+def test_a_scope_read_reads_the_block_on_record_before_it_waits() -> None:
+    """While Search answers the read of `FOUND`'s scope, another read writes a
+    block of `FOUND` with a record of its own. The read keeps the record of
+    the block on record when it started, so reads made at once write what
+    reading them one after another would."""
+    state = _FakeToolContext().state
+    candidate = found_blocks(outcome_from_envelope(as_candidates()))[FOUND]
+    save_found_sources(state, {FOUND: {**candidate, "_bound_refs": []}})
+
+    class Writing(RecordedSearch):
+        async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+            save_found_sources(state, {FOUND: {**candidate, "_bound_refs": ["late"]}})
+            return await super().call_tool(**kwargs)
+
+    search = Writing(RECORDED["resolves"])
+
+    read = asyncio.run(read_found_scope(search, FOUND, held=held_sources(state), state=state))
+
+    assert read[FOUND]["_bound_refs"] == []
 
 
 @pytest.mark.parametrize("held_definition", ["none", "another series'"])
@@ -834,7 +862,7 @@ def test_a_scope_read_resolves_the_definition_discovery_recorded(held_definition
         candidate["definition"] = _searched(_TOTAL)["spec"]["definition"]
     save_found_sources(state, {FOUND: candidate})
 
-    read = asyncio.run(read_found_scope(search, FOUND, state=state))
+    read = asyncio.run(read_found_scope(search, FOUND, held=held_sources(state), state=state))
 
     (call,) = search.calls
     assert call["identity"] == _definite_found()["definition"]["identity"]

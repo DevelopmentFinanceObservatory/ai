@@ -548,10 +548,11 @@ def store_search(
     choices Search has not stated (`planner.plan.scope_unread`), and the
     part's warnings under `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch`
     finds them. The part holds each of its spec_ids with its own record and
-    warnings, and an earlier block of the spec_id that says more about its
-    scope choices keeps its scope content standing
-    (`planner.plan.with_blocks`). Each part
-    joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
+    warnings, and an earlier block of the spec_id, of an earlier part or
+    already stored, that says more about its scope choices keeps its scope
+    content standing (`planner.plan.with_blocks`). The parts' blocks are
+    merged first and joined to the store once, which copies it once. Each
+    part joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
     `asked` holds each part's asked flow parties by position, and
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
@@ -559,12 +560,13 @@ def store_search(
     with `open_prices`, the options of its prices question
     (`harness.turn_records.open_prices`).
     """
-    specs = dict(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
     searches = list(stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY))
     skill_ids = [skill["id"] for skill in digest.get("skills") or []]
     observed_at = datetime.now(UTC)
     readings = []
+    found: dict[str, dict[str, Any]] = {}
     for index, part in enumerate(digest.get("part_digests") or []):
         reading = {
             key: value
@@ -590,7 +592,7 @@ def store_search(
                 spec_id: {**block, "_resolved_sources": mentions}
                 for spec_id, block in blocks.items()
             }
-        specs = with_blocks(specs, blocks)
+        found = with_blocks(found, blocks)
         spec_warnings.update(dict.fromkeys(blocks, reading.get("warnings") or []))
         if asked:
             facts["asked_roles"] = list(asked[index])
@@ -603,7 +605,7 @@ def store_search(
         )
         searches.append(stored.model_dump(mode="json"))
         readings.append(reading)
-    state[ORCHESTRATOR_SPECS_KEY] = specs
+    state[ORCHESTRATOR_SPECS_KEY] = with_blocks(specs, found)
     state[ORCHESTRATOR_SPEC_WARNINGS_KEY] = spec_warnings
     state[ORCHESTRATOR_SEARCHES_KEY] = searches
     return readings

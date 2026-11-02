@@ -44,7 +44,6 @@ import ssl
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from http import HTTPStatus
 from typing import Any, cast
 
 import aiohttp
@@ -64,9 +63,9 @@ from compiler.surface import (
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
-from executor.classify import ExecutorCode
+from executor.classify import internal_fault
 from executor.outcomes import RefusalKind
-from executor.run import current_step_id
+from executor.run import current_step_id, transient_status
 from google.adk.events import Event
 from google.auth import exceptions as google_auth_errors
 from google.genai import errors as genai_errors
@@ -317,25 +316,20 @@ def _transient_fault(exc: BaseException) -> bool:
     return False
 
 
-def _status_transient(status: int | None) -> bool:
-    """Whether an HTTP `status` says to try again later (a rate limit or a
-    server error). A 4xx other than 429 repeats for the same request."""
-    return status is not None and (status == HTTPStatus.TOO_MANY_REQUESTS or status >= 500)
-
-
 def _transient_link(exc: BaseException) -> bool:
     """Whether `exc` alone is transient: a timeout, the session store's pool
     timeout among them (`sqlalchemy.exc.TimeoutError`, every pooled
     connection busy under load); a connection that failed or dropped, a
     Postgres one included (`PostgresConnectionError`, or a server ending
-    the connection, `_POSTGRES_CONNECTION_ENDED`), or one SQLAlchemy
+    the connection, `_POSTGRES_CONNECTION_ENDED`, or refusing one when its
+    connection slots are full, `TooManyConnectionsError`), or one SQLAlchemy
     invalidated as a disconnect (`DBAPIError.connection_invalidated`); a
     name lookup or TLS failure; a transport error, httpx2's, aiohttp's
     connection or payload error (the Gemini SDK's transport, under which a
     peer's reset reads as `ClientPayloadError`), or google-auth's while
     fetching a token (a `RefreshError` raised from one is read by its
     cause); an HTTP or model answer of 429 or 5xx after the client's
-    retries; or an MCP call whose connection closed or that timed out,
+    retries, httpx2's included (`executor.run.transient_status`); or an MCP call whose connection closed or that timed out,
     fastmcp's session ending under a call included (anyio's closed or
     broken stream, under its "Server session was closed unexpectedly", or
     `_FASTMCP_SESSION_ENDED`). Any other `OSError`, such as `FileNotFoundError`, and any
@@ -344,10 +338,13 @@ def _transient_link(exc: BaseException) -> bool:
     a later turn meets again. Any other `DBAPIError` is read by the asyncpg
     error it was raised from (`_transient_fault` walks `__cause__`), so a
     connection error under it is transient and a SQL error a fault."""
-    if isinstance(exc, genai_errors.APIError):
-        return _status_transient(exc.code)
-    if isinstance(exc, aiohttp.ClientResponseError):
-        return _status_transient(exc.status)
+    match exc:
+        case (
+            genai_errors.APIError(code=status)
+            | aiohttp.ClientResponseError(status=status)
+            | httpx2.HTTPStatusError(response=httpx2.Response(status_code=status))
+        ):
+            return transient_status(status)
     if isinstance(exc, MCPError):
         return exc.error.code in _TRANSIENT_MCP_CODES
     if isinstance(exc, sa_exc.DBAPIError):
@@ -362,6 +359,7 @@ def _transient_link(exc: BaseException) -> bool:
             socket.gaierror,
             ssl.SSLError,
             asyncpg.PostgresConnectionError,
+            asyncpg.TooManyConnectionsError,
             *_POSTGRES_CONNECTION_ENDED,
             sa_exc.TimeoutError,
             httpx2.TransportError,
@@ -372,15 +370,6 @@ def _transient_link(exc: BaseException) -> bool:
             anyio.BrokenResourceError,
         ),
     )
-
-
-# What `_stream_fatal` reads for an exception that states no refusal and is no
-# `_transient_fault`: a fault of the system, such as a bug, which the same turn
-# meets again.
-_INTERNAL_FAULT: Mapping[str, Any] = {
-    "code": ExecutorCode.INTERNAL_ERROR.value,
-    "retry_mode": RetryMode.DO_NOT_RETRY.value,
-}
 
 
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
@@ -417,7 +406,7 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
         wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
     else:
         refusal = getattr(exc, "refusal", None) or (
-            {} if _transient_fault(exc) else _INTERNAL_FAULT
+            {} if _transient_fault(exc) else internal_fault()
         )
         wire_code = refusal.get("code")
     try:

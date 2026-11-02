@@ -143,6 +143,7 @@ from planner.plan import (
     AggregateRequirement,
     DatasetRequirement,
     Entity,
+    PinSource,
     Plan,
     PlanStatus,
     QuotientRequirement,
@@ -2515,15 +2516,17 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
     return spec
 
 
-def definition_on_record(state: SessionState, spec_id: str) -> RecordedDefinition | None:
+def definition_on_record(
+    state: SessionState, spec_id: str, *, held: Mapping[str, PinSource] | None = None
+) -> RecordedDefinition | None:
     """The definition on record for `spec_id` (`planner.plan.identity_on_record`),
     hashing to it: one a search in the conversation recorded, else one this
     session's discovery holds (`DiscoveryLog.recorded_definition`), else the
-    one its block on record carries (`planner.plan.held_sources`); `None`
-    when none is."""
+    one its block on record carries (`held`, `planner.plan.held_sources` of
+    `state` when not given); `None` when none is."""
     return identity_on_record(
         spec_id,
-        shown=held_sources(state),
+        shown=held_sources(state) if held is None else held,
         end_open=True,
         definition_lookup=load_log(state).recorded_definition,
     )
@@ -3346,11 +3349,15 @@ def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
 
 
 async def read_found_scope(
-    surface: ToolSurface, spec_id: str, *, state: SessionState
+    surface: ToolSurface, spec_id: str, *, held: Mapping[str, PinSource], state: SessionState
 ) -> dict[str, Mapping[str, Any]]:
     """The block on record for `spec_id`, a source held with no scope choices
     (`SCOPE_UNREAD_BLOCK_KEY`), with the scope content Search answers for its
     definition on record (`definition_on_record`), by spec_id.
+
+    `held` is the blocks on record (`planner.plan.held_sources`), and both it
+    and `state` are read before the call waits on Search, so reads made at
+    once read none of each other's writes (`planner.agent._held_in_order`).
 
     Search states a part's scope choices on a definite answer to a resubmit
     posting scope entries, so the resolve posts none (`compile_scope`) and
@@ -3368,9 +3375,11 @@ async def read_found_scope(
             dataset `spec_id` names (`resolved_spec`).
         ValueError: If no definition of `spec_id` is on record.
     """
-    recorded = definition_on_record(state, spec_id)
+    recorded = definition_on_record(state, spec_id, held=held)
     if recorded is None:
         raise ValueError(f"no definition of {spec_id} is on record")
+    source = held.get(spec_id)
+    block = source.spec_block(spec_id) if source is not None else None
     part, _ = await resolve_definition_at(
         surface,
         spec_id=spec_id,
@@ -3380,8 +3389,6 @@ async def read_found_scope(
     )
     resolved_spec(part, spec_id=spec_id)
     (read,) = outcome_from_envelope({"parts": [part]}).blocks
-    held = held_sources(state).get(spec_id)
-    block = held.spec_block(spec_id) if held is not None else None
     return {spec_id: read if block is None else standing_block(block, read)}
 
 
