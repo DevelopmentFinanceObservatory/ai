@@ -10,8 +10,8 @@ the input that row is for alone.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -21,7 +21,7 @@ from compiler.evidence import RetrievalEvidence, check_evidence
 from compiler.sources import source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurface
 from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
+from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.graph import switch as switch_module
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY
@@ -43,6 +43,7 @@ from planner.plan import (
     Period,
     PinSource,
     Plan,
+    RecordedDefinition,
     Reduction,
     RequirementSide,
     ResolvedBy,
@@ -50,9 +51,8 @@ from planner.plan import (
     WholeOf,
     aligned_pins,
     alignments,
-    definitions_on_record,
+    current_recorded_identity,
     held_sources,
-    identity_on_record,
     load_plan,
     period_window,
     pin_sources,
@@ -94,6 +94,27 @@ from .planner.test_aligned_identity import (
 )
 
 _GRANT_EQUIVALENT = f"spec_{'9' * 32}"
+
+
+@contextmanager
+def definitions_on_record(definitions: Mapping[str, RecordedDefinition]) -> Iterator[None]:
+    """Put `definitions`, by spec_id, on record inside the block
+    (`planner.plan.recorded_identity`), each looked up before what the
+    conversation recorded, as `harness.studio` puts a Studio conversation's
+    record in `current_recorded_identity`."""
+    outer = current_recorded_identity.get()
+
+    def lookup(spec_id: str) -> RecordedDefinition | None:
+        found = definitions.get(spec_id)
+        if found is None and outer is not None:
+            return outer(spec_id)
+        return found
+
+    token = current_recorded_identity.set(lookup)
+    try:
+        yield
+    finally:
+        current_recorded_identity.reset(token)
 
 
 def _counted_on_grant_equivalents() -> dict[str, Any]:
@@ -944,23 +965,90 @@ class _ResolvesCopies:
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
-@pytest.mark.parametrize("warnings", [(), ("role_text_not_recognised",)], ids=["clean", "warned"])
-@pytest.mark.parametrize("requirement_id", ["total", "health"], ids=["compiled", "searched"])
-async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
-    decision: DecisionFactory, requirement_id: str, warnings: tuple[str, ...]
-) -> None:
-    """The share's total is compiled gross from the total Search found, and its
-    health input pins the health aid Search found; admission moves both to copies
-    over 2024. Where the search part that returned the pin the requirement states
-    carries a blocking warning, discovery does not honour the copy and searches,
-    as for the pin itself; a clean part's copy is honoured with no search."""
-    share = _closed_share("basis")
-    stated = {"total": TOTAL, "health": HEALTH}[requirement_id]
-    shown = pin_sources(share.ctx.state)
-    shown[stated] = shown[stated].model_copy(update={"warnings": warnings})
-    save_pin_sources(share.ctx.state, shown)
+async def _pinning_the_basis_compile(share: _ClosedShare, decision: DecisionFactory) -> Plan:
+    """`share`, the `basis` share, proposed and amended with health's share of a
+    requirement `direct` pinning the total's compile, which the planner was never
+    shown. Returns the plan on record."""
     plan = await _propose(share, decision)
-    assert _dataset_pins(plan)[requirement_id] in windowed_pins(share.ctx.state)
+    (compiled,) = aligned_pins(share.ctx.state)
+    direct = _us_dataset("direct", "US total ODA", compiled.spec_id).model_copy(
+        update={"period": share.period}
+    )
+    propose = _tools_reading(cast(ToolSurface, share.surface))["propose_plan"].func
+    with definitions_on_record(share.recorded):
+        result = await propose(
+            answered=[AskAnswer(ask=0, outputs=("share", "of_direct"))],
+            evidence_requirements=[
+                direct,
+                ShareOfRequirement(
+                    id="of_direct",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="health"),
+                    denominator=RequirementSide(input_id="direct"),
+                ),
+            ],
+            amends_version=plan.version,
+            tool_context=share.ctx,
+        )
+    assert result["outcome"] == Outcome.OK.value, result
+    assert "direct" not in alignments(share.ctx.state)
+    amended = load_plan(share.ctx.state)
+    assert amended is not None
+    return amended
+
+
+@pytest.mark.parametrize(
+    ("warnings", "admitted_clean", "honoured"),
+    [
+        ((), True, True),
+        (("role_text_not_recognised",), False, False),
+        (("time_text_not_parsed",), False, True),
+        (("role_text_not_recognised",), True, False),
+    ],
+    ids=["clean", "role", "time", "role-after-admission"],
+)
+@pytest.mark.parametrize(
+    ("kind", "requirement_id"),
+    [("basis", "total"), ("basis", "health"), ("whole", "whole"), ("basis", "direct")],
+    ids=["compiled", "searched", "whole", "compile-pinned"],
+)
+async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
+    decision: DecisionFactory,
+    kind: str,
+    requirement_id: str,
+    warnings: tuple[str, ...],
+    admitted_clean: bool,
+    honoured: bool,
+) -> None:
+    """Admission moves each input of a share over 2024 to a copy over that year:
+    the total compiled gross from the total Search found, the health aid Search
+    found, the whole compiled from that health aid, and a requirement pinning the
+    total's compile directly. Where the search part every one of them descends
+    from carries a blocking warning, admission leaves the pin unwindowed, and
+    discovery does not honour it and searches. A part that only dropped the
+    question's years (`time_text_not_parsed`) is repaired by the copy over the
+    requirement's period, which is honoured with no search, as a clean part's is.
+    A warning on the part that admission did not see, as when a later search
+    returns it warned, still keeps discovery from honouring the copy."""
+    share = _closed_share(kind)
+    stated = share.requirements[0].source_spec_id if kind == "whole" else TOTAL
+    stated = HEALTH if requirement_id == "health" else stated
+    assert stated is not None
+
+    def warn() -> None:
+        shown = pin_sources(share.ctx.state)
+        shown[stated] = shown[stated].model_copy(update={"warnings": warnings})
+        save_pin_sources(share.ctx.state, shown)
+
+    if not admitted_clean:
+        warn()
+    if requirement_id == "direct":
+        plan = await _pinning_the_basis_compile(share, decision)
+    else:
+        plan = await _propose(share, decision)
+    copied = _dataset_pins(plan)[requirement_id] in windowed_pins(share.ctx.state)
+    assert copied is (admitted_clean or honoured)
+    warn()
     surface = _ResolvesCopies(share.ctx)
 
     with definitions_on_record(share.recorded):
@@ -968,12 +1056,12 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
             requirement_id=requirement_id, state=share.ctx.state
         )
 
-    if warnings:
-        assert "search" in surface.tools
-        assert found.get("status") != "definite", found
-    else:
+    if honoured:
         assert surface.tools == ["resolve_definition"]
         assert found["status"] == "definite", found
+    else:
+        assert "search" in surface.tools
+        assert found.get("status") != "definite", found
 
 
 @pytest.mark.parametrize("identity", ["bad", ["bad"]], ids=["string", "list"])
@@ -1061,26 +1149,6 @@ async def test_a_switch_on_a_closed_share_moves_both_inputs_to_copies_over_its_p
         rid: copies[pin].identity["requested_window"] if pin in copies else None
         for rid, pin in pins.items()
     } == dict.fromkeys(pins, window)
-
-
-@pytest.mark.parametrize("padding", [0, MAX_IDENTITY_BYTES], ids=["under-cap", "past-cap"])
-def test_a_shown_block_puts_its_identity_on_record_only_within_the_size_cap(
-    padding: int,
-) -> None:
-    """A shown block whose identity hashes to its spec_id puts that identity on
-    record, so a compile held only as a block is windowed. Past `MAX_IDENTITY_BYTES`
-    as compact JSON it puts none, since data-mcp's `resolve_definition` would refuse
-    a copy of it (`caller_definition`)."""
-    block = json.loads(json.dumps(us_2023_block("health")))
-    identity = block["definition"]["identity"]
-    if padding:
-        identity["padding"] = "x" * padding
-    spec_id = spec_id_for(canonicalize(identity))
-    block["spec_id"] = spec_id
-
-    recorded = identity_on_record(spec_id, shown={spec_id: PinSource(block=block, settled=True)})
-
-    assert (recorded.identity if recorded is not None else None) == (None if padding else identity)
 
 
 # Dev Search's answers for the share of Kenya's ODA that goes to health, by name:

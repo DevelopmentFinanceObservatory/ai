@@ -97,7 +97,7 @@ import json
 import logging
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -139,8 +139,10 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
+    AlignedPin,
     DatasetRequirement,
     Entity,
+    PinSource,
     Plan,
     PlanStatus,
     QuotientRequirement,
@@ -149,6 +151,7 @@ from planner.plan import (
     ShareOfRequirement,
     Unit,
     aligned_entry,
+    aligned_pins,
     alignments,
     authored,
     compiled_pin,
@@ -236,6 +239,11 @@ DESCRIBE_ID_BATCH_MAX = 8
 # `facet_binding_unsupported`, `default_not_declared` -- is advisory and
 # rides out with the answer.
 BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_parsed"})
+
+# Of `BLOCKING_WARNING_CODES`, the ones under which Search dropped only the
+# question's years. A copy over the requirement's period
+# (`planner.plan.windowed_pins`) states the years again, so it repairs them.
+WINDOW_ONLY_WARNING_CODES = frozenset({"time_text_not_parsed"})
 
 # The answers of the translator's own search a pin may be honoured from. A
 # pin the planner chose among a `source_ambiguous` referral's candidates is
@@ -2573,7 +2581,7 @@ def _resolve_pin_block(
     (`planner.plan.windowed_pins`) is neither shown nor compiled, so it
     reads `None`, and Search confirms the copy (`_recorded_source`).
     `_pin_source` reads neither for a pin from a warned search part
-    (`_from_warned_part`).
+    (`from_warned_part`).
     """
     pin = requirement.source_spec_id
     if pin is None:
@@ -2598,16 +2606,56 @@ def _resolve_pin_block(
     return source.spec_block(pin)
 
 
-def _from_warned_part(state: SessionState, requirement: DatasetRequirement) -> bool:
-    """Whether the pin `requirement` states comes from a search part carrying a code in `BLOCKING_WARNING_CODES`.
+def from_warned_part(
+    pin: str,
+    *,
+    copied: bool,
+    stated_pin: str | None,
+    shown: Mapping[str, PinSource],
+    compiled: Iterable[AlignedPin],
+) -> bool:
+    """Whether `pin` descends from a search part that answered a narrower question than the one asked.
 
-    Such a part dropped part of the ask and answered a narrower one, so no
-    reader honours the pin (`_pin_source`). The pin is followed to what the
-    planner was shown: a copy over the requirement's period
-    (`planner.plan.windowed_pins`) to the pin it copies, and a compile
-    admission pinned the requirement to (`planner.plan.aligned_entry`) to
-    the pin the requirement states (`AlignedInput.stated_pin`). A pin the
-    planner was not shown (`planner.plan.pin_sources`) carries no warning.
+    Such a part carries a code in `BLOCKING_WARNING_CODES` among its
+    `PinSource.warnings` in `shown`; a pin `shown` does not hold carries
+    none. `pin` descends from itself, from each pin it was compiled from
+    (`AlignedPin.origin` of each of `compiled` answered as `pin`), and from
+    `stated_pin`, the pin the requirement admission moved onto `pin` states
+    (`planner.plan.AlignedInput.stated_pin`). With `copied`, `pin` is read
+    through a copy over the requirement's period, which repairs a part
+    carrying only `WINDOW_ONLY_WARNING_CODES`.
+
+    Admission moves no pin this holds for to a copy
+    (`submission.service._window_pins`), and the translator honours none
+    (`_pin_source`), so the two read one rule.
+    """
+    blocking = (
+        BLOCKING_WARNING_CODES - WINDOW_ONLY_WARNING_CODES if copied else BLOCKING_WARNING_CODES
+    )
+    origins: dict[str, list[str]] = {}
+    for held in compiled:
+        origins.setdefault(held.spec_id, []).append(held.origin)
+    pending = [pin] if stated_pin is None else [pin, stated_pin]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        source = shown.get(current)
+        if source is not None and blocking.intersection(source.warnings):
+            return True
+        pending.extend(origins.get(current, ()))
+    return False
+
+
+def _from_warned_part(state: SessionState, requirement: DatasetRequirement) -> bool:
+    """Whether the pin `requirement` states descends from a warned search part (`from_warned_part`).
+
+    A copy over the requirement's period (`planner.plan.windowed_pins`) is
+    followed to the pin it copies, and a compile admission pinned the
+    requirement to (`planner.plan.aligned_entry`) to the pin the
+    requirement states as well.
     """
     pin = requirement.source_spec_id
     if pin is None:
@@ -2617,9 +2665,13 @@ def _from_warned_part(state: SessionState, requirement: DatasetRequirement) -> b
     entry = aligned_entry(
         requirement.model_copy(update={"source_spec_id": origin}), alignments(state)
     )
-    stated = entry.stated_pin if entry is not None else origin
-    source = pin_sources(state).get(stated or "")
-    return source is not None and bool(BLOCKING_WARNING_CODES.intersection(source.warnings))
+    return from_warned_part(
+        origin,
+        copied=copy is not None,
+        stated_pin=entry.stated_pin if entry is not None else None,
+        shown=pin_sources(state),
+        compiled=aligned_pins(state),
+    )
 
 
 def _block_source(
@@ -2751,7 +2803,7 @@ async def _pin_source(
     The source is stamped with the requirement's `measure` as `searched_as`.
     Honoured means the block or identity reader holds it over the
     requirement's period. Neither reader is asked for a pin from a search
-    part carrying a blocking warning (`_from_warned_part`), whether the
+    part that answered a narrower question (`from_warned_part`), whether the
     requirement pins it, a copy of it, or a compile from it. A source read
     only off the discovery log (`DiscoveryLog.recorded_source`) is not
     honoured, and serves the scope

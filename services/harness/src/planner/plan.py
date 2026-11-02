@@ -46,8 +46,7 @@ import itertools
 import json
 import logging
 import re
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
@@ -6034,9 +6033,8 @@ def full_history(block: Mapping[str, Any]) -> FullHistory | None:
     to the current one. `None` when the answer is over a window or states no
     first year.
     """
-    definition = block.get("definition")
-    identity = definition.get("identity") if isinstance(definition, Mapping) else None
-    requested = identity.get("requested_window") if isinstance(identity, Mapping) else None
+    identity = block_identity(block)
+    requested = identity.get("requested_window") if identity is not None else None
     if not isinstance(requested, Mapping) or requested.get("kind") != "all":
         return None
     resolved = block.get("resolved")
@@ -6110,16 +6108,21 @@ def save_full_history(state: SessionState, spec_id: str, history: FullHistory | 
     state[FULL_HISTORIES_STATE_KEY] = stored
 
 
-def shown_identity(spec_id: str, source: PinSource) -> Mapping[str, Any] | None:
-    """The identity `source`'s block for `spec_id` carries; `None` when
+def block_identity(block: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The identity `block`'s definition carries; `None` when either is not a mapping."""
+    definition = block.get("definition")
+    identity = definition.get("identity") if isinstance(definition, Mapping) else None
+    return identity if isinstance(identity, Mapping) else None
+
+
+def shown_identity(spec_id: str, block: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The identity `block`, a spec block for `spec_id`, carries; `None` when
     data-mcp's `resolve_definition` would refuse it (`caller_definition`:
     it does not hash to `spec_id`, has no RFC 8785 form, or its compact
     JSON is past `MAX_IDENTITY_BYTES`). `harness.studio_state._turn_identities`
     leaves such an identity off the record too."""
-    block = source.spec_block(spec_id)
-    definition = block.get("definition") if block is not None else None
-    identity = definition.get("identity") if isinstance(definition, Mapping) else None
-    if not isinstance(identity, Mapping):
+    identity = block_identity(block)
+    if identity is None:
         return None
     try:
         caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
@@ -6202,30 +6205,6 @@ def recorded_identity(spec_id: str) -> RecordedDefinition | None:
     return lookup(spec_id) if lookup is not None else None
 
 
-@contextmanager
-def definitions_on_record(definitions: Mapping[str, RecordedDefinition]) -> Iterator[None]:
-    """Put `definitions`, by spec_id, on record inside the block (`recorded_identity`).
-
-    Each is looked up before what the conversation recorded. Tests use it to
-    stand in for a Studio conversation's record, which `harness.studio` puts
-    in `current_recorded_identity`
-    (`harness.studio_state.ConversationState.recorded_identity`).
-    """
-    outer = current_recorded_identity.get()
-
-    def lookup(spec_id: str) -> RecordedDefinition | None:
-        found = definitions.get(spec_id)
-        if found is None and outer is not None:
-            return outer(spec_id)
-        return found
-
-    token = current_recorded_identity.set(lookup)
-    try:
-        yield
-    finally:
-        current_recorded_identity.reset(token)
-
-
 class _ShownDefinition(NamedTuple):
     """The definition of a dataset the planner was shown, as its block carries it,
     with the sets its places were asked for as."""
@@ -6262,9 +6241,9 @@ def identity_on_record(
         recorded = definition_lookup(pin)
     if recorded is not None or pin not in shown:
         return recorded
-    identity = shown_identity(pin, shown[pin])
     block = shown[pin].spec_block(pin)
-    if identity is None or block is None:
+    identity = shown_identity(pin, block) if block is not None else None
+    if block is None or identity is None:
         return None
     try:
         source = source_from_spec_block(block)

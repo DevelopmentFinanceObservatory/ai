@@ -35,7 +35,7 @@ from compiler.compile import CompileIssueCode, compile_plan
 from compiler.sources import PROVIDER_ACCOUNT, DiscoveryStatus, source_from_spec_block
 from compiler.surface import FixtureSurface, McpSurface, ToolCallResult, ToolSurface
 from data_mcp.definition_store import InMemoryDefinitionStore, canonicalize, spec_id_for
-from data_mcp.definition_writes import windowed_identity
+from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -17164,6 +17164,22 @@ def aid_held(request: pytest.FixtureRequest) -> str:
     return request.param
 
 
+def _discover_aid(ctx: _FakeToolContext) -> None:
+    """Record the 2020-2024 education aid in discovery's log, as a source it found."""
+    found = DiscoveryRecord(
+        revision="earlier",
+        tool="search",
+        requirement_id="aid",
+        requirement_key="earlier",
+        status=DiscoveryStatus.DEFINITE,
+        spec_ids=(_AID_2020_2024_SPEC,),
+    )
+    aid = SelectedSource(
+        spec_id=_AID_2020_2024_SPEC, sentence="aid", has_data=True, identity=_AID_2020_2024
+    )
+    save_log(ctx.state, load_log(ctx.state).with_record(found, (aid,)))
+
+
 async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
@@ -17177,18 +17193,7 @@ async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     propose = _tools_reading(reads)["propose_plan"].func
     ctx = _FakeToolContext()
     if aid_held == "discovered":
-        found = DiscoveryRecord(
-            revision="earlier",
-            tool="search",
-            requirement_id="aid",
-            requirement_key="earlier",
-            status=DiscoveryStatus.DEFINITE,
-            spec_ids=(_AID_2020_2024_SPEC,),
-        )
-        aid = SelectedSource(
-            spec_id=_AID_2020_2024_SPEC, sentence="aid", has_data=True, identity=_AID_2020_2024
-        )
-        save_log(ctx.state, load_log(ctx.state).with_record(found, (aid,)))
+        _discover_aid(ctx)
     dataset = requirement(
         source_spec_id=_AID_2020_2024_SPEC,
         period=Period(start=2020, end=2024),
@@ -17228,16 +17233,19 @@ async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     assert plan.evidence_requirements[0].source_spec_id == opened  # type: ignore[union-attr]
 
 
-@pytest.mark.usefixtures("aid_on_record")
 async def test_first_year_reads_name_each_read_propose_plan_can_still_make(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
+    aid_held: str,
 ) -> None:
     """Of two datasets the planner was shown, the one whose block states its first year
     needs no read. The other is the read `propose_plan` then makes, and once made it is
-    no longer one."""
+    no longer one. A dataset only discovery found is on record in its log, and is
+    named the same way."""
     reads = _DefinitionReads()
     ctx = _FakeToolContext()
+    if aid_held == "discovered":
+        _discover_aid(ctx)
     stated = _every_year_block(_GDP_ALL["identity"], first_year=1960, rows=65)
     save_pin_sources(
         ctx.state,
@@ -17302,29 +17310,37 @@ def test_propose_plan_declares_the_same_arguments_with_and_without_a_surface() -
     assert declared[0] == declared[1]
 
 
-def test_a_pin_read_from_the_block_the_planner_was_shown_keeps_its_set() -> None:
-    # A requirement with no end year pins a dataset over Africa's countries from
-    # the block it was shown; the copy over its window posts Africa again.
+@pytest.mark.parametrize(
+    ("change", "groups"),
+    [("none", [("Africa", "africa")]), ("unknown-class", None), ("past-cap", None)],
+    ids=["shown", "set-of-unknown-class", "identity-past-cap"],
+)
+def test_a_shown_block_puts_its_identity_and_sets_on_record(
+    change: str, groups: list[tuple[str, str]] | None
+) -> None:
+    """A requirement with no end year pins a dataset over Africa's countries from the
+    block it was shown, and the copy over its window posts Africa again. A set of an
+    unknown class puts no pin on record, and nor does an identity past
+    `MAX_IDENTITY_BYTES` as compact JSON, since data-mcp's `resolve_definition`
+    would refuse a copy of it (`caller_definition`)."""
     fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
     block = json.loads(fixture.read_text())["spec"]
+    identity = block["definition"]["identity"]
+    if change == "unknown-class":
+        block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = ["party"]
+    if change == "past-cap":
+        identity["padding"] = "x" * MAX_IDENTITY_BYTES
+        block["spec_id"] = spec_id_for(canonicalize(identity))
     spec_id = block["spec_id"]
 
     recorded = identity_on_record(spec_id, shown={spec_id: PinSource(block=block, settled=True)})
 
+    if groups is None:
+        assert recorded is None
+        return
     assert recorded is not None
-    assert recorded.identity == block["definition"]["identity"]
-    assert [(group.label, group.ref) for group in recorded.groups] == [("Africa", "africa")]
-
-
-def test_a_shown_block_with_a_set_of_an_unknown_class_puts_no_pin_on_record() -> None:
-    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
-    block = json.loads(fixture.read_text())["spec"]
-    block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = ["party"]
-    spec_id = block["spec_id"]
-
-    recorded = identity_on_record(spec_id, shown={spec_id: PinSource(block=block, settled=True)})
-
-    assert recorded is None
+    assert recorded.identity == identity
+    assert [(group.label, group.ref) for group in recorded.groups] == groups
 
 
 def test_amendment_keeps_measure_choice_from_the_compiled_family(

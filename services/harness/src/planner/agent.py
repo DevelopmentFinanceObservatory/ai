@@ -95,6 +95,7 @@ from submission.service import (
     basis_unservable,
     block_parties,
     bound_parties,
+    first_year_identity,
     part_scope,
     realignments_wanted,
     save_aligned_pin,
@@ -112,7 +113,6 @@ from translator.discovery import (
     PartNotResolvedError,
     answered_once_at,
     call_within_entry,
-    load_log,
     refusal_retryable,
     resolve_definition,
     resolve_definition_at,
@@ -151,7 +151,6 @@ from planner.plan import (
     full_histories,
     full_history,
     held_sources,
-    identity_on_record,
     load_plan,
     pin_sources,
     plan_revision,
@@ -965,20 +964,6 @@ def _first_year_wanted(result: Mapping[str, object]) -> str | None:
 FIRST_YEAR_READ_DEADLINE_SECONDS = 10.0
 
 
-def _first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | None:
-    """The identity a first-year read of `pin` reads; `None` when none is on record.
-
-    It is on record as `submission.service.admit` finds it, the discovery
-    log's definitions included, so a pin `propose_plan` admits is read.
-    """
-    recorded = identity_on_record(
-        pin,
-        shown=held_sources(state),
-        definition_lookup=load_log(state).recorded_definition,
-    )
-    return recorded.identity if recorded is not None else None
-
-
 async def read_full_history(
     surface: ToolSurface,
     identity: Mapping[str, Any],
@@ -1727,7 +1712,7 @@ async def with_source_reads(
         if pin is not None:
             if pin in full_histories(state):
                 return result
-            identity = _first_year_identity(pin, state)
+            identity = first_year_identity(pin, state)
             if identity is None:
                 return result
             try:
