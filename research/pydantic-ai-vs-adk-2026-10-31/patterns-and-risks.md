@@ -61,13 +61,15 @@ A standing check on what reaches Gemini is therefore needed whichever framework 
 
 ## Durable engines
 
-Durable engines (DBOS, Temporal, Prefect) do not fit the interactive turn:
+A durable engine does not fit the interactive turn as a whole. A paused turn lasts days and spans deploys, and every engine fails recovery when a deploy changes the order of recorded steps (DBOS raises `DBOSUnexpectedStepError`).
 
-- DBOS and pgtask buffer the model stream;
-- every engine reruns the tool that was in flight;
-- DBOS fails on recovery when a deploy changes the order of recorded steps (`DBOSUnexpectedStepError`).
+DBOS does fit one planner segment inside the turn: the run from the brief, or from an answer, to the next pause. The pause stays in ADK, so no DBOS workflow stays open across it. `prototype-node-stream/dbos/` measured this inside the ADK node. A kill inside `propose_plan` repeats no model call, against one without DBOS, and progress still streams live through `DBOSDurability(event_stream_handler=...)`. Stop and failure behave. Three costs come with it:
 
-They fit beside the loop, for work that leaves the user's stream, such as mints and fetches. DBOS, a library on Postgres with no new service, is the candidate to trial there.
+- A segment a dead instance left `PENDING` does not resume when the node calls it again. The node checks its status and calls `DBOS.resume_workflow_async`, a public function used in an undocumented way, and it cannot tell a dead owner from a live one.
+- A resumed segment can run on any instance that reads DBOS's queue, and its progress then stays on that instance. Several instances need the segment to run where the client waits, which was not built.
+- A cancel from another instance waits for the step in flight: 0.05 s inside a tool, 5.3 s inside a 6 s model call.
+
+DBOS also fits beside the loop, for work that leaves the user's stream, such as mints and fetches. It is a library on Postgres with no new service.
 
 ## The Studio translator
 
@@ -85,7 +87,7 @@ Each item has a pass line:
 
 1. **Parity and the paired Gemini run against dev on ADK 2.13**, with the cache prefix built from canonical declarations. Pass: both frameworks use one cache name, and acceptance and first-chunk latency hold.
 1. **The seam and turn budget on public hooks**, with the client patch removed. Pass: the planner-entry results hold. One extra check: whether `on_model_request_error` receives a streamed `first_event_timeout`.
-1. **A per-response checkpoint and the effect ledger.** Pass: after a kill inside `propose_plan`, the planner makes one extra model call at most and sends no duplicate frames.
+1. **A per-response checkpoint and the effect ledger.** Pass: after a kill inside `propose_plan`, the planner makes one extra model call at most and sends no duplicate frames. A DBOS segment met the checkpoint half with no extra model call (`prototype-node-stream/dbos/NOTES.md`); the tool body in flight still reruns, so the effect ledger stays.
 1. **The stability matrix with the new shapes and a live Gemini response, plus the envelope.** Pass: forward loads hold, and the one-way rollback boundaries are stated.
 1. **One Langfuse trace per framework through `harness.langfuse_export`.** Pass: names, usage, cached tokens, tool spans and session id match, or each difference is explained.
 1. **A second turn under `request_limit=2`.** Pass: the budget counts only that turn.

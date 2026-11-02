@@ -1,6 +1,6 @@
 # The Pydantic AI planner inside an ADK workflow node: results
 
-A Pydantic AI planner can run inside ADK's `planner` workflow node and stream its progress live. ADK keeps owning the turn. This unblocks live planning progress, a committed feature that ADK blocks today. The prototype ran on dev at 190c7a9c, with google-adk 2.13.0, pydantic-ai 2.64.0 and a scripted planner. Its code is in `prototype-node-stream/`.
+A Pydantic AI planner can run inside ADK's `planner` workflow node and stream its progress live. ADK keeps owning the turn. This unblocks live planning progress, a committed feature that ADK blocks today. A third stage adds DBOS checkpoints within each planner segment, so a crash repeats no model call. The prototype ran on dev at 190c7a9c, with google-adk 2.13.0, pydantic-ai 2.64.0 and a scripted planner. Its code is in `prototype-node-stream/`.
 
 ## Why dev cannot stream planning progress
 
@@ -33,6 +33,18 @@ This stage swaps the same node into dev's real root workflow, in test code only,
 - **S4 stop.** Both Studio's `/cancel` and a client disconnect end the stream and cancel the planner. No task is left, and the next turn reaches the plan card.
 - **S5 records.** The plan, its revision, the approval state, the plan records, the approvals and the stored turns all equal dev's, once times and run ids are removed. The only difference is a `planner:conversation` key, which holds `None` at the end. The `approve` and `execute` nodes need no change.
 
+## DBOS checkpoints inside the node (`dbos/`)
+
+This stage runs each planner segment, from the brief or an answer to the next pause, as a DBOS 3.4.0 workflow through Pydantic AI's `DBOSDurability`, inside stage A's node. The pause still lives in ADK. The workflow id is `{invocation_id}:{segment}`, so a node re-entered after a crash asks DBOS for the same workflow. All 15 tests pass, and every control fails as predicted.
+
+- D1, a kill. Stage A's N4 kill repeats no model call. The `propose_plan` body still reruns from the top, since a plain function tool runs in workflow code. Progress `(2,1)` reached the client once, against twice in stage A, because its handler step was recorded before the kill; a kill between the handler and its commit would still send it twice.
+- D2, live progress. The first event arrives in 0.04 s, and 40 events arrive in order before the interrupt. `ctx.emit` from a plain tool reaches the `event_stream_handler`, each event in its own step.
+- D3, re-entry. Calling the workflow again with its id does not resume a segment a dead executor left `PENDING`: DBOS waits on that owner forever. The node checks the status and calls `DBOS.resume_workflow_async`, a public function used here in an undocumented way. It cannot tell a dead owner from a live one.
+- D4, stop. Cancelling the consumer cancels the model call in flight and leaves the workflow `CANCELLED`. The node must cancel the DBOS workflow itself, or the next launch reruns the segment with no one listening. A cancel from another process takes effect at the next step: 0.05 to 0.08 s inside the tool loop, 5.3 s inside a 6 s model call.
+- D5, failure. A tool failure surfaces as in stage A within 5 s, and the workflow ends `ERROR` without retrying.
+
+Two hazards were read from DBOS's source and not run. A resumed segment goes on DBOS's queue, which any instance may claim, so with several instances its progress can land on an instance the client is not connected to. And each instance needs its own executor id, since with a shared one a new instance's launch recovery takes over segments a live instance is still running. A production version also needs a shared Postgres system database, and a new `application_version` whenever a change alters a segment's step order.
+
 ## What a production version needs
 
 - **`planning.py`.** About 40 lines go: the await, the progress queue and the `NodeInterruptedError` handling. About 70 replace them: the relay loop, the ask's interrupt, and the stored conversation keyed on the invocation. A pick's replan runs under `switch._unless_stopped` as a task, and that wrapper must stop the stream it drives (about 20 lines).
@@ -50,3 +62,4 @@ This stage swaps the same node into dev's real root workflow, in test code only,
 - A served check against uvicorn instead of the test transport.
 - How much a slow client slows the planner. The planner runs about one event ahead of the client because both sides apply back-pressure.
 - A live Gemini run. Every model here was scripted; the paired Gemini run in `prototype/gemini/` covers the model side.
+- Several instances sharing one DBOS system database, and a kill inside the model step or between a segment's end and the ADK pause.
