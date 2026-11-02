@@ -27,7 +27,7 @@ from google.adk import Context, Event
 from google.adk.events import RequestInput
 from google.adk.sessions import State
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
-from planner.plan import AskBreakdown, SessionState, stored_plan
+from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
 
@@ -544,9 +544,15 @@ def store_search(
     and return its parts as the model reads them, without their blocks.
 
     Each part's spec blocks, its own and its candidates', go under
-    `ORCHESTRATOR_SPECS_KEY` and the part's warnings under
-    `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch` finds them, and each part
-    joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
+    `ORCHESTRATOR_SPECS_KEY`, each candidate's marked as one whose scope
+    choices Search has not stated (`planner.plan.scope_unread`), and the
+    part's warnings under `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch`
+    finds them. The part holds each of its spec_ids with its own record and
+    warnings, and an earlier block of the spec_id, of an earlier part or
+    already stored, that says more about its scope choices keeps its scope
+    content standing (`planner.plan.with_blocks`). The parts' blocks are
+    merged first and joined to the store once, which copies it once. Each
+    part joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
     `asked` holds each part's asked flow parties by position, and
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
@@ -557,15 +563,17 @@ def store_search(
     A spec_id a part holds as its own keeps that part's block and warnings
     against a later part offering it as a candidate, since a pin of it is
     one of the search that settled on it (`harness.planner_seam`, which
-    reads both for the pin).
+    reads both for the pin). Between blocks no search settled, or two
+    searches that each settled it, `planner.plan.with_blocks` decides.
     """
-    specs = dict(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
     searches = list(stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY))
     own = {stored["spec_id"] for stored in searches if stored.get("spec_id")}
     skill_ids = [skill["id"] for skill in digest.get("skills") or []]
     observed_at = datetime.now(UTC)
     readings = []
+    found: dict[str, dict[str, Any]] = {}
     for index, part in enumerate(digest.get("part_digests") or []):
         reading = {
             key: value
@@ -573,7 +581,7 @@ def store_search(
             if key not in ("spec_block", "candidate_blocks")
         }
         blocks = {
-            spec_id: block
+            spec_id: scope_unread(block)
             for spec_id, block in (part.get("candidate_blocks") or {}).items()
             if spec_id not in own
         }
@@ -593,7 +601,7 @@ def store_search(
                 spec_id: {**block, "_resolved_sources": mentions}
                 for spec_id, block in blocks.items()
             }
-        specs.update(blocks)
+        found = with_blocks(found, blocks)
         spec_warnings.update(dict.fromkeys(blocks, reading.get("warnings") or []))
         if asked:
             facts["asked_roles"] = list(asked[index])
@@ -606,7 +614,7 @@ def store_search(
         )
         searches.append(stored.model_dump(mode="json"))
         readings.append(reading)
-    state[ORCHESTRATOR_SPECS_KEY] = specs
+    state[ORCHESTRATOR_SPECS_KEY] = with_blocks(specs, found)
     state[ORCHESTRATOR_SPEC_WARNINGS_KEY] = spec_warnings
     state[ORCHESTRATOR_SEARCHES_KEY] = searches
     return readings

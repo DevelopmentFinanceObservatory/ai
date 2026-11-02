@@ -98,6 +98,8 @@ from planner.plan import (
     SessionState,
     earlier_block,
     recorded_identity,
+    scope_unread,
+    with_blocks,
 )
 from planner.skills import GET_SKILL, GET_SKILL_FILE
 from planner.workflow import ToolId
@@ -1521,6 +1523,8 @@ async def _recorded_block(surface: ToolSurface | None, spec_id: str) -> Mapping[
     The definition is resolved through data-mcp (`resolve_definition`),
     which stores it for `get_data`, and the block is Search's own part's
     (`resolved_spec`), as `translator.discovery._recorded_source` reads a pin.
+    The resolve posts no scope entries, so the block is marked unread where
+    it states no scope choices (`planner.plan.scope_unread`).
 
     Raises:
         DefinitionNotResolvedError: If data-mcp or Search could not be
@@ -1539,7 +1543,7 @@ async def _recorded_block(surface: ToolSurface | None, spec_id: str) -> Mapping[
     part = await resolve_definition(
         surface, spec_id=spec_id, identity=recorded.identity, groups=recorded.groups
     )
-    block = resolved_spec(part, spec_id=spec_id)
+    block = scope_unread(resolved_spec(part, spec_id=spec_id))
     mentions = getattr(recorded, "resolved_sources", ())
     return (
         {**block, "_resolved_sources": [mention.model_dump(mode="json") for mention in mentions]}
@@ -2049,10 +2053,9 @@ def build_orchestrator_tools(
                 logger.warning("fetch: no block for %s on record: %s", spec_id, exc)
                 return _unresolved_refusal(spec_id, exc)
             if block is not None:
-                tool_context.state[ORCHESTRATOR_SPECS_KEY] = {
-                    **stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY),
-                    spec_id: block,
-                }
+                tool_context.state[ORCHESTRATOR_SPECS_KEY] = with_blocks(
+                    stored_mapping(tool_context.state, ORCHESTRATOR_SPECS_KEY), {spec_id: block}
+                )
         source = None
         if block:
             try:

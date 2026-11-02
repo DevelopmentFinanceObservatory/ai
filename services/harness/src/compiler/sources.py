@@ -22,7 +22,7 @@ import hashlib
 import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from enum import StrEnum
-from typing import cast
+from typing import Any, cast
 
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
@@ -111,11 +111,16 @@ class DiscoveryOutcome(StrictModel):
     signal that a role or time phrase was dropped from the search. Discovery
     sends one part per call, so a request-level warning bears on it.
     `ambiguous_sources` and `ambiguous_entities` are a `no_data` answer's
-    choices between source references and between graph nodes.
+    choices between source references and between graph nodes. `blocks`
+    holds the spec block each of `sources` is read from, in the same order,
+    with the part's bound refs and source mentions under `_bound_refs` and
+    `_resolved_sources`, so `source_from_spec_block` reads each back as the
+    source it gave.
     """
 
     status: DiscoveryStatus
     sources: tuple[SelectedSource, ...] = ()
+    blocks: tuple[dict[str, Any], ...] = ()
     detail: str | None = None
     reason: str | None = None
     warnings: tuple[PartWarning, ...] = ()
@@ -243,34 +248,40 @@ def outcome_from_envelope(
     except ValueError as exc:
         raise ValueError(f"search answered with an unrecognised status {raw_status!r}") from exc
     warnings = _warnings(envelope, part)
-    mentions = resolved_source_mentions(part)
+    constraints = {
+        "_bound_refs": [row.model_dump(mode="json") for row in bound_refs(part)],
+        "_resolved_sources": [
+            mention.model_dump(mode="json") for mention in resolved_source_mentions(part)
+        ],
+    }
 
-    bound = bound_refs(part)
-
-    def constrained(source: SelectedSource) -> SelectedSource:
-        return source.model_copy(update={"resolved_sources": mentions, "bound_refs": bound})
+    def constrained(specs: Sequence[Mapping[str, object]]) -> tuple[dict[str, Any], ...]:
+        """`specs`, each with the part's bound refs and source mentions."""
+        return tuple({**spec, **constraints} for spec in specs)
 
     if status is DiscoveryStatus.DEFINITE:
         spec = _mapping(part.get("spec"))
         if not spec:
             raise ValueError("a definite search part names no spec")
+        blocks = constrained([spec])
         return DiscoveryOutcome(
-            status=status, sources=(constrained(source_from_spec_block(spec)),), warnings=warnings
+            status=status, sources=_sources(blocks), blocks=blocks, warnings=warnings
         )
     if status is DiscoveryStatus.CANDIDATES:
-        blocks = _sequence(_mapping(part.get("candidates")).get("specs"))
+        blocks = constrained(_sequence(_mapping(part.get("candidates")).get("specs")))
         return DiscoveryOutcome(
-            status=status,
-            sources=tuple(constrained(s) for s in _sources(blocks)),
-            warnings=warnings,
+            status=status, sources=_sources(blocks), blocks=blocks, warnings=warnings
         )
     if status is DiscoveryStatus.NO_DATA:
         no_data = _mapping(part.get("no_data"))
-        nearest = [block for block in _sequence(no_data.get("nearest_real")) if "spec_id" in block]
+        nearest = tuple(
+            dict(block) for block in _sequence(no_data.get("nearest_real")) if "spec_id" in block
+        )
         reason = _text(no_data.get("reason"))
         return DiscoveryOutcome(
             status=status,
             sources=_sources(nearest),
+            blocks=nearest,
             detail=reason,
             reason=reason,
             warnings=warnings,

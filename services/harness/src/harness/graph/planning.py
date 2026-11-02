@@ -10,6 +10,7 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Iterator,
+    Mapping,
 )
 from datetime import datetime
 from typing import Any, cast
@@ -17,7 +18,6 @@ from typing import Any, cast
 from common.telemetry import record_span
 from google.adk import Context, Event
 from google.adk.events import RequestInput
-from google.adk.workflow._errors import NodeInterruptedError
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -112,7 +112,10 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         `"refused"` covers a refusal on a first draft (nothing was ever
         submitted this turn) and on a replan (the record on file is already
         `APPROVED`, not something a fresh approval interrupt could act on).
-        A seam that raises fails the turn.
+        A seam that raises fails the turn. A seam that answers `"asked"`,
+        for a planner run that ended on a question for the user
+        (`planner.agent.ask_user_question`), pauses the entry on that
+        question; the resume reruns this node and the seam with the answer.
         On the `"refused"` route `plan_done` lists the asks an earlier run
         of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
 
@@ -145,15 +148,8 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         warns against wrapping a `ctx.run_node`-calling call in a task like
         that, and this node has two reasons that matters. A real
         `PlannerModel` seam (`harness.planner_seam.PlannerSeam`) calls
-        `ctx.run_node` from inside it, and that call can genuinely pause
-        mid-turn -- a planner-side ask (`planner.agent`'s
-        `adk_request_input` tool) suspends the whole run by raising
-        `NodeInterruptedError` straight out of the awaited call, a
-        `BaseException` `ctx.run_node` uses exclusively for this
-        (`google.adk.workflow._errors`); wrapped in a `Task`, that exception
-        would sit on the `Task` instead of propagating up through this
-        node's own coroutine the way its `rerun_on_resume=True` re-entry
-        depends on. The direct await also closes a real turn more simply:
+        `ctx.run_node` from inside it, and the direct await closes a real
+        turn simply:
         `studio.py`'s `_sse_stream` -> `_unwind` cancels the event stream on
         a stop or a disconnect, throwing into whichever call is suspended --
         with no separate `Task` to orphan, the throw propagates straight
@@ -163,14 +159,11 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         one while a nested plain `await` is still pending would need a
         second concurrent task to rendezvous with, which this design
         avoids creating. Reports queue as they happen and relay the moment
-        the `await` returns. A pause drops them instead: ADK streams the
-        ask before the pause reaches this node, so anything relayed then
-        would follow the ask. A pick's replan is the one exception: Stop has
-        to reach it while it runs, so `_unless_stopped` runs it as a task. A
-        task copies the context it starts in, so the seam's `_active_call`
-        and `ctx.run_node` read the same values there, and the ask's
-        `NodeInterruptedError`, which the task holds, is raised again here
-        when the task's result is read.
+        the `await` returns, a pause on the planner's ask included, which
+        this node yields after them. A pick's replan is the one exception:
+        Stop has to reach it while it runs, so `_unless_stopped` runs it as
+        a task. A task copies the context it starts in, so the seam's
+        `_active_call` and `ctx.run_node` read the same values there.
         """
         raw = ctx.state.get("plan")
         question = ctx.state.get(ORCHESTRATOR_BRIEF_KEY, "")
@@ -265,15 +258,6 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             drafted = await (
                 drafting if pick is None else switch_module._unless_stopped(ctx, drafting)
             )
-        except NodeInterruptedError:
-            # A planner-side ask paused the draft mid-turn, and ADK has
-            # already streamed the ask, so the reports queued so far are
-            # dropped with it: relayed now they would follow the ask. A
-            # pick's replan keeps its state for the resume, and records what
-            # to put back should the resumed replan not land.
-            if before is not None:
-                ctx.state[PICK_REPLAN_KEY] = before
-            raise
         except SwitchFailedError as exc:
             # Only a pick's replan, stopped by the user (`SWITCH_STOP`).
             failed, drafted = exc, {}
@@ -283,6 +267,18 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             raise
         while not progress.empty():
             yield Event(custom_metadata={"progress": progress.get_nowait()})
+        asked = drafted.get("asked") if isinstance(drafted, dict) else None
+        if asked is not None:
+            # The planner's run ended on an ask it put to the user, so the
+            # entry pauses on it, under the ask's call id, after every call
+            # the run made has reported. The resume reruns this node, and the
+            # seam re-enters the planner with the answer. A pick's replan
+            # keeps its state for the resume, and records what to put back
+            # should the resumed replan not land.
+            if before is not None:
+                ctx.state[PICK_REPLAN_KEY] = before
+            yield planner_ask_interrupt(asked)
+            return
         refused = drafted.get("refused") if isinstance(drafted, dict) else None
         if pick is not None and (failed is not None or refused is not None):
             assert existing is not None and before is not None
@@ -376,6 +372,21 @@ def _pick(payload: dict[str, Any]) -> DecisionPick | None:
             code=switch_module.SCOPE_CHOICE_NOT_APPLIED,
             retryable=True,
         ) from exc
+
+
+def planner_ask_interrupt(asked: Mapping[str, Any]) -> Event:
+    """The pause on the planner's accepted ask, `asked` as a `PlannerModel`
+    answers it: its `RequestInput` takes the ask's call id as the interrupt
+    id, which the user's answer carries back, and the call's arguments as the
+    payload Studio renders the question from
+    (`harness.studio_translate._planner_question`)."""
+    return interrupt_event(
+        RequestInput(
+            interrupt_id=str(asked["call_id"]),
+            message=str(asked["args"]["message"]),
+            payload=dict(asked["args"]),
+        )
+    )
 
 
 def _pick_snapshot(ctx: Context) -> dict[str, Any]:

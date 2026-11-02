@@ -92,7 +92,7 @@ from harness.scope_choices import (
     scope_money,
 )
 from harness.sentences import PlanWords
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import refusals_in_force, settled_by_readings
 from planner.parties import (
     PARTY_ROLES,
@@ -115,6 +115,7 @@ from planner.plan import (
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
+    SCOPE_UNREAD_BLOCK_KEY,
     AggregateRequirement,
     AlignedInput,
     AlignedPin,
@@ -504,13 +505,25 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             }
         )
     except ValidationError as exc:
-        shown = pin_sources(view.state)
-        readings = SourceReadings.of_shown(shown)
+        # The call's own requirements, which validation has refused, so any
+        # shape: a value that is no list states none.
+        stated = raw if isinstance(raw := proposal.evidence_requirements, list) else []
+        readings = SourceReadings.of_shown(held_sources(view.state))
         return base_year_refusal(
             exc,
-            proposal.evidence_requirements,
+            stated,
             choices=view.prices_chosen(),
-            parts=Parts.of_shown(shown, readings.get, readings.block),
+            parts=Parts.of_shown(
+                pin_sources(view.state),
+                readings.get,
+                readings.block,
+                pinned=[
+                    pin
+                    for requirement in stated
+                    if isinstance(requirement, dict)
+                    and isinstance(pin := requirement.get("source_spec_id"), str)
+                ],
+            ),
             propose=proposer.call,
         ) or _invalid_data(exc, proposer)
     reads_user_words = reads_user_words or amendment_entry(view.state)
@@ -603,7 +616,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 pick,
                 _decisions_after(
                     previous,
-                    settle_decisions(patch.decisions, written),
+                    settle_decisions(_without_user_prices(patch.decisions), written),
                     removed=removed_decisions,
                 ),
                 written,
@@ -645,7 +658,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     wholes = {rid: pin for rid, pin in targets.items() if pin.whole_axis is not None}
     moved = {rid: pin for rid, pin in targets.items() if pin.whole_axis is None}
     settled, evidence_requirements = _without_replaced_whole_decisions(
-        settle_decisions(patch.decisions, aligned_after),
+        settle_decisions(_without_user_prices(patch.decisions), aligned_after),
         evidence_requirements,
         carried=previous.decisions if previous is not None else (),
         after=aligned_after,
@@ -701,6 +714,16 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     if prices:
         priced_slots = {decision.slot for decision in prices}
         settled = [*(d for d in settled if d.slot not in priced_slots), *prices]
+        requirements_after = _requirements_after(
+            previous, evidence_requirements, removed_evidence_requirements
+        )
+    unmade = _unmade_prices_citations(
+        requirements_after, _decisions_after(previous, settled, removed=removed_decisions)
+    )
+    if unmade:
+        evidence_requirements = _without_citations(
+            requirements_after, evidence_requirements, slots=unmade
+        )
         requirements_after = _requirements_after(
             previous, evidence_requirements, removed_evidence_requirements
         )
@@ -908,6 +931,37 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         windowed_pins=tuple(copies) if copies or held_copies else None,
         alignments=tuple(entries.values()),
         pin_verdicts=verdicts,
+    )
+
+
+def _without_user_prices(drafts: Sequence[DecisionDraft]) -> list[DecisionDraft]:
+    """`drafts` less any under a slot of the prices the user chose (`PRICES_SLOT_PREFIX`).
+
+    Code alone writes those (`prices_decisions`). A draft there can only copy
+    the user's decision or change it, and none may change it, so the user's
+    decision stands as code derives or carries it, whatever a draft restates.
+    """
+    return [draft for draft in drafts if not draft.slot.startswith(PRICES_SLOT_PREFIX)]
+
+
+def _unmade_prices_citations(
+    requirements: Sequence[EvidenceRequirement], decisions: Sequence[Decision]
+) -> frozenset[str]:
+    """Each slot of the prices the user chose that `requirements` cite and `decisions` do not hold.
+
+    Code owns those citations as it owns the decisions (`_without_user_prices`):
+    `prices_decisions` writes a part's decision, and cites it, while some
+    requirement reads the part. A citation of one it did not write this call,
+    and the plan does not carry, names no decision, so admission drops it, and
+    the user's choice stays on record for any later requirement reading the
+    part. Restating the decision could never make it.
+    """
+    made = {decision.slot for decision in decisions}
+    return frozenset(
+        slot
+        for requirement in requirements
+        for slot in requirement.decision_ids
+        if slot.startswith(PRICES_SLOT_PREFIX) and slot not in made
     )
 
 
@@ -2051,10 +2105,10 @@ def _referral_unanswered(
         ProblemCode.REFERRAL_PENDING,
         f"The translator handed requirement `{referral.requirement_id}` back as "
         f"{referral.kind.value}, and the user has said nothing since. Tell them what "
-        f"cannot be done and put the choice to them through `{REQUEST_INPUT_FUNCTION_CALL_NAME}` "
+        f"cannot be done and put the choice to them through `{PLANNER_ASK}` "
         "before proposing again.",
         outcome=Outcome.REFUSED,
-        action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME),
+        action=Action(call=PLANNER_ASK),
     )
 
 
@@ -2062,7 +2116,7 @@ def _referral_unanswered(
 COMBINE_OPTION = "add them"
 
 # The options a combination ask offers, as `_combination_unasked`'s refusal
-# hands them to `adk_request_input`: each `id` is what the user's pick comes
+# hands them to `ask_user_question`: each `id` is what the user's pick comes
 # back as, and Studio shows each `label`.
 COMBINATION_OPTIONS: tuple[dict[str, str], ...] = (
     {"id": COMBINE_OPTION, "label": "Add them into one total"},
@@ -2071,13 +2125,13 @@ COMBINATION_OPTIONS: tuple[dict[str, str], ...] = (
 
 
 def _combination_ask() -> Action:
-    """The `adk_request_input` call that asks the user whether to add two datasets.
+    """The `ask_user_question` call that asks the user whether to add two datasets.
 
     It carries `COMBINATION_OPTIONS` and needs only the question. What it asks
     about is the refusal that carries it (`SessionView.combination_picks`).
     """
     return Action(
-        call=REQUEST_INPUT_FUNCTION_CALL_NAME,
+        call=PLANNER_ASK,
         arguments={"options": [dict(option) for option in COMBINATION_OPTIONS]},
         needs=("message",),
     )
@@ -2219,7 +2273,7 @@ def _withheld_scope_dropped(
         + (
             f"Make the referral's repair, {repair}, and propose again."
             if repair is not None
-            else f"Ask the user through `{REQUEST_INPUT_FUNCTION_CALL_NAME}` what to change."
+            else f"Ask the user through `{PLANNER_ASK}` what to change."
         ),
         outcome=Outcome.REFUSED,
         detail={"requirement_id": requirement.id, "repair": repair},
@@ -2483,7 +2537,7 @@ def _combination_unasked(
             ProblemCode.COMBINATION_UNASKED,
             f"{requirement.id!r} adds two datasets, and whether they add up without "
             "counting a flow twice is the user's to decide: ODA loans, for one, count in "
-            f"both aid and debt flows. Ask the user through `{REQUEST_INPUT_FUNCTION_CALL_NAME}` "
+            f"both aid and debt flows. Ask the user through `{PLANNER_ASK}` "
             "with this action's `options` unchanged and a `message` naming that overlap. "
             f"If they pick {COMBINE_OPTION!r}, cite a `Decision` resolved by `user` whose "
             "`options` are those option ids and whose `chosen` is the one they picked; "
@@ -3907,7 +3961,7 @@ def _user_settled_measures(
 ) -> dict[str, UserChoice]:
     """The spec_ids of `measures` whose measure the user chose, with how.
 
-    The user picked one answering an `adk_request_input` call: the
+    The user picked one answering an `ask_user_question` call: the
     orchestrator's `ask_user` offers each measure under its own spec_id, so
     a pick names it (`SessionView.elected_spec_ids`). A typed answer or an
     amendment at approval names no spec_id, so the measure it leads to
@@ -4487,6 +4541,34 @@ def unpinned_wanted(result: Mapping[str, object]) -> list[Unpinned]:
         return []
     detail = cast("Mapping[str, Any]", result.get("detail") or {})
     return [Unpinned.model_validate(entry) for entry in detail.get("search") or ()]
+
+
+class ScopeRead(NamedTuple):
+    """One input of an aligning calculation pinned to a candidate whose scope
+    choices Search has not stated (`planner.plan.SCOPE_UNREAD_BLOCK_KEY`).
+
+    `spec_id` is the pin, `requirement_id` the dataset requirement pinning
+    it and `step_id` the calculation that aligns it.
+    """
+
+    spec_id: str
+    requirement_id: str
+    step_id: str
+
+
+def scopes_wanted(result: Mapping[str, object]) -> list[ScopeRead]:
+    """The pins a `SCOPE_UNREAD` refusal asks to read; empty for any other answer."""
+    if result.get("code") != ProblemCode.SCOPE_UNREAD.value:
+        return []
+    detail = cast("Mapping[str, Any]", result.get("detail") or {})
+    return [
+        ScopeRead(
+            spec_id=entry["spec_id"],
+            requirement_id=entry["requirement_id"],
+            step_id=entry["step_id"],
+        )
+        for entry in detail.get("read") or ()
+    ]
 
 
 class Realignment(NamedTuple):
@@ -5143,6 +5225,9 @@ def _aligned_bases(
     if unpinned:
         return _basis_unknown(list(unpinned.values()))
     try:
+        unread = _scope_unread(steps, groups, by_axis, aligning, sources=sources)
+        if unread:
+            raise _Unservable(_scope_unread_problem(unread, proposer))
         targets = _alignment_targets(
             steps,
             groups,
@@ -5168,6 +5253,58 @@ def _aligned_bases(
     if itself is not None:
         return itself
     return _with_found(evidence_requirements, requirements, found, restated=moved.keys()), moved
+
+
+def _scope_unread(
+    steps: Sequence[EvidenceRequirement],
+    groups: Mapping[str, Sequence[_InputGroup]],
+    by_axis: Mapping[str, Mapping[str, _InputBasis]],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    sources: SourceReadings,
+) -> list[ScopeRead]:
+    """The read each input alignment could move needs, where its pin's block is a found
+    candidate's (`planner.plan.SCOPE_UNREAD_BLOCK_KEY`), in plan order.
+
+    Search states no scope choices on a candidate, so how the input is counted
+    is unknown, and left unread it would keep the basis its dataset counts it
+    on whatever its calculation's other inputs share. Alignment counts a group
+    of a calculation's inputs (`_input_groups`) on one option of an axis the
+    calculation reads on (`_reads_on`) once two of them carry a choice there
+    (`_alignment_targets`), so a candidate is read where its group holds
+    another input that carries one (`by_axis`) or is a candidate too: a share
+    of two candidates aligns once both are read. A candidate whose group holds
+    no other input with a choice on any such axis is left unread, as alignment
+    would leave it as it stands. `planner.agent.read_scope` makes each read.
+    """
+    pins = {
+        requirement.id: requirement.source_spec_id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
+    }
+    candidates = {
+        requirement_id
+        for requirement_id, spec_id in pins.items()
+        if (block := sources.block(spec_id)) is not None and block.get(SCOPE_UNREAD_BLOCK_KEY)
+    }
+    unread: dict[str, ScopeRead] = {}
+    for step in steps:
+        for group in groups[step.id]:
+            offered = group.members & candidates
+            if not any(
+                len(offered | (group.members & bases.keys())) >= 2
+                for axis, bases in by_axis.items()
+                if _reads_on(step, axis)
+            ):
+                continue
+            for requirement_id in sorted(offered):
+                unread.setdefault(
+                    requirement_id,
+                    ScopeRead(
+                        spec_id=pins[requirement_id], requirement_id=requirement_id, step_id=step.id
+                    ),
+                )
+    return [unread[r.id] for r in requirements if r.id in unread]
 
 
 def _share_of_itself(
@@ -7189,6 +7326,36 @@ def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
     )
 
 
+def _scope_unread_problem(reads: Sequence[ScopeRead], proposer: Proposer) -> dict[str, object]:
+    """Return the `SCOPE_UNREAD` problem naming each candidate pin to read before alignment.
+
+    `planner.agent.with_source_reads` answers it by reading each
+    (`planner.agent.read_scope`) and proposing again, and answers a read
+    that leaves a pin unread as `OPERATION_UNSUPPORTED`, so the planner sees
+    it only where no tool surface reaches Search. No read can be made there,
+    so the same plan would be refused again, and the refusal asks for each
+    input pinned to a series Search stated in full. `detail.requirement_id`
+    names the first input for the refusal's sentence (`harness.sentences`).
+    """
+    named = "; ".join(
+        f"{item.requirement_id!r}, an input of {item.step_id!r}, pins {item.spec_id}"
+        for item in reads
+    )
+    return problem(
+        ProblemCode.SCOPE_UNREAD,
+        f"A calculation's inputs must share one measure basis and provider scope, and Search "
+        f"offered these as candidates without saying how each is counted: {named}. No read "
+        "of them can be made here, so pin each to a series a search answered in full, or "
+        "leave it out of the calculation.",
+        outcome=Outcome.REFUSED,
+        action=proposer.action(needs=("evidence_requirements",)),
+        detail={
+            "requirement_id": reads[0].requirement_id,
+            "read": [item._asdict() for item in reads],
+        },
+    )
+
+
 def _bases_unaligned(
     wanted: Sequence[Realignment], by_axis: Mapping[str, Mapping[str, _InputBasis]]
 ) -> dict[str, object]:
@@ -7523,9 +7690,9 @@ def _user_decision_dropped(decision: Decision, *, removed: bool) -> dict[str, ob
         f"The user decided {decision.chosen!r} in decision {decision.slot!r}, and this patch "
         f"{how}. They have said nothing since the plan was recorded, so it stands: keep it "
         "cited on the requirements it fixes, or ask them through "
-        f"`{REQUEST_INPUT_FUNCTION_CALL_NAME}`; once they answer, a patch may drop it.",
+        f"`{PLANNER_ASK}`; once they answer, a patch may drop it.",
         outcome=Outcome.REFUSED,
-        action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME),
+        action=Action(call=PLANNER_ASK),
         detail={"slot": decision.slot, "chosen": decision.chosen, "removed": removed},
     )
 
@@ -7549,10 +7716,10 @@ def _user_decision_contradicted(
         f"{where} {field} {now}, but the user decided {decided} in decision "
         f"{decision.slot!r} ({decision.chosen!r}), and they have said nothing since the plan "
         f"was recorded, so it stands as they made it. Keep {field} as they decided, or ask "
-        f"them through `{REQUEST_INPUT_FUNCTION_CALL_NAME}`; once they answer, a patch may "
+        f"them through `{PLANNER_ASK}`; once they answer, a patch may "
         "change it.",
         outcome=Outcome.REFUSED,
-        action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME),
+        action=Action(call=PLANNER_ASK),
         detail={
             "slot": decision.slot,
             "field": field,

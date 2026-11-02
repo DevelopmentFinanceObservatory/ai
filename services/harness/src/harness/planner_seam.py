@@ -32,9 +32,9 @@ path, so a call sees nothing an earlier call was sent or read, and an amend or
 replan needs the plan it changes and the skills already read in front of
 it. `_propose` writes the brief to `planner.agent.BRIEF_STATE_KEY` and runs
 the planner with no node input, and `planner.agent.prepend_brief` shows it
-after the turn's question on every request of the run. A run resumed after
-a planner-side ask gets it too, since the planner node reruns on resume and
-renders it again, where ADK hands a node its input only on a live run.
+after the turn's question on every request of the run. The entry the user's
+answer to a planner-side ask resumes renders it again, with the question and
+the answer added (`_answer_text`), since the planner node reruns on resume.
 
 `_plan_context` renders the plan being changed as a digest, and
 `_READINGS_BUDGET` holds the search readings. With a realistic
@@ -61,7 +61,7 @@ from typing import Any, NamedTuple, cast
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
-from executor.classify import RECOVERABLE_SPEC_CODES, ExecutorCode
+from executor.classify import RECOVERABLE_SPEC_CODES, internal_fault
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.base_llm import BaseLlm
@@ -71,9 +71,13 @@ from google.adk.tools.base_tool import BaseTool
 from google.genai import types
 from planner.agent import (
     BRIEF_STATE_KEY,
+    PENDING_ASK_STATE_KEY,
     PROPOSE_PLAN,
+    AcceptedAsk,
     AdkCall,
+    clear_pending_ask,
     end_run_when_ready,
+    load_pending_ask,
     with_source_reads,
 )
 from planner.call import CallSession
@@ -152,6 +156,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     conversation_readings,
+    resume_answers,
     store_search,
     stored_mapping,
     stored_sequence,
@@ -167,7 +172,7 @@ from harness.sentences import (
 )
 from harness.settings import Settings
 from harness.turn_budget import CLOSED_BY_KEY, current_turn_budget
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import (
     SETTLED_STATUSES,
     CandidateReading,
@@ -239,10 +244,13 @@ _NO_READINGS = RenderedReadings("", ())
 # How many of the skill pages the planner read for this plan
 # (`planner.skills.SKILLS_READ_STATE_KEY`) it read before the current entry.
 # A `single_turn` run sees only its own calls, so those pages render in the
-# brief (`_skills_section`); a page read in this entry is in the run's own
-# history already, a resume's included. Set on every entry, and a first draft
-# clears the pages themselves.
+# brief (`_skills_section`); a page read in this run is in the run's own
+# history already. Set on every entry and on its resume by the user's answer,
+# which runs the planner again, and a first draft clears the pages themselves.
 _SKILLS_BEFORE_ENTRY_STATE_KEY = "planner:skills_before_entry"
+# The last translation's referral the planner's run saw before it ended on an
+# ask, as `propose_plan` answered it, or None.
+_ASKED_REFERRAL_STATE_KEY = "planner:asked_referral"
 # The opening of the brief's section for those pages.
 _SKILLS_CONTEXT = """
 Skills you read on an earlier call for this plan, as data-mcp answered. A \
@@ -332,11 +340,7 @@ class PlannerSeamError(RuntimeError):
 
     def __init__(self, message: str, *, refusal: dict[str, Any] | None = None) -> None:
         super().__init__(message)
-        self.refusal = refusal or {
-            "code": ExecutorCode.INTERNAL_ERROR.value,
-            "retry_mode": "do_not_retry",
-            "fix": {"detail": message},
-        }
+        self.refusal = refusal or internal_fault(message)
 
 
 class _RunTracker:
@@ -359,8 +363,8 @@ class _RunTracker:
         self.referral_counts: dict[StallKey, int] = {}
         self.refused: dict[str, Any] | None = None
         self.ready_to_break = False
-        # The `adk_request_input` call args the next generation is replaced
-        # with, for a referral the user decides (`_user_decided_ask`).
+        # The `PLANNER_ASK` call args the next generation is replaced with,
+        # for a referral the user decides (`_user_decided_ask`).
         self.ask: dict[str, Any] | None = None
         self.submitted: dict[str, Any] | None = None
         self.events = 0
@@ -537,7 +541,10 @@ class PlannerSeam:
         # them. The brief renders them.
         #
         # `propose_plan` amends from the graph's record, not whatever this
-        # session's own drafting key already holds, reseeded every call.
+        # session's own drafting key already holds, reseeded every entry. The
+        # resume of an entry by the user's answer to the planner's ask keeps
+        # what the entry drafted before it asked, and its brief shows that
+        # draft as the plan being changed.
         #
         # Written through `ctx.session.state`, not `ctx.state`, and so is
         # every other write in this method: `ctx.state[key] = value` records
@@ -559,13 +566,31 @@ class PlannerSeam:
         # eventually carries is never older than what `ctx.run_node` itself
         # already produced.
         seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
-        if seeded is not None:
+        if seeded is not None and not ctx.resume_inputs:
             save_plan(cast(SessionState, ctx.session.state), seeded)
+        changing = load_plan(cast(SessionState, ctx.session.state)) if ctx.resume_inputs else seeded
+        # The ask an earlier run of this entry ended on, which the graph's
+        # planner node paused on under the ask's call id, and the user's
+        # answer, which the resume carries under that id. The ask is put to
+        # the user once: every entry starts with none waiting.
+        asked = load_pending_ask(cast(SessionState, ctx.session.state))
+        if asked is None or asked.call_id not in ctx.resume_inputs:
+            asked = self._legacy_ask(ctx) or asked
+        answered = (
+            _Answered(
+                asked,
+                ctx.resume_inputs[asked.call_id],
+                ctx.session.state.get(_ASKED_REFERRAL_STATE_KEY),
+            )
+            if asked is not None and asked.call_id in ctx.resume_inputs
+            else None
+        )
+        _forget_ask(ctx)
         if not ctx.resume_inputs:
             # One `__call__` is one entry into the planner, EXCEPT when it
-            # re-enters through a `RequestInput` this seam itself raised
-            # partway through (the ask-the-user interrupt) and is resumed with
-            # that interrupt's answer in `ctx.resume_inputs` -- the graph's own
+            # re-enters with the user's answer to the ask a run of this entry
+            # ended on, which the graph's planner node paused on, in
+            # `ctx.resume_inputs` -- the graph's own
             # "amend" and "replan" edges both re-enter `__call__` fresh, with
             # nothing in `resume_inputs`, so they get a new budget here.
             # Resetting unconditionally would zero the budget partway through
@@ -632,9 +657,9 @@ class PlannerSeam:
                     UnsupportedOperation.NO_OPERATION_COVERS,
                     terminal=True,
                 )
-            ctx.session.state[_SKILLS_BEFORE_ENTRY_STATE_KEY] = len(
-                skills_read(cast(SessionState, ctx.session.state))
-            )
+        ctx.session.state[_SKILLS_BEFORE_ENTRY_STATE_KEY] = len(
+            skills_read(cast(SessionState, ctx.session.state))
+        )
         # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
         # cancelled on the way out (`translator.discovery.CutCalls`).
@@ -696,11 +721,12 @@ class PlannerSeam:
                 save_pin_sources(cast(SessionState, ctx.session.state), sources)
                 message = self._message(
                     question=question,
-                    prior_plan=_as_authored(seeded),
+                    prior_plan=_as_authored(changing),
                     refusal=refusal,
                     refused=excluded,
                     amendment=amendment,
                     pick=pick,
+                    answered=answered,
                     canvas_digest=canvas_digest,
                     conversation_digest=conversation_digest,
                     ledger=ledger,
@@ -708,11 +734,23 @@ class PlannerSeam:
                     asks=load_asks(cast(SessionState, ctx.session.state)),
                     ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
                     asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
-                    dropped=seeded.dropped_asks if seeded is not None else (),
+                    dropped=changing.dropped_asks if changing is not None else (),
                 )
                 submitted, plan, refused = await self._propose(
-                    ctx=ctx, message=message, on_progress=on_progress
+                    ctx=ctx,
+                    message=message,
+                    on_progress=on_progress,
+                    run_id=f"answered-{answered.ask.call_id}" if answered is not None else None,
                 )
+                # A run that ended on an accepted ask pauses the entry on it
+                # (`harness.graph.planning`), unless a plan declared ready
+                # beside it answers the entry or a refusal the run met ends
+                # it, which no answer could undo (`_propose` sets none of its
+                # own on an ask).
+                asking = load_pending_ask(cast(SessionState, ctx.session.state))
+                if asking is not None and submitted is None and refused is None:
+                    return {"asked": asking._asdict()}
+                _forget_ask(ctx)
                 if refused is not None:
                     if pick is not None:
                         # The card shows why under the decision the user
@@ -739,20 +777,43 @@ class PlannerSeam:
                         "pending_approval; refusing to report it ready"
                     )
                 return {"plan": plan.model_dump(mode="json"), "summary": submitted["summary"]}
+            except BaseException:
+                # An entry that raises asks nothing: the turn ends on the
+                # failure, so no ask is left for a resume or a reader of the
+                # state to find.
+                _forget_ask(ctx)
+                raise
             finally:
-                # Every exit of this method runs through here: a normal return, a
-                # raised `PlannerSeamError`, and a `NodeInterruptedError` from
-                # `_propose`'s own `await ctx.run_node(...)` (a planner-side
-                # `adk_request_input` ask). Nothing in this method catches that
+                # Every exit of this method runs through here: a normal return,
+                # an ask the planner's run ended on included, and a raised
+                # `PlannerSeamError`. Nothing in this method catches that
                 # exception, so only a `finally` runs before the flush this
-                # node's own `NodeRunner` performs on the way to reporting the
-                # pause (see `_persist_durable`'s own docstring).
+                # node's own `NodeRunner` performs (see `_persist_durable`'s own
+                # docstring).
                 try:
                     store_searched_pin_readings(ctx, cast(SessionState, ctx.session.state))
                     self._persist_durable(ctx)
                 finally:
                     current_cut_calls.reset(cut_calls_token)
                     await cut_calls.close()
+
+    def _legacy_ask(self, ctx: Context) -> AcceptedAsk | None:
+        """The ask a turn paused on before the planner node paused on its
+        planner's asks, which the resume answers, or `None`.
+
+        Such a turn paused inside the planner's run, on the planner's own
+        `REQUEST_INPUT_FUNCTION_CALL_NAME` call, whose arguments were the
+        question, and records no `PENDING_ASK_STATE_KEY`. Its answer
+        re-enters the planner as a new ask's does, in the brief of a fresh run
+        (`_answer_text`).
+        """
+        for event in reversed(ctx.session.events):
+            if event.author != self._agent.name:
+                continue
+            for call in event.get_function_calls():
+                if call.name == REQUEST_INPUT_FUNCTION_CALL_NAME and call.id in ctx.resume_inputs:
+                    return AcceptedAsk(call.id, dict(call.args or {}))
+        return None
 
     @staticmethod
     def _persist_durable(ctx: Context) -> None:
@@ -803,12 +864,13 @@ class PlannerSeam:
         # `ALIGNED_PIN_WARNINGS_STATE_KEY`,
         # `SEARCHED_PINS_STATE_KEY`, `SPEC_SEARCHED_STATE_KEY`,
         # `REFUSED_SPECS_STATE_KEY`, `REFUSAL_DETAILS_STATE_KEY`,
-        # `SKILLS_READ_STATE_KEY` and `_SKILLS_BEFORE_ENTRY_STATE_KEY` too. The
+        # `SKILLS_READ_STATE_KEY`, `_SKILLS_BEFORE_ENTRY_STATE_KEY`,
+        # `PENDING_ASK_STATE_KEY` and `_ASKED_REFERRAL_STATE_KEY` too. The
         # declines an ask-the-user resume still owes or may make, the failures
         # it may repeat, the amendment or card pick that opened it, the pins
         # compiled for its proposals and when Search settled on each, the
-        # spec_ids it may not pin and the skill pages its brief shows are this
-        # entry's own.
+        # spec_ids it may not pin, the skill pages its brief shows, and the
+        # ask it paused on with the referral before it are this entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
@@ -825,6 +887,8 @@ class PlannerSeam:
             REFUSAL_DETAILS_STATE_KEY,
             SKILLS_READ_STATE_KEY,
             _SKILLS_BEFORE_ENTRY_STATE_KEY,
+            PENDING_ASK_STATE_KEY,
+            _ASKED_REFERRAL_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
@@ -931,6 +995,7 @@ class PlannerSeam:
         ctx: Context,
         message: str,
         on_progress: Callable[[dict[str, Any]], None] | None,
+        run_id: str | None = None,
     ) -> tuple[dict[str, Any] | None, Plan | None, dict[str, Any] | None]:
         """Run the planner once through `ctx.run_node`, in the graph's own
         session.
@@ -957,7 +1022,14 @@ class PlannerSeam:
         and no refusal of its own ends on the bound that closed one of its
         model calls (`harness.turn_budget.TurnBudget.closed`), or else on
         `SeamCode.PLAN_NOT_READY`, carrying the referral the last translation
-        answered, if any (`_not_ready`).
+        answered, if any (`_not_ready`). A run that ends on an accepted ask
+        answers neither: the ask is in session state for `__call__` to return.
+
+        `run_id` names the run the user's answer resumes, which the default
+        would put on the path of the run that asked. A `single_turn` run reads
+        the events on its own node path, so the resumed run would read the
+        asking run's calls beside a brief that restates what it needs of them
+        (`_answer_text`, `_skills_section`, `_plan_context`).
 
         A discovery call inside the run may take what is left of the
         request's wall-clock bound (`planner.plan.discovery_time_left`); with
@@ -984,8 +1056,7 @@ class PlannerSeam:
         event whose branch is empty. The assertion covers both ways the
         guarantee can lapse: a dropped `override_branch` here, and a future
         ADK release that stops honouring it. The check runs when the run
-        raises as well, so a run that suspends for a planner-side ask has the
-        events it appended checked before the resume reads them.
+        raises as well.
         """
         tracker = _RunTracker()
         token = _active_call.set(_CallState(tracker=tracker, on_progress=on_progress))
@@ -998,12 +1069,11 @@ class PlannerSeam:
             # `prepend_brief` shows the brief on every request of the run, the
             # first after a resume included, so the run takes no node input.
             ctx.session.state[BRIEF_STATE_KEY] = message
-            await ctx.run_node(self._agent, None, override_branch=_PLANNER_BRANCH)
+            await ctx.run_node(self._agent, None, run_id=run_id, override_branch=_PLANNER_BRANCH)
         finally:
             current_discovery_time_left.reset(time_left_token)
             _active_call.reset(token)
-            # Also checked when the run raised. A planner-side ask suspends it
-            # by raising through `ctx.run_node`.
+            # Also checked when the run raised.
             _check_branches(ctx.session.events[before:], planner=self._agent.name)
 
         # Not `ctx.state`: `Context.state` is a `State` wrapper holding a
@@ -1015,7 +1085,12 @@ class PlannerSeam:
         # fresh off the live `Session` object, is what actually reflects
         # what the run just left behind.
         plan = load_plan(cast(SessionState, ctx.session.state))
-        if tracker.submitted is None and tracker.refused is None:
+        asked = load_pending_ask(cast(SessionState, ctx.session.state)) is not None
+        # The referral the run saw last, which the brief of the run the
+        # user's answer resumes shows, since that run sees none of this one's
+        # calls (`_answer_text`).
+        ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = tracker.last_referral if asked else None
+        if tracker.submitted is None and tracker.refused is None and not asked:
             closed = budget.closed if budget is not None else None
             tracker.refused = closed or _not_ready(tracker.last_referral)
         return tracker.submitted, plan, tracker.refused
@@ -1098,10 +1173,11 @@ class PlannerSeam:
         closed (`harness.turn_budget.CLOSED_BY_KEY`) with a question to the
         user when the last referral names sources to choose from.
 
-        The question is the same `adk_request_input` long-running call
-        `planner.agent.ask_user` issues, built here from the referral's
-        candidates (`_pinnable_candidates`), since no model call is left to
-        compose it. `populate_client_function_call_id` gives the call an id,
+        The question is the same `PLANNER_ASK` call the planner's model
+        makes (`planner.agent.ask_user_question`), built here from the
+        referral's candidates (`_pinnable_candidates`), since no model call is
+        left to compose it, and its tool accepts it as any other, ending the
+        run on it. `populate_client_function_call_id` gives the call an id,
         so the resume pairs with the user's answer the way a model-issued ask
         does (`planner.call.elected_spec_ids`), and the answer arrives in a
         request of its own, with a fresh budget. With nothing pinnable (no
@@ -1135,8 +1211,8 @@ class PlannerSeam:
         this callback lets through.
 
         A referral the user decides (`_user_decided_ask`) is answered first,
-        with the `adk_request_input` call it asks, which suspends the run in
-        place of a model turn composing the question. Every break carries a
+        with the `PLANNER_ASK` call it asks, which ends the run on the
+        question in place of a model turn composing it. Every break carries a
         refusal, and the substituted text is that refusal's sentence
         (`harness.sentences.refusal_sentence`). The request's budget is kept
         by the model itself (`harness.turn_budget.BoundedGemini`).
@@ -1406,6 +1482,7 @@ class PlannerSeam:
         skills: Sequence[Mapping[str, Any]] = (),
         refused: Sequence[str] = (),
         pick: DecisionPick | None = None,
+        answered: _Answered | None = None,
         asks: Sequence[str] = (),
         ask_breakdowns: Sequence[AskBreakdown] = (),
         asks_across_years: Sequence[int] = (),
@@ -1456,6 +1533,7 @@ class PlannerSeam:
                     refused=refused,
                     removed=bool(asks) and bool(dropped),
                 ),
+                _answer_text(answered) if answered is not None else "",
             ]
         )
 
@@ -1528,6 +1606,67 @@ def _ask_text(
     return ask
 
 
+def _forget_ask(ctx: Context) -> None:
+    """Clear the ask the planner's run ended on and the referral kept with it."""
+    clear_pending_ask(cast(SessionState, ctx.session.state))
+    ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = None
+
+
+# The line before the referral `_answer_text` renders.
+_ASKED_REFERRAL_INTRO = (
+    "Before you asked, the last translation of the plan referred it back, as "
+    "`propose_plan` answered:"
+)
+
+
+class _Answered(NamedTuple):
+    """The ask the planner's last run ended on, the user's answer to it, and
+    the referral that run saw last, as `propose_plan` answered it, if any."""
+
+    ask: AcceptedAsk
+    answer: object
+    referral: Mapping[str, Any] | None
+
+
+def _answer_text(answered: _Answered) -> str:
+    """The close of the brief of the entry the user's answer resumes: the
+    referral the run that asked saw last, the question it asked, then what the
+    user picked, by its label and id, what they wrote, or that they left it.
+    The resumed run sees none of the asking run's calls, so the referral
+    renders as `propose_plan` answered it.
+
+    The answer is the `result` `harness.studio`'s `/interrupt` route resumes
+    with, one answer per question id (`harness.graph.state.resume_answers`);
+    the planner's ask is one question, `q1`. The question and the user's own
+    words render cut to `MAX_QUESTION_CHARS` (`planner.plan.cut_user_text`).
+    """
+    args = answered.ask.args
+    offered = {
+        str(choice.get("spec_id", choice.get("id"))): str(choice.get("label", ""))
+        for choice in [*(args.get("candidates") or ()), *(args.get("options") or ())]
+        if isinstance(choice, dict)
+    }
+    reply = (resume_answers(answered.answer) or {}).get("q1") or {}
+    picked = str(reply.get("spec_id")) if reply.get("kind") == "option" else None
+    text = reply.get("text") if reply.get("kind") == "text" else None
+    if picked is not None:
+        said = f"They picked {offered.get(picked, picked)!r}, id `{picked}`."
+    elif isinstance(text, str) and text.strip():
+        said = f"They answered in their own words: {cut_user_text(text, MAX_QUESTION_CHARS)}"
+    else:
+        said = "They left the question unanswered, so nothing it asked is settled by them."
+    question = cut_user_text(str(args.get("message", "")), MAX_QUESTION_CHARS)
+    referral = (
+        f"\n{_ASKED_REFERRAL_INTRO}\n{json.dumps(answered.referral)}\n"
+        if answered.referral is not None
+        else ""
+    )
+    return (
+        f"{referral}\nThe user answered the question you asked through `{PLANNER_ASK}`: "
+        f"{question}\n{said}\nWhat they chose is the user's decision. Carry on from it.\n"
+    )
+
+
 def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) -> PlanWords:
     """How a sentence about `revision`, which did not compile, names its
     requirements (`harness.plan_display.plan_words`): each `prior`, the plan the
@@ -1541,19 +1680,21 @@ def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) 
 
 
 def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
-    """Every spec block `state` holds a pin's source in, by spec_id: those on
-    record (`held_sources`), then this turn's searches (`ORCHESTRATOR_SPECS_KEY`)
-    in place of those for their spec_ids. A pin compiled for a calculation's
-    input gives its block only to a spec_id no dataset the planner was shown
-    holds, so a pin of a shown dataset reads the block it was shown with,
-    whatever compile shares its spec_id."""
-    blocks: dict[str, Mapping[str, Any]] = {
-        spec_id: block
-        for spec_id, held in held_sources(state).items()
-        if (block := held.spec_block(spec_id)) is not None
+    """Every spec block `state` holds a pin's source in, by spec_id: the one on
+    record for each spec_id a pin may name (`held_sources`), as admission and
+    translation read it, and this turn's searches' (`ORCHESTRATOR_SPECS_KEY`)
+    for each spec_id none is on record for. A pin of a shown dataset reads
+    the block it was shown with, holding the scope content of a compile or
+    found source of its spec_id that says more about its scope choices
+    (`planner.plan.standing_block`)."""
+    return {
+        **stored_mapping(state, ORCHESTRATOR_SPECS_KEY),
+        **{
+            spec_id: block
+            for spec_id, held in held_sources(state).items()
+            if (block := held.spec_block(spec_id)) is not None
+        },
     }
-    blocks.update(stored_mapping(state, ORCHESTRATOR_SPECS_KEY))
-    return blocks
 
 
 def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
@@ -1851,10 +1992,8 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
     effect rather than the argument: a dropped keyword and a future ADK
     release that stops honouring it both surface here.
 
-    An empty slice, or one with no planner event, passes. A run resumed by the
-    user's answer to a planner-side ask finishes the model turn the answer
-    completed and may append no planner event, and a run that raised may have
-    appended nothing yet.
+    An empty slice, or one with no planner event, passes. A run that raised
+    may have appended nothing yet.
 
     Raises:
         PlannerSeamError: If a planner event carries another branch. Nothing
@@ -1880,7 +2019,7 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
 
 def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]]:
     """The `spec_id`-bearing candidates a referral names, shaped as
-    `planner.agent.ask_user`'s own `candidates` argument
+    `planner.agent.ask_user_question`'s own `candidates` argument
     (`{"spec_id": ..., "label": ...}`, `label` the candidate's `sentence`).
 
     A `no_data` referral's candidates (`translator.discovery.compact_source
@@ -1925,8 +2064,8 @@ _WHICH_INSTEAD = "Which of these should be used instead?"
 def _clarifying_question_args(
     candidates: list[dict[str, str]], *, lead: str, question: str = _WHICH_MEANT
 ) -> dict[str, Any]:
-    """The `adk_request_input` call args that put a referral's pinnable
-    candidates to the user: the shape `planner.agent.ask_user` declares, built
+    """The `PLANNER_ASK` call args that put a referral's pinnable
+    candidates to the user: the shape `planner.agent.ask_user_question` declares, built
     here from the candidates with no model call composing it. `lead` says why
     the user is asked and `question` what they are asked. It recommends no
     candidate, since nothing has weighed them. The message reaches the user, so
@@ -1937,7 +2076,7 @@ def _clarifying_question_args(
 
 
 def _user_decided_ask(referral: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """The `adk_request_input` call args for a referral the user decides, or
+    """The `PLANNER_ASK` call args for a referral the user decides, or
     `None` for any other answer.
 
     A referral of a kind in `translator.referral.USER_DECIDES` carrying
@@ -1962,7 +2101,7 @@ def _user_decided_ask(referral: Mapping[str, Any] | None) -> dict[str, Any] | No
 
 
 def _ask_response(args: dict[str, Any]) -> LlmResponse:
-    """A model turn that is one `adk_request_input` call with `args`.
+    """A model turn that is one `PLANNER_ASK` call with `args`.
 
     `populate_client_function_call_id` gives the call an id, so the resume
     pairs with the user's answer the way a model-issued ask does
@@ -1973,9 +2112,7 @@ def _ask_response(args: dict[str, Any]) -> LlmResponse:
             role="model",
             parts=[
                 types.Part(
-                    function_call=types.FunctionCall(
-                        name=REQUEST_INPUT_FUNCTION_CALL_NAME, args=args
-                    ),
+                    function_call=types.FunctionCall(name=PLANNER_ASK, args=args),
                     thought_signature=_SKIP_THOUGHT_SIGNATURE,
                 )
             ],

@@ -61,7 +61,7 @@
               "rubric_id": "pair-invents-no-tools",
               "type": "TOOL_USE_QUALITY",
               "rubric_content": {
-                "text_property": "Did every function the agent invoked come from its declared tool list -- adk_request_input, propose_plan, and reject_plan? Tool names appearing inside a plan's contents or in the agent's prose are not invocations."
+                "text_property": "Did every function the agent invoked come from its declared tool list -- ask_user_question, propose_plan, and reject_plan? Tool names appearing inside a plan's contents or in the agent's prose are not invocations."
               },
               "description": "The planner names no MCP tool: which data and operations carry out a decision is translation's business, run inside propose_plan."
             }
@@ -141,7 +141,7 @@
     },
     {
       "eval_id": "asks-which-congo-before-guessing",
-      "note": "The canned search answers a part naming \"Congo\" bare with one ambiguous_entities group over country/COD and country/COG whose options pin every bare row, as the parsed door answers two rows sent alike. workflow_outcome pins that a proposal's translation came back as an entity_name_ambiguous referral with one reading per Congo entity, each offering both nodes in that order. The roles are the model's own, so the expectation leaves them out. Whether the planner then asks the user is judged from its adk_request_input call: the words name neither Congo, so the choice is the user's. Each reading's candidates carry a `pick`, the id an ask offers them under, and an ask offers one reading's picks alone, since Studio shows it as one single-select question. A run pauses on its first ask, so the case judges that ask and scores no answer: no case in this set resumes a pending ask. Answering each Congo on its own resume and the nodes the answers settle are tested in services/harness/tests/test_planner_seam.py.",
+      "note": "The canned search answers a part naming \"Congo\" bare with one ambiguous_entities group over country/COD and country/COG whose options pin every bare row, as the parsed door answers two rows sent alike. workflow_outcome pins that a proposal's translation came back as an entity_name_ambiguous referral with one reading per Congo entity, each offering both nodes in that order. The roles are the model's own, so the expectation leaves them out. Whether the planner then asks the user is judged from its ask_user_question call: the words name neither Congo, so the choice is the user's. Each reading's candidates carry a `pick`, the id an ask offers them under, and an ask offers one reading's picks alone, since Studio shows it as one single-select question. A run pauses on its first ask, so the case judges that ask and scores no answer: no case in this set resumes a pending ask. Answering each Congo on its own resume and the nodes the answers settle are tested in services/harness/tests/test_planner_seam.py.",
       "session_input": {
         "app_name": "harness_pair_v1",
         "user_id": "eval-user",
@@ -210,7 +210,7 @@
               "rubric_id": "congo-asks-about-one-reading",
               "type": "TOOL_USE_QUALITY",
               "rubric_content": {
-                "text_property": "After a propose_plan response whose `translation` has kind `entity_name_ambiguous`, did the agent call adk_request_input with `candidates` covering exactly one reading of `ambiguous_entities`: their `spec_id` values are that reading's candidates' `pick` values, the one naming `country/COD` and the one naming `country/COG`, and no `pick` of another reading? This property always applies and is never inapplicable. Judge the arguments of the adk_request_input calls the agent invoked, not its prose; a run with no adk_request_input call after that referral fails, and so does any such call whose candidates mix two readings, leave out either node, or state a `spec_id` that is no reading's `pick`."
+                "text_property": "After a propose_plan response whose `translation` has kind `entity_name_ambiguous`, did the agent call ask_user_question with `candidates` covering exactly one reading of `ambiguous_entities`: their `spec_id` values are that reading's candidates' `pick` values, the one naming `country/COD` and the one naming `country/COG`, and no `pick` of another reading? This property always applies and is never inapplicable. Judge the arguments of the ask_user_question calls the agent invoked, not its prose; a run with no ask_user_question call after that referral fails, and so does any such call whose candidates mix two readings, leave out either node, or state a `spec_id` that is no reading's `pick`."
               },
               "description": "The question names neither Congo, so which one each side means is the user's to choose, one side per question, from the nodes the referral offers."
             },

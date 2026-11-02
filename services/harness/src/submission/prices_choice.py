@@ -37,7 +37,7 @@ from typing import Any, Literal, NamedTuple
 from compiler.evidence import PriceBasis, UnitReading, read_unit_currency, read_unit_dcid
 from compiler.evidence import requested_unit as requested_unit_of
 from compiler.sources import readable_source
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import CONSTANT_PRICES, CURRENT_PRICES
 from planner.plan import (
     BaseYearUnstatedError,
@@ -147,10 +147,11 @@ class Parts:
         unless it was fetched as another count of one (`PinSource.other_count_of`).
 
         A dataset a requirement pins (`pinned`) that the planner was not shown,
-        a pin compiled for another input that the planner pins directly
-        (`planner.plan.held_sources`), is a reading of its own too, its
-        measure read off the block `block_of` holds for it. So the user's
-        prices choice on that measure holds it."""
+        a pin compiled for another input that the planner pins directly, or a
+        source translation's discovery found that a referral offers in place
+        of a pin (`planner.plan.held_sources`), is a reading of its own too,
+        its measure read off the block `block_of` holds for it. So the
+        user's prices choice on that measure holds it."""
         compiled = [
             spec_id
             for spec_id in dict.fromkeys(pinned)
@@ -489,11 +490,11 @@ def _refusal(
         return problem(
             code,
             f"{lead} No series shown serves it in {choice.label}. Ask the user through "
-            f"`{REQUEST_INPUT_FUNCTION_CALL_NAME}`, with the action's `options`, which prices "
+            f"`{PLANNER_ASK}`, with the action's `options`, which prices "
             "to go on in; once they pick, a patch states those.",
             outcome=outcome,
             action=Action(
-                call=REQUEST_INPUT_FUNCTION_CALL_NAME,
+                call=PLANNER_ASK,
                 arguments={"options": [dict(option) for option in PRICES_OPTIONS]},
                 needs=("message",),
             ),

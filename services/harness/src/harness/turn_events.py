@@ -17,6 +17,13 @@ from google.genai import types
 # under this name and its answer a function response under it.
 REQUEST_INPUT_FUNCTION_CALL_NAME = request_input.name
 
+# The planner's own ask, the tool it calls to put a question to the user
+# (`planner.agent.ask_user_question`). The tool answers every call at once,
+# refusing or accepting it. The graph's planner node pauses on an accepted
+# ask with a `RequestInput` under the call's id, which ADK records under
+# `REQUEST_INPUT_FUNCTION_CALL_NAME`, so the user's answer carries that id.
+PLANNER_ASK = "ask_user_question"
+
 
 def _turn_question(callback_context: CallbackContext) -> types.Content | None:
     """The message the user opened the turn with, or None when the turn has none.

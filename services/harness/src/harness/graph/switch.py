@@ -80,7 +80,6 @@ from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
-from google.adk.workflow._errors import NodeInterruptedError
 from planner.agent import run_together
 from planner.plan import (
     AlignedInput,
@@ -336,15 +335,15 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
     raises included, ends stopped, as does one that finishes in the same wait
     as the Stop. The `switch` node puts the state it wrote back, so the plan
     stands unchanged. A cancellation of the node itself,
-    while the revision unwinds, still cancels the node. A revision that
-    paused on a question to the user (`NodeInterruptedError`) stays paused
-    though the Stop came in the same wait: ADK has streamed the question, so
-    the node run ends as that pause and offers no plan beside it.
+    while the revision unwinds, still cancels the node. A pick's replan
+    that ended on the planner's question to the user (`{"asked": ...}`,
+    `harness.graph.seams.PlannerModel`) stays paused though the Stop came in
+    the same wait: the question is the user's to answer, so its payload is
+    answered and the node pauses on it, offering no plan beside it.
 
     Raises:
         SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
             the switch, else as `revision` raises it.
-        NodeInterruptedError: When `revision` paused on a question.
     """
     stop = SWITCH_STOP.get()
     running = asyncio.ensure_future(revision)
@@ -364,11 +363,13 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
         if unfinished:
             # Raises nothing the tasks raise. A cancellation of the node raises.
             await asyncio.wait(unfinished)
-    if running in finished and stopped not in finished and not running.cancelled():
+    if (
+        running in finished
+        and not running.cancelled()
+        and (stopped not in finished or _asked(running))
+    ):
         return running.result()
     error = None if running.cancelled() else running.exception()
-    if isinstance(error, NodeInterruptedError):
-        raise error
     if error is not None:
         logger.info("stopped plan switch raised: %r", error)
     raise SwitchFailedError(
@@ -376,6 +377,14 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
         code=SWITCH_CANCELLED,
         retryable=True,
     )
+
+
+def _asked(running: asyncio.Future[Any]) -> bool:
+    """Whether `running`, done, answered a question to the user."""
+    if running.exception() is not None:
+        return False
+    result = running.result()
+    return isinstance(result, dict) and "asked" in result
 
 
 async def _switched_plan(

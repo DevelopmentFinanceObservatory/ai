@@ -362,6 +362,19 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
 }
 
 
+def internal_fault(detail: str | None = None) -> dict[str, JsonValue]:
+    """The refusal of a fault of the system itself, such as a bug: `internal_error`,
+    `do_not_retry`, since the same turn meets it again, with `detail` for the log
+    under `fix.detail` when given."""
+    refusal: dict[str, JsonValue] = {
+        "code": ExecutorCode.INTERNAL_ERROR.value,
+        "retry_mode": "do_not_retry",
+    }
+    if detail is not None:
+        refusal["fix"] = {"detail": detail}
+    return refusal
+
+
 # analysis-mcp's code for a newest period that is not established, and the
 # `fix.detail`s of it that state a fact of the data: no year that half of the
 # series hold, and a pairing whose two sides name no entity in common.

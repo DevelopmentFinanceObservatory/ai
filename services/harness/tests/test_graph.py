@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,12 +53,9 @@ from executor.outcomes import (
     Refused,
 )
 from executor.run import StepProgressCallback, execute_approved_plan
-from google.adk import Context
-from google.adk.events import Event, RequestInput
+from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, State
-from google.adk.workflow._errors import NodeInterruptedError
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
 from harness import scripted
 from harness.chart_binding import (
@@ -1618,45 +1615,44 @@ async def test_a_turn_closed_mid_draft_cancels_the_seam_and_writes_no_state_afte
 
 
 class _AskingSeam:
-    """A `PlannerModel` that reports two progress rounds, then pauses the
-    same way a real `PlannerSeam` does once `planner.agent`'s
-    `adk_request_input` tool call is what it's awaiting: `ctx.run_node`
-    raises `NodeInterruptedError` straight out of the awaited call
-    (`google.adk.workflow._errors`, a `BaseException` used exclusively for
-    this). Raised directly here rather than through a real nested
-    `ctx.run_node` call -- so the interrupt this synthesises carries none of
-    ADK's own bookkeeping for resuming it later (`test_planner_seam.py`'s
-    `test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered` proves
-    that half, through a real one) -- this is only for the one property
-    this node itself owns: drop the progress queued before the pause, then
-    let it propagate."""
+    """A `PlannerModel` that reports two progress rounds, then answers that the
+    planner's run ended on a question for the user, as `PlannerSeam` does once
+    `planner.agent.ask_user_question` accepted one."""
 
     async def __call__(self, *, on_progress: Any = None, **_kwargs: Any) -> dict[str, Any]:
         if on_progress is not None:
             on_progress({"agent": "dfo_planner", "tools": ["propose_plan"]})
-            on_progress({"agent": "dfo_planner", "tools": ["adk_request_input"]})
-        raise NodeInterruptedError()
+            on_progress({"agent": "dfo_planner", "tools": ["ask_user_question"]})
+        return _ASKED
 
 
-async def test_a_planner_side_pause_relays_no_progress_after_it() -> None:
-    """The `planner` node awaits the seam directly, so a pause's
-    `NodeInterruptedError` passes straight through it. A real pause has
-    already streamed the ask by then, so the node relays none of the
-    progress queued before it (a frame after the ask breaks the stream's
-    pause), and the pause reaches the workflow's own handling untouched. No
-    `plan.proposed` or `refused` output follows: the turn is suspended,
-    not settled."""
+async def test_a_planner_side_pause_relays_its_progress_before_the_question() -> None:
+    """The `planner` node relays the progress the seam reported, then pauses
+    on the planner's question under its call id, carrying the call's
+    arguments as the payload. No `plan.proposed` or `refused` output follows:
+    the turn is suspended, not settled."""
     seam = _AskingSeam()
     runner, _ = _plan_runner(seam)
 
     events = await _start(runner)
 
-    progress = [
-        event.custom_metadata["progress"]
-        for event in events
+    relayed = [
+        ("progress", event.custom_metadata["progress"]["tools"])
         if event.custom_metadata and "progress" in event.custom_metadata
+        else ("ask", _pending_interrupt([event]))
+        for event in events
+        if (event.custom_metadata and "progress" in event.custom_metadata)
+        or _pending_interrupt([event]) is not None
     ]
-    assert progress == []
+    assert relayed == [
+        ("progress", ["propose_plan"]),
+        ("progress", ["ask_user_question"]),
+        ("ask", _PLANNER_ASK),
+    ]
+    (call,) = [
+        call for event in events for call in event.get_function_calls() if call.id == _PLANNER_ASK
+    ]
+    assert (call.args or {})["payload"] == _ASKED["asked"]["args"]
     assert _output_of(events, "planner") is None
     assert _output_of(events, "approve") is None
     assert _output_of(events, "plan_done") is None
@@ -1673,7 +1669,7 @@ class _GatedSeam:
     async def __call__(self, **_kwargs: Any) -> dict[str, Any]:
         await asyncio.wait_for(self.seen.wait(), timeout=5)
         self.drafted = True
-        raise NodeInterruptedError()
+        return _ASKED
 
 
 async def test_the_planner_node_announces_a_draft_before_the_seam_returns() -> None:
@@ -1730,25 +1726,19 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
 _PLANNER_ASK = "planner_ask"
 
 
-def _ask_the_user(ctx: Context) -> Iterator[Any]:
-    """A node that pauses on a question and outputs the answer it is resumed with."""
-    answer = (ctx.resume_inputs or {}).get(_PLANNER_ASK)
-    if answer is None:
-        yield create_request_input_event(
-            RequestInput(interrupt_id=_PLANNER_ASK, message="Which years?")
-        )
-        return
-    yield Event(output=answer)
+# What a `PlannerModel` answers for a planner run that ended on a question for
+# the user, which the `planner` node pauses on under `_PLANNER_ASK`.
+_ASKED = {"asked": {"call_id": _PLANNER_ASK, "args": {"message": "Which years?"}}}
 
 
 class _AskingOnAmendSeam(_Seam):
     """A `PlannerModel` that drafts its first plan outright and asks the user
-    a question, through a real `ctx.run_node` pause, on every later call."""
+    a question on every later call that no answer resumes."""
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
-        if len(self.calls) > 1:
-            await kwargs["ctx"].run_node(_ask_the_user)
+        if len(self.calls) > 1 and not kwargs["ctx"].resume_inputs:
+            return _ASKED
         return self._plans[0]
 
 
@@ -2059,16 +2049,14 @@ async def test_a_stopped_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
 
 class _AskingOnPickSeam(_ReplanSeam):
     """`_ReplanSeam` that, on its second call, asks the user a question
-    through a real `ctx.run_node` pause after writing `_DRAFTING_KEY` and the
-    pick, as `PlannerSeam` records it."""
+    after writing `_DRAFTING_KEY` and the pick, as `PlannerSeam` records it."""
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         if len(self.calls) == 1:
             kwargs["ctx"].state[_DRAFTING_KEY] = "draft"
             save_decision_pick(kwargs["ctx"].state, kwargs["pick"])
             self.calls.append(kwargs)
-            await kwargs["ctx"].run_node(_ask_the_user)
-            raise AssertionError("the ask pauses the replan")
+            return _ASKED
         return await super().__call__(**kwargs)
 
 
@@ -4456,24 +4444,25 @@ async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
     assert stopped.value.code == SWITCH_CANCELLED
 
 
-async def test_a_revision_that_paused_in_the_same_wait_as_the_stop_stays_paused() -> None:
-    """The revision pauses on a question to the user as the Stop lands. ADK
-    has streamed the question, so the pause stands and no `switch_failed`
-    follows it."""
+async def test_a_replan_that_asked_in_the_same_wait_as_the_stop_stays_paused() -> None:
+    """A pick's replan ends on the planner's question to the user as the Stop
+    lands. The question is the user's to answer, so `_unless_stopped` answers
+    it for the planner node to pause on, and no `switch_failed` follows."""
     stop = asyncio.Event()
     stop.set()
 
-    async def revision() -> dict[str, Any]:
-        raise NodeInterruptedError()
+    async def replan() -> dict[str, Any]:
+        return _ASKED
 
     token = SWITCH_STOP.set(stop)
     try:
-        with pytest.raises(NodeInterruptedError):
-            await asyncio.wait_for(
-                switch_module._unless_stopped(cast(Any, None), revision()), timeout=5
-            )
+        answered = await asyncio.wait_for(
+            switch_module._unless_stopped(cast(Any, None), replan()), timeout=5
+        )
     finally:
         SWITCH_STOP.reset(token)
+
+    assert answered == _ASKED
 
 
 @_UNWIND_ERRORS
@@ -4562,9 +4551,9 @@ class _SwitchedOff(NamedTuple):
 
 
 class _RefusingPickSeam(_TranslatingSeam):
-    """A `_TranslatingSeam` whose replan for a pick asks the user a question
-    through a real `ctx.run_node` pause, after recording the pick and
-    drafting state as `PlannerSeam` does, and is refused once resumed."""
+    """A `_TranslatingSeam` whose replan for a pick asks the user a question,
+    after recording the pick and drafting state as `PlannerSeam` does, and is
+    refused once resumed."""
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         pick = kwargs.get("pick")
@@ -4576,8 +4565,7 @@ class _RefusingPickSeam(_TranslatingSeam):
             return {"refused": {"text": "No plan.", "final": False, "code": "plan_not_ready"}}
         save_decision_pick(ctx.state, pick)
         ctx.state[_DRAFTING_KEY] = "draft"
-        await ctx.run_node(_ask_the_user)
-        raise AssertionError("the ask pauses the replan")
+        return _ASKED
 
 
 async def _switch_off_a_stated_source(

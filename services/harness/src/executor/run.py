@@ -480,13 +480,18 @@ class StatisticsUnusableError(Exception):
     """
 
 
+def transient_status(status: int | None) -> bool:
+    """Whether an HTTP `status` says to try again later: a rate limit (429) or
+    a server error (5xx). Any other 4xx repeats for the same request."""
+    return status is not None and (status == httpx2.codes.TOO_MANY_REQUESTS or status >= 500)
+
+
 def _is_transient(exc: Exception) -> bool:
     """Whether a failed statistics fetch is one a later try can get past."""
     if isinstance(exc, ArtifactRefusalError):
         return exc.code in TRANSIENT_CODES
     if isinstance(exc, httpx2.HTTPStatusError):
-        status = exc.response.status_code
-        return status == httpx2.codes.TOO_MANY_REQUESTS or status >= 500
+        return transient_status(exc.response.status_code)
     return isinstance(exc, (TimeoutError, httpx2.TransportError))
 
 

@@ -47,7 +47,6 @@ from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_event,
     create_request_input_response,
@@ -62,15 +61,20 @@ from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
 from harness.studio_state import _turn_identities
 from harness.tool_contracts import reading_facts
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
 from planner import agent as planner_agent
 from planner.agent import (
+    ASK_ACCEPTED,
     BRIEF_STATE_KEY,
+    PENDING_ASK_STATE_KEY,
     AdkCall,
+    ask_refusal,
+    ask_user_question,
     build_planner_tools,
     create_planner_agent,
     end_run_when_ready,
+    load_pending_ask,
     planner_instruction,
     prepend_brief,
     read_full_history,
@@ -274,7 +278,7 @@ RequirementFactory = Callable[..., EvidenceRequirement]
 DerivedRequirementFactory = Callable[..., AggregateRequirement]
 RequirementPair = tuple[EvidenceRequirement, ...]
 
-SIMPLE_TOOLS = (REQUEST_INPUT_FUNCTION_CALL_NAME, "propose_plan", "reject_plan")
+SIMPLE_TOOLS = (PLANNER_ASK, "propose_plan", "reject_plan")
 
 SPEC = "spec_" + "a" * 32
 POPULATION_SPEC = "spec_" + "c" * 32
@@ -307,7 +311,7 @@ HANDED_BACK_KINDS = (
 class _FakeSession:
     """A minimal stand-in for ADK's `Session`: just `.events`, read through
     `planner.agent._session_steps` by `planner.call.elected_spec_ids` to find
-    what the user actually chose answering `adk_request_input`, and by
+    what the user actually chose answering `ask_user_question`, and by
     `planner.call.answered_since_referral` to find whether they answered at
     all. Empty by default -- a test that needs an election on record populates
     it with `_ask_event` and `_answer_event`, below, and one that needs an
@@ -320,8 +324,10 @@ class _FakeSession:
 class _FakeToolContext:
     """A minimal stand-in for ADK's `ToolContext`.
 
-    `.state` (a plain, mutable mapping), `.session` (`.events` only) and
-    `.actions` (where `end_run_when_ready` ends the run) are all `planner.agent`'s
+    `.state` (a plain, mutable mapping), `.session` (`.events` only),
+    `.actions` (where `end_run_when_ready` ends the run), and the call's
+    `.invocation_id`, `.branch` and `.function_call_id` (where `_ask_beside_ask`
+    finds the call among the session's events) are all `planner.agent`'s
     tool functions use: none of them gates on a confirmation any more, so
     none needs `.tool_confirmation`. A tool body that tried to read it would
     raise `AttributeError` against this stand-in, which is exactly the
@@ -333,10 +339,12 @@ class _FakeToolContext:
         self.actions = EventActions()
         self.session = _FakeSession()
         self.invocation_id = "turn-1"
+        self.branch = None
+        self.function_call_id = "call-1"
 
 
 def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> Any:
-    """A fake session event for `adk_request_input`'s own function call,
+    """A fake session event for `ask_user_question`'s own function call,
     carrying `candidates` in its `args` and `call_id` in its `id` -- the
     shape `planner.call.elected_spec_ids` pairs against a matching
     `_answer_event`'s `id`. A `SimpleNamespace` tree rather than a real
@@ -347,7 +355,7 @@ def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> 
     explicitly -- a real ADK `Part` always carries the field, defaulting to
     `None`, and `_session_steps` reads it unconditionally off every part.
     """
-    call = SimpleNamespace(id=call_id, name="adk_request_input", args={"candidates": candidates})
+    call = SimpleNamespace(id=call_id, name=PLANNER_ASK, args={"candidates": candidates})
     part = SimpleNamespace(function_call=call, function_response=None)
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
 
@@ -359,7 +367,7 @@ def _answer_event(spec_id: str, *, call_id: str = "call-1") -> Any:
     sends (`create_request_input_response`).
     """
     response = SimpleNamespace(
-        id=call_id, name="adk_request_input", response={"result": {"spec_id": spec_id}}
+        id=call_id, name=PLANNER_ASK, response={"result": {"spec_id": spec_id}}
     )
     part = SimpleNamespace(function_call=None, function_response=response)
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
@@ -385,8 +393,8 @@ def _referred_event(kind: ReferralKind, requirement_id: str | None) -> Any:
 
 
 def _ask_response(call_id: str, body: dict[str, Any]) -> Any:
-    """A `FunctionResponse` named `adk_request_input` under `call_id`, carrying `body`."""
-    response = SimpleNamespace(id=call_id, name="adk_request_input", response=body)
+    """A `FunctionResponse` named `ask_user_question` under `call_id`, carrying `body`."""
+    response = SimpleNamespace(id=call_id, name=PLANNER_ASK, response=body)
     part = SimpleNamespace(function_call=None, function_response=response)
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
 
@@ -394,7 +402,7 @@ def _ask_response(call_id: str, body: dict[str, Any]) -> Any:
 def _ask_answered_events(
     result: Any = "use current prices", *, call_id: str = "ask-1"
 ) -> list[Any]:
-    """An `adk_request_input` call that offered no candidates, and the response that
+    """An `ask_user_question` call that offered no candidates, and the response that
     answers it with `result`. A user's free-text answer leaves these two events in the
     session."""
     return [_ask_event([], call_id=call_id), _ask_response(call_id, {"result": result})]
@@ -608,7 +616,7 @@ def _tool_args(
 ) -> dict[str, object]:
     """The minimum arguments each of `SIMPLE_TOOLS` needs to reach its own body."""
     by_tool: dict[str, dict[str, object]] = {
-        "adk_request_input": {
+        PLANNER_ASK: {
             "message": "Which source did you mean?",
             "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
         },
@@ -869,7 +877,7 @@ def test_the_gate_sends_the_planner_to_the_user_over_an_unanswered_referral(
     result = _declare_over_a_handed_back_plan(decision, requirements, kind)
 
     assert result["code"] == ProblemCode.REFERRAL_PENDING.value
-    assert result["action"]["call"] == "adk_request_input"
+    assert result["action"]["call"] == PLANNER_ASK
 
 
 @pytest.mark.parametrize("kind", HANDED_BACK_KINDS)
@@ -1834,7 +1842,7 @@ def test_a_sum_of_two_datasets_needs_the_users_decision(
     if refused:
         assert result is not None
         assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
-        assert result["action"]["call"] == "adk_request_input"
+        assert result["action"]["call"] == PLANNER_ASK
         assert result["action"]["arguments"] == {
             "options": [dict(option) for option in COMBINATION_OPTIONS]
         }
@@ -1907,7 +1915,7 @@ def _combination_asked(
     about: tuple[str, list[str]] | None = ("net_flows", _AID_AND_DEBT),
 ) -> list[Any]:
     """A `combination_unasked` refusal naming the sum `about` (its requirement id and
-    datasets; `None` for no refusal), then an `adk_request_input` call offering
+    datasets; `None` for no refusal), then an `ask_user_question` call offering
     `options`, `COMBINATION_OPTIONS` by default, and one response to it per answer in
     `answers`."""
     offered = [dict(option) for option in COMBINATION_OPTIONS] if options is None else options
@@ -1928,7 +1936,7 @@ def _combination_asked(
     )
     call = SimpleNamespace(
         id=call_id,
-        name="adk_request_input",
+        name=PLANNER_ASK,
         args={"message": "Add them, or show them separately?", "options": offered},
     )
     asked = SimpleNamespace(
@@ -2743,7 +2751,7 @@ def test_propose_plan_refuses_an_amendment_while_the_user_has_not_answered_the_r
 
     assert refused["outcome"] == Outcome.REFUSED.value
     assert refused["code"] == ProblemCode.REFERRAL_PENDING.value
-    assert refused["action"]["call"] == "adk_request_input"
+    assert refused["action"]["call"] == PLANNER_ASK
     assert requirement_id in str(refused["message"])
     assert kind.value in str(refused["message"])
     stored = load_plan(ctx.state)
@@ -2912,7 +2920,7 @@ def _unsupported_ask_handed_back(
     "body",
     [
         {
-            "error": "Invoking `adk_request_input()` failed as the following mandatory "
+            "error": "Invoking `ask_user_question()` failed as the following mandatory "
             "input parameters are not present:\ncandidates"
         },
         {
@@ -2926,7 +2934,7 @@ def _unsupported_ask_handed_back(
 def test_an_ask_the_tool_rejected_does_not_settle_the_referral(
     decision: DecisionFactory, requirements: RequirementPair, body: dict[str, Any]
 ) -> None:
-    """A rejected `adk_request_input` call comes back as a `FunctionResponse` at once, with
+    """A rejected `ask_user_question` call comes back as a `FunctionResponse` at once, with
     no user involved and no `result` in its body."""
     tools, ctx = _unsupported_ask_handed_back(decision, requirements)
     ctx.session.events.extend([_ask_event([], call_id="ask-1"), _ask_response("ask-1", body)])
@@ -3773,56 +3781,66 @@ def test_propose_plan_rejects_a_null_list(
     assert PLAN_STATE_KEY not in ctx.state
 
 
-# --- Asking the user (`adk_request_input`) ---------------------------------------------
+# --- Asking the user (`ask_user_question`) ---------------------------------------------
 
 
-def test_the_ask_tool_is_registered_as_a_long_running_call() -> None:
-    tools = _tools_by_name()
+def test_an_accepted_ask_records_lists_its_call_does_not_share() -> None:
+    """The record an accepted ask leaves in durable state holds its own
+    lists: a later write to it changes neither the tool's defaults nor the
+    next ask's record."""
+    first = _FakeToolContext()
+    ask_user_question(cast(Any, first), message="Which years?")
+    first.state[PENDING_ASK_STATE_KEY]["args"]["candidates"].append({"spec_id": "s", "label": "l"})
 
-    tool = tools["adk_request_input"]
+    second = _FakeToolContext()
+    ask_user_question(cast(Any, second), message="Which years?")
 
-    assert isinstance(tool, LongRunningFunctionTool)
-    assert tool.is_long_running is True
+    assert second.state[PENDING_ASK_STATE_KEY]["args"]["candidates"] == []
+
+
+def test_the_ask_tool_is_not_long_running() -> None:
+    """ADK marks a long-running call an interrupt before its tool runs, so a
+    refused ask would leave the run paused. The graph's planner node pauses
+    on an accepted ask instead."""
+    tool = _tools_by_name()[PLANNER_ASK]
+
+    assert isinstance(tool, FunctionTool)
+    assert tool.is_long_running is False
 
 
 def test_asking_the_user_needs_no_candidates() -> None:
     """A referral that carries no candidates (`unsupported_ask`, `requirement_unmeetable`)
     is put to the user with a message alone."""
-    tools = _tools_by_name()
-    tool = tools["adk_request_input"]
-
-    declaration = tool._get_declaration()
+    declaration = _tools_by_name()[PLANNER_ASK]._get_declaration()
 
     assert declaration is not None
     schema = declaration.parameters_json_schema
     assert schema is not None
     assert schema.get("required") == ["message"]
-    assert tool.func(message="What should change?") is None
+    assert ask_refusal({"message": "What should change?"}) is None
 
 
-def test_asking_the_user_with_valid_candidates_pauses() -> None:
-    # A `LongRunningFunctionTool` pauses the turn by returning `None`
-    # (`ask_user`'s own docstring, and `google.adk.tools.request_input`'s).
-    tools = _tools_by_name()
-
-    result = tools["adk_request_input"].func(
-        message="Which source did you mean?",
-        candidates=[{"spec_id": SPEC, "label": "a candidate"}],
-        recommended_spec_id=SPEC,
-        rationale="the only one with full coverage",
+def test_asking_the_user_with_valid_candidates_is_accepted() -> None:
+    result = ask_refusal(
+        {
+            "message": "Which source did you mean?",
+            "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
+            "recommended_spec_id": SPEC,
+            "rationale": "the only one with full coverage",
+        }
     )
 
     assert result is None
 
 
 def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
-    tools = _tools_by_name()
-
-    result = tools["adk_request_input"].func(
-        message="Which source did you mean?",
-        candidates=[{"spec_id": SPEC, "label": "a candidate"}],
-        recommended_spec_id=POPULATION_SPEC,
-        rationale="not one of the candidates",
+    result = ask_refusal(
+        {
+            "message": "Which source did you mean?",
+            "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
+            "recommended_spec_id": POPULATION_SPEC,
+            "rationale": "not one of the candidates",
+        }
     )
 
     assert result is not None
@@ -3845,11 +3863,7 @@ def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
 def test_asking_the_user_takes_only_the_options_a_refusal_carries(
     candidates: list[dict[str, str]], options: list[dict[str, str]], refused: bool
 ) -> None:
-    tools = _tools_by_name()
-
-    result = tools["adk_request_input"].func(
-        message="Add them?", candidates=candidates, options=options
-    )
+    result = ask_refusal({"message": "Add them?", "candidates": candidates, "options": options})
 
     if refused:
         assert result is not None
@@ -12036,6 +12050,26 @@ def test_a_decision_naming_the_pin_is_refused_as_invalid_data(
     assert PLAN_STATE_KEY not in ctx.state
 
 
+@pytest.mark.parametrize("raw", [42, True])
+def test_requirements_that_are_no_list_are_an_invalid_plan(
+    decision: DecisionFactory, raw: object
+) -> None:
+    """ADK passes a value that is no list unconverted, so admission answers it
+    as any malformed draft, and the turn goes on."""
+    ctx = _FakeToolContext()
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=raw,
+        tool_context=ctx,
+    )
+
+    assert (result["outcome"], result["code"]) == ("invalid_input", "invalid_plan")
+    assert PLAN_STATE_KEY not in ctx.state
+
+
 def test_an_amendment_moving_a_value_a_planner_decision_fixes_drops_it_and_rebuilds_a_restated_one(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
@@ -12201,7 +12235,7 @@ def test_a_user_decision_stands_until_the_user_speaks_again(
     assert refused["outcome"] == Outcome.REFUSED.value, refused
     assert refused["code"] == code.value
     assert refused["detail"] == detail
-    assert refused["action"] == {"call": "adk_request_input"}
+    assert refused["action"] == {"call": PLANNER_ASK}
     kept = load_plan(ctx.state)
     assert kept is not None
     assert kept.version == first["version"]
@@ -12243,7 +12277,7 @@ def test_a_user_decision_restated_and_left_uncited_is_refused_as_dropped(
 
     assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
     assert refused["detail"] == _DROPPED
-    assert refused["action"] == {"call": "adk_request_input"}
+    assert refused["action"] == {"call": PLANNER_ASK}
 
 
 def _typed(text: str, *, branch: str | None = None) -> Event:
@@ -12462,10 +12496,10 @@ def _user_prices(part: str, requirement_id: str, **more: Any) -> dict[str, Any]:
 
 
 def _prices_options_ask(call_id: str = "ask-prices") -> Any:
-    """The planner's `adk_request_input` call offering `PRICES_OPTIONS`, as a prices refusal's action carries them."""
+    """The planner's `ask_user_question` call offering `PRICES_OPTIONS`, as a prices refusal's action carries them."""
     call = SimpleNamespace(
         id=call_id,
-        name="adk_request_input",
+        name=PLANNER_ASK,
         args={"message": "Go on in current prices?", "options": [dict(o) for o in PRICES_OPTIONS]},
     )
     part = SimpleNamespace(function_call=call, function_response=None)
@@ -12506,7 +12540,7 @@ def test_constant_prices_the_user_chose_hold_a_plan_that_states_no_unit(
     assert refused["code"] == ProblemCode.USER_DECISION_DROPPED.value, refused
     assert refused["detail"] == _user_prices(_GROSS, dataset.id)
     assert refused["action"] == {
-        "call": "adk_request_input",
+        "call": PLANNER_ASK,
         "arguments": {"options": [dict(o) for o in PRICES_OPTIONS]},
         "needs": ["message"],
     }
@@ -12530,7 +12564,7 @@ def _prices_refused_event(part: str, *, asks_user: bool) -> Any:
     """A `propose_plan` refusal of the user's prices for `part`, sending the
     planner to the user or back to `propose_plan`."""
     action = (
-        {"call": "adk_request_input", "arguments": {"options": [dict(o) for o in PRICES_OPTIONS]}}
+        {"call": PLANNER_ASK, "arguments": {"options": [dict(o) for o in PRICES_OPTIONS]}}
         if asks_user
         else {"call": "propose_plan", "needs": ["evidence_requirements"]}
     )
@@ -12879,7 +12913,7 @@ def test_constant_prices_a_later_search_found_name_that_series(
 
     if not found:
         assert refused["detail"] == _user_prices(_GROSS, dataset.id), refused
-        assert refused["action"]["call"] == "adk_request_input"
+        assert refused["action"]["call"] == PLANNER_ASK
         return
     unit = {"currency": "USD", "prices": "constant", "base_year": 2023}
     assert refused["detail"] == _user_prices(_GROSS, dataset.id, unit=unit, pin=_CONSTANT_GROSS), (
@@ -14158,7 +14192,7 @@ def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable
 
     assert (
         "`unsupported_ask` or `requirement_unmeetable` referral means the requirement cannot be "
-        "met as stated. Tell the user what cannot be done and ask, through `adk_request_input`, "
+        "met as stated. Tell the user what cannot be done and ask, through `ask_user_question`, "
         "before you propose again"
     ) in instruction
     # The options an ask offers are ones discovery found, never ones the model
@@ -14168,7 +14202,7 @@ def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable
         "the ask says what cannot be done and asks what to change"
     )
     assert grounded in instruction
-    declaration = _tools_by_name()["adk_request_input"]._get_declaration()
+    declaration = _tools_by_name()[PLANNER_ASK]._get_declaration()
     assert declaration is not None
     schema = declaration.parameters_json_schema
     assert schema is not None
@@ -14258,7 +14292,7 @@ def test_create_planner_agent_wires_name_model_and_tools() -> None:
     assert isinstance(agent.model, Gemini)
     assert agent.model.model == "gemini-3.8-flash"
     assert {tool.name for tool in agent.tools} == {  # type: ignore[union-attr]
-        "adk_request_input",
+        PLANNER_ASK,
         "propose_plan",
         "reject_plan",
     }
@@ -14355,7 +14389,7 @@ async def test_an_accepted_proposal_answers_with_the_translation_and_no_translat
     accepted = await _propose_translated(tools, ctx, decision(), requirements)
     refused = await _propose_translated(tools, ctx, decision(), requirements, amends_version=7)
 
-    assert set(tools) == {"adk_request_input", "propose_plan", "reject_plan"}
+    assert set(tools) == {PLANNER_ASK, "propose_plan", "reject_plan"}
     assert accepted["outcome"] == Outcome.OK.value
     assert accepted["translation"] == {"outcome": Outcome.OK.value}
     assert refused["outcome"] != Outcome.OK.value
@@ -17976,6 +18010,16 @@ def _congo_split_draft(decision):
     )
 
 
+# What `_asked` answers: the ask got past every refusal to the `RequestInput` it pauses on.
+def _assert_asked(result: Any, ctx: Any) -> None:
+    """`result` accepts the ask, which waits in `ctx.state` under its call id
+    and ends the planner's run."""
+    assert result == ASK_ACCEPTED
+    asked = load_pending_ask(ctx.state)
+    assert asked is not None and asked.call_id == ctx.function_call_id
+    assert ctx.actions.skip_summarization is True
+
+
 @pytest.mark.parametrize(("offered_for", "refused"), [("debt", False), ("debt_history", True)])
 async def test_an_entity_ask_on_a_history_copy_offers_the_origin_picks(
     decision, offered_for, refused
@@ -17985,7 +18029,7 @@ async def test_an_entity_ask_on_a_history_copy_offers_the_origin_picks(
     save_referral(ctx.state, _congo_both_ends("debt_history"))
     reading = _congo_both_ends(offered_for).ambiguous_entities[0]
 
-    result = await _tools_by_name()["adk_request_input"].run_async(
+    result = await _tools_by_name()[PLANNER_ASK].run_async(
         args={
             "message": "Which Congo gave the aid?",
             "candidates": [{"spec_id": c.pick, "label": c.label} for c in reading.candidates],
@@ -17995,8 +18039,9 @@ async def test_an_entity_ask_on_a_history_copy_offers_the_origin_picks(
 
     if refused:
         assert result["code"] == ProblemCode.INVALID_ARGUMENTS.value
+        assert load_pending_ask(ctx.state) is None
     else:
-        assert result is None
+        _assert_asked(result, ctx)
 
 
 @pytest.mark.parametrize(
@@ -18182,7 +18227,7 @@ async def test_an_ask_under_an_entity_referral_offers_one_reading_by_its_picks(
     if referred:
         save_referral(ctx.state, _congo_both_ends(_CONGO_REQUIREMENT))
 
-    result = await _tools_by_name()["adk_request_input"].run_async(
+    result = await _tools_by_name()[PLANNER_ASK].run_async(
         args={
             "message": "Which Congo gave the aid?",
             "candidates": [{"spec_id": spec_id, "label": spec_id} for spec_id in spec_ids],
@@ -18192,8 +18237,9 @@ async def test_an_ask_under_an_entity_referral_offers_one_reading_by_its_picks(
 
     if refused:
         assert result["code"] == ProblemCode.INVALID_ARGUMENTS.value
+        assert load_pending_ask(ctx.state) is None
     else:
-        assert result is None
+        _assert_asked(result, ctx)
 
 
 def test_an_entity_referral_leaves_a_kept_pin_as_it_is(
@@ -18608,13 +18654,11 @@ def _user_text(text: str) -> types.Content:
 _QUESTION = _user_text("kenya debt?")
 _ASK_CALL = types.Content(
     role="model",
-    parts=[types.Part(function_call=types.FunctionCall(name="adk_request_input", args={}))],
+    parts=[types.Part(function_call=types.FunctionCall(name=PLANNER_ASK, args={}))],
 )
 _ANSWER = types.Content(
     role="user",
-    parts=[
-        types.Part(function_response=types.FunctionResponse(name="adk_request_input", response={}))
-    ],
+    parts=[types.Part(function_response=types.FunctionResponse(name=PLANNER_ASK, response={}))],
 )
 
 
