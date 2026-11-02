@@ -103,6 +103,7 @@ from planner.parties import (
     role_party,
 )
 from planner.plan import (
+    ALIGNED_PIN_WARNINGS_STATE_KEY,
     ALIGNED_PINS_STATE_KEY,
     MAX_DECISION_OPTIONS,
     MAX_DECISION_RATIONALE_CHARS,
@@ -121,6 +122,8 @@ from planner.plan import (
     AskRoleDroppedError,
     AsksUnaccountedError,
     ComparisonRequirement,
+    CompileKey,
+    CompileWarnings,
     DatasetRequirement,
     Decision,
     DecisionDraft,
@@ -159,11 +162,11 @@ from planner.plan import (
     alignments,
     amendment_entry,
     authored,
-    block_identity,
     bound_fixes,
     check_acyclic,
     check_references,
     check_wholes_span_their_totals,
+    compile_warnings,
     content_digest,
     cut_user_text,
     dataset_of,
@@ -241,8 +244,8 @@ from planner.workflow import OpenEntityAxis, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
 from translator.discovery import (
-    from_warned_part,
     load_log,
+    narrowed_pin,
     requirement_open_roles,
     requirement_parties,
     requirement_revision,
@@ -841,7 +844,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             materialized,
             shown=on_record,
             definition_lookup=definition_lookup,
+            pins=pins,
             compiled=aligned_pins(view.state),
+            recorded_warnings=compile_warnings(view.state),
             entries=entries,
         )
     except (ValidationError, ValueError) as exc:
@@ -3405,16 +3410,17 @@ def _first_year_unknown_cause(exc: ValueError) -> RollingPlanError | None:
 def _no_source_on_record(requirement_id: str, pin: str | None) -> RollingPlanError:
     """The refusal of `requirement_id`, stating `period_end_open`, whose pin `pin` has no identity on record (`identity_on_record`).
 
-    With a pin, no search recorded its definition, and data-mcp would refuse
-    the one its block carries (`planner.plan.shown_identity`), as it refuses
-    one past `MAX_IDENTITY_BYTES`.
+    With a pin, no search recorded a definition of it, and no block the
+    session holds for it carries one data-mcp takes (`planner.plan.shown_identity`)
+    with sets it can read (`compiler.sources.source_from_spec_block`), or it
+    holds no block.
     """
     if pin is None:
         stated = "pin a search result's `spec_id` as its `source_spec_id`"
     else:
         stated = (
-            f"the definition of {pin} is not on record in a form such a retrieval can "
-            "use, so pin another search result's `spec_id`"
+            f"no search recorded a definition of {pin}, and no search result on record "
+            "carries one a retrieval can use, so pin a search result's `spec_id`"
         )
     return RollingPlanError(
         RollingIssue.NEEDS_OPEN_PERIOD,
@@ -3526,7 +3532,7 @@ def first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | No
 
 def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     """The identity of each dataset on record whose first year `propose_plan`
-    can still read in `state`.
+    can still read in `state`, read through the lookups `first_year_identity` reads.
 
     `propose_plan` reads a pinned dataset's first year
     (`planner.agent.read_full_history`) when a requirement rolls from its start and
@@ -3537,13 +3543,14 @@ def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     """
     held = held_sources(state)
     read = full_histories(state)
+    definition_lookup = load_log(state).recorded_definition
     reads = []
     for pin in held:
         if pin in read or _first_year_on_record(pin, shown=held, read=read) is not None:
             continue
-        identity = first_year_identity(pin, state)
-        if identity is not None:
-            reads.append(identity)
+        recorded = identity_on_record(pin, shown=held, definition_lookup=definition_lookup)
+        if recorded is not None:
+            reads.append(recorded.identity)
     return reads
 
 
@@ -3552,7 +3559,9 @@ def _window_pins(
     *,
     shown: Mapping[str, PinSource] = {},
     definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+    pins: Mapping[str, PinSource] = {},
     compiled: Sequence[AlignedPin] = (),
+    recorded_warnings: Mapping[CompileKey, tuple[str, ...]] = {},
     entries: Mapping[str, AlignedInput] = {},
 ) -> tuple[Plan, list[WindowedPin]]:
     """`plan` with each pin whose identity is on record moved to that identity over the requirement's own period.
@@ -3575,12 +3584,14 @@ def _window_pins(
     window whole, as `get_data`'s scope surgery does, and the translator
     confirms the copy through Search before it is retrieved.
 
-    A pin from a search part that answered a narrower question than the one
-    asked keeps its own window, since the translator honours no copy of it
-    and searches (`translator.discovery.from_warned_part`). It descends from
-    the pins `compiled` were compiled from and the pin the requirement
-    states where `entries` moved it to a compile
-    (`planner.plan.AlignedInput.stated_pin`).
+    A pin that answers a narrower question than the one asked keeps its own
+    window, since the translator honours no copy of it and searches
+    (`translator.discovery.narrowed_pin`). It is judged by its record: the
+    compile `entries` pinned its requirement to among `compiled`, else the
+    search part it was shown from among `pins` (`planner.plan.pin_sources`),
+    else the compiles answered as it, a compile by the codes
+    `recorded_warnings` holds for it (`planner.plan.compile_warnings`). Such a pin costs no refusal for an
+    identity it lacks.
 
     A requirement stating `period_end_open` is pinned to that identity over
     a range with no end year (`_open_window`), which apis ends at the
@@ -3616,47 +3627,25 @@ def _window_pins(
         if not isinstance(requirement, DatasetRequirement):
             continue
         pin = requirement.source_spec_id
-        recorded = (
-            identity_on_record(
-                pin,
-                shown=shown,
-                definition_lookup=definition_lookup,
-            )
-            if pin is not None
-            else None
-        )
-        if requirement.period_end_open and pin is not None and recorded is None:
-            raise _no_source_on_record(requirement.id, pin)
-        if pin is not None and recorded is None and pin in shown:
-            # A shown block whose identity data-mcp would refuse, or whose
-            # source is unreadable, keeps its own window. Where that is not the
-            # requirement's, the compiler refuses the pin (`scope_window_short`).
-            block = shown[pin].spec_block(pin)
-            identity = block_identity(block) if block is not None else None
-            asked = period_window(requirement.period)
-            if block is None:
-                logger.warning(
-                    "pin not windowed, no block on record: requirement=%s pin=%s",
-                    requirement.id,
-                    pin,
-                )
-            elif (identity or {}).get("requested_window") != asked:
-                logger.warning(
-                    "pin not windowed, no identity on record: requirement=%s pin=%s window=%s",
-                    requirement.id,
-                    pin,
-                    asked,
-                )
-        if pin is None or recorded is None:
-            continue
-        entry = aligned_entry(requirement, entries)
-        if from_warned_part(
+        if pin is None or narrowed_pin(
             pin,
-            copied=True,
-            stated_pin=entry.stated_pin if entry is not None else None,
-            shown=shown,
+            entry=aligned_entry(requirement, entries),
+            shown=pins,
             compiled=compiled,
+            recorded=recorded_warnings,
         ):
+            continue
+        recorded = identity_on_record(pin, shown=shown, definition_lookup=definition_lookup)
+        if recorded is None:
+            if requirement.period_end_open:
+                raise _no_source_on_record(requirement.id, pin)
+            # The pin keeps its own window. The translator honours its block
+            # where that covers the requirement's period, and searches otherwise.
+            logger.debug(
+                "pin not windowed, no identity on record: requirement=%s pin=%s",
+                requirement.id,
+                pin,
+            )
             continue
         pinning[requirement.id] = pin
         if requirement.period_end_open:
@@ -4336,10 +4325,21 @@ _PROVIDER_ALIGNED = (
 _SECTOR_AXIS = "sector"
 
 
-def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
-    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`)."""
+def save_aligned_pin(
+    state: SessionState, pin: AlignedPin, *, warnings: tuple[str, ...] = ()
+) -> None:
+    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`),
+    with `warnings`, its origin's codes when it was compiled
+    (`planner.plan.compile_warnings`), empty included."""
     kept = [held for held in aligned_pins(state) if held.key != pin.key]
     state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
+    recorded = {**compile_warnings(state), pin.key: warnings}
+    state[ALIGNED_PIN_WARNINGS_STATE_KEY] = [
+        CompileWarnings(
+            origin=origin, option_ids=option_ids, whole_axis=whole_axis, warnings=codes
+        ).model_dump(mode="json")
+        for (origin, option_ids, whole_axis), codes in recorded.items()
+    ]
 
 
 # The session slot holding each search code made for a calculation's input

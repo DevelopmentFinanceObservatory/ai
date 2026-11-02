@@ -139,7 +139,9 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
+    AlignedInput,
     AlignedPin,
+    CompileKey,
     DatasetRequirement,
     Entity,
     PinSource,
@@ -150,15 +152,16 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     Unit,
+    WindowedPin,
     aligned_entry,
     aligned_pins,
     alignments,
     authored,
-    compiled_pin,
+    compile_warnings,
     dataset_of,
     discovery_time_left,
     frame_shapes,
-    held_sources,
+    held_blocks,
     identity_on_record,
     inputs_of,
     load_plan,
@@ -241,8 +244,10 @@ DESCRIBE_ID_BATCH_MAX = 8
 BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_parsed"})
 
 # Of `BLOCKING_WARNING_CODES`, the ones under which Search dropped only the
-# question's years. A copy over the requirement's period
-# (`planner.plan.windowed_pins`) states the years again, so it repairs them.
+# question's years. A pin is honoured only over the requirement's own period,
+# through a copy over it (`planner.plan.windowed_pins`) or an identity already
+# over it (`planner.plan.retrieves_period`), so the dropped years never reach
+# a retrieval and these block no pin (`answers_narrower`).
 WINDOW_ONLY_WARNING_CODES = frozenset({"time_text_not_parsed"})
 
 # The answers of the translator's own search a pin may be honoured from. A
@@ -2491,7 +2496,7 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
 
 
 async def _recorded_source(
-    state: SessionState,
+    records: _PinRecords,
     *,
     requirement: DatasetRequirement,
     first_year: int | None,
@@ -2519,10 +2524,10 @@ async def _recorded_source(
     back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
-    recorded = windowed_pins(state).get(spec_id) or identity_on_record(
+    recorded = records.copies.get(spec_id) or identity_on_record(
         spec_id,
-        shown=held_sources(state),
-        definition_lookup=load_log(state).recorded_definition,
+        shown=held_blocks(records.shown, records.compiled),
+        definition_lookup=records.log.recorded_definition,
     )
     identity = recorded.identity if recorded is not None else None
     if (
@@ -2561,7 +2566,7 @@ async def _recorded_source(
 
 
 def _resolve_pin_block(
-    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+    records: _PinRecords, *, plan: Plan, requirement: DatasetRequirement
 ) -> Mapping[str, object] | None:
     """The spec block of the dataset `requirement` pins, when the planner was shown it or admission compiled it, else `None`.
 
@@ -2580,18 +2585,18 @@ def _resolve_pin_block(
     A pin admission moved to a copy over the requirement's period
     (`planner.plan.windowed_pins`) is neither shown nor compiled, so it
     reads `None`, and Search confirms the copy (`_recorded_source`).
-    `_pin_source` reads neither for a pin from a warned search part
-    (`from_warned_part`).
+    `_pin_source` reads neither for a pin that answers a narrower question
+    (`narrowed_pin`).
     """
     pin = requirement.source_spec_id
     if pin is None:
         return None
-    held = alignments(state)
+    held = records.alignments
     entry = aligned_entry(requirement, held)
     if entry is not None:
-        compiled = compiled_pin(state, entry)
+        compiled = next((p for p in records.compiled if p.key == entry.key), None)
         return compiled.block if compiled is not None else None
-    source = pin_sources(state).get(pin)
+    source = records.shown.get(pin)
     if source is None:
         return None
     pinning = [
@@ -2606,79 +2611,129 @@ def _resolve_pin_block(
     return source.spec_block(pin)
 
 
-def from_warned_part(
+def answers_narrower(warnings: Iterable[str]) -> bool:
+    """Whether a pin whose record carries the warning codes `warnings` answers a narrower question than the one asked.
+
+    It does when Search dropped part of the ask other than its years: a code
+    in `BLOCKING_WARNING_CODES` outside `WINDOW_ONLY_WARNING_CODES`.
+    """
+    return not (BLOCKING_WARNING_CODES - WINDOW_ONLY_WARNING_CODES).isdisjoint(warnings)
+
+
+def pin_warnings(
     pin: str,
     *,
-    copied: bool,
-    stated_pin: str | None,
+    entry: AlignedInput | None,
     shown: Mapping[str, PinSource],
     compiled: Iterable[AlignedPin],
-) -> bool:
-    """Whether `pin` descends from a search part that answered a narrower question than the one asked.
+    recorded: Mapping[CompileKey, tuple[str, ...]],
+) -> tuple[str, ...]:
+    """The codes in `BLOCKING_WARNING_CODES` on the record of `pin`, made when the pin was.
 
-    Such a part carries a code in `BLOCKING_WARNING_CODES` among its
-    `PinSource.warnings` in `shown`; a pin `shown` does not hold carries
-    none. `pin` descends from itself, from each pin it was compiled from
-    (`AlignedPin.origin` of each of `compiled` answered as `pin`), and from
-    `stated_pin`, the pin the requirement admission moved onto `pin` states
-    (`planner.plan.AlignedInput.stated_pin`). With `copied`, `pin` is read
-    through a copy over the requirement's period, which repairs a part
-    carrying only `WINDOW_ONLY_WARNING_CODES`.
-
-    Admission moves no pin this holds for to a copy
-    (`submission.service._window_pins`), and the translator honours none
-    (`_pin_source`), so the two read one rule.
+    A requirement admission pinned to a compile (`entry`,
+    `planner.plan.aligned_entry`) reads that compile's codes (`recorded`,
+    `planner.plan.compile_warnings`). Any other pin reads the search part it
+    was shown from (`PinSource.warnings` in `shown`, the
+    `planner.plan.pin_sources`), else those of every compile of `compiled`
+    Search answered as `pin`. A dataset shown from a search of its own is
+    judged by that search, whatever compile shares its spec_id. A compile
+    `recorded` holds no codes for was held before they were recorded, and is
+    judged by its origin's part as `shown` holds it now.
     """
-    blocking = (
-        BLOCKING_WARNING_CODES - WINDOW_ONLY_WARNING_CODES if copied else BLOCKING_WARNING_CODES
+
+    def of(compile_: AlignedPin) -> tuple[str, ...]:
+        codes = recorded.get(compile_.key)
+        if codes is not None:
+            return codes
+        origin = shown.get(compile_.origin)
+        return origin.warnings if origin is not None else ()
+
+    if entry is not None:
+        held = [of(p) for p in compiled if p.key == entry.key]
+    elif pin in shown:
+        held = [shown[pin].warnings]
+    else:
+        held = [of(p) for p in compiled if p.spec_id == pin]
+    codes = dict.fromkeys(code for warnings in held for code in warnings)
+    return tuple(code for code in codes if code in BLOCKING_WARNING_CODES)
+
+
+def narrowed_pin(
+    pin: str,
+    *,
+    entry: AlignedInput | None,
+    shown: Mapping[str, PinSource],
+    compiled: Iterable[AlignedPin],
+    recorded: Mapping[CompileKey, tuple[str, ...]],
+) -> bool:
+    """Whether `pin` answers a narrower question than its requirement asks (`answers_narrower` of `pin_warnings`).
+
+    Admission moves no such pin to a copy over the requirement's period
+    (`submission.service._window_pins`), and the translator honours none
+    (`_pin_source`), so the two read one rule over the same record.
+    """
+    return answers_narrower(
+        pin_warnings(pin, entry=entry, shown=shown, compiled=compiled, recorded=recorded)
     )
-    origins: dict[str, list[str]] = {}
-    for held in compiled:
-        origins.setdefault(held.spec_id, []).append(held.origin)
-    pending = [pin] if stated_pin is None else [pin, stated_pin]
-    seen: set[str] = set()
-    while pending:
-        current = pending.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        source = shown.get(current)
-        if source is not None and blocking.intersection(source.warnings):
-            return True
-        pending.extend(origins.get(current, ()))
-    return False
 
 
-def _from_warned_part(state: SessionState, requirement: DatasetRequirement) -> bool:
-    """Whether the pin `requirement` states descends from a warned search part (`from_warned_part`).
+class _PinRecords(NamedTuple):
+    """What session state records of the pins a plan states, read once for one requirement's pin.
+
+    `copies` are `planner.plan.windowed_pins`, `alignments`
+    `planner.plan.alignments`, `shown` `planner.plan.pin_sources`,
+    `compiled` `planner.plan.aligned_pins`, `compile_warnings`
+    `planner.plan.compile_warnings`, and `log` the discovery log.
+    """
+
+    copies: Mapping[str, WindowedPin]
+    alignments: Mapping[str, AlignedInput]
+    shown: Mapping[str, PinSource]
+    compiled: tuple[AlignedPin, ...]
+    compile_warnings: Mapping[CompileKey, tuple[str, ...]]
+    log: DiscoveryLog
+
+    @classmethod
+    def read(cls, state: SessionState) -> _PinRecords:
+        """The records `state` holds now."""
+        return cls(
+            copies=windowed_pins(state),
+            alignments=alignments(state),
+            shown=pin_sources(state),
+            compiled=aligned_pins(state),
+            compile_warnings=compile_warnings(state),
+            log=load_log(state),
+        )
+
+
+def _narrowed(records: _PinRecords, requirement: DatasetRequirement) -> bool:
+    """Whether the pin `requirement` states answers a narrower question (`narrowed_pin`).
 
     A copy over the requirement's period (`planner.plan.windowed_pins`) is
-    followed to the pin it copies, and a compile admission pinned the
-    requirement to (`planner.plan.aligned_entry`) to the pin the
-    requirement states as well.
+    judged by the record of the pin it copies.
     """
     pin = requirement.source_spec_id
     if pin is None:
         return False
-    copy = windowed_pins(state).get(pin)
+    copy = records.copies.get(pin)
     origin = copy.windowed_from if copy is not None else pin
     entry = aligned_entry(
-        requirement.model_copy(update={"source_spec_id": origin}), alignments(state)
+        requirement.model_copy(update={"source_spec_id": origin}), records.alignments
     )
-    return from_warned_part(
+    return narrowed_pin(
         origin,
-        copied=copy is not None,
-        stated_pin=entry.stated_pin if entry is not None else None,
-        shown=pin_sources(state),
-        compiled=aligned_pins(state),
+        entry=entry,
+        shown=records.shown,
+        compiled=records.compiled,
+        recorded=records.compile_warnings,
     )
 
 
 def _block_source(
-    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+    records: _PinRecords, *, plan: Plan, requirement: DatasetRequirement
 ) -> SelectedSource | None:
     """The source of the pinned dataset's block as the planner was shown it, when it covers `requirement.period` exactly; `None` otherwise."""
-    block = _resolve_pin_block(state, plan=plan, requirement=requirement)
+    block = _resolve_pin_block(records, plan=plan, requirement=requirement)
     if block is None:
         return None
     try:
@@ -2802,9 +2857,9 @@ async def _pin_source(
     (`HistorySplit.whole_history`), `None` when it reads the stated period.
     The source is stamped with the requirement's `measure` as `searched_as`.
     Honoured means the block or identity reader holds it over the
-    requirement's period. Neither reader is asked for a pin from a search
-    part that answered a narrower question (`from_warned_part`), whether the
-    requirement pins it, a copy of it, or a compile from it. A source read
+    requirement's period. Neither reader is asked for a pin that answers a
+    narrower question than the one asked (`narrowed_pin`), whether the
+    requirement pins it or a copy of it. A source read
     only off the discovery log (`DiscoveryLog.recorded_source`) is not
     honoured, and serves the scope
     check alone. A source that does not confirm the `source` or the
@@ -2813,12 +2868,13 @@ async def _pin_source(
     so the caller searches again with them. `None` when no reader holds a
     source; a problem a reader met is returned as it is.
     """
+    records = _PinRecords.read(state)
     source: SelectedSource | dict[str, object] | None = None
-    if not _from_warned_part(state, requirement):
-        source = _block_source(state, plan=plan, requirement=requirement)
+    if not _narrowed(records, requirement):
+        source = _block_source(records, plan=plan, requirement=requirement)
         if source is None:
             source = await _recorded_source(
-                state,
+                records,
                 requirement=requirement,
                 first_year=first_year,
                 surface=surface,
@@ -2827,6 +2883,8 @@ async def _pin_source(
         return source
     honoured = source is not None
     if source is None and requirement.source_spec_id is not None:
+        # Read again: the requirements beside this one record what they find
+        # while Search answers this one's identity.
         source = load_log(state).recorded_source(requirement.source_spec_id)
     if source is None:
         return None

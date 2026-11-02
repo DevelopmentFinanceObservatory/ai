@@ -113,6 +113,7 @@ from translator.discovery import (
     PartNotResolvedError,
     answered_once_at,
     call_within_entry,
+    pin_warnings,
     refusal_retryable,
     resolve_definition,
     resolve_definition_at,
@@ -148,6 +149,7 @@ from planner.plan import (
     Plan,
     PlanStatus,
     SessionState,
+    compile_warnings,
     full_histories,
     full_history,
     held_sources,
@@ -1156,10 +1158,22 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                 spec_id=spec_id,
                 digest=digest,
             ),
+            warnings=_origin_warnings(into, realignment.spec_id),
         )
         record_spec_searched(into, spec_id, resolved_at)
 
     return hold
+
+
+def _origin_warnings(state: SessionState, origin: str) -> tuple[str, ...]:
+    """The warning codes on the record of `origin`, a pin a compile is made from (`translator.discovery.pin_warnings`), which the compile keeps."""
+    return pin_warnings(
+        origin,
+        entry=None,
+        shown=pin_sources(state),
+        compiled=aligned_pins(state),
+        recorded=compile_warnings(state),
+    )
 
 
 async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
@@ -1306,6 +1320,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
                 digest=digest,
                 whole_axis=axis,
             ),
+            warnings=_origin_warnings(into, part_pin),
         )
         record_spec_searched(into, spec_id, resolved_at)
 
@@ -1572,8 +1587,8 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     and with no message of the user's, so every axis an entry settled on
     Search's answer is marked as the planner's
     (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
-    shown to the planner as a source of its own
-    (`planner.plan.save_pin_sources`) and held as a
+    shown to the planner as a source of its own, with its part's warning
+    codes (`planner.plan.save_pin_sources`), and held as a
     `submission.service.SearchedPin` with its digest, and the time the
     search was made as one settling on its spec_id
     (`planner.plan.record_spec_searched`), so the next proposal
@@ -1633,7 +1648,17 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
         if scope is not None
         else (),
     )
-    shown = PinSource(block=digest["spec_block"], settled=True, asked_roles=unpinned.asked_roles)
+    warnings = part.get("warnings") if isinstance(part, dict) else None
+    shown = PinSource(
+        block=digest["spec_block"],
+        warnings=tuple(
+            str(code)
+            for warning in (warnings if isinstance(warnings, list) else ())
+            if isinstance(warning, dict) and (code := warning.get("code"))
+        ),
+        settled=True,
+        asked_roles=unpinned.asked_roles,
+    )
 
     def hold(into: SessionState) -> None:
         save_pin_sources(into, {**pin_sources(into), spec_id: shown})

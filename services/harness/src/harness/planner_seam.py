@@ -126,6 +126,7 @@ from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key, skills_read
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
+    ALIGNED_PIN_WARNINGS_STATE_KEY,
     ALIGNED_PINS_STATE_KEY,
     SEARCHED_PINS_STATE_KEY,
     Proposal,
@@ -797,6 +798,7 @@ class PlannerSeam:
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
         # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
         # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY`,
+        # `ALIGNED_PIN_WARNINGS_STATE_KEY`,
         # `SEARCHED_PINS_STATE_KEY`, `SPEC_SEARCHED_STATE_KEY`,
         # `REFUSED_SPECS_STATE_KEY`, `REFUSAL_DETAILS_STATE_KEY`,
         # `SKILLS_READ_STATE_KEY` and `_SKILLS_BEFORE_ENTRY_STATE_KEY` too. The
@@ -814,6 +816,7 @@ class PlannerSeam:
             AMENDMENT_ENTRY_STATE_KEY,
             DECISION_PICK_STATE_KEY,
             ALIGNED_PINS_STATE_KEY,
+            ALIGNED_PIN_WARNINGS_STATE_KEY,
             SEARCHED_PINS_STATE_KEY,
             SPEC_SEARCHED_STATE_KEY,
             REFUSED_SPECS_STATE_KEY,

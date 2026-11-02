@@ -917,12 +917,19 @@ def _reading_digest(item: _Switched, *, axis: str) -> dict[str, Any]:
 def _pin_source(
     replaced: PinSource | None, digest: Mapping[str, Any], reading: SearchReading
 ) -> PinSource:
-    """The pin source of a switched dataset: the one it replaces, holding the switched block."""
+    """The pin source of a switched dataset: the one it replaces, holding the switched block.
+
+    It keeps none of the replaced source's warnings. The switched dataset is
+    Search's answer for the identity the user picked on the card, which
+    posts no text for Search to drop, and the plan's run retrieves the
+    dataset the card shows (`translator.discovery.narrowed_pin`). A reading
+    of it in a later turn carries no warnings either (`_reading_digest`).
+    """
     (part,) = digest["part_digests"]
     block = part["spec_block"]
     if replaced is None:
         return PinSource(block=block, settled=True, asked_roles=reading.asked_roles)
-    return replaced.model_copy(update={"block": block, "earlier_turn": False})
+    return replaced.model_copy(update={"block": block, "earlier_turn": False, "warnings": ()})
 
 
 def _restorable_state(ctx: Context) -> dict[str, Any]:

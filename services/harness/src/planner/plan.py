@@ -243,6 +243,14 @@ WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 # `planner.agent.with_source_reads` writes (`submission.service.save_aligned_pin`).
 ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 
+# The session-state slot holding, for each pin compiled (`AlignedPin.key`),
+# the warning codes on its origin's record when it was compiled
+# (`CompileWarnings`), written beside it by
+# `submission.service.save_aligned_pin`, an empty list included. Kept off
+# `AlignedPin`, so a build that predates it still loads the compiles. A
+# compile with no entry was held before the slot existed.
+ALIGNED_PIN_WARNINGS_STATE_KEY = "planner:aligned_pin_warnings"
+
 # The session-state slot holding an `AlignedInput` for every dataset
 # requirement of the plan `planner.agent.propose_plan` last recorded that
 # admission pinned to a compiled pin (`AlignedPin`) in place of the pin it
@@ -6329,6 +6337,9 @@ class AlignedPin(StrictModel):
     the part pinned to `origin` with its choice on `whole_axis` left open
     and every other choice on the part's options, and moves no option
     (`option_ids` empty, `submission.service.Realignment.whole_axis`).
+
+    The warning codes on the origin's record when it was compiled are held
+    beside it (`compile_warnings`).
     """
 
     origin: str
@@ -6354,6 +6365,48 @@ def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
     return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
 
 
+type CompileKey = tuple[str, tuple[str, ...], str | None]
+
+
+class CompileWarnings(StrictModel):
+    """The warning codes under which Search dropped part of the ask for the
+    origin of the compile `origin`, `option_ids`, `whole_axis` names
+    (`AlignedPin.key`), as the origin's record held them when it was compiled
+    (`translator.discovery.pin_warnings`). A compile from a part that
+    answered a narrower question answers that narrower question too."""
+
+    origin: str
+    option_ids: tuple[str, ...]
+    whole_axis: str | None = None
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def key(self) -> CompileKey:
+        """The compile these warnings are for (`AlignedPin.key`)."""
+        return self.origin, self.option_ids, self.whole_axis
+
+
+def compile_warnings(state: SessionState) -> dict[CompileKey, tuple[str, ...]]:
+    """The warning codes `ALIGNED_PIN_WARNINGS_STATE_KEY` holds, by compile; empty when unset.
+
+    An entry stored in a shape `CompileWarnings` rejects is left out, and the
+    omission is logged; its compile is then read as one held before the slot
+    existed.
+    """
+    held: dict[CompileKey, tuple[str, ...]] = {}
+    errors: list[ValidationError] = []
+    for raw in state.get(ALIGNED_PIN_WARNINGS_STATE_KEY) or []:
+        try:
+            entry = CompileWarnings.model_validate(raw)
+        except ValidationError as exc:
+            errors.append(exc)
+        else:
+            held[entry.key] = entry.warnings
+    if errors:
+        warn_left_out(logger, ALIGNED_PIN_WARNINGS_STATE_KEY, errors, entries=len(errors))
+    return held
+
+
 def held_sources(state: SessionState) -> dict[str, PinSource]:
     """The spec block on record for each spec_id `state` holds one for: the datasets
     the planner was shown (`pin_sources`), then each compiled pin's
@@ -6363,13 +6416,19 @@ def held_sources(state: SessionState) -> dict[str, PinSource]:
     holder of the spec_id shares. A compiled pin's entry states that block
     alone, so nothing about how the pin was chosen is read from it.
     """
-    shown = pin_sources(state)
-    compiled = {
+    return held_blocks(pin_sources(state), aligned_pins(state))
+
+
+def held_blocks(
+    shown: Mapping[str, PinSource], compiled: Iterable[AlignedPin]
+) -> dict[str, PinSource]:
+    """`held_sources` of a state whose `pin_sources` are `shown` and whose `aligned_pins` are `compiled`."""
+    blocks = {
         pin.spec_id: PinSource(block=dict(block))
-        for pin in aligned_pins(state)
+        for pin in compiled
         if pin.spec_id not in shown and (block := pin.block) is not None
     }
-    return {**compiled, **shown}
+    return {**blocks, **shown}
 
 
 class AlignedInput(StrictModel):

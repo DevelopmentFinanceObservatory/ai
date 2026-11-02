@@ -31,6 +31,7 @@ from harness.planner_seam import PlannerSeam
 from harness.settings import Settings
 from harness.turn_records import SearchReading
 from planner.plan import (
+    ALIGNED_PIN_WARNINGS_STATE_KEY,
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_STATE_KEY,
     AnswerMode,
@@ -718,11 +719,13 @@ class _Resolves:
     `blocks`, of the dataset whose base it posts from, with each posted option active
     and explicit. Its identity is the base identity posted, its window kept, with a
     slot binding each posted option, and its spec_id is the one that identity hashes
-    to, so its block puts it on record (`planner.plan.shown_identity`)."""
+    to, so its block puts it on record (`planner.plan.shown_identity`). With
+    `searched`, its `search` answers that part."""
 
-    def __init__(self, *blocks: Mapping[str, Any]) -> None:
+    def __init__(self, *blocks: Mapping[str, Any], searched: dict[str, Any] | None = None) -> None:
         self.blocks = {b["resolved"]["scope_choices"]["base"]["spec_id"]: b for b in blocks}
         self.calls: list[Mapping[str, Any]] = []
+        self.searched = searched
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -731,6 +734,9 @@ class _Resolves:
         self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
     ) -> ToolCallResult:
         del on_progress
+        if tool.name == "search" and self.searched is not None:
+            envelope = {"parts": [json.loads(json.dumps(self.searched))]}
+            return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
         if tool.name != "resolve_definition" or "scope_entries" not in arguments:
             return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
         self.calls.append(arguments)
@@ -791,7 +797,9 @@ def _closed_share(kind: str) -> _ClosedShare:
     over the US total, inclusive and in grant equivalents, both over the latest year
     and read over 2024; alignment compiles the total gross and bilateral in one
     resubmit. `basis`: US health aid counted gross over the total in grant
-    equivalents, compiled gross. `whole`: US health aid Search found over 2023, read
+    equivalents, compiled gross. `searched-total`: `basis` with the total pinned to
+    nothing, which `propose_plan` searches for (`planner.agent.pin_by_search`) and
+    Search answers with the total. `whole`: US health aid Search found over 2023, read
     over 2022, as a share of its whole over every sector, compiled from it
     (`planner.agent.compile_whole`)."""
     ctx = _FakeToolContext()
@@ -824,7 +832,7 @@ def _closed_share(kind: str) -> _ClosedShare:
             requirements=(health, whole, _share_of("whole")),
             question="What share of US aid went to health in 2022?",
         )
-    if kind == "basis":
+    if kind in {"basis", "searched-total"}:
         health = basis_block(HEALTH, narrow=True, active="measure_basis:gross")
         total = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
     else:
@@ -835,21 +843,26 @@ def _closed_share(kind: str) -> _ClosedShare:
             TOTAL, narrow=False, active="provider:inclusive", basis="measure_basis:grant_equivalent"
         )
     recorded = _over_latest(health, total)
-    _show_blocks(ctx, health, total)
+    searched = kind == "searched-total"
+    _show_blocks(ctx, *((health,) if searched else (health, total)))
     period = Period(start=2024, end=2024)
 
-    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
-        return _us_dataset(requirement_id, measure, pin).model_copy(update={"period": period})
+    def dataset(requirement_id: str, measure: str, pin: str | None) -> DatasetRequirement:
+        return _us_dataset(requirement_id, measure, TOTAL).model_copy(
+            update={"period": period, "source_spec_id": pin}
+        )
 
     return _ClosedShare(
         ctx=ctx,
-        surface=_Resolves(health, total),
+        surface=_Resolves(
+            health, total, searched={"status": "definite", "spec": total} if searched else None
+        ),
         recorded=recorded,
         period=period,
         aligned="total",
         requirements=(
             dataset("health", "US aid to health", HEALTH),
-            dataset("total", "US total ODA", TOTAL),
+            dataset("total", "US total ODA", None if searched else TOTAL),
             _share_of("total"),
         ),
         question="What share of US bilateral aid goes to health in 2024?",
@@ -940,8 +953,9 @@ async def test_an_aligned_input_keeps_the_requirements_period_when_the_search_wa
 
 class _ResolvesCopies:
     """A tool surface answering `resolve_definition` of a windowed copy with its
-    origin's block under the copy's spec_id and identity, recording each tool it
-    is asked in `tools`. Every other call is refused."""
+    origin's block under the copy's spec_id and identity, and of a dataset whose
+    block the session holds with that block, recording each tool it is asked in
+    `tools`. Every other call is refused."""
 
     def __init__(self, ctx: _FakeToolContext) -> None:
         self._ctx = ctx
@@ -955,22 +969,40 @@ class _ResolvesCopies:
     ) -> ToolCallResult:
         del on_progress
         self.tools.append(tool.name)
-        copy = windowed_pins(self._ctx.state).get(arguments.get("spec_id") or "")
-        if tool.name != "resolve_definition" or copy is None:
+        spec_id = arguments.get("spec_id") or ""
+        copy = windowed_pins(self._ctx.state).get(spec_id)
+        held = held_sources(self._ctx.state)
+        if tool.name != "resolve_definition" or (copy is None and spec_id not in held):
             return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
-        block = json.loads(json.dumps(held_sources(self._ctx.state)[copy.windowed_from].block))
-        block["spec_id"] = copy.spec_id
-        block["definition"] = {**block["definition"], "identity": copy.identity}
+        if copy is None:
+            block = json.loads(json.dumps(held[spec_id].block))
+            block["definition"] = {**block["definition"], "identity": arguments["identity"]}
+        else:
+            block = json.loads(json.dumps(held[copy.windowed_from].block))
+            block["spec_id"] = copy.spec_id
+            block["definition"] = {**block["definition"], "identity": copy.identity}
         part = {"status": "definite", "spec": block}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
-async def _pinning_the_basis_compile(share: _ClosedShare, decision: DecisionFactory) -> Plan:
+async def _pinning_the_basis_compile(
+    share: _ClosedShare, decision: DecisionFactory, *, shown: bool = False
+) -> Plan:
     """`share`, the `basis` share, proposed and amended with health's share of a
     requirement `direct` pinning the total's compile, which the planner was never
-    shown. Returns the plan on record."""
+    shown, or, with `shown`, was shown from a search of its own with no warning.
+    Returns the plan on record."""
     plan = await _propose(share, decision)
     (compiled,) = aligned_pins(share.ctx.state)
+    if shown:
+        assert compiled.block is not None
+        save_pin_sources(
+            share.ctx.state,
+            {
+                **pin_sources(share.ctx.state),
+                compiled.spec_id: PinSource(block=dict(compiled.block), settled=True),
+            },
+        )
     direct = _us_dataset("direct", "US total ODA", compiled.spec_id).model_copy(
         update={"period": share.period}
     )
@@ -998,42 +1030,72 @@ async def _pinning_the_basis_compile(share: _ClosedShare, decision: DecisionFact
 
 
 @pytest.mark.parametrize(
-    ("warnings", "admitted_clean", "honoured"),
+    ("warnings", "admitted_clean"),
     [
-        ((), True, True),
-        (("role_text_not_recognised",), False, False),
-        (("time_text_not_parsed",), False, True),
-        (("role_text_not_recognised",), True, False),
+        ((), True),
+        (("role_text_not_recognised",), False),
+        (("time_text_not_parsed",), False),
+        (("role_text_not_recognised",), True),
     ],
     ids=["clean", "role", "time", "role-after-admission"],
 )
 @pytest.mark.parametrize(
-    ("kind", "requirement_id"),
-    [("basis", "total"), ("basis", "health"), ("whole", "whole"), ("basis", "direct")],
-    ids=["compiled", "searched", "whole", "compile-pinned"],
+    ("kind", "requirement_id", "record"),
+    [
+        ("basis", "total", "made"),
+        ("basis", "health", "shown"),
+        ("whole", "whole", "made"),
+        ("basis", "direct", "made"),
+        ("searched-total", "total", "made"),
+        ("covered", "health", "shown"),
+        ("shown-compile", "direct", "clean"),
+    ],
+    ids=[
+        "compiled",
+        "searched",
+        "whole",
+        "compile-pinned",
+        "pin-by-search",
+        "covered",
+        "shown-compile",
+    ],
 )
 async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
     decision: DecisionFactory,
     kind: str,
     requirement_id: str,
+    record: str,
     warnings: tuple[str, ...],
     admitted_clean: bool,
-    honoured: bool,
 ) -> None:
     """Admission moves each input of a share over 2024 to a copy over that year:
     the total compiled gross from the total Search found, the health aid Search
-    found, the whole compiled from that health aid, and a requirement pinning the
-    total's compile directly. Where the search part every one of them descends
-    from carries a blocking warning, admission leaves the pin unwindowed, and
-    discovery does not honour it and searches. A part that only dropped the
-    question's years (`time_text_not_parsed`) is repaired by the copy over the
-    requirement's period, which is honoured with no search, as a clean part's is.
-    A warning on the part that admission did not see, as when a later search
-    returns it warned, still keeps discovery from honouring the copy."""
-    share = _closed_share(kind)
+    found, the whole compiled from that health aid, a requirement pinning the
+    total's compile directly, and the total compiled from the one `propose_plan`
+    searched for itself. Where the search part a pin was made from dropped the
+    roles it was asked (`role_text_not_recognised`), admission leaves the pin
+    unwindowed, and discovery does not honour it and searches. A part that only
+    dropped the question's years (`time_text_not_parsed`) blocks no pin retrieved
+    over the requirement's period: a copy over it, or health's own identity when
+    that is already over 2024 (`covered`), is honoured with no search, as a
+    clean part's is.
+
+    Each pin is judged by what was recorded when it was made: a compile by the
+    part it was compiled from then, so a warning that part gains later blocks
+    the part's own pin alone. A dataset shown from a clean search of its own is
+    honoured though a compile from a warned part shares its spec_id
+    (`shown-compile`)."""
+    share = _closed_share("basis" if kind in {"covered", "shown-compile"} else kind)
+    if kind == "covered":
+        identity = {
+            **share.recorded[HEALTH].identity,
+            "requested_window": period_window(share.period),
+        }
+        share = replace(share, recorded={**share.recorded, HEALTH: _Recorded(identity)})
     stated = share.requirements[0].source_spec_id if kind == "whole" else TOTAL
     stated = HEALTH if requirement_id == "health" else stated
     assert stated is not None
+    role = "role_text_not_recognised" in warnings
 
     def warn() -> None:
         shown = pin_sources(share.ctx.state)
@@ -1041,13 +1103,18 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
         save_pin_sources(share.ctx.state, shown)
 
     if not admitted_clean:
-        warn()
+        if kind == "searched-total":
+            searched = cast(_Resolves, share.surface).searched
+            assert searched is not None
+            searched["warnings"] = [{"code": code} for code in warnings]
+        else:
+            warn()
     if requirement_id == "direct":
-        plan = await _pinning_the_basis_compile(share, decision)
+        plan = await _pinning_the_basis_compile(share, decision, shown=kind == "shown-compile")
     else:
         plan = await _propose(share, decision)
     copied = _dataset_pins(plan)[requirement_id] in windowed_pins(share.ctx.state)
-    assert copied is (admitted_clean or honoured)
+    assert copied is (kind != "covered" and (admitted_clean or not role or record == "clean"))
     warn()
     surface = _ResolvesCopies(share.ctx)
 
@@ -1056,12 +1123,105 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
             requirement_id=requirement_id, state=share.ctx.state
         )
 
+    if not role or record == "clean" or (record == "made" and admitted_clean):
+        assert surface.tools == ["resolve_definition"]
+        assert found["status"] == "definite", found
+    else:
+        assert "search" in surface.tools
+        assert found.get("status") != "definite", found
+
+
+@pytest.mark.parametrize(
+    ("warnings", "honoured"),
+    [((), True), (("role_text_not_recognised",), False)],
+    ids=["clean", "role"],
+)
+async def test_a_compile_stored_before_its_warnings_were_recorded_is_judged_by_its_origin(
+    decision: DecisionFactory, warnings: tuple[str, ...], honoured: bool
+) -> None:
+    """The share's total is compiled gross from the total Search found and moved to a
+    copy over 2024, and the session holds the compiles as a build that recorded no
+    compile's warnings stored them. The compiles load, and discovery judges the
+    compile by the part its origin was shown from: from a clean part the copy is
+    honoured with no search, and from one that dropped the roles asked it searches."""
+    share = _closed_share("basis")
+    plan = await _propose(share, decision)
+    assert _dataset_pins(plan)["total"] in windowed_pins(share.ctx.state)
+    del share.ctx.state[ALIGNED_PIN_WARNINGS_STATE_KEY]
+    shown = pin_sources(share.ctx.state)
+    shown[TOTAL] = shown[TOTAL].model_copy(update={"warnings": warnings})
+    save_pin_sources(share.ctx.state, shown)
+    surface = _ResolvesCopies(share.ctx)
+
+    with definitions_on_record(share.recorded):
+        found = await build_discover_source(surface=cast(ToolSurface, surface))(
+            requirement_id="total", state=share.ctx.state
+        )
+
     if honoured:
         assert surface.tools == ["resolve_definition"]
         assert found["status"] == "definite", found
     else:
         assert "search" in surface.tools
         assert found.get("status") != "definite", found
+
+
+@pytest.mark.parametrize("warnings", [(), ("role_text_not_recognised",)], ids=["clean", "role"])
+@pytest.mark.parametrize(
+    ("kind", "requirement_id", "stated", "row", "option_id"),
+    [
+        ("provider-and-basis", "health", HEALTH, "provider", "provider:inclusive"),
+        ("basis", "total", TOTAL, "measure_basis", "measure_basis:net"),
+    ],
+    ids=["switched", "switched-compile"],
+)
+async def test_a_switch_of_a_pin_from_a_warned_search_part_is_honoured(
+    decision: DecisionFactory,
+    kind: str,
+    requirement_id: str,
+    stated: str,
+    row: str,
+    option_id: str,
+    warnings: tuple[str, ...],
+) -> None:
+    """The user switches the provider row of the 2024 share's health input, a
+    dataset Search found, or the basis row of its total, compiled gross from the
+    total Search found. The switched dataset is the one the card shows the user
+    picked, so the revision admits it over a copy over 2024 for discovery to
+    honour, whatever warning the search part of the dataset it replaces
+    carried."""
+    share = _closed_share(kind)
+    shown = pin_sources(share.ctx.state)
+    shown[stated] = shown[stated].model_copy(update={"warnings": warnings})
+    save_pin_sources(share.ctx.state, shown)
+    plan = await _propose(share, decision)
+    share.ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [
+        _searched(shown[HEALTH].block),
+        _searched(shown[TOTAL].block),
+    ]
+    planner = _RevisingPlanner(cast(ToolSurface, share.surface))
+
+    # The revision's translation has no Search to discover through, so the
+    # switch ends refused; what admission recorded is what this test reads.
+    with definitions_on_record(share.recorded), suppress(SwitchFailedError):
+        await switch_module._switched_plan(
+            cast(Any, share.ctx),
+            plan,
+            choice_id=choice_id(
+                plan,
+                _provider_row(plan, requirement_id)
+                if row == "provider"
+                else _basis_row(plan, requirement_id),
+            ),
+            option_id=option_id,
+            planner=cast(Any, planner),
+            surface=cast(ToolSurface, share.surface),
+        )
+
+    (admitted,) = planner.admitted
+    switched = _dataset_pins(admitted)[requirement_id]
+    assert switched not in {_dataset_pins(plan)[requirement_id], stated}
+    assert switched in windowed_pins(share.ctx.state)
 
 
 @pytest.mark.parametrize("identity", ["bad", ["bad"]], ids=["string", "list"])

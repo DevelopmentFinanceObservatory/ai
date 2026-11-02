@@ -136,6 +136,7 @@ from planner.plan import (
     WindowedPin,
     aligned_pins,
     clear_unsupported,
+    compile_warnings,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
@@ -6236,15 +6237,16 @@ _BASE_ALIGNED_PIN_FIELDS = frozenset({"origin", "option_ids", "spec_id", "digest
 
 
 @pytest.mark.parametrize(
-    ("code", "compiled", "searched_first", "admitted"),
+    ("code", "compiled", "searched_first", "admitted", "warned"),
     [
-        (None, False, False, False),
-        ("open_role_unavailable", False, False, False),
-        ("open_role_unavailable", False, True, False),
-        ("upstream_version_changed", False, True, False),
-        ("upstream_version_changed", False, False, True),
-        ("upstream_version_changed", True, True, False),
-        ("upstream_version_changed", True, False, True),
+        (None, False, False, False, False),
+        ("open_role_unavailable", False, False, False, False),
+        ("open_role_unavailable", False, True, False, False),
+        ("upstream_version_changed", False, True, False, False),
+        ("upstream_version_changed", False, False, True, False),
+        ("upstream_version_changed", True, True, False, False),
+        ("upstream_version_changed", True, False, True, False),
+        ("upstream_version_changed", True, False, True, True),
     ],
     ids=[
         "stored-bare",
@@ -6254,6 +6256,7 @@ _BASE_ALIGNED_PIN_FIELDS = frozenset({"origin", "option_ids", "spec_id", "digest
         "searched-after-refusal",
         "compile-served-from-before-refusal",
         "compiled-after-refusal",
+        "compiled-from-a-warned-part-after-refusal",
     ],
 )
 async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_refused(
@@ -6262,6 +6265,7 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
     compiled: bool,
     searched_first: bool,
     admitted: bool,
+    warned: bool,
 ) -> None:
     """Search settles the unpinned US total on a spec_id the executor refused in
     this entry, or on a total the compile then moves to the health aid's gross
@@ -6271,9 +6275,16 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
     Search is asked after the refusal, and refused when an earlier entry's
     search and compile from before the refusal (`searched_first`) are served
     instead. Every pin and refusal is stored in the shape a build reading only
-    the base fields loads."""
+    the base fields loads, a compile from a search part that dropped the roles
+    asked (`warned`) included."""
     surface = (
-        BasisCompiles()
+        BasisCompiles(
+            searched={
+                "status": "definite",
+                "spec": basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+                "warnings": [{"code": "role_text_not_recognised"}] if warned else [],
+            }
+        )
         if compiled
         else BasisCompiles(
             searched={
@@ -6312,6 +6323,9 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
         assert set(raw) <= _BASE_SEARCHED_PIN_FIELDS
     for raw in ctx.state.get(ALIGNED_PINS_STATE_KEY) or ():
         assert set(raw) <= _BASE_ALIGNED_PIN_FIELDS
+    if warned:
+        (held,) = aligned_pins(ctx.state)
+        assert compile_warnings(ctx.state)[held.key] == ("role_text_not_recognised",)
     if admitted:
         assert result["outcome"] == Outcome.OK.value, result
         return
@@ -16385,6 +16399,50 @@ def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_ope
 
     assert _rolling_issue(result) == ("rolling_needs_open_period", fault, [dataset.id])
     assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("warnings", "refused"),
+    [((), True), (("role_text_not_recognised",), False)],
+    ids=["clean", "narrower"],
+)
+def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    warnings: tuple[str, ...],
+    refused: bool,
+) -> None:
+    """A requirement rolling at its end pins a dataset the planner was shown with no
+    block, whose definition no search recorded. Shown from a clean search part, the
+    plan is refused: nothing on record can be retrieved with no end year. Shown from
+    one that dropped the roles asked, the translator searches for the requirement
+    whatever its pin (`translator.discovery.narrowed_pin`), so the plan is recorded
+    with the pin as written."""
+    ctx = _FakeToolContext()
+    save_pin_sources(ctx.state, {_AID_SPEC: PinSource(settled=True, warnings=warnings)})
+    dataset = requirement(source_spec_id=_AID_SPEC, period_end_open=True)
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([pinning_decision(_AID_SPEC, resolved_by=ResolvedBy.PLANNER_DEFAULT)]),
+        evidence_requirements=[
+            dataset,
+            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_ITS_END),
+        ],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert _rolling_issue(result) == (
+            "rolling_needs_open_period",
+            "no_source_on_record",
+            [dataset.id],
+        )
+        return
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _source_pin(load_plan(ctx.state)) == _AID_SPEC
+    assert windowed_pins(ctx.state) == {}
 
 
 def test_an_unpinned_period_rolling_at_its_end_is_recorded_for_the_translator_to_search(

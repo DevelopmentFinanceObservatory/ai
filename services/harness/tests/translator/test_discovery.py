@@ -1536,7 +1536,15 @@ def test_resolved_spec_names_how_a_part_is_not_the_dataset(
     assert raised.value.part == part
 
 
-async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dropped_time_text(
+@pytest.mark.parametrize(
+    ("coverage", "searches"),
+    [
+        (_matching_window(), 0),
+        ({"kind": "exact", "has_data": True, "window": {"start_year": 2010, "end_year": 2020}}, 1),
+    ],
+    ids=["over-its-period", "over-other-years"],
+)
+async def test_a_pin_whose_resolve_dropped_time_text_is_honoured_over_its_own_period(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
     draft: DraftFactory,
@@ -1544,12 +1552,14 @@ async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dro
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    coverage: dict[str, Any],
+    searches: int,
 ) -> None:
-    # The resolve's own part carried a blocking warning: `search` dropped
-    # the time text and answered a narrower ask than the requirement states,
-    # so reusing the block would relabel that narrower answer as DEFINITE
-    # for the whole requirement. Falls through to the existing search path,
-    # which applies `ask_not_understood` itself.
+    # The resolve's own part dropped only the time text
+    # (`time_text_not_parsed`). The planner states the requirement's period,
+    # so a pin retrieved over that period answers the whole ask: a block
+    # covering it is honoured with no search. A block over other years, with
+    # no copy over the period, falls through to a fresh search.
     pinned = requirement(source_spec_id=SPEC_KENYA)
     context = context_holding(
         draft(
@@ -1560,13 +1570,13 @@ async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dro
     _shown(
         context,
         SPEC_KENYA,
-        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=coverage),
         "time_text_not_parsed",
     )
 
     await _discover(surface, context)
 
-    assert len(search_calls) == 1
+    assert len(search_calls) == searches
 
 
 @pytest.mark.parametrize(
