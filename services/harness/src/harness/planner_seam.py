@@ -118,6 +118,7 @@ from planner.plan import (
     save_plan,
     save_plan_rounds,
     save_refused_specs,
+    warning_codes,
     windowed_pins,
 )
 from planner.records import Severity
@@ -215,7 +216,8 @@ Context for this question. These are the readings of the searches this \
 conversation ran, earlier turns' included, oldest first: each part's \
 status and spec_id, what it resolved \
 to, its window, the observations in its most recent years, its warnings \
-(! marks one that dropped part of the ask) and what a fetch of it \
+(! marks one under which its source answers a narrower question than the \
+ask) and what a fetch of it \
 returned. A candidate a referral names for a requirement is an allowed \
 source for that requirement -- pin it from its own discovery. Never invent \
 a spec_id or a source that neither these readings nor a referral has named.
@@ -2103,21 +2105,13 @@ def _reading_pin_sources(
             provenance_ref=reading.provenance_ref if reading else None,
             provenance_account=reading.provenance_account if reading else None,
             block=None if from_earlier else blocks.get(spec_id),
-            warnings=_warning_codes(warnings.get(spec_id)),
+            warnings=warning_codes(warnings.get(spec_id)),
             settled=spec_id in elected or spec_id in counts_of,
             earlier_turn=from_earlier,
             other_count_of=None if spec_id in elected else counts_of.get(spec_id),
             asked_roles=tuple(reading.asked_roles) if reading else (),
         )
     return sources
-
-
-def _warning_codes(warnings: object) -> tuple[str, ...]:
-    """The `code` of each warning dict in `warnings`, a list as search returns it."""
-    if not isinstance(warnings, list):
-        return ()
-    codes = (warning.get("code") for warning in warnings if isinstance(warning, dict))
-    return tuple(str(code) for code in codes if code)
 
 
 def _as_authored(plan: Plan | None) -> dict[str, Any] | None:

@@ -145,6 +145,7 @@ from planner.plan import (
     DatasetRequirement,
     Entity,
     PinSource,
+    PinVerdict,
     Plan,
     PlanStatus,
     QuotientRequirement,
@@ -166,6 +167,7 @@ from planner.plan import (
     inputs_of,
     load_plan,
     pin_sources,
+    pin_verdicts,
     plan_revision,
     retrieves_period,
     save_plan,
@@ -249,6 +251,10 @@ BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_p
 # over it (`planner.plan.retrieves_period`), so the dropped years never reach
 # a retrieval and these block no pin (`answers_narrower`).
 WINDOW_ONLY_WARNING_CODES = frozenset({"time_text_not_parsed"})
+
+# The codes under which a pin answers a narrower question than the one asked,
+# and so is neither windowed nor honoured (`answers_narrower`).
+NARROWING_WARNING_CODES = BLOCKING_WARNING_CODES - WINDOW_ONLY_WARNING_CODES
 
 # The answers of the translator's own search a pin may be honoured from. A
 # pin the planner chose among a `source_ambiguous` referral's candidates is
@@ -2615,9 +2621,9 @@ def answers_narrower(warnings: Iterable[str]) -> bool:
     """Whether a pin whose record carries the warning codes `warnings` answers a narrower question than the one asked.
 
     It does when Search dropped part of the ask other than its years: a code
-    in `BLOCKING_WARNING_CODES` outside `WINDOW_ONLY_WARNING_CODES`.
+    in `NARROWING_WARNING_CODES`.
     """
-    return not (BLOCKING_WARNING_CODES - WINDOW_ONLY_WARNING_CODES).isdisjoint(warnings)
+    return not NARROWING_WARNING_CODES.isdisjoint(warnings)
 
 
 def pin_warnings(
@@ -2683,7 +2689,8 @@ class _PinRecords(NamedTuple):
     `copies` are `planner.plan.windowed_pins`, `alignments`
     `planner.plan.alignments`, `shown` `planner.plan.pin_sources`,
     `compiled` `planner.plan.aligned_pins`, `compile_warnings`
-    `planner.plan.compile_warnings`, and `log` the discovery log.
+    `planner.plan.compile_warnings`, `verdicts` `planner.plan.pin_verdicts`,
+    and `log` the discovery log.
     """
 
     copies: Mapping[str, WindowedPin]
@@ -2691,6 +2698,7 @@ class _PinRecords(NamedTuple):
     shown: Mapping[str, PinSource]
     compiled: tuple[AlignedPin, ...]
     compile_warnings: Mapping[CompileKey, tuple[str, ...]]
+    verdicts: Mapping[str, PinVerdict]
     log: DiscoveryLog
 
     @classmethod
@@ -2702,6 +2710,7 @@ class _PinRecords(NamedTuple):
             shown=pin_sources(state),
             compiled=aligned_pins(state),
             compile_warnings=compile_warnings(state),
+            verdicts=pin_verdicts(state),
             log=load_log(state),
         )
 
@@ -2709,14 +2718,21 @@ class _PinRecords(NamedTuple):
 def _narrowed(records: _PinRecords, requirement: DatasetRequirement) -> bool:
     """Whether the pin `requirement` states answers a narrower question (`narrowed_pin`).
 
-    A copy over the requirement's period (`planner.plan.windowed_pins`) is
-    judged by the record of the pin it copies.
+    Admission's verdict on the pin stands (`planner.plan.PinVerdict`), so
+    admission and the translator never disagree on one. A copy over the
+    requirement's period (`planner.plan.windowed_pins`) reads the verdict on
+    the pin it copies. A pin admission gave no verdict on, as in a plan
+    recorded before verdicts were or one whose pin moved since, is judged
+    from the records held now.
     """
     pin = requirement.source_spec_id
     if pin is None:
         return False
     copy = records.copies.get(pin)
     origin = copy.windowed_from if copy is not None else pin
+    verdict = records.verdicts.get(requirement.id)
+    if verdict is not None and verdict.spec_id == origin:
+        return verdict.narrowed
     entry = aligned_entry(
         requirement.model_copy(update={"source_spec_id": origin}), records.alignments
     )

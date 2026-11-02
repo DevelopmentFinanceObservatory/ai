@@ -257,6 +257,13 @@ ALIGNED_PIN_WARNINGS_STATE_KEY = "planner:aligned_pin_warnings"
 # states. Unset until a plan holds one.
 ALIGNMENTS_STATE_KEY = "planner:alignments"
 
+# The session-state slot holding a `PinVerdict` for every pinned dataset
+# requirement of the plan `planner.agent.propose_plan` last recorded: whether
+# admission judged its pin to answer a narrower question than the one asked
+# (`submission.service._pin_verdicts`), which the translator reads in place
+# of judging it again. Unset until a plan is recorded with them.
+PIN_VERDICTS_STATE_KEY = "planner:pin_verdicts"
+
 # The session-state slot holding what `planner.agent.propose_plan` read about
 # every year a pinned dataset holds, by the pin's spec_id, as its first year and
 # its rows, or null when Search's answer over no window stated no first year.
@@ -6222,6 +6229,29 @@ class _ShownDefinition(NamedTuple):
     resolved_sources: tuple[ResolvedSourceMention, ...] = ()
 
 
+def unusable_definition(spec_id: str, block: Mapping[str, Any]) -> str | None:
+    """Why the definition `block`, a spec block for `spec_id`, carries cannot be put on record (`identity_on_record`).
+
+    data-mcp's refusal (`caller_definition`: it does not hash to `spec_id`,
+    has no RFC 8785 form, or is past `MAX_IDENTITY_BYTES`), or the named sets
+    of a block that is not readable as a source
+    (`compiler.sources.source_from_spec_block`). `None` when the block
+    carries no definition, or one that can be put on record.
+    """
+    identity = block_identity(block)
+    if identity is None:
+        return None
+    try:
+        caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
+    except (IdentityMismatch, IdentityUnusable) as exc:
+        return str(exc)
+    try:
+        source_from_spec_block(block)
+    except ValueError:
+        return "its named sets cannot be read"
+    return None
+
+
 def identity_on_record(
     pin: str,
     *,
@@ -6309,6 +6339,53 @@ class PinSource(StrictModel):
     def spec_block(self, spec_id: str) -> Mapping[str, Any] | None:
         """The spec block a pin of `spec_id`, this source, reuses."""
         return earlier_block(spec_id) if self.earlier_turn else self.block
+
+
+def warning_codes(warnings: object) -> tuple[str, ...]:
+    """The `code` of each warning dict in `warnings`, a list as search returns it."""
+    if not isinstance(warnings, list):
+        return ()
+    return tuple(
+        str(code)
+        for warning in warnings
+        if isinstance(warning, dict) and (code := warning.get("code"))
+    )
+
+
+class PinVerdict(StrictModel):
+    """Whether admission judged the pin `spec_id` of the dataset requirement
+    `requirement_id` to answer a narrower question than the one asked
+    (`narrowed`, `translator.discovery.narrowed_pin`). `spec_id` is the pin
+    before admission moved it to a copy (`WindowedPin.windowed_from`)."""
+
+    requirement_id: str
+    spec_id: SpecId
+    narrowed: bool
+
+
+def pin_verdicts(state: SessionState) -> dict[str, PinVerdict]:
+    """The verdicts `PIN_VERDICTS_STATE_KEY` holds, by requirement id; empty when unset.
+
+    An entry stored in a shape `PinVerdict` rejects is left out, and the
+    omission is logged; the translator then judges that pin itself.
+    """
+    held: dict[str, PinVerdict] = {}
+    errors: list[ValidationError] = []
+    for raw in state.get(PIN_VERDICTS_STATE_KEY) or []:
+        try:
+            verdict = PinVerdict.model_validate(raw)
+        except ValidationError as exc:
+            errors.append(exc)
+        else:
+            held[verdict.requirement_id] = verdict
+    if errors:
+        warn_left_out(logger, PIN_VERDICTS_STATE_KEY, errors, entries=len(errors))
+    return held
+
+
+def save_pin_verdicts(state: SessionState, verdicts: Iterable[PinVerdict]) -> None:
+    """Record `verdicts` as admission's judgement of the recorded plan's pins."""
+    state[PIN_VERDICTS_STATE_KEY] = [verdict.model_dump(mode="json") for verdict in verdicts]
 
 
 def pin_sources(state: SessionState) -> dict[str, PinSource]:

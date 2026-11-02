@@ -162,6 +162,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     split_of,
+    warning_codes,
 )
 from planner.records import (
     OpenPeriodFault,
@@ -1648,14 +1649,9 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
         if scope is not None
         else (),
     )
-    warnings = part.get("warnings") if isinstance(part, dict) else None
     shown = PinSource(
         block=digest["spec_block"],
-        warnings=tuple(
-            str(code)
-            for warning in (warnings if isinstance(warnings, list) else ())
-            if isinstance(warning, dict) and (code := warning.get("code"))
-        ),
+        warnings=warning_codes(part.get("warnings") if isinstance(part, dict) else None),
         settled=True,
         asked_roles=unpinned.asked_roles,
     )

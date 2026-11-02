@@ -584,6 +584,53 @@ async def test_a_pin_cannot_resurrect_an_answer_search_reached_by_dropping_a_phr
     assert log.selectable(requirement_keys=keys, pinned={"annual_debt_service": SPEC_KENYA}) == {}
 
 
+@pytest.mark.parametrize(
+    ("measure", "settled"),
+    [("dropped role debt service", False), ("external debt service paid", True)],
+    ids=["search-narrows-again", "search-confirms"],
+)
+async def test_a_pin_from_a_narrowed_part_is_settled_only_by_a_search_confirming_it(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    measure: str,
+    settled: bool,
+) -> None:
+    # The planner was shown the pin from a search part that dropped the roles
+    # asked, so its block, though over the requirement's period, is not read.
+    # The translator's own search settles the pin only when it answers with
+    # it and drops nothing; otherwise the plan goes back to the planner. A
+    # plan card therefore lists rows of such a pin only for a dataset that
+    # search confirmed for the requirement, and a switch of one may be
+    # honoured (`harness.graph.switch._pin_source`).
+    pinned = requirement(measure=measure, source_spec_id=SPEC_KENYA)
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    _shown(
+        context,
+        SPEC_KENYA,
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+        "role_text_not_recognised",
+    )
+
+    result = await _discover(surface, context)
+
+    assert len(search_calls) == 1
+    if settled:
+        assert result["status"] == "definite", result
+        assert [source["spec_id"] for source in result["sources"]] == [SPEC_KENYA]
+    else:
+        assert result["code"] == "ask_not_understood", result
+
+
 async def test_an_advisory_warning_rides_out_with_the_answer(
     surface: McpSurface,
     draft: DraftFactory,

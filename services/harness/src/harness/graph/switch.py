@@ -919,11 +919,16 @@ def _pin_source(
 ) -> PinSource:
     """The pin source of a switched dataset: the one it replaces, holding the switched block.
 
-    It keeps none of the replaced source's warnings. The switched dataset is
-    Search's answer for the identity the user picked on the card, which
-    posts no text for Search to drop, and the plan's run retrieves the
-    dataset the card shows (`translator.discovery.narrowed_pin`). A reading
-    of it in a later turn carries no warnings either (`_reading_digest`).
+    It keeps none of the replaced source's warnings. A card lists rows of a
+    pin from a search part that dropped part of the ask only once the
+    translator's own search, asking the requirement's roles and years,
+    answered with that pin and dropped nothing (`translator.discovery`), so
+    the identity the switch resubmits from answers the requirement. The
+    switched dataset is Search's answer for that identity on the option the
+    user picked, which posts no text for Search to drop, and the run
+    retrieves the dataset the card shows (`translator.discovery.narrowed_pin`).
+    A reading of it in a later turn carries no warnings either
+    (`_reading_digest`).
     """
     (part,) = digest["part_digests"]
     block = part["spec_block"]

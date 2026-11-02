@@ -5704,7 +5704,7 @@ def test_a_declared_wholes_compile_leaves_the_readings_unchanged() -> None:
     )
     ctx = SimpleNamespace(state={ORCHESTRATOR_SEARCHES_KEY: [origin]})
     planner_state: dict[str, Any] = {}
-    save_aligned_pin(cast(SessionState, planner_state), whole)
+    save_aligned_pin(cast(SessionState, planner_state), whole, warnings=())
 
     planner_seam.store_searched_pin_readings(cast(Any, ctx), cast(SessionState, planner_state))
 
@@ -5752,6 +5752,7 @@ def test_a_revision_names_a_pin_by_the_block_it_is_held_in(
                 spec_id=HEALTH,
                 digest={"spec_block": compiled},
             ),
+            warnings=(),
         )
     plan = Plan(
         question="health aid",

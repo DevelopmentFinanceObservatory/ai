@@ -163,6 +163,7 @@ from planner.plan import (
     search_pin_slot,
     split_of,
     stored_plan,
+    unusable_definition,
     windowed_pins,
 )
 from planner.records import (
@@ -209,6 +210,7 @@ from submission.service import (
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
+    _window_pins,
     first_year_reads,
     identity_on_record,
     save_aligned_pin,
@@ -7612,6 +7614,7 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
             spec_id=inclusive["spec_id"],
             digest={},
         ),
+        warnings=(),
     )
 
     result = await _us_2023(
@@ -10982,6 +10985,7 @@ def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
             spec_id=compile_block["spec_id"],
             digest={"spec_block": compile_block},
         ),
+        warnings=(),
     )
 
     result = _tools_by_name()["propose_plan"].func(
@@ -11758,6 +11762,50 @@ def _propose_gdp(
         amends_version=amends_version,
         tool_context=ctx,
     )
+
+
+@pytest.mark.usefixtures("gdp_on_record")
+def test_two_pins_of_one_dataset_over_one_period_keep_their_own_decisions(
+    decision: DecisionFactory, requirement: Callable[..., DatasetRequirement]
+) -> None:
+    """One requirement pins Guatemala's GDP over every year, the other the same
+    dataset over 1960-2024, both read over 1960-2024, each with the measure decision
+    code wrote for its pin. The first's copy over 1960-2024 is the second's dataset,
+    so both pin that dataset and no copy is recorded, and each decision keeps its pin
+    and slot."""
+    every, period = _GDP_ALL["spec_id"], _GDP_1960_2024["spec_id"]
+    pins = (every, period)
+    plan = Plan(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=[
+            decision(),
+            *(
+                decision(slot=search_pin_slot(pin), fixes=DecisionFixes(source_spec_id=pin))
+                for pin in pins
+            ),
+        ],
+        evidence_requirements=[
+            requirement(
+                id=f"gdp_{index}",
+                source_spec_id=pin,
+                period=Period(start=1960, end=2024),
+                decision_ids=["measure", search_pin_slot(pin)],
+            )
+            for index, pin in enumerate(pins)
+        ],
+    )
+    shown = {pin: PinSource(settled=True) for pin in pins}
+
+    windowed, minted = _window_pins(plan, shown=shown, definition_lookup=None, narrowed=())
+
+    assert minted == []
+    assert [
+        (r.source_spec_id, r.decision_ids)
+        for r in windowed.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [(period, ("measure", search_pin_slot(pin))) for pin in pins]
+    assert windowed.decisions == plan.decisions
 
 
 def _source_pin(plan: Plan | None) -> str | None:
@@ -12868,6 +12916,7 @@ async def test_a_part_alignment_moves_is_held_to_the_user_s_prices(
             spec_id=inclusive["spec_id"],
             digest={},
         ),
+        warnings=(),
     )
     ctx.session.events = _prices_ask_events(part=health["spec_id"])
     extra = [
@@ -12958,6 +13007,7 @@ def test_a_direct_pin_of_an_unshown_compile_is_held_to_the_user_s_prices(
             spec_id=compiled["spec_id"],
             digest={"spec_block": compiled},
         ),
+        warnings=(),
     )
     ctx.session.events = _prices_ask_events()
     dataset, derived = requirements
@@ -16402,14 +16452,15 @@ def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_ope
 
 
 @pytest.mark.parametrize(
-    ("warnings", "refused"),
-    [((), True), (("role_text_not_recognised",), False)],
-    ids=["clean", "narrower"],
+    ("warnings", "past_cap", "refused"),
+    [((), False, True), (("role_text_not_recognised",), False, False), ((), True, True)],
+    ids=["clean", "narrower", "identity-past-cap"],
 )
 def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
     warnings: tuple[str, ...],
+    past_cap: bool,
     refused: bool,
 ) -> None:
     """A requirement rolling at its end pins a dataset the planner was shown with no
@@ -16417,15 +16468,24 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
     plan is refused: nothing on record can be retrieved with no end year. Shown from
     one that dropped the roles asked, the translator searches for the requirement
     whatever its pin (`translator.discovery.narrowed_pin`), so the plan is recorded
-    with the pin as written."""
+    with the pin as written. Shown with a block whose identity is past
+    `MAX_IDENTITY_BYTES`, the refusal names that cause
+    (`planner.plan.unusable_definition`)."""
     ctx = _FakeToolContext()
-    save_pin_sources(ctx.state, {_AID_SPEC: PinSource(settled=True, warnings=warnings)})
-    dataset = requirement(source_spec_id=_AID_SPEC, period_end_open=True)
+    pin, block = _AID_SPEC, None
+    if past_cap:
+        fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+        block = json.loads(fixture.read_text())["spec"]
+        identity = block["definition"]["identity"]
+        identity["padding"] = "x" * MAX_IDENTITY_BYTES
+        pin = block["spec_id"] = spec_id_for(canonicalize(identity))
+    save_pin_sources(ctx.state, {pin: PinSource(block=block, settled=True, warnings=warnings)})
+    dataset = requirement(source_spec_id=pin, period_end_open=True)
 
     result = _tools_by_name()["propose_plan"].func(
         question="q",
         answer_mode=AnswerMode.COMPUTED,
-        decisions=drafts([pinning_decision(_AID_SPEC, resolved_by=ResolvedBy.PLANNER_DEFAULT)]),
+        decisions=drafts([pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT)]),
         evidence_requirements=[
             dataset,
             _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_ITS_END),
@@ -16439,9 +16499,13 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
             "no_source_on_record",
             [dataset.id],
         )
+        if block is not None:
+            cause = unusable_definition(pin, block)
+            assert cause is not None
+            assert cause in result["message"]
         return
     assert result["outcome"] == Outcome.OK.value, result
-    assert _source_pin(load_plan(ctx.state)) == _AID_SPEC
+    assert _source_pin(load_plan(ctx.state)) == pin
     assert windowed_pins(ctx.state) == {}
 
 

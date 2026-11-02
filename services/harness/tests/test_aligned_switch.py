@@ -34,6 +34,7 @@ from planner.plan import (
     ALIGNED_PIN_WARNINGS_STATE_KEY,
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_STATE_KEY,
+    PIN_VERDICTS_STATE_KEY,
     AnswerMode,
     AskAnswer,
     AskBreakdown,
@@ -1081,9 +1082,10 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
     clean part's is.
 
     Each pin is judged by what was recorded when it was made: a compile by the
-    part it was compiled from then, so a warning that part gains later blocks
-    the part's own pin alone. A dataset shown from a clean search of its own is
-    honoured though a compile from a warned part shares its spec_id
+    part it was compiled from then, and every pin by the verdict admission
+    recorded with the plan, so a warning a part gains after admission blocks
+    nothing the translator reads. A dataset shown from a clean search of its
+    own is honoured though a compile from a warned part shares its spec_id
     (`shown-compile`)."""
     share = _closed_share("basis" if kind in {"covered", "shown-compile"} else kind)
     if kind == "covered":
@@ -1123,7 +1125,7 @@ async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
             requirement_id=requirement_id, state=share.ctx.state
         )
 
-    if not role or record == "clean" or (record == "made" and admitted_clean):
+    if not role or record == "clean" or admitted_clean:
         assert surface.tools == ["resolve_definition"]
         assert found["status"] == "definite", found
     else:
@@ -1140,14 +1142,15 @@ async def test_a_compile_stored_before_its_warnings_were_recorded_is_judged_by_i
     decision: DecisionFactory, warnings: tuple[str, ...], honoured: bool
 ) -> None:
     """The share's total is compiled gross from the total Search found and moved to a
-    copy over 2024, and the session holds the compiles as a build that recorded no
-    compile's warnings stored them. The compiles load, and discovery judges the
+    copy over 2024, and the session holds the compiles and the plan as a build that
+    recorded no compile's warnings and no verdict stored them. The compiles load, and discovery judges the
     compile by the part its origin was shown from: from a clean part the copy is
     honoured with no search, and from one that dropped the roles asked it searches."""
     share = _closed_share("basis")
     plan = await _propose(share, decision)
     assert _dataset_pins(plan)["total"] in windowed_pins(share.ctx.state)
     del share.ctx.state[ALIGNED_PIN_WARNINGS_STATE_KEY]
+    del share.ctx.state[PIN_VERDICTS_STATE_KEY]
     shown = pin_sources(share.ctx.state)
     shown[TOTAL] = shown[TOTAL].model_copy(update={"warnings": warnings})
     save_pin_sources(share.ctx.state, shown)
