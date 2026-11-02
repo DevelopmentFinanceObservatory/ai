@@ -559,10 +559,17 @@ def store_search(
     known. A `definite` part whose prices are open over several years reads
     with `open_prices`, the options of its prices question
     (`harness.turn_records.open_prices`).
+
+    A spec_id a part holds as its own keeps that part's block and warnings
+    against a later part offering it as a candidate, since a pin of it is
+    one of the search that settled on it (`harness.planner_seam`, which
+    reads both for the pin). Between blocks no search settled, or two
+    searches that each settled it, `planner.plan.with_blocks` decides.
     """
     specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
     searches = list(stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY))
+    own = {stored["spec_id"] for stored in searches if stored.get("spec_id")}
     skill_ids = [skill["id"] for skill in digest.get("skills") or []]
     observed_at = datetime.now(UTC)
     readings = []
@@ -576,10 +583,12 @@ def store_search(
         blocks = {
             spec_id: scope_unread(block)
             for spec_id, block in (part.get("candidate_blocks") or {}).items()
+            if spec_id not in own
         }
         facts: dict[str, Any] = {}
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
+            own.add(part["spec_id"])
             facts = reading_facts(part["spec_block"])
             if prices := open_prices(
                 part["spec_block"],

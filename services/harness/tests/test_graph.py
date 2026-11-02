@@ -3887,6 +3887,7 @@ async def _switch_runner(
         save_aligned_pin(
             cast(SessionState, _session_state(runner)),
             earlier_whole.model_copy(update={"spec_id": pin}),
+            warnings=(),
         )
     if entity_groups is not None:
         _session_state(runner)[ORCHESTRATOR_SPECS_KEY] = {

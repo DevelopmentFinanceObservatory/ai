@@ -103,6 +103,7 @@ from submission.service import (
     basis_unservable,
     block_parties,
     bound_parties,
+    first_year_identity,
     part_scope,
     realignments_wanted,
     save_aligned_pin,
@@ -121,7 +122,7 @@ from translator.discovery import (
     PartNotResolvedError,
     answered_once_at,
     call_within_entry,
-    load_log,
+    pin_warnings,
     read_found_scope,
     refusal_retryable,
     resolve_definition,
@@ -158,10 +159,10 @@ from planner.plan import (
     Plan,
     PlanStatus,
     SessionState,
+    compile_warnings,
     full_histories,
     full_history,
     held_sources,
-    identity_on_record,
     load_plan,
     pin_sources,
     plan_revision,
@@ -172,6 +173,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     split_of,
+    warning_codes,
 )
 from planner.records import (
     OpenPeriodFault,
@@ -975,21 +977,6 @@ def _first_year_wanted(result: Mapping[str, object]) -> str | None:
 FIRST_YEAR_READ_DEADLINE_SECONDS = 10.0
 
 
-def _first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | None:
-    """The identity a first-year read of `pin` reads; `None` when none is on record.
-
-    It is on record as `submission.service.admit` finds it, the discovery
-    log's definitions included, so a pin `propose_plan` admits is read.
-    """
-    recorded = identity_on_record(
-        pin,
-        shown=held_sources(state),
-        end_open=True,
-        definition_lookup=load_log(state).recorded_definition,
-    )
-    return recorded.identity if recorded is not None else None
-
-
 async def read_full_history(
     surface: ToolSurface,
     identity: Mapping[str, Any],
@@ -1182,6 +1169,7 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
                 spec_id=spec_id,
                 digest=digest,
             ),
+            warnings=_origin_warnings(into, realignment.spec_id),
         )
         record_spec_searched(into, spec_id, resolved_at)
 
@@ -1259,6 +1247,17 @@ def _scope_unservable(read: ScopeRead, reason: str) -> dict[str, object]:
                 "step_id": read.step_id,
             }
         },
+    )
+
+
+def _origin_warnings(state: SessionState, origin: str) -> tuple[str, ...]:
+    """The warning codes on the record of `origin`, a pin a compile is made from (`translator.discovery.pin_warnings`), which the compile keeps."""
+    return pin_warnings(
+        origin,
+        entry=None,
+        shown=pin_sources(state),
+        compiled=aligned_pins(state),
+        recorded=compile_warnings(state),
     )
 
 
@@ -1406,6 +1405,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
                 digest=digest,
                 whole_axis=axis,
             ),
+            warnings=_origin_warnings(into, part_pin),
         )
         record_spec_searched(into, spec_id, resolved_at)
 
@@ -1672,8 +1672,8 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     and with no message of the user's, so every axis an entry settled on
     Search's answer is marked as the planner's
     (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
-    shown to the planner as a source of its own
-    (`planner.plan.save_pin_sources`) and held as a
+    shown to the planner as a source of its own, with its part's warning
+    codes (`planner.plan.save_pin_sources`), and held as a
     `submission.service.SearchedPin` with its digest, and the time the
     search was made as one settling on its spec_id
     (`planner.plan.record_spec_searched`), so the next proposal
@@ -1733,7 +1733,12 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
         if scope is not None
         else (),
     )
-    shown = PinSource(block=digest["spec_block"], settled=True, asked_roles=unpinned.asked_roles)
+    shown = PinSource(
+        block=digest["spec_block"],
+        warnings=warning_codes(part.get("warnings") if isinstance(part, dict) else None),
+        settled=True,
+        asked_roles=unpinned.asked_roles,
+    )
 
     def hold(into: SessionState) -> None:
         save_pin_sources(into, {**pin_sources(into), spec_id: shown})
@@ -1831,7 +1836,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
         if pin is not None:
             if pin in full_histories(state):
                 return result
-            identity = _first_year_identity(pin, state)
+            identity = first_year_identity(pin, state)
             if identity is None:
                 return result
             try:

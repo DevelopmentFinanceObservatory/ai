@@ -783,27 +783,23 @@ def test_a_plan_sentence_reads_the_block_admission_reads() -> None:
     assert SCOPE_UNREAD_BLOCK_KEY not in blocks[FOUND]
 
 
-def test_a_later_search_offering_a_series_as_a_candidate_holds_it_with_its_own_record() -> None:
+def test_a_later_search_offering_a_settled_series_as_a_candidate_leaves_it_as_settled() -> None:
     """One search answered `FOUND` definite, stating its scope choices and
     binding the United Kingdom as donor, and a later one offered it as a
-    candidate, with no choices and no rows bound. `FOUND` stays held with
-    the choices the first stated, and with the later search's record and
-    warnings together, the search the planner reads it by."""
+    candidate, with no choices, no rows bound and a warning. A pin of
+    `FOUND` is one of the search that settled on it, so `FOUND` keeps that
+    search's block and warnings together."""
     state = _FakeToolContext().state
     store_search(state, resolver_digest(RECORDED["translator"]))
+    settled = dict(stored_mapping(state, ORCHESTRATOR_SPECS_KEY)[FOUND])
     candidates = as_candidates()
     warning = {"code": "default_not_declared", "message": "fell back to a default"}
     candidates["parts"][0]["warnings"] = [warning]
     store_search(state, resolver_digest(candidates))
 
-    block = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)[FOUND]
-
-    assert block["resolved"] == _definite_found()["resolved"]
-    assert SCOPE_UNREAD_BLOCK_KEY not in block
-    assert "_bound_refs" not in block
-    assert [w["code"] for w in state[ORCHESTRATOR_SPEC_WARNINGS_KEY][FOUND]] == [
-        "default_not_declared"
-    ]
+    assert stored_mapping(state, ORCHESTRATOR_SPECS_KEY)[FOUND] == settled
+    assert settled["_bound_refs"] == _definite_found()["_bound_refs"]
+    assert state[ORCHESTRATOR_SPEC_WARNINGS_KEY][FOUND] == []
 
 
 def test_a_scope_read_marks_no_axis_as_the_planners() -> None:

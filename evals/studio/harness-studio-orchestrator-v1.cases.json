@@ -236,8 +236,8 @@
               ],
               "warnings": [
                 {
-                  "code": "time_text_not_parsed",
-                  "message": "The time text in the question was not understood."
+                  "code": "role_text_not_recognised",
+                  "message": "The role text in the question was not recognised."
                 }
               ]
             }

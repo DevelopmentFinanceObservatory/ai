@@ -122,6 +122,7 @@ from planner.plan import (
     save_plan,
     save_plan_rounds,
     save_refused_specs,
+    warning_codes,
     windowed_pins,
 )
 from planner.records import Severity
@@ -130,6 +131,7 @@ from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key, skills_read
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
+    ALIGNED_PIN_WARNINGS_STATE_KEY,
     ALIGNED_PINS_STATE_KEY,
     SEARCHED_PINS_STATE_KEY,
     Proposal,
@@ -219,7 +221,8 @@ Context for this question. These are the readings of the searches this \
 conversation ran, earlier turns' included, oldest first: each part's \
 status and spec_id, what it resolved \
 to, its window, the observations in its most recent years, its warnings \
-(! marks one that dropped part of the ask) and what a fetch of it \
+(! marks one under which its source answers a narrower question than the \
+ask) and what a fetch of it \
 returned. A candidate a referral names for a requirement is an allowed \
 source for that requirement -- pin it from its own discovery. Never invent \
 a spec_id or a source that neither these readings nor a referral has named.
@@ -858,6 +861,7 @@ class PlannerSeam:
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
         # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
         # `DECISION_PICK_STATE_KEY`, `ALIGNED_PINS_STATE_KEY`,
+        # `ALIGNED_PIN_WARNINGS_STATE_KEY`,
         # `SEARCHED_PINS_STATE_KEY`, `SPEC_SEARCHED_STATE_KEY`,
         # `REFUSED_SPECS_STATE_KEY`, `REFUSAL_DETAILS_STATE_KEY`,
         # `SKILLS_READ_STATE_KEY`, `_SKILLS_BEFORE_ENTRY_STATE_KEY`,
@@ -876,6 +880,7 @@ class PlannerSeam:
             AMENDMENT_ENTRY_STATE_KEY,
             DECISION_PICK_STATE_KEY,
             ALIGNED_PINS_STATE_KEY,
+            ALIGNED_PIN_WARNINGS_STATE_KEY,
             SEARCHED_PINS_STATE_KEY,
             SPEC_SEARCHED_STATE_KEY,
             REFUSED_SPECS_STATE_KEY,
@@ -2237,21 +2242,13 @@ def _reading_pin_sources(
             provenance_ref=reading.provenance_ref if reading else None,
             provenance_account=reading.provenance_account if reading else None,
             block=None if from_earlier else blocks.get(spec_id),
-            warnings=_warning_codes(warnings.get(spec_id)),
+            warnings=warning_codes(warnings.get(spec_id)),
             settled=spec_id in elected or spec_id in counts_of,
             earlier_turn=from_earlier,
             other_count_of=None if spec_id in elected else counts_of.get(spec_id),
             asked_roles=tuple(reading.asked_roles) if reading else (),
         )
     return sources
-
-
-def _warning_codes(warnings: object) -> tuple[str, ...]:
-    """The `code` of each warning dict in `warnings`, a list as search returns it."""
-    if not isinstance(warnings, list):
-        return ()
-    codes = (warning.get("code") for warning in warnings if isinstance(warning, dict))
-    return tuple(str(code) for code in codes if code)
 
 
 def _as_authored(plan: Plan | None) -> dict[str, Any] | None:

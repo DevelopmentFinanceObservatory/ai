@@ -46,6 +46,7 @@ import hashlib
 import itertools
 import logging
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -103,6 +104,7 @@ from planner.parties import (
     role_party,
 )
 from planner.plan import (
+    ALIGNED_PIN_WARNINGS_STATE_KEY,
     ALIGNED_PINS_STATE_KEY,
     MAX_DECISION_OPTIONS,
     MAX_DECISION_RATIONALE_CHARS,
@@ -122,6 +124,8 @@ from planner.plan import (
     AskRoleDroppedError,
     AsksUnaccountedError,
     ComparisonRequirement,
+    CompileKey,
+    CompileWarnings,
     DatasetRequirement,
     Decision,
     DecisionDraft,
@@ -139,6 +143,7 @@ from planner.plan import (
     FullHistory,
     OneYearRead,
     PinSource,
+    PinVerdict,
     Plan,
     QuotientRequirement,
     RankRequirement,
@@ -154,6 +159,7 @@ from planner.plan import (
     UnsupportedPlanError,
     WholeIsItsMemberError,
     WindowedPin,
+    aligned_entry,
     aligned_input,
     aligned_pins,
     alignments,
@@ -163,6 +169,7 @@ from planner.plan import (
     check_acyclic,
     check_references,
     check_wholes_span_their_totals,
+    compile_warnings,
     content_digest,
     cut_user_text,
     dataset_of,
@@ -212,6 +219,7 @@ from planner.plan import (
     unaligned_requirement,
     unstated_period_reductions,
     unstated_result_scopes,
+    unusable_definition,
     whole_of_fault,
     windowed_pin,
     windowed_pins,
@@ -241,6 +249,7 @@ from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, 
 from pydantic_core import to_jsonable_python
 from translator.discovery import (
     load_log,
+    narrowed_pin,
     requirement_open_roles,
     requirement_parties,
     requirement_revision,
@@ -404,13 +413,15 @@ class Admission:
     so nothing is written. `alignments` is every requirement the plan pins
     to a compile in place of the pin it states (`planner.plan.AlignedInput`),
     to replace those on record: they belong to this plan, so a fresh plan
-    holding none writes none.
+    holding none writes none. `pin_verdicts` are admission's verdicts on the
+    plan's pins (`_pin_verdicts`), to replace those on record.
     """
 
     plan: Plan
     rounds: int
     windowed_pins: tuple[WindowedPin, ...] | None
     alignments: tuple[AlignedInput, ...]
+    pin_verdicts: tuple[PinVerdict, ...]
 
 
 def submit(
@@ -518,8 +529,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     reads_user_words = reads_user_words or amendment_entry(view.state)
     question = proposal.question
     answer_mode = proposal.answer_mode
-    evidence_requirements = patch.evidence_requirements
-    removed_decisions = patch.removed_decisions
     removed_evidence_requirements = patch.removed_evidence_requirements
     existing = load_plan(view.state)
     referral = _authored_referral(view, existing)
@@ -538,10 +547,11 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
     # Alignments belong to the plan this call amends. A fresh plan states its own pins.
     held_alignments = alignments(view.state) if previous is not None else {}
-    if to_origin:
-        _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
+    patch = _unwindowed_patch(patch, to_origin)
+    removed_decisions = patch.removed_decisions
     evidence_requirements = [
-        unaligned_requirement(requirement, held_alignments) for requirement in evidence_requirements
+        unaligned_requirement(requirement, held_alignments)
+        for requirement in patch.evidence_requirements
     ]
     if previous is not None:
         previous = statement(previous, to_origin=to_origin, alignments=held_alignments)
@@ -858,8 +868,18 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             if split.copies
             else stated
         )
+        verdicts = _pin_verdicts(
+            materialized,
+            shown=pins,
+            compiled=aligned_pins(view.state),
+            recorded_warnings=compile_warnings(view.state),
+            entries=entries,
+        )
         plan, copies = _window_pins(
-            materialized, shown=on_record, definition_lookup=definition_lookup
+            materialized,
+            shown=on_record,
+            definition_lookup=definition_lookup,
+            narrowed={verdict.requirement_id for verdict in verdicts if verdict.narrowed},
         )
     except (ValidationError, ValueError) as exc:
         # The plan-level rules: unique slots and ids, every citation naming
@@ -910,6 +930,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         rounds=rounds,
         windowed_pins=tuple(copies) if copies or held_copies else None,
         alignments=tuple(entries.values()),
+        pin_verdicts=verdicts,
     )
 
 
@@ -3292,7 +3313,10 @@ def unwindowed(plan: Plan, to_origin: Mapping[str, str]) -> Plan:
     if not to_origin:
         return plan
     decisions, requirements = _unwindowed_pins(
-        plan.decisions, plan.evidence_requirements, to_origin
+        plan.decisions,
+        plan.evidence_requirements,
+        to_origin,
+        slots=_unwindowed_slots(to_origin),
     )
     return plan.model_copy(
         update={"decisions": tuple(decisions), "evidence_requirements": tuple(requirements)}
@@ -3303,11 +3327,15 @@ def _unwindowed_pins(
     decisions: Sequence[Decision],
     requirements: Sequence[EvidenceRequirement],
     to_origin: Mapping[str, str],
+    *,
+    slots: Mapping[str, str],
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
     """`decisions` and `requirements` with every pin of a windowed copy moved back to the pin it copies.
 
     `to_origin` maps each copy's spec_id to the pin it copies over another
-    period (`planner.plan.WindowedPin.windowed_from`).
+    period (`planner.plan.WindowedPin.windowed_from`), and `slots` each
+    slot written for a copy's pin to the one for the pin it copies
+    (`_unwindowed_slots`).
     `propose_plan` reasons about a pin by the spec_id the planner was shown,
     whatever period an earlier call recorded it over (`_window_pins`), so a
     patch and the plan it amends always agree on what they pin.
@@ -3327,11 +3355,43 @@ def _unwindowed_pins(
             if isinstance(requirement, DatasetRequirement)
             and (origin := to_origin.get(requirement.source_spec_id or ""))
         },
-        slots={
-            slot: moved
-            for copy, origin in to_origin.items()
-            for slot, moved in pin_slot_moves(copy, origin).items()
-        },
+        slots=slots,
+    )
+
+
+def _unwindowed_slots(to_origin: Mapping[str, str]) -> dict[str, str]:
+    """Each slot `propose_plan` may write for a pin of a windowed copy, mapped to the slot of the pin it copies (`planner.plan.pin_slot_moves`)."""
+    return {
+        slot: moved
+        for copy, origin in to_origin.items()
+        for slot, moved in pin_slot_moves(copy, origin).items()
+    }
+
+
+def _unwindowed_patch(patch: _Patch, to_origin: Mapping[str, str]) -> _Patch:
+    """`patch` with every pin of a windowed copy, and every slot code wrote for one, moved back to the pin it copies.
+
+    The planner reads the plan on record (`harness.plan_display.shown_plan`),
+    where `_window_pins` moved pins and slots to the copies. `admit` applies
+    the patch to the plan as `statement` gives it, where they name the pins
+    the planner stated. So a requirement's pin and citations
+    (`_unwindowed_pins`), a draft's slot, and a removed slot each move back
+    to the pin the copy was made from, and `_window_pins` moves them to the
+    copy again.
+    """
+    if not to_origin:
+        return patch
+    slots = _unwindowed_slots(to_origin)
+    _, requirements = _unwindowed_pins((), patch.evidence_requirements, to_origin, slots=slots)
+    return patch.model_copy(
+        update={
+            "decisions": [
+                draft.model_copy(update={"slot": slots.get(draft.slot, draft.slot)})
+                for draft in patch.decisions
+            ],
+            "evidence_requirements": requirements,
+            "removed_decisions": [slots.get(slot, slot) for slot in patch.removed_decisions],
+        }
     )
 
 
@@ -3411,6 +3471,47 @@ def _first_year_unknown_cause(exc: ValueError) -> RollingPlanError | None:
     return None
 
 
+def _no_source_on_record(
+    requirement_id: str, pin: str | None, *, shown: Mapping[str, PinSource]
+) -> RollingPlanError:
+    """The refusal of `requirement_id`, stating `period_end_open`, whose pin `pin` has no identity on record (`identity_on_record`).
+
+    Where the pin's block in `shown` carries a definition that cannot be put
+    on record (`planner.plan.unusable_definition`), the refusal names why,
+    and asks for fixed years: no pin of that dataset can be retrieved with
+    no end year. Otherwise no search recorded a definition of the pin, and
+    no block the session holds for it carries one.
+    """
+    source = shown.get(pin) if pin is not None else None
+    block = source.spec_block(pin) if source is not None and pin is not None else None
+    cause = unusable_definition(pin, block) if pin is not None and block is not None else None
+    if cause is not None:
+        message = (
+            f"{requirement_id!r} states `period_end_open`, which retrieves its dataset with "
+            f"no end year, and the definition of {pin} cannot be retrieved that way: {cause}. "
+            f"State fixed years for {requirement_id!r}: drop `period_end_open` and every "
+            "`rolling` reading it"
+        )
+    else:
+        stated = (
+            "pin a search result's `spec_id` as its `source_spec_id`"
+            if pin is None
+            else f"no search recorded a definition of {pin}, and no search result on record "
+            "carries one a retrieval can use, so pin a search result's `spec_id`"
+        )
+        message = (
+            f"{requirement_id!r} states `period_end_open`, which takes a dataset on record "
+            f"to retrieve with no end year: {stated}, or drop `period_end_open` and every "
+            "`rolling` reading it for fixed years"
+        )
+    return RollingPlanError(
+        RollingIssue.NEEDS_OPEN_PERIOD,
+        message,
+        requirement_ids=[requirement_id],
+        fault=OpenPeriodFault.NO_SOURCE_ON_RECORD,
+    )
+
+
 def _first_year_refusal(
     refused: RollingPlanError,
     *,
@@ -3435,18 +3536,9 @@ def _first_year_refusal(
     pin = refused.spec_id
     if (
         pin is None
-        or identity_on_record(pin, shown=shown, end_open=True, definition_lookup=definition_lookup)
-        is None
+        or identity_on_record(pin, shown=shown, definition_lookup=definition_lookup) is None
     ):
-        return RollingPlanError(
-            RollingIssue.NEEDS_OPEN_PERIOD,
-            f"{requirement_id!r} states `period_end_open`, which takes a dataset on "
-            "record to retrieve with no end year: pin a search result's `spec_id` as its "
-            "`source_spec_id`, or drop `period_end_open` and every `rolling` reading it "
-            "for fixed years",
-            requirement_ids=[requirement_id],
-            fault=OpenPeriodFault.NO_SOURCE_ON_RECORD,
-        )
+        return _no_source_on_record(requirement_id, pin, shown=shown)
     history = _first_year_on_record(pin, shown=shown, read=read)
     if history is None and pin in read:
         return RollingPlanError(
@@ -3503,34 +3595,87 @@ def _open_window(
     return open_window(first_year)
 
 
+def first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | None:
+    """The identity a first-year read of `pin` reads; `None` when none is on record.
+
+    It is on record as `admit` finds it: the blocks `state` holds
+    (`planner.plan.held_sources`) and the discovery log's definitions
+    (`translator.discovery.DiscoveryLog.recorded_definition`).
+    """
+    recorded = identity_on_record(
+        pin,
+        shown=held_sources(state),
+        definition_lookup=load_log(state).recorded_definition,
+    )
+    return recorded.identity if recorded is not None else None
+
+
 def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
-    """The identity of each dataset the planner was shown whose first year `propose_plan`
-    can still read in `state`.
+    """The identity of each dataset on record whose first year `propose_plan`
+    can still read in `state`, read through the lookups `first_year_identity` reads.
 
     `propose_plan` reads a pinned dataset's first year
     (`planner.agent.read_full_history`) when a requirement rolls from its start and
     nothing on record states that year (`_first_year_refusal`), once per dataset. Which dataset
-    it reads depends on the plan, so this is every dataset the planner was shown
-    (`planner.plan.pin_sources`) that has an identity on record, has not been read, and
-    whose block states no first year.
+    it reads depends on the plan, so this is every dataset whose block `state` holds
+    (`planner.plan.held_sources`) that has an identity on record
+    (`first_year_identity`), has not been read, and whose block states no first year.
     """
-    shown = pin_sources(state)
+    held = held_sources(state)
     read = full_histories(state)
+    definition_lookup = load_log(state).recorded_definition
     reads = []
-    for pin in shown:
-        if pin in read or _first_year_on_record(pin, shown=shown, read=read) is not None:
+    for pin in held:
+        if pin in read or _first_year_on_record(pin, shown=held, read=read) is not None:
             continue
-        recorded = identity_on_record(pin, shown=shown, end_open=True)
+        recorded = identity_on_record(pin, shown=held, definition_lookup=definition_lookup)
         if recorded is not None:
             reads.append(recorded.identity)
     return reads
 
 
+def _pin_verdicts(
+    plan: Plan,
+    *,
+    shown: Mapping[str, PinSource],
+    compiled: Sequence[AlignedPin],
+    recorded_warnings: Mapping[CompileKey, tuple[str, ...]],
+    entries: Mapping[str, AlignedInput],
+) -> tuple[PinVerdict, ...]:
+    """The verdict on the pin of each pinned dataset requirement of `plan` (`planner.plan.PinVerdict`).
+
+    A pin answers a narrower question than the one asked when its record
+    says so (`translator.discovery.narrowed_pin`): the compile `entries`
+    pinned its requirement to among `compiled`, by the codes
+    `recorded_warnings` holds for it (`planner.plan.compile_warnings`), else
+    the search part it was shown from among `shown`
+    (`planner.plan.pin_sources`), else the compiles answered as it.
+    `_window_pins` moves no such pin, and the translator reads the verdict
+    recorded with the plan, so the two never disagree.
+    """
+    return tuple(
+        PinVerdict(
+            requirement_id=requirement.id,
+            spec_id=requirement.source_spec_id,
+            narrowed=narrowed_pin(
+                requirement.source_spec_id,
+                entry=aligned_entry(requirement, entries),
+                shown=shown,
+                compiled=compiled,
+                recorded=recorded_warnings,
+            ),
+        )
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
+    )
+
+
 def _window_pins(
     plan: Plan,
     *,
-    shown: Mapping[str, PinSource] = {},
-    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+    shown: Mapping[str, PinSource],
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None,
+    narrowed: Collection[str],
 ) -> tuple[Plan, list[WindowedPin]]:
     """`plan` with each pin whose identity is on record moved to that identity over the requirement's own period.
 
@@ -3546,16 +3691,30 @@ def _window_pins(
     (`planner.plan.recorded_identity`), else the one `definition_lookup`
     answers, the discovery log's
     (`translator.discovery.DiscoveryLog.recorded_definition`) under
-    `admit`. One of a `latest` window is copied
-    like any other: the copy replaces the window whole, as `get_data`'s
-    scope surgery does, and the translator confirms the copy through Search
-    before it is retrieved.
+    `admit`, else the one the pin's block in `shown` carries, which is how a
+    pin compiled in code is on record (`planner.plan.identity_on_record`).
+    One of a `latest` window is copied like any other: the copy replaces the
+    window whole, as `get_data`'s scope surgery does, and the translator
+    confirms the copy through Search before it is retrieved.
+
+    The pin of a requirement in `narrowed` answers a narrower question than
+    the one asked (`_pin_verdicts`) and keeps its own window, since the
+    translator honours no copy of it and searches. Such a pin costs no
+    refusal for an identity it lacks.
+
+    A copy whose spec_id is itself a dataset on record in `shown`, the
+    same identity over the requirement's period, is that dataset: the
+    requirement pins it, and it is recorded as no copy, so no later
+    proposal reads it as the pin it was copied from. A decision is moved to
+    a copy's slots only where no other decision holds them or moves to
+    them, so two pins of one dataset over two windows never share a slot.
 
     A requirement stating `period_end_open` is pinned to that identity over
     a range with no end year (`_open_window`), which apis ends at the
     current year at every mint, so its retrieval reaches years published
-    after the plan. `shown` are the datasets the planner was shown this
-    entry (`planner.plan.pin_sources`). A pinned one needs an identity on
+    after the plan. `shown` are the blocks on record: the datasets the
+    planner was shown this entry and each compiled pin
+    (`planner.plan.held_sources`). A pinned one needs an identity on
     record (`identity_on_record`). An unpinned one is searched for from its
     first year on (`translator.discovery`), and Search answers with a
     definition that has no end year; plan validation refuses one the plan
@@ -3579,32 +3738,25 @@ def _window_pins(
     """
     whole_history = split_of(plan).whole_history
     pinning: dict[str, str] = {}
-    copies: dict[str, WindowedPin | None] = {}
+    retrieved: dict[str, str] = {}
+    minted: dict[str, WindowedPin] = {}
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement):
             continue
         pin = requirement.source_spec_id
-        recorded = (
-            identity_on_record(
+        if pin is None or requirement.id in narrowed:
+            continue
+        recorded = identity_on_record(pin, shown=shown, definition_lookup=definition_lookup)
+        if recorded is None:
+            if requirement.period_end_open:
+                raise _no_source_on_record(requirement.id, pin, shown=shown)
+            # The pin keeps its own window. The translator honours its block
+            # where that covers the requirement's period, and searches otherwise.
+            logger.debug(
+                "pin not windowed, no identity on record: requirement=%s pin=%s",
+                requirement.id,
                 pin,
-                shown=shown,
-                end_open=requirement.period_end_open,
-                definition_lookup=definition_lookup,
             )
-            if pin is not None
-            else None
-        )
-        if requirement.period_end_open and pin is not None and recorded is None:
-            raise RollingPlanError(
-                RollingIssue.NEEDS_OPEN_PERIOD,
-                f"{requirement.id!r} states `period_end_open`, which takes a dataset on "
-                "record to retrieve with no end year: pin a search result's `spec_id` as its "
-                "`source_spec_id`, or drop `period_end_open` and every `rolling` reading it "
-                "for fixed years",
-                requirement_ids=[requirement.id],
-                fault=OpenPeriodFault.NO_SOURCE_ON_RECORD,
-            )
-        if pin is None or recorded is None:
             continue
         pinning[requirement.id] = pin
         if requirement.period_end_open:
@@ -3612,17 +3764,19 @@ def _window_pins(
         else:
             window = period_window(requirement.period)
         if recorded.identity.get("requested_window") == window:
-            copies[requirement.id] = None
-        else:
-            copies[requirement.id] = windowed_pin(pin, recorded, window)
+            retrieved[requirement.id] = pin
+            continue
+        copy = windowed_pin(pin, recorded, window)
+        retrieved[requirement.id] = copy.spec_id
+        # A copy that is a dataset on record is that dataset, not a copy.
+        if copy.spec_id not in shown:
+            minted.setdefault(copy.spec_id, copy)
     targets: dict[str, set[str]] = {}
     for requirement in plan.evidence_requirements:
-        if requirement.id not in copies:
+        if requirement.id not in retrieved:
             continue
-        copy = copies[requirement.id]
-        target = pinning[requirement.id] if copy is None else copy.spec_id
         for slot in requirement.decision_ids:
-            targets.setdefault(slot, set()).add(target)
+            targets.setdefault(slot, set()).add(retrieved[requirement.id])
     origins = set(pinning.values())
     decision_pins: dict[str, str] = {}
     slots: dict[str, str] = {}
@@ -3639,15 +3793,22 @@ def _window_pins(
                 slots[decision.slot] = pin_slot_moves(pin, decision_pins[decision.slot])[
                     decision.slot
                 ]
+    held_slots = {decision.slot for decision in plan.decisions} - slots.keys()
+    taken = Counter(slots.values())
+    for slot, target in list(slots.items()):
+        # Two pins of one dataset over two windows move to one copy, or one to
+        # the other: each decision keeps its pin and slot, and each
+        # requirement its own pin.
+        if target in held_slots or taken[target] > 1:
+            del slots[slot]
+            del decision_pins[slot]
     requirement_pins = {
-        requirement_id: copy.spec_id for requirement_id, copy in copies.items() if copy is not None
+        requirement_id: target
+        for requirement_id, target in retrieved.items()
+        if target != pinning[requirement_id]
     }
     if not requirement_pins and not decision_pins:
         return plan, []
-    recorded_copies: dict[str, WindowedPin] = {}
-    for copy in copies.values():
-        if copy is not None:
-            recorded_copies.setdefault(copy.spec_id, copy)
     decisions, requirements = _repinned(
         plan.decisions,
         plan.evidence_requirements,
@@ -3658,7 +3819,7 @@ def _window_pins(
     moved = plan.model_copy(
         update={"decisions": tuple(decisions), "evidence_requirements": tuple(requirements)}
     )
-    return Plan.model_validate(moved.model_dump()), list(recorded_copies.values())
+    return Plan.model_validate(moved.model_dump()), list(minted.values())
 
 
 def _measure_decisions(
@@ -4284,10 +4445,19 @@ _PROVIDER_ALIGNED = (
 _SECTOR_AXIS = "sector"
 
 
-def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
-    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`)."""
+def save_aligned_pin(state: SessionState, pin: AlignedPin, *, warnings: tuple[str, ...]) -> None:
+    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`),
+    with `warnings`, its origin's codes when it was compiled
+    (`planner.plan.compile_warnings`), empty included."""
     kept = [held for held in aligned_pins(state) if held.key != pin.key]
     state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
+    recorded = {**compile_warnings(state), pin.key: warnings}
+    state[ALIGNED_PIN_WARNINGS_STATE_KEY] = [
+        CompileWarnings(
+            origin=origin, option_ids=option_ids, whole_axis=whole_axis, warnings=codes
+        ).model_dump(mode="json")
+        for (origin, option_ids, whole_axis), codes in recorded.items()
+    ]
 
 
 # The session slot holding each search code made for a calculation's input

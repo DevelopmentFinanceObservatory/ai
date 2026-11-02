@@ -4,7 +4,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 153415,
+      "total_chars": 153450,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 41163,
       "declarations": [
@@ -30,12 +30,12 @@
         }
       ],
       "contents": {
-        "total_chars": 87537,
+        "total_chars": 87572,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 87532
+            "chars": 87567
           },
           {
             "bucket": "text",
@@ -49,7 +49,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 187028,
+      "total_chars": 187063,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 41163,
       "declarations": [
@@ -75,12 +75,12 @@
         }
       ],
       "contents": {
-        "total_chars": 120258,
+        "total_chars": 120293,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 87532
+            "chars": 87567
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -104,7 +104,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 188394,
+      "total_chars": 188429,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 41163,
       "declarations": [
@@ -130,12 +130,12 @@
         }
       ],
       "contents": {
-        "total_chars": 120732,
+        "total_chars": 120767,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 87532
+            "chars": 87567
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -169,7 +169,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 71544,
+      "total_chars": 71579,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 41163,
       "declarations": [
@@ -195,12 +195,12 @@
         }
       ],
       "contents": {
-        "total_chars": 7622,
+        "total_chars": 7657,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 7617
+            "chars": 7652
           },
           {
             "bucket": "text",
@@ -214,7 +214,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 105157,
+      "total_chars": 105192,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 41163,
       "declarations": [
@@ -240,7 +240,7 @@
         }
       ],
       "contents": {
-        "total_chars": 40343,
+        "total_chars": 40378,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -250,7 +250,7 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 7617
+            "chars": 7652
           },
           {
             "bucket": "functionCall:get_skill",
@@ -269,7 +269,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 107064,
+      "total_chars": 107099,
       "system_instruction_chars": 20138,
       "declaration_total_chars": 41163,
       "declarations": [
@@ -295,7 +295,7 @@
         }
       ],
       "contents": {
-        "total_chars": 41358,
+        "total_chars": 41393,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -305,7 +305,7 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 7617
+            "chars": 7652
           },
           {
             "bucket": "functionResponse:propose_plan",

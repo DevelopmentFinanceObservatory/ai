@@ -943,6 +943,45 @@ async def test_search_stores_a_reading_for_every_part_and_warnings_for_every_spe
     assert set(ctx.state["orchestrator:specs"]) == {ROLE_OPEN_ID, SPEC_LIFE}
 
 
+DROPPED_ROLE = {"code": "role_text_not_recognised", "severity": "degraded", "message": "role"}
+
+
+@pytest.mark.parametrize(
+    ("settled_with", "offered_with"),
+    [([], [DROPPED_ROLE]), ([DROPPED_ROLE], [])],
+    ids=["settled-clean", "settled-narrowed"],
+)
+def test_a_search_offering_a_settled_spec_as_a_candidate_keeps_its_block_and_warnings(
+    settled_with: list[dict[str, str]], offered_with: list[dict[str, str]]
+) -> None:
+    """A search settles on education aid to Kenya, and a later one offers the same
+    spec_id among its candidates under other warnings. The block and warnings of the
+    search that settled on it stand for the spec_id."""
+    state: dict[str, Any] = {}
+    settled = {
+        "status": "definite",
+        "variable_text": "education aid",
+        "warnings": settled_with,
+        "spec": copy.deepcopy(ROLE_OPEN_SPEC),
+    }
+    store_search(state, resolver_digest({"status": "definite", "parts": [settled]}))
+    block = copy.deepcopy(state["orchestrator:specs"][ROLE_OPEN_ID])
+    offered = copy.deepcopy(ROLE_OPEN_SPEC)
+    offered["resolved"]["rendered_sentence"] = "aid offered in its place"
+    candidates = {
+        "status": "candidates",
+        "variable_text": "aid",
+        "warnings": offered_with,
+        "candidates": {"specs": [offered, SINGLE_BLOCK]},
+    }
+
+    store_search(state, resolver_digest({"status": "candidates", "parts": [candidates]}))
+
+    assert state["orchestrator:specs"][ROLE_OPEN_ID] == block
+    assert state["orchestrator:spec_warnings"][ROLE_OPEN_ID] == settled_with
+    assert state["orchestrator:spec_warnings"][SPEC_LIFE] == offered_with
+
+
 async def test_search_shows_no_year_counts_of_a_part_searched_for_the_latest_period():
     envelope = _recorded_envelope()
     spec = envelope["parts"][0]["spec"]

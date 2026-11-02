@@ -35,7 +35,7 @@ from compiler.compile import CompileIssueCode, compile_plan
 from compiler.sources import PROVIDER_ACCOUNT, DiscoveryStatus, source_from_spec_block
 from compiler.surface import FixtureSurface, McpSurface, ToolCallResult, ToolSurface
 from data_mcp.definition_store import InMemoryDefinitionStore, canonicalize, spec_id_for
-from data_mcp.definition_writes import windowed_identity
+from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -140,6 +140,7 @@ from planner.plan import (
     WindowedPin,
     aligned_pins,
     clear_unsupported,
+    compile_warnings,
     current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
@@ -151,6 +152,7 @@ from planner.plan import (
     load_plan_rounds,
     load_unsupported,
     open_window,
+    period_window,
     pin_slot_moves,
     pin_sources,
     plan_revision,
@@ -165,6 +167,7 @@ from planner.plan import (
     search_pin_slot,
     split_of,
     stored_plan,
+    unusable_definition,
     windowed_pins,
 )
 from planner.records import (
@@ -211,6 +214,7 @@ from submission.service import (
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
+    _window_pins,
     first_year_reads,
     identity_on_record,
     save_aligned_pin,
@@ -4151,6 +4155,22 @@ _GROSS = _FRANCE_KENYA["spec_id"]
 _NET = _FRANCE_KENYA["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
 
 
+def _over_period(block: dict[str, Any], period: Period) -> str:
+    """The spec_id a requirement over `period` pins in place of `block`'s.
+
+    A shown block whose identity hashes to its spec_id is on record, so a pin of
+    it moves to its definition over `period` (`submission.service._window_pins`).
+    That is the spec_id itself when the definition is over `period` already.
+    Computed from the block's own identity, with no call to the code under test,
+    so a block production fails to put on record fails the test that expects it
+    windowed.
+    """
+    identity = block["definition"]["identity"]
+    assert spec_id_for(canonicalize(identity)) == block["spec_id"], "the block is not on record"
+    spec_id, _ = windowed_identity(identity, period_window(period))
+    return spec_id
+
+
 def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET)) -> list[Any]:
     """The orchestrator's `ask_user` on how to count the aid, through the clarify
     interrupt, each option offered under `offered`, and the user's pick of `picked`."""
@@ -4278,7 +4298,9 @@ def test_a_pin_of_an_aid_measure_states_how_the_flow_is_counted(
     assert result["outcome"] == Outcome.OK.value, result
     plan = load_plan(ctx.state)
     assert plan is not None
-    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == pin]
+    # Only the shown block's own pin has an identity on record, so only it moves to a copy.
+    pinned = _over_period(_FRANCE_KENYA, dataset.period) if pin == _GROSS else pin
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == pinned]
     assert measure.options == ("gross disbursements", "net disbursements")
     assert (measure.chosen, measure.resolved_by) == (chosen, resolved_by)
     assert measure in shown_decisions(plan)
@@ -4374,7 +4396,8 @@ def test_a_pick_after_the_plan_pinned_the_measure_makes_its_decision_the_users(
     assert second["outcome"] == Outcome.OK.value, second
     plan = load_plan(ctx.state)
     assert plan is not None
-    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == _GROSS]
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == copied]
     assert (measure.chosen, measure.resolved_by) == ("gross disbursements", ResolvedBy.USER)
 
 
@@ -4572,7 +4595,8 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
     assert first["outcome"] == Outcome.OK.value
     plan = load_plan(ctx.state)
     assert plan is not None
-    synthesized = next(d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == _GROSS)
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
+    synthesized = next(d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == copied)
 
     second = tools["propose_plan"].func(
         question="q",
@@ -4586,7 +4610,7 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
     assert second["outcome"] == Outcome.OK.value
     amended = load_plan(ctx.state)
     assert amended is not None
-    assert [d.slot for d in amended.decisions if d.fixes and d.fixes.source_spec_id == _GROSS] == [
+    assert [d.slot for d in amended.decisions if d.fixes and d.fixes.source_spec_id == copied] == [
         synthesized.slot
     ]
     assert synthesized.slot in amended.requirement(dataset.id).decision_ids
@@ -4650,11 +4674,12 @@ def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
     assert result["outcome"] == Outcome.OK.value, result
     plan = load_plan(ctx.state)
     assert plan is not None
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
     scoped = [d for d in plan.decisions if is_scope_choice(d)]
     assert [d.slot for d in plan.decisions] == [
         "measure",
-        search_pin_slot(_GROSS),
-        *(scope_choice_slot(_GROSS, axis) for axis in axes),
+        search_pin_slot(copied),
+        *(scope_choice_slot(copied, axis) for axis in axes),
     ]
     assert [(d.chosen, d.resolved_by) for d in scoped] == [
         ("health (CRS 120)", ResolvedBy.USER),
@@ -4670,7 +4695,7 @@ def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
     ][: len(axes)]
     assert plan.requirement(dataset.id).decision_ids == (
         "measure",
-        search_pin_slot(_GROSS),
+        search_pin_slot(copied),
         *(d.slot for d in scoped),
     )
     assert set(scoped) <= set(shown_decisions(plan))
@@ -4695,7 +4720,8 @@ def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_
         tool_context=ctx,
     )
     assert first["outcome"] == Outcome.OK.value, first
-    scope_slots = tuple(scope_choice_slot(_GROSS, axis) for axis in ("sector", "region"))
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
+    scope_slots = tuple(scope_choice_slot(copied, axis) for axis in ("sector", "region"))
 
     second = tools["propose_plan"].func(
         evidence_requirements=[
@@ -4708,7 +4734,7 @@ def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_
     assert second["outcome"] == Outcome.OK.value, second
     plan = load_plan(ctx.state)
     assert plan is not None
-    assert search_pin_slot(_GROSS) in plan.requirement(dataset.id).decision_ids
+    assert search_pin_slot(copied) in plan.requirement(dataset.id).decision_ids
 
 
 def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
@@ -4739,12 +4765,13 @@ def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
     plan = load_plan(ctx.state)
     assert plan is not None
     assert len(plan.decisions) == MAX_PLAN_DECISIONS
+    copied = _over_period(_FRANCE_KENYA, dataset.period)
     assert [d.slot for d in plan.decisions if is_scope_choice(d)] == [
-        scope_choice_slot(_GROSS, "sector")
+        scope_choice_slot(copied, "sector")
     ]
     assert plan.requirement(dataset.id).decision_ids[-2:] == (
-        search_pin_slot(_GROSS),
-        scope_choice_slot(_GROSS, "sector"),
+        search_pin_slot(copied),
+        scope_choice_slot(copied, "sector"),
     )
 
 
@@ -6226,15 +6253,16 @@ _BASE_ALIGNED_PIN_FIELDS = frozenset({"origin", "option_ids", "spec_id", "digest
 
 
 @pytest.mark.parametrize(
-    ("code", "compiled", "searched_first", "admitted"),
+    ("code", "compiled", "searched_first", "admitted", "warned"),
     [
-        (None, False, False, False),
-        ("open_role_unavailable", False, False, False),
-        ("open_role_unavailable", False, True, False),
-        ("upstream_version_changed", False, True, False),
-        ("upstream_version_changed", False, False, True),
-        ("upstream_version_changed", True, True, False),
-        ("upstream_version_changed", True, False, True),
+        (None, False, False, False, False),
+        ("open_role_unavailable", False, False, False, False),
+        ("open_role_unavailable", False, True, False, False),
+        ("upstream_version_changed", False, True, False, False),
+        ("upstream_version_changed", False, False, True, False),
+        ("upstream_version_changed", True, True, False, False),
+        ("upstream_version_changed", True, False, True, False),
+        ("upstream_version_changed", True, False, True, True),
     ],
     ids=[
         "stored-bare",
@@ -6244,6 +6272,7 @@ _BASE_ALIGNED_PIN_FIELDS = frozenset({"origin", "option_ids", "spec_id", "digest
         "searched-after-refusal",
         "compile-served-from-before-refusal",
         "compiled-after-refusal",
+        "compiled-from-a-warned-part-after-refusal",
     ],
 )
 async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_refused(
@@ -6252,6 +6281,7 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
     compiled: bool,
     searched_first: bool,
     admitted: bool,
+    warned: bool,
 ) -> None:
     """Search settles the unpinned US total on a spec_id the executor refused in
     this entry, or on a total the compile then moves to the health aid's gross
@@ -6261,9 +6291,16 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
     Search is asked after the refusal, and refused when an earlier entry's
     search and compile from before the refusal (`searched_first`) are served
     instead. Every pin and refusal is stored in the shape a build reading only
-    the base fields loads."""
+    the base fields loads, a compile from a search part that dropped the roles
+    asked (`warned`) included."""
     surface = (
-        BasisCompiles()
+        BasisCompiles(
+            searched={
+                "status": "definite",
+                "spec": basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+                "warnings": [{"code": "role_text_not_recognised"}] if warned else [],
+            }
+        )
         if compiled
         else BasisCompiles(
             searched={
@@ -6302,6 +6339,9 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
         assert set(raw) <= _BASE_SEARCHED_PIN_FIELDS
     for raw in ctx.state.get(ALIGNED_PINS_STATE_KEY) or ():
         assert set(raw) <= _BASE_ALIGNED_PIN_FIELDS
+    if warned:
+        (held,) = aligned_pins(ctx.state)
+        assert compile_warnings(ctx.state)[held.key] == ("role_text_not_recognised",)
     if admitted:
         assert result["outcome"] == Outcome.OK.value, result
         return
@@ -6680,7 +6720,9 @@ def test_an_amendment_restating_a_measure_beside_no_second_flow_decision_is_reco
     recorded = load_plan(ctx.state)
     assert recorded is not None
     if code_slot:
-        restated = next(d for d in recorded.decisions if d.slot == search_pin_slot(_GROSS))
+        # The planner reads the slot on record, the windowed copy's (`shown_plan`).
+        slot = search_pin_slot(_over_period(_FRANCE_KENYA, dataset.period))
+        restated = next(d for d in recorded.decisions if d.slot == slot)
     else:
         _show_block(ctx, _FRANCE_KENYA)
         restated = first_decision
@@ -6698,6 +6740,46 @@ def test_an_amendment_restating_a_measure_beside_no_second_flow_decision_is_reco
         "measure",
         *([search_pin_slot(_GROSS)] if code_slot else []),
     ]
+
+
+@pytest.mark.parametrize("named_by", ["copy", "original_pin"])
+def test_an_amendment_removing_a_windowed_pins_decision_by_its_recorded_slot_is_recorded(
+    decision: DecisionFactory, requirements: RequirementPair, named_by: str
+) -> None:
+    """The plan on record, and the digest the planner reads it from, name a
+    windowed pin's decision by its copy's slot. An amendment that unpins the
+    requirement and removes that decision, by the slot it was shown or by the
+    slot of the pin the planner stated, removes the decision the planner stated."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[pinned, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    copy_slot = search_pin_slot(_over_period(_FRANCE_KENYA, dataset.period))
+    assert copy_slot != search_pin_slot(_GROSS)
+    assert copy_slot in {d.slot for d in recorded.decisions}
+
+    amended = tools["propose_plan"].func(
+        evidence_requirements=[dataset],
+        removed_decisions=[copy_slot if named_by == "copy" else search_pin_slot(_GROSS)],
+        amends_version=recorded.version,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.slot for d in plan.decisions] == ["measure"]
 
 
 def test_a_stored_decision_over_a_pins_flow_count_loads_and_stands_through_an_amendment(
@@ -7546,6 +7628,7 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
             spec_id=inclusive["spec_id"],
             digest={},
         ),
+        warnings=(),
     )
 
     result = await _us_2023(
@@ -9908,7 +9991,11 @@ async def test_a_dac_donor_whole_reads_searchs_answer_for_it(
 
     assert result["outcome"] == Outcome.OK.value, result
     whole_pin = surface.recorded["whole"]["spec_id"]
-    assert _pins(ctx) == [(_PART, block["spec_id"]), (_WHOLE, whole_pin)]
+    year = Period(start=2023, end=2023)
+    assert _pins(ctx) == [
+        (_PART, _over_period(block, year)),
+        (_WHOLE, _over_period(surface.recorded["whole"], year)),
+    ]
     whole_block = held_sources(ctx.state)[whole_pin].spec_block(whole_pin)
     assert whole_block is not None
     held = reading_facts(whole_block)["scope"]["dropped_entries"]
@@ -9950,7 +10037,8 @@ async def test_a_donor_whole_names_on_its_opened_side_only_the_total_search_boun
 
     if not refused:
         assert result["outcome"] == Outcome.OK.value, result
-        assert dict(_pins(ctx))[_WHOLE] == surface.recorded["whole"]["spec_id"]
+        year = Period(start=2023, end=2023)
+        assert dict(_pins(ctx))[_WHOLE] == _over_period(surface.recorded["whole"], year)
         return
     assert result["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, result
     assert result["detail"]["whole"]["cause"] == "whole_names_another_total"
@@ -10837,7 +10925,9 @@ def test_two_sides_never_read_one_series(
         ]
         return
     assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == [(rid, block["spec_id"]) for rid, block in blocks.items()]
+    assert _pins(ctx) == [
+        (rid, _over_period(block, Period(start=2019, end=2019))) for rid, block in blocks.items()
+    ]
     plan = load_plan(ctx.state)
     assert plan is not None
     differ = {d.slot for d in plan.decisions if d.caveat == "providers_differ"}
@@ -10909,6 +10999,7 @@ def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
             spec_id=compile_block["spec_id"],
             digest={"spec_block": compile_block},
         ),
+        warnings=(),
     )
 
     result = _tools_by_name()["propose_plan"].func(
@@ -10924,7 +11015,11 @@ def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
     )
 
     assert result["outcome"] == Outcome.OK.value, result
-    assert _pins(ctx) == [("first", numerator["spec_id"]), ("second", _US_TOTAL["spec_id"])]
+    year = Period(start=2019, end=2019)
+    assert _pins(ctx) == [
+        ("first", _over_period(numerator, year)),
+        ("second", _over_period(_US_TOTAL, year)),
+    ]
     plan = load_plan(ctx.state)
     assert plan is not None
     differ = {d.slot for d in plan.decisions if d.caveat == "providers_differ"}
@@ -11681,6 +11776,50 @@ def _propose_gdp(
         amends_version=amends_version,
         tool_context=ctx,
     )
+
+
+@pytest.mark.usefixtures("gdp_on_record")
+def test_two_pins_of_one_dataset_over_one_period_keep_their_own_decisions(
+    decision: DecisionFactory, requirement: Callable[..., DatasetRequirement]
+) -> None:
+    """One requirement pins Guatemala's GDP over every year, the other the same
+    dataset over 1960-2024, both read over 1960-2024, each with the measure decision
+    code wrote for its pin. The first's copy over 1960-2024 is the second's dataset,
+    so both pin that dataset and no copy is recorded, and each decision keeps its pin
+    and slot."""
+    every, period = _GDP_ALL["spec_id"], _GDP_1960_2024["spec_id"]
+    pins = (every, period)
+    plan = Plan(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=[
+            decision(),
+            *(
+                decision(slot=search_pin_slot(pin), fixes=DecisionFixes(source_spec_id=pin))
+                for pin in pins
+            ),
+        ],
+        evidence_requirements=[
+            requirement(
+                id=f"gdp_{index}",
+                source_spec_id=pin,
+                period=Period(start=1960, end=2024),
+                decision_ids=["measure", search_pin_slot(pin)],
+            )
+            for index, pin in enumerate(pins)
+        ],
+    )
+    shown = {pin: PinSource(settled=True) for pin in pins}
+
+    windowed, minted = _window_pins(plan, shown=shown, definition_lookup=None, narrowed=())
+
+    assert minted == []
+    assert [
+        (r.source_spec_id, r.decision_ids)
+        for r in windowed.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [(period, ("measure", search_pin_slot(pin))) for pin in pins]
+    assert windowed.decisions == plan.decisions
 
 
 def _source_pin(plan: Plan | None) -> str | None:
@@ -12811,6 +12950,7 @@ async def test_a_part_alignment_moves_is_held_to_the_user_s_prices(
             spec_id=inclusive["spec_id"],
             digest={},
         ),
+        warnings=(),
     )
     ctx.session.events = _prices_ask_events(part=health["spec_id"])
     extra = [
@@ -12901,6 +13041,7 @@ def test_a_direct_pin_of_an_unshown_compile_is_held_to_the_user_s_prices(
             spec_id=compiled["spec_id"],
             digest={"spec_block": compiled},
         ),
+        warnings=(),
     )
     ctx.session.events = _prices_ask_events()
     dataset, derived = requirements
@@ -16344,6 +16485,64 @@ def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_ope
     assert load_plan(ctx.state) is None
 
 
+@pytest.mark.parametrize(
+    ("warnings", "past_cap", "refused"),
+    [((), False, True), (("role_text_not_recognised",), False, False), ((), True, True)],
+    ids=["clean", "narrower", "identity-past-cap"],
+)
+def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    warnings: tuple[str, ...],
+    past_cap: bool,
+    refused: bool,
+) -> None:
+    """A requirement rolling at its end pins a dataset the planner was shown with no
+    block, whose definition no search recorded. Shown from a clean search part, the
+    plan is refused: nothing on record can be retrieved with no end year. Shown from
+    one that dropped the roles asked, the translator searches for the requirement
+    whatever its pin (`translator.discovery.narrowed_pin`), so the plan is recorded
+    with the pin as written. Shown with a block whose identity is past
+    `MAX_IDENTITY_BYTES`, the refusal names that cause
+    (`planner.plan.unusable_definition`)."""
+    ctx = _FakeToolContext()
+    pin, block = _AID_SPEC, None
+    if past_cap:
+        fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+        block = json.loads(fixture.read_text())["spec"]
+        identity = block["definition"]["identity"]
+        identity["padding"] = "x" * MAX_IDENTITY_BYTES
+        pin = block["spec_id"] = spec_id_for(canonicalize(identity))
+    save_pin_sources(ctx.state, {pin: PinSource(block=block, settled=True, warnings=warnings)})
+    dataset = requirement(source_spec_id=pin, period_end_open=True)
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT)]),
+        evidence_requirements=[
+            dataset,
+            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_ITS_END),
+        ],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert _rolling_issue(result) == (
+            "rolling_needs_open_period",
+            "no_source_on_record",
+            [dataset.id],
+        )
+        if block is not None:
+            cause = unusable_definition(pin, block)
+            assert cause is not None
+            assert cause in result["message"]
+        return
+    assert result["outcome"] == Outcome.OK.value, result
+    assert _source_pin(load_plan(ctx.state)) == pin
+    assert windowed_pins(ctx.state) == {}
+
+
 def test_an_unpinned_period_rolling_at_its_end_is_recorded_for_the_translator_to_search(
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
@@ -17121,6 +17320,22 @@ def aid_held(request: pytest.FixtureRequest) -> str:
     return request.param
 
 
+def _discover_aid(ctx: _FakeToolContext) -> None:
+    """Record the 2020-2024 education aid in discovery's log, as a source it found."""
+    found = DiscoveryRecord(
+        revision="earlier",
+        tool="search",
+        requirement_id="aid",
+        requirement_key="earlier",
+        status=DiscoveryStatus.DEFINITE,
+        spec_ids=(_AID_2020_2024_SPEC,),
+    )
+    aid = SelectedSource(
+        spec_id=_AID_2020_2024_SPEC, sentence="aid", has_data=True, identity=_AID_2020_2024
+    )
+    save_log(ctx.state, load_log(ctx.state).with_record(found, (aid,)))
+
+
 async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
@@ -17134,18 +17349,7 @@ async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     propose = _tools_reading(reads)["propose_plan"].func
     ctx = _FakeToolContext()
     if aid_held == "discovered":
-        found = DiscoveryRecord(
-            revision="earlier",
-            tool="search",
-            requirement_id="aid",
-            requirement_key="earlier",
-            status=DiscoveryStatus.DEFINITE,
-            spec_ids=(_AID_2020_2024_SPEC,),
-        )
-        aid = SelectedSource(
-            spec_id=_AID_2020_2024_SPEC, sentence="aid", has_data=True, identity=_AID_2020_2024
-        )
-        save_log(ctx.state, load_log(ctx.state).with_record(found, (aid,)))
+        _discover_aid(ctx)
     dataset = requirement(
         source_spec_id=_AID_2020_2024_SPEC,
         period=Period(start=2020, end=2024),
@@ -17185,16 +17389,19 @@ async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     assert plan.evidence_requirements[0].source_spec_id == opened  # type: ignore[union-attr]
 
 
-@pytest.mark.usefixtures("aid_on_record")
 async def test_first_year_reads_name_each_read_propose_plan_can_still_make(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
+    aid_held: str,
 ) -> None:
     """Of two datasets the planner was shown, the one whose block states its first year
     needs no read. The other is the read `propose_plan` then makes, and once made it is
-    no longer one."""
+    no longer one. A dataset only discovery found is on record in its log, and is
+    named the same way."""
     reads = _DefinitionReads()
     ctx = _FakeToolContext()
+    if aid_held == "discovered":
+        _discover_aid(ctx)
     stated = _every_year_block(_GDP_ALL["identity"], first_year=1960, rows=65)
     save_pin_sources(
         ctx.state,
@@ -17259,33 +17466,37 @@ def test_propose_plan_declares_the_same_arguments_with_and_without_a_surface() -
     assert declared[0] == declared[1]
 
 
-def test_a_pin_read_from_the_block_the_planner_was_shown_keeps_its_set() -> None:
-    # A requirement with no end year pins a dataset over Africa's countries from
-    # the block it was shown; the copy over its window posts Africa again.
+@pytest.mark.parametrize(
+    ("change", "groups"),
+    [("none", [("Africa", "africa")]), ("unknown-class", None), ("past-cap", None)],
+    ids=["shown", "set-of-unknown-class", "identity-past-cap"],
+)
+def test_a_shown_block_puts_its_identity_and_sets_on_record(
+    change: str, groups: list[tuple[str, str]] | None
+) -> None:
+    """A requirement with no end year pins a dataset over Africa's countries from the
+    block it was shown, and the copy over its window posts Africa again. A set of an
+    unknown class puts no pin on record, and nor does an identity past
+    `MAX_IDENTITY_BYTES` as compact JSON, since data-mcp's `resolve_definition`
+    would refuse a copy of it (`caller_definition`)."""
     fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
     block = json.loads(fixture.read_text())["spec"]
+    identity = block["definition"]["identity"]
+    if change == "unknown-class":
+        block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = ["party"]
+    if change == "past-cap":
+        identity["padding"] = "x" * MAX_IDENTITY_BYTES
+        block["spec_id"] = spec_id_for(canonicalize(identity))
     spec_id = block["spec_id"]
 
-    recorded = identity_on_record(
-        spec_id, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
-    )
+    recorded = identity_on_record(spec_id, shown={spec_id: PinSource(block=block, settled=True)})
 
+    if groups is None:
+        assert recorded is None
+        return
     assert recorded is not None
-    assert recorded.identity == block["definition"]["identity"]
-    assert [(group.label, group.ref) for group in recorded.groups] == [("Africa", "africa")]
-
-
-def test_a_shown_block_with_a_set_of_an_unknown_class_puts_no_pin_on_record() -> None:
-    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
-    block = json.loads(fixture.read_text())["spec"]
-    block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = ["party"]
-    spec_id = block["spec_id"]
-
-    recorded = identity_on_record(
-        spec_id, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
-    )
-
-    assert recorded is None
+    assert recorded.identity == identity
+    assert [(group.label, group.ref) for group in recorded.groups] == groups
 
 
 def test_amendment_keeps_measure_choice_from_the_compiled_family(

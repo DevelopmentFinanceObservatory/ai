@@ -2738,7 +2738,10 @@ def test_the_one_year_each_refusal_offers_is_admitted(
         if output not in _computed_from(stored, refused_step)
     ]
     windowed, minted = _window_pins(
-        _recorded(_model_plan(requirements, cited, asks=asks, answered=answered)), shown=pins
+        _recorded(_model_plan(requirements, cited, asks=asks, answered=answered)),
+        shown=pins,
+        definition_lookup=None,
+        narrowed=(),
     )
     assert _windows_read(stored, windowed_pins(ctx.state), kept) == _windows_read(
         windowed, {copy.spec_id: copy for copy in minted}, kept
