@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -51,6 +51,7 @@ from planner.plan import (
     aligned_pins,
     alignments,
     definitions_on_record,
+    held_sources,
     identity_on_record,
     load_plan,
     period_window,
@@ -62,6 +63,7 @@ from planner.records import EvidenceIssueCode
 from planner.tool_results import Outcome
 from planner.workflow import ResolvedGroup, ToolId
 from submission.service import statement
+from translator.discovery import build_discover_source
 
 from .basis_alignment import (
     HEALTH,
@@ -913,6 +915,85 @@ async def test_an_aligned_input_keeps_the_requirements_period_when_the_search_wa
         **held.block["definition"]["identity"],
         "requested_window": window,
     }
+
+
+class _ResolvesCopies:
+    """A tool surface answering `resolve_definition` of a windowed copy with its
+    origin's block under the copy's spec_id and identity, recording each tool it
+    is asked in `tools`. Every other call is refused."""
+
+    def __init__(self, ctx: _FakeToolContext) -> None:
+        self._ctx = ctx
+        self.tools: list[str] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        self.tools.append(tool.name)
+        copy = windowed_pins(self._ctx.state).get(arguments.get("spec_id") or "")
+        if tool.name != "resolve_definition" or copy is None:
+            return ToolCallResult(is_error=True, structured_content={"code": "unreachable"})
+        block = json.loads(json.dumps(held_sources(self._ctx.state)[copy.windowed_from].block))
+        block["spec_id"] = copy.spec_id
+        block["definition"] = {**block["definition"], "identity": copy.identity}
+        part = {"status": "definite", "spec": block}
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+@pytest.mark.parametrize("warnings", [(), ("role_text_not_recognised",)], ids=["clean", "warned"])
+@pytest.mark.parametrize("requirement_id", ["total", "health"], ids=["compiled", "searched"])
+async def test_a_copy_of_a_pin_from_a_warned_search_part_is_not_honoured(
+    decision: DecisionFactory, requirement_id: str, warnings: tuple[str, ...]
+) -> None:
+    """The share's total is compiled gross from the total Search found, and its
+    health input pins the health aid Search found; admission moves both to copies
+    over 2024. Where the search part that returned the pin the requirement states
+    carries a blocking warning, discovery does not honour the copy and searches,
+    as for the pin itself; a clean part's copy is honoured with no search."""
+    share = _closed_share("basis")
+    stated = {"total": TOTAL, "health": HEALTH}[requirement_id]
+    shown = pin_sources(share.ctx.state)
+    shown[stated] = shown[stated].model_copy(update={"warnings": warnings})
+    save_pin_sources(share.ctx.state, shown)
+    plan = await _propose(share, decision)
+    assert _dataset_pins(plan)[requirement_id] in windowed_pins(share.ctx.state)
+    surface = _ResolvesCopies(share.ctx)
+
+    with definitions_on_record(share.recorded):
+        found = await build_discover_source(surface=cast(ToolSurface, surface))(
+            requirement_id=requirement_id, state=share.ctx.state
+        )
+
+    if warnings:
+        assert "search" in surface.tools
+        assert found.get("status") != "definite", found
+    else:
+        assert surface.tools == ["resolve_definition"]
+        assert found["status"] == "definite", found
+
+
+@pytest.mark.parametrize("identity", ["bad", ["bad"]], ids=["string", "list"])
+async def test_a_shown_block_with_a_malformed_identity_is_admitted_unwindowed(
+    decision: DecisionFactory, identity: Any
+) -> None:
+    """Health's shown block carries an identity that is no mapping, and no search
+    recorded one. Admission puts nothing on record for the pin and admits the plan
+    with health pinned as stated."""
+    share = _closed_share("basis")
+    shown = pin_sources(share.ctx.state)
+    block = json.loads(json.dumps(shown[HEALTH].block))
+    block["definition"] = {"identity": identity}
+    shown[HEALTH] = shown[HEALTH].model_copy(update={"block": block})
+    save_pin_sources(share.ctx.state, shown)
+    share = replace(share, recorded={TOTAL: share.recorded[TOTAL]})
+
+    plan = await _propose(share, decision)
+
+    assert _dataset_pins(plan)["health"] == HEALTH
 
 
 async def test_a_restated_closed_share_keeps_its_compile_and_its_copies(

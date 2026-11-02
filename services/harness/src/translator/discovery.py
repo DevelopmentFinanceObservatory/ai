@@ -2559,41 +2559,32 @@ def _resolve_pin_block(
 
     A requirement admission pinned to a compile (`planner.plan.alignments`)
     reads the block Search answered the compile with
-    (`planner.plan.AlignedPin`), when the source of the pin it states
-    carries no blocking warning. Any other pin is the planner's
+    (`planner.plan.AlignedPin`). Any other pin is the planner's
     assertion that the dataset answers the
     requirement, so a dataset it was shown this entry
     (`planner.plan.pin_sources`) is reused when `requirement` is the only
     dataset requirement in `plan` pinning it as its own. With several, nothing tells
-    which one the search that returned it was about. `None` too when the
-    search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
-    since one means the search dropped part of the ask and answered a
-    narrower one, and when no block was carried forward for it. An earlier
+    which one the search that returned it was about. `None` too when no
+    block was carried forward for it. An earlier
     turn's source reads the block that turn stored (`PinSource.spec_block`).
     The compiler checks the reused source's entities and window against the requirement.
 
     A pin admission moved to a copy over the requirement's period
     (`planner.plan.windowed_pins`) is neither shown nor compiled, so it
-    reads `None`, whether its origin was a search pin or a compile. Search
-    confirms the copy (`_recorded_source`) without a check of the origin's
-    blocking warnings.
+    reads `None`, and Search confirms the copy (`_recorded_source`).
+    `_pin_source` reads neither for a pin from a warned search part
+    (`_from_warned_part`).
     """
     pin = requirement.source_spec_id
     if pin is None:
         return None
-    shown = pin_sources(state)
     held = alignments(state)
     entry = aligned_entry(requirement, held)
     if entry is not None:
         compiled = compiled_pin(state, entry)
-        origin = shown.get(entry.stated_pin or "")
-        if compiled is None or (
-            origin is not None and BLOCKING_WARNING_CODES.intersection(origin.warnings)
-        ):
-            return None
-        return compiled.block
-    source = shown.get(pin)
-    if source is None or BLOCKING_WARNING_CODES.intersection(source.warnings):
+        return compiled.block if compiled is not None else None
+    source = pin_sources(state).get(pin)
+    if source is None:
         return None
     pinning = [
         item
@@ -2605,6 +2596,30 @@ def _resolve_pin_block(
     if len(pinning) != 1:
         return None
     return source.spec_block(pin)
+
+
+def _from_warned_part(state: SessionState, requirement: DatasetRequirement) -> bool:
+    """Whether the pin `requirement` states comes from a search part carrying a code in `BLOCKING_WARNING_CODES`.
+
+    Such a part dropped part of the ask and answered a narrower one, so no
+    reader honours the pin (`_pin_source`). The pin is followed to what the
+    planner was shown: a copy over the requirement's period
+    (`planner.plan.windowed_pins`) to the pin it copies, and a compile
+    admission pinned the requirement to (`planner.plan.aligned_entry`) to
+    the pin the requirement states (`AlignedInput.stated_pin`). A pin the
+    planner was not shown (`planner.plan.pin_sources`) carries no warning.
+    """
+    pin = requirement.source_spec_id
+    if pin is None:
+        return False
+    copy = windowed_pins(state).get(pin)
+    origin = copy.windowed_from if copy is not None else pin
+    entry = aligned_entry(
+        requirement.model_copy(update={"source_spec_id": origin}), alignments(state)
+    )
+    stated = entry.stated_pin if entry is not None else origin
+    source = pin_sources(state).get(stated or "")
+    return source is not None and bool(BLOCKING_WARNING_CODES.intersection(source.warnings))
 
 
 def _block_source(
@@ -2735,24 +2750,27 @@ async def _pin_source(
     (`HistorySplit.whole_history`), `None` when it reads the stated period.
     The source is stamped with the requirement's `measure` as `searched_as`.
     Honoured means the block or identity reader holds it over the
-    requirement's period. A source read only off the discovery log
-    (`DiscoveryLog.recorded_source`) is not honoured, and serves the scope
+    requirement's period. Neither reader is asked for a pin from a search
+    part carrying a blocking warning (`_from_warned_part`), whether the
+    requirement pins it, a copy of it, or a compile from it. A source read
+    only off the discovery log (`DiscoveryLog.recorded_source`) is not
+    honoured, and serves the scope
     check alone. A source that does not confirm the `source` or the
     `source_code` the requirement states
     (`compiler.evidence.source_requirement_matches`) is not honoured either,
     so the caller searches again with them. `None` when no reader holds a
     source; a problem a reader met is returned as it is.
     """
-    source: SelectedSource | dict[str, object] | None = _block_source(
-        state, plan=plan, requirement=requirement
-    )
-    if source is None:
-        source = await _recorded_source(
-            state,
-            requirement=requirement,
-            first_year=first_year,
-            surface=surface,
-        )
+    source: SelectedSource | dict[str, object] | None = None
+    if not _from_warned_part(state, requirement):
+        source = _block_source(state, plan=plan, requirement=requirement)
+        if source is None:
+            source = await _recorded_source(
+                state,
+                requirement=requirement,
+                first_year=first_year,
+                surface=surface,
+            )
     if isinstance(source, dict):
         return source
     honoured = source is not None

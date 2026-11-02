@@ -3526,10 +3526,9 @@ def _window_pins(
     pin compiled in code is on record (`planner.plan.identity_on_record`).
     One of a `latest` window is copied like any other: the copy replaces the
     window whole, as `get_data`'s scope surgery does, and the translator
-    confirms the copy through Search before it is retrieved. The translator
-    reads a copy of a compile as it reads a copy of a searched pin, without
-    the check of the origin's blocking warnings it runs on a pin read from
-    its block (`translator.discovery._resolve_pin_block`).
+    confirms the copy through Search before it is retrieved. It honours no
+    copy of a pin, or of a compile from one, whose search part carries a
+    blocking warning (`translator.discovery._from_warned_part`).
 
     A requirement stating `period_end_open` is pinned to that identity over
     a range with no end year (`_open_window`), which apis ends at the
@@ -3588,9 +3587,11 @@ def _window_pins(
             # A shown block whose identity data-mcp would refuse, or whose
             # source is unreadable, keeps its own window. Where that is not the
             # requirement's, the compiler refuses the pin (`scope_window_short`).
-            definition = (shown[pin].spec_block(pin) or {}).get("definition") or {}
+            definition = (shown[pin].spec_block(pin) or {}).get("definition")
+            identity = definition.get("identity") if isinstance(definition, Mapping) else None
+            held = identity.get("requested_window") if isinstance(identity, Mapping) else None
             asked = period_window(requirement.period)
-            if (definition.get("identity") or {}).get("requested_window") != asked:
+            if held != asked:
                 logger.warning(
                     "pin not windowed, no identity on record: requirement=%s pin=%s window=%s",
                     requirement.id,
