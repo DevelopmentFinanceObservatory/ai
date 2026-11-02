@@ -1,0 +1,152 @@
+{
+  "plan_mcp": {
+    "declarations": [
+      {
+        "name": "start_plan",
+        "description": 1300,
+        "input_schema": 2288,
+        "chars": 3598
+      },
+      {
+        "name": "propose_plan",
+        "description": 239,
+        "input_schema": 34916,
+        "chars": 35167
+      },
+      {
+        "name": "record_user_answer",
+        "description": 109,
+        "input_schema": 1292,
+        "chars": 1419
+      },
+      {
+        "name": "run_plan",
+        "description": 385,
+        "input_schema": 395,
+        "chars": 788
+      }
+    ],
+    "guidance": {
+      "name": "start_plan guidance",
+      "chars": 20829,
+      "tokens": 5207
+    },
+    "planner_message": {
+      "median": 1755,
+      "max": 3484,
+      "min": 1223
+    },
+    "before_first_proposal": {
+      "name": "total, median task",
+      "chars": 63556,
+      "tokens": 15889
+    }
+  },
+  "planner_today": {
+    "instruction": 20138,
+    "declarations": {
+      "get_skill": 644,
+      "get_skill_file": 1045,
+      "adk_request_input": 2007,
+      "propose_plan": 35719,
+      "reject_plan": 215
+    },
+    "first_message": {
+      "median": 1755,
+      "max": 3484,
+      "min": 1223
+    },
+    "before_first_proposal": {
+      "name": "total, median task",
+      "chars": 61523,
+      "tokens": 15381
+    }
+  },
+  "api_faults": {
+    "start_plan": {
+      "both": {
+        "faults": 0,
+        "kinds": []
+      },
+      "anthropic_strict": {
+        "faults": 4,
+        "kinds": [
+          "additionalProperties is not false"
+        ]
+      },
+      "openai_strict": {
+        "faults": 8,
+        "kinds": [
+          "additionalProperties is not false",
+          "default",
+          "optional properties"
+        ]
+      }
+    },
+    "propose_plan": {
+      "both": {
+        "faults": 0,
+        "kinds": []
+      },
+      "anthropic_strict": {
+        "faults": 106,
+        "kinds": [
+          "additionalProperties is not false",
+          "exclusiveMaximum",
+          "maxItems",
+          "maxLength",
+          "maximum",
+          "minLength",
+          "minimum"
+        ]
+      },
+      "openai_strict": {
+        "faults": 102,
+        "kinds": [
+          "additionalProperties is not false",
+          "default",
+          "maxLength",
+          "minLength",
+          "optional properties"
+        ]
+      }
+    },
+    "record_user_answer": {
+      "both": {
+        "faults": 0,
+        "kinds": []
+      },
+      "anthropic_strict": {
+        "faults": 3,
+        "kinds": [
+          "additionalProperties is not false"
+        ]
+      },
+      "openai_strict": {
+        "faults": 8,
+        "kinds": [
+          "additionalProperties is not false",
+          "default",
+          "optional properties"
+        ]
+      }
+    },
+    "run_plan": {
+      "both": {
+        "faults": 0,
+        "kinds": []
+      },
+      "anthropic_strict": {
+        "faults": 0,
+        "kinds": []
+      },
+      "openai_strict": {
+        "faults": 2,
+        "kinds": [
+          "default",
+          "optional properties"
+        ]
+      }
+    }
+  }
+}
