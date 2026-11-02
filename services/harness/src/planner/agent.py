@@ -1960,7 +1960,8 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
         return problem(
             ProblemCode.INVALID_ARGUMENTS,
             "These candidates come from more than one reading in `ambiguous_entities`. Ask "
-            "about each reading in an `adk_request_input` call of its own.",
+            "about one reading per `adk_request_input` call, and the next once the user has "
+            "answered.",
             outcome=Outcome.INVALID_INPUT,
         )
     if touched and offered != {pick for pick, entity in readings.items() if entity in touched}:
@@ -1973,17 +1974,67 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
     return None
 
 
+def _ask_waiting(tool_context: ToolContext) -> dict[str, object] | None:
+    """The refusal for an ask made while another planner ask may be waiting, or `None`.
+
+    An ask the tool accepts gets no response, and ADK resumes the run only
+    once every such ask has its answer, so the tool lets at most one through.
+    `tool_context.session.events` holds this call's own model response by the
+    time its tool runs. An ask is refused when an earlier `adk_request_input`
+    call sits in the same response, since the calls of one response run
+    concurrently and none sees whether another was accepted. It is also
+    refused when an earlier event of the planner's branch in this invocation
+    holds one that no function response in the session answers: a refused
+    ask's response arrives with its response's other answers, before the
+    model is called again, so such an ask is one the tool accepted.
+    """
+    own = tool_context.function_call_id
+    events = tool_context.session.events
+    answered = {r.id for event in events for r in event.get_function_responses() if r.id}
+    waiting = False
+    for event in events:
+        if event.invocation_id != tool_context.invocation_id or event.branch != tool_context.branch:
+            continue
+        calls = event.get_function_calls()
+        ids = [call.id for call in calls]
+        if own in ids:
+            waiting = any(
+                call.name == REQUEST_INPUT_FUNCTION_CALL_NAME for call in calls[: ids.index(own)]
+            )
+            break
+        waiting = any(
+            call.name == REQUEST_INPUT_FUNCTION_CALL_NAME and call.id not in answered
+            for call in calls
+        )
+        if waiting:
+            break
+    if not waiting:
+        return None
+    return problem(
+        ProblemCode.INVALID_ARGUMENTS,
+        "Another `adk_request_input` call already waits for the user's answer, and the "
+        "user answers one question at a time. Ask this one once that answer arrives, if "
+        "it still needs asking.",
+        outcome=Outcome.INVALID_INPUT,
+    )
+
+
 class _AskTool(LongRunningFunctionTool):
-    """The planner's ask, refusing a call that would not bind its answer to one entity reading.
+    """The planner's ask, refusing a call made while another ask may be waiting
+    (`_ask_waiting`) or that would not bind its answer to one entity reading.
 
     The function and so the declaration the model reads are `ask_user`'s. The
-    referral pending in the call's session decides what the ask may offer
+    session's events decide whether another ask waits, and the referral
+    pending in the call's session what the ask may offer
     (`_entity_ask_unbound`), which the function, holding no `ToolContext`,
     cannot read.
     """
 
     @override
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        waiting = _ask_waiting(tool_context)
+        if waiting is not None:
+            return waiting
         state = tool_context.state
         referral = load_referral(state)
         plan = load_plan(state)

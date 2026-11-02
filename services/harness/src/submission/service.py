@@ -494,11 +494,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             }
         )
     except ValidationError as exc:
-        held = held_sources(view.state)
-        readings = SourceReadings.of_shown(held)
+        # The call's own requirements, which validation has refused, so any
+        # shape: a value that is no list states none.
+        stated = raw if isinstance(raw := proposal.evidence_requirements, list) else []
+        readings = SourceReadings.of_shown(held_sources(view.state))
         return base_year_refusal(
             exc,
-            proposal.evidence_requirements,
+            stated,
             choices=view.prices_chosen(),
             parts=Parts.of_shown(
                 pin_sources(view.state),
@@ -506,8 +508,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 readings.block,
                 pinned=[
                     pin
-                    for raw in proposal.evidence_requirements or ()
-                    if isinstance(raw, dict) and isinstance(pin := raw.get("source_spec_id"), str)
+                    for requirement in stated
+                    if isinstance(requirement, dict)
+                    and isinstance(pin := requirement.get("source_spec_id"), str)
                 ],
             ),
             propose=proposer.call,
@@ -5021,7 +5024,7 @@ def _aligned_bases(
     if unpinned:
         return _basis_unknown(list(unpinned.values()))
     try:
-        unread = _scope_unread(steps, groups, by_axis, aligning, sources=sources)
+        unread = _scope_unread(steps, groups, aligning, sources=sources)
         if unread:
             raise _Unservable(_scope_unread_problem(unread))
         targets = _alignment_targets(
@@ -5054,19 +5057,20 @@ def _aligned_bases(
 def _scope_unread(
     steps: Sequence[EvidenceRequirement],
     groups: Mapping[str, Sequence[_InputGroup]],
-    by_axis: Mapping[str, Mapping[str, _InputBasis]],
     requirements: Sequence[EvidenceRequirement],
     *,
     sources: SourceReadings,
 ) -> list[ScopeRead]:
-    """The read each input of an aligning calculation needs whose pin's block is a
-    found candidate's (`planner.plan.SCOPE_UNREAD_BLOCK_KEY`), in plan order.
+    """The read each input of a calculation needs whose pin's block is a found
+    candidate's (`planner.plan.SCOPE_UNREAD_BLOCK_KEY`), in plan order.
 
     Search states no scope choices on a candidate, so how the input is counted
     is unknown, and left unread it would keep the basis its dataset counts it
-    on whatever its calculation's other inputs share. A calculation aligns when
-    an input under it carries a choice on an axis it reads on.
-    `planner.agent.read_scope` makes each read.
+    on whatever its calculation's other inputs share. Every calculation reads
+    its inputs' measure basis (`_reads_on`), and whether it aligns them turns
+    on the choices of every input, this one's included, so each is read
+    whatever its calculation's other inputs carry: a share of two candidates
+    aligns once both are read. `planner.agent.read_scope` makes each read.
     """
     pins = {
         requirement.id: requirement.source_spec_id
@@ -5076,10 +5080,6 @@ def _scope_unread(
     unread: dict[str, ScopeRead] = {}
     for step in steps:
         under = set().union(*(group.members for group in groups[step.id]))
-        if not any(
-            bases.keys() & under for axis, bases in by_axis.items() if _reads_on(step, axis)
-        ):
-            continue
         for requirement_id in sorted(under & pins.keys()):
             block = sources.block(pins[requirement_id])
             if block is not None and block.get(SCOPE_UNREAD_BLOCK_KEY):

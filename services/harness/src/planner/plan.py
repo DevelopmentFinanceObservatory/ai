@@ -251,10 +251,11 @@ ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 # cannot pin (`keep_found_sources`).
 FOUND_SOURCES_STATE_KEY = "planner:found_sources"
 
-# The key a found source's block carries when Search served it as a candidate
-# or a nearest series, with no `resolved.scope_choices`: Search states a part's
-# scope choices on a definite answer alone, so whether it has any is unknown
-# until its identity is resolved (`submission.service._aligned_bases`).
+# The key a spec block carries when Search served it other than as a definite
+# search part's own spec, as a candidate, a nearest series or a resolve posting
+# no scope entries, and it states no `resolved.scope_choices` (`scope_unread`):
+# whether its series has any is unknown until its identity is resolved
+# (`submission.service._aligned_bases`).
 SCOPE_UNREAD_BLOCK_KEY = "_scope_unread"
 
 # The session-state slot holding an `AlignedInput` for every dataset
@@ -6393,14 +6394,36 @@ def found_sources(state: SessionState) -> dict[str, dict[str, Any]]:
 
 
 def save_found_sources(state: SessionState, blocks: Mapping[str, Mapping[str, Any]]) -> None:
-    """Hold `blocks`, by spec_id, beside the found sources' blocks already held.
+    """Hold `blocks`, by spec_id, beside the found sources' blocks already held
+    (`with_blocks`)."""
+    state[FOUND_SOURCES_STATE_KEY] = with_blocks(found_sources(state), blocks)
 
-    A block marked `SCOPE_UNREAD_BLOCK_KEY` leaves one held for the same
-    spec_id that states its scope choices standing.
+
+def scope_unread(block: Mapping[str, Any]) -> dict[str, Any]:
+    """`block`, a spec block Search served other than as a `definite` search
+    part's own spec, marked `SCOPE_UNREAD_BLOCK_KEY` where it states no
+    `resolved.scope_choices`.
+
+    Search states a part's scope choices on a `definite` search part, and on
+    a resolve that posts scope entries, alone. A candidate, a nearest series,
+    or a resolve posting none states none whatever choices its series has, so
+    admission reads them first (`submission.service._aligned_bases`). A
+    block stating them says how it is counted wherever it came from.
     """
-    held = found_sources(state)
-    state[FOUND_SOURCES_STATE_KEY] = {
-        **held,
+    if (block.get("resolved") or {}).get("scope_choices") is not None:
+        return dict(block)
+    return {**block, SCOPE_UNREAD_BLOCK_KEY: True}
+
+
+def with_blocks(
+    held: Mapping[str, Mapping[str, Any]], blocks: Mapping[str, Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """`held`, spec blocks by spec_id, with `blocks` in place of those for
+    their spec_ids, except that a block marked `SCOPE_UNREAD_BLOCK_KEY`
+    leaves an unmarked one held for its spec_id standing: one spec_id names
+    one series, and the unmarked block says how it is counted."""
+    return {
+        **{spec_id: dict(block) for spec_id, block in held.items()},
         **{
             spec_id: dict(block)
             for spec_id, block in blocks.items()
@@ -6453,21 +6476,50 @@ def held_sources(state: SessionState) -> dict[str, PinSource]:
     Read for what a spec_id is, its identity, years and codes, which every
     holder of the spec_id shares. A compiled pin's or found source's entry
     states that block alone, so nothing about how the pin was chosen is read
-    from it.
+    from it. Where several holders hold a block for one spec_id, the block
+    saying most about its scope choices (`_scope_rank`) is read, a shown
+    entry's first on a tie, then a compiled pin's: so a candidate the planner
+    was shown, which states none, reads a found or compiled block that states
+    them. A shown entry keeps the rest of what it records of the showing.
     """
     shown = pin_sources(state)
     compiled = {
-        pin.spec_id: PinSource(block=dict(block))
-        for pin in aligned_pins(state)
-        if pin.spec_id not in shown and (block := pin.block) is not None
+        pin.spec_id: dict(block) for pin in aligned_pins(state) if (block := pin.block) is not None
     }
-    held = {**compiled, **shown}
-    found = {
-        spec_id: PinSource(block=block)
-        for spec_id, block in found_sources(state).items()
-        if spec_id not in held
+    found = found_sources(state)
+    held = {
+        **{
+            spec_id: PinSource(block=block)
+            for spec_id, block in compiled.items()
+            if spec_id not in shown
+        },
+        **shown,
     }
-    return {**held, **found}
+    held |= {
+        spec_id: PinSource(block=block) for spec_id, block in found.items() if spec_id not in held
+    }
+    for spec_id, source in list(held.items()):
+        block = source.spec_block(spec_id)
+        rival = max(
+            (b for b in (compiled.get(spec_id), found.get(spec_id)) if b is not None),
+            key=_scope_rank,
+            default=None,
+        )
+        if rival is not None and _scope_rank(rival) > _scope_rank(block):
+            held[spec_id] = source.model_copy(update={"block": rival, "earlier_turn": False})
+    return held
+
+
+def _scope_rank(block: Mapping[str, Any] | None) -> int:
+    """How much `block` says about its spec_id's scope choices: 2 where it states
+    them, 1 where it states none and is not marked, as a series Search counts
+    no other way, and 0 where it is marked unread (`SCOPE_UNREAD_BLOCK_KEY`)
+    or absent. So a marked block loses to any answer Search gave that reads
+    the series' scope, whether or not it states choices.
+    """
+    if block is None or block.get(SCOPE_UNREAD_BLOCK_KEY):
+        return 0
+    return 2 if (block.get("resolved") or {}).get("scope_choices") is not None else 1
 
 
 class AlignedInput(StrictModel):

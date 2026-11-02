@@ -90,6 +90,8 @@ from planner.records import AmbiguousEntityReading, EntityCandidate, EntityKey
 from planner.tool_results import ProblemCode
 from planner.workflow import ToolId
 from pydantic import BaseModel, ConfigDict, ValidationError
+from sqlalchemy import exc as sa_exc
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from submission.service import scope_choice_decisions
 from translator.referral import (
     ENTITY_CHOICE_REPAIR,
@@ -2008,13 +2010,14 @@ async def _asked_through_the_seam(
     state: dict[str, Any],
     *,
     beside: Sequence[tuple[str, dict[str, Any]]] = (),
+    then: Sequence[list[tuple[str, dict[str, Any]]]] = (),
 ) -> tuple[_Translator, list[Any], ScriptedPlannerLlm]:
     """`ask`, with the calls `beside` it, as the planner's first model
-    response in a real `PlannerSeam` run, every event through the
-    translator, then the segment's end."""
+    response in a real `PlannerSeam` run, and each of `then` as a later
+    response, every event through the translator, then the segment's end."""
     seam = _seam()
     calls = [*([("adk_request_input", ask)] if ask is not None else []), *beside]
-    llm = ScriptedPlannerLlm(script=[calls, "done"])
+    llm = ScriptedPlannerLlm(script=[calls, *then, "done"])
     seam._agent.model = llm
 
     async def planner(ctx: Context, node_input: Any) -> Any:
@@ -2102,6 +2105,78 @@ async def test_an_ask_made_beside_another_call_loses_none_of_that_call_s_activit
     steps = [(f.label, f.status) for f in frames if f.event == "activity.step"]
     assert steps == [(f.label, f.status) for f in alone if f.event == "activity.step"]
     assert ("Checking the plan against the data", StepStatus.COMPLETE) in steps
+
+
+# A valid ask other than `_SOURCE_ASK`, which the tool accepts when no other ask waits.
+_FREE_TEXT_ASK = {"message": "Which years should the series cover?"}
+
+
+def _ask_answers(request: Any) -> list[dict[str, Any]]:
+    """The answers to the planner's asks a model request carries, in order."""
+    return [
+        part.function_response.response or {}
+        for content in request.contents
+        for part in content.parts or []
+        if part.function_response is not None
+        and part.function_response.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+    ]
+
+
+@pytest.mark.parametrize(
+    "later", [_AUTHORED_OPTIONS_ASK, _FREE_TEXT_ASK], ids=["refused-on-its-arguments", "valid"]
+)
+async def test_an_accepted_ask_survives_a_later_ask_the_tool_refuses(
+    later: dict[str, Any],
+) -> None:
+    """ADK runs `propose_plan`, made beside an ask the tool accepts, and calls
+    the model again. That response asks again, and the tool refuses it, a
+    valid ask too since the first still waits for its answer, so the model
+    runs a third time before the planner's run stops paused on the first ask.
+    Studio asks the first ask's question alone."""
+    proposal = [("propose_plan", {"question": "uk oda"})]
+    translator, frames, llm = await _asked_through_the_seam(
+        _SOURCE_ASK, {}, beside=proposal, then=[[("adk_request_input", later)]]
+    )
+
+    assert len(llm.captured_requests) == 3
+    assert [a["code"] for a in _ask_answers(llm.captured_requests[2])] == [
+        ProblemCode.INVALID_ARGUMENTS.value
+    ]
+    assert translator.paused is True
+    assert "done" not in [f.event for f in frames]
+    (asked,) = [f for f in frames if f.event == "elicitation.request"]
+    assert asked.questions == [_planner_question(_SOURCE_ASK)]
+    assert list(translator._conversation.pending) == [asked.interrupt_id]
+
+
+async def test_a_second_ask_in_the_same_response_is_refused() -> None:
+    """The calls of one model response run concurrently, so the tool refuses
+    an ask made after another in the same response, valid as it is. The run
+    pauses on the first, the only question Studio asks."""
+    sibling = [("adk_request_input", _FREE_TEXT_ASK)]
+    translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, beside=sibling)
+
+    assert len(llm.captured_requests) == 2
+    assert [a["code"] for a in _ask_answers(llm.captured_requests[1])] == [
+        ProblemCode.INVALID_ARGUMENTS.value
+    ]
+    assert translator.paused is True
+    (asked,) = [f for f in frames if f.event == "elicitation.request"]
+    assert asked.questions == [_planner_question(_SOURCE_ASK)]
+    assert list(translator._conversation.pending) == [asked.interrupt_id]
+
+
+async def test_an_ask_after_a_refused_ask_pauses_on_its_question() -> None:
+    """A refused ask has its answer, so it waits for nothing, and a valid ask
+    in a later response is accepted."""
+    translator, frames, llm = await _asked_through_the_seam(
+        _AUTHORED_OPTIONS_ASK, {}, then=[[("adk_request_input", _FREE_TEXT_ASK)]]
+    )
+
+    assert len(llm.captured_requests) == 2
+    assert translator.paused is True
+    (asked,) = [f for f in frames if f.event == "elicitation.request"]
+    assert asked.questions == [_planner_question(_FREE_TEXT_ASK)]
 
 
 def test_a_resumed_segment_that_replays_the_ask_does_not_ask_it_again() -> None:
@@ -2251,6 +2326,21 @@ def _raised_from(exc: BaseException, cause: BaseException) -> BaseException:
     return exc
 
 
+def _wrapped_by_sqlalchemy(error: Exception, *, invalidated: bool) -> BaseException:
+    """`error`, raised by asyncpg under a statement, as SQLAlchemy's asyncpg
+    dialect raises it: translated to the dialect's DB-API class, raised from
+    `error`, then wrapped in a `sqlalchemy.exc.DBAPIError` raised from that,
+    `connection_invalidated` when the dialect reads it as a disconnect."""
+    dbapi = AsyncAdapt_asyncpg_dbapi(asyncpg)
+    translate = dbapi._asyncpg_error_translate
+    dbapi_class = next(translate[cls] for cls in type(error).__mro__ if cls in translate)
+    translated = _raised_from(dbapi_class(f"{type(error)}: {error}"), error)
+    wrapped = sa_exc.DBAPIError.instance(
+        "SELECT 1", None, translated, dbapi.Error, connection_invalidated=invalidated
+    )
+    return _raised_from(wrapped, translated)
+
+
 def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseException:
     """`exc` raised inside an `except` block for `handled`, with no `from`."""
     try:
@@ -2283,6 +2373,26 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         (aiohttp.ClientResponseError(None, (), status=403), False),
         (aiohttp.ClientResponseError(None, (), status=503), True),
         (asyncpg.ConnectionDoesNotExistError("connection was closed"), True),
+        (sa_exc.TimeoutError("QueuePool limit of size 2 overflow 10 reached"), True),
+        (
+            _wrapped_by_sqlalchemy(
+                asyncpg.InterfaceError("connection is closed"), invalidated=True
+            ),
+            True,
+        ),
+        (
+            _wrapped_by_sqlalchemy(
+                asyncpg.ConnectionDoesNotExistError("connection was closed"), invalidated=False
+            ),
+            True,
+        ),
+        (
+            _wrapped_by_sqlalchemy(
+                asyncpg.UndefinedTableError('relation "sessions" does not exist'),
+                invalidated=False,
+            ),
+            False,
+        ),
         (MCPError(code=CONNECTION_CLOSED, message="Connection closed"), True),
         (MCPError(code=INTERNAL_ERROR, message="Internal error"), False),
         (_raised_while_handling(KeyError("id"), TimeoutError("slow")), False),
@@ -2302,6 +2412,10 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         "aiohttp-client-status",
         "aiohttp-server-status",
         "asyncpg-connection-gone",
+        "session-pool-timeout",
+        "sqlalchemy-connection-invalidated",
+        "sqlalchemy-wrapping-a-connection-error",
+        "sqlalchemy-sql-error",
         "mcp-connection-closed",
         "mcp-server-error",
         "bug-while-handling-a-timeout",

@@ -1538,10 +1538,10 @@ def _revision_words(revision: Plan | None, prior: Plan, *, state: SessionState) 
 def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
     """Every spec block `state` holds a pin's source in, by spec_id: those on
     record (`held_sources`), then this turn's searches (`ORCHESTRATOR_SPECS_KEY`)
-    in place of those for their spec_ids. A pin compiled for a calculation's
-    input gives its block only to a spec_id no dataset the planner was shown
-    holds, so a pin of a shown dataset reads the block it was shown with,
-    whatever compile shares its spec_id."""
+    in place of those for their spec_ids. A pin of a shown dataset reads the
+    block it was shown with, unless that block states no scope choices and a
+    compile or found source sharing its spec_id states them
+    (`planner.plan.held_sources`)."""
     blocks: dict[str, Mapping[str, Any]] = {
         spec_id: block
         for spec_id, held in held_sources(state).items()

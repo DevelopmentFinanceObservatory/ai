@@ -45,7 +45,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Any, NamedTuple, cast
+from typing import Any, cast
 
 import aiohttp
 import asyncpg
@@ -79,6 +79,7 @@ from planner.plan import Plan as PlannerPlan
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
+from sqlalchemy import exc as sa_exc
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -301,8 +302,11 @@ def _status_transient(status: int | None) -> bool:
 
 
 def _transient_link(exc: BaseException) -> bool:
-    """Whether `exc` alone is transient: a timeout; a connection that failed
-    or dropped, a Postgres one included (`ConnectionError`); a name lookup or
+    """Whether `exc` alone is transient: a timeout, the session store's pool
+    timeout among them (`sqlalchemy.exc.TimeoutError`, every pooled
+    connection busy under load); a connection that failed or dropped, a
+    Postgres one included (`ConnectionError`), or one SQLAlchemy invalidated
+    as a disconnect (`DBAPIError.connection_invalidated`); a name lookup or
     TLS failure; a transport error, httpx2's or aiohttp's connection or
     payload error (the Gemini SDK's transport, under which a peer's reset
     reads as `ClientPayloadError`); an HTTP or model answer of 429 or 5xx
@@ -310,13 +314,17 @@ def _transient_link(exc: BaseException) -> bool:
     that timed out. Any other `OSError`, such as `FileNotFoundError`, and any
     other aiohttp error, such as `InvalidURL`, is a fault in this code, and
     any other MCP error an answer the server or this client got wrong, which
-    a later turn meets again."""
+    a later turn meets again. Any other `DBAPIError` is read by the asyncpg
+    error it was raised from (`_transient_fault` walks `__cause__`), so a
+    connection error under it is transient and a SQL error a fault."""
     if isinstance(exc, genai_errors.APIError):
         return _status_transient(exc.code)
     if isinstance(exc, aiohttp.ClientResponseError):
         return _status_transient(exc.status)
     if isinstance(exc, MCPError):
         return exc.error.code in _TRANSIENT_MCP_CODES
+    if isinstance(exc, sa_exc.DBAPIError):
+        return exc.connection_invalidated
     return isinstance(
         exc,
         (
@@ -325,6 +333,7 @@ def _transient_link(exc: BaseException) -> bool:
             socket.gaierror,
             ssl.SSLError,
             asyncpg.PostgresConnectionError,
+            sa_exc.TimeoutError,
             httpx2.TransportError,
             aiohttp.ClientConnectionError,
             aiohttp.ClientPayloadError,
@@ -406,13 +415,6 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
             retry_after_seconds=30 if retry is RetryMode.RETRY_AFTER_DELAY else None,
         ),
     )
-
-
-class _HeldAsk(NamedTuple):
-    """The planner's ask a `_Translator` holds: its interrupt id and its call args."""
-
-    adk_id: str
-    args: dict[str, Any]
 
 
 @dataclass
@@ -1428,9 +1430,10 @@ class _Translator:
         self._wire_step_ids: dict[str, str] = {}
         self._final_text = ""
         self.paused = False
-        # The planner's ask, from its call event until its tool's answer
+        # The planner's asks, each call's args by its call id (the interrupt
+        # id), in call order, from its call event until its tool's answer
         # refuses it (`_await_ask`) or the segment ends paused on it (`finish`).
-        self._ask: _HeldAsk | None = None
+        self._asks: dict[str, dict[str, Any]] = {}
         # Whether the planner's latest entry replans for a pick on the plan
         # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
         # resumes a stoppable replan.
@@ -1486,14 +1489,16 @@ class _Translator:
         frames: list[Any] = list(self._drain_recorder())
         interrupt = _request_input_call(event)
         if interrupt is not None and event.author == PLANNER_AGENT_NAME:
-            # ADK yields the planner's ask before its tool runs, so whether
-            # the run pauses on it is known only later (`_await_ask`). An ask
+            # ADK yields the planner's asks before their tool runs, so whether
+            # the run pauses on one is known only later (`_await_ask`). An ask
             # the conversation already shows, pending its answer, is not held
             # again. The other calls of the response open their lines.
-            adk_id, args = interrupt
-            if not any(held.adk_id == adk_id for held in self._conversation.pending.values()):
-                self._ask = _HeldAsk(adk_id, args)
+            shown = {held.adk_id for held in self._conversation.pending.values()}
             for call in event.get_function_calls():
+                if call.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
+                    if call.id and call.id not in shown:
+                        self._asks[call.id] = dict(call.args or {})
+                    continue
                 frames.extend(self._planner_call_status(call.name or ""))
             return frames
         if interrupt is not None:
@@ -2521,21 +2526,21 @@ class _Translator:
         )
 
     def _await_ask(self, event: Event) -> None:
-        """Drop the held ask when `event` answers it: the tool refused it,
-        and the run goes on with the refusal.
+        """Drop each held ask `event` answers: the tool refused it, and the
+        run goes on with the refusal. An answer drops only the ask whose call
+        id it carries.
 
         An ask the tool accepts gets no answer. ADK still runs the other calls
         of its model response and may call the model again on their answers,
-        all translated as they come, before the planner's run stops paused on
-        the ask. A run ends without raising, so with `finish`, only by
-        finishing or by pausing, and it cannot finish with the ask open: the
-        planner node passes the pause on (`harness.graph.planning`). A run
-        that raises, such as a planner that runs past its event bound, ends
-        the stream with no `finish`, and so asks nothing."""
-        if self._ask is not None and any(
-            response.id == self._ask.adk_id for response in event.get_function_responses()
-        ):
-            self._ask = None
+        all translated as they come, and that model may ask again, before the
+        planner's run stops paused on the accepted ask. A run ends without
+        raising, so with `finish`, only by finishing or by pausing, and it
+        cannot finish with an ask open: the planner node passes the pause on
+        (`harness.graph.planning`). A run that raises, such as a planner that
+        runs past its event bound, ends the stream with no `finish`, and so
+        asks nothing."""
+        for response in event.get_function_responses():
+            self._asks.pop(response.id or "", None)
 
     def finish(self) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
@@ -2549,10 +2554,12 @@ class _Translator:
         (`ConversationState.close_turn`), so a later turn's model reads the
         answer alone, with no text of the code's own to restate."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
-        if self._ask is not None:
-            # The run ended paused on the planner's ask.
-            ask, self._ask = self._ask, None
-            frames.extend(self._interrupt_frames(ask.adk_id, ask.args))
+        # The run ended paused on the planner's ask still held. The ask tool
+        # accepts at most one while another waits (`planner.agent._ask_waiting`),
+        # since ADK resumes the run only once every accepted ask has its answer.
+        asks, self._asks = self._asks, {}
+        for adk_id, args in asks.items():
+            frames.extend(self._interrupt_frames(adk_id, args))
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
             self._step(

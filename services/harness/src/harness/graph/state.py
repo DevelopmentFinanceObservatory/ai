@@ -27,7 +27,7 @@ from google.adk import Context, Event
 from google.adk.events import RequestInput
 from google.adk.sessions import State
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
-from planner.plan import AskBreakdown, SessionState, stored_plan
+from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
 
@@ -544,7 +544,10 @@ def store_search(
     and return its parts as the model reads them, without their blocks.
 
     Each part's spec blocks, its own and its candidates', go under
-    `ORCHESTRATOR_SPECS_KEY` and the part's warnings under
+    `ORCHESTRATOR_SPECS_KEY`, each candidate's marked as one whose scope
+    choices Search has not stated (`planner.plan.scope_unread`), which leaves
+    an unmarked block of its spec_id standing (`planner.plan.with_blocks`),
+    and the part's warnings under
     `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch` finds them, and each part
     joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
     `asked` holds each part's asked flow parties by position, and
@@ -566,7 +569,10 @@ def store_search(
             for key, value in part.items()
             if key not in ("spec_block", "candidate_blocks")
         }
-        blocks = dict(part.get("candidate_blocks") or {})
+        blocks = {
+            spec_id: scope_unread(block)
+            for spec_id, block in (part.get("candidate_blocks") or {}).items()
+        }
         facts: dict[str, Any] = {}
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
@@ -582,7 +588,7 @@ def store_search(
                 spec_id: {**block, "_resolved_sources": mentions}
                 for spec_id, block in blocks.items()
             }
-        specs.update(blocks)
+        specs = with_blocks(specs, blocks)
         spec_warnings.update(dict.fromkeys(blocks, reading.get("warnings") or []))
         if asked:
             facts["asked_roles"] = list(asked[index])

@@ -316,8 +316,10 @@ class _FakeSession:
 class _FakeToolContext:
     """A minimal stand-in for ADK's `ToolContext`.
 
-    `.state` (a plain, mutable mapping), `.session` (`.events` only) and
-    `.actions` (where `end_run_when_ready` ends the run) are all `planner.agent`'s
+    `.state` (a plain, mutable mapping), `.session` (`.events` only),
+    `.actions` (where `end_run_when_ready` ends the run), and the call's
+    `.invocation_id`, `.branch` and `.function_call_id` (where `_ask_waiting`
+    finds the call among the session's events) are all `planner.agent`'s
     tool functions use: none of them gates on a confirmation any more, so
     none needs `.tool_confirmation`. A tool body that tried to read it would
     raise `AttributeError` against this stand-in, which is exactly the
@@ -329,6 +331,8 @@ class _FakeToolContext:
         self.actions = EventActions()
         self.session = _FakeSession()
         self.invocation_id = "turn-1"
+        self.branch = None
+        self.function_call_id = "call-1"
 
 
 def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> Any:
@@ -11894,6 +11898,26 @@ def test_a_decision_naming_the_pin_is_refused_as_invalid_data(
     )
 
     assert result["outcome"] == Outcome.INVALID_INPUT.value
+    assert PLAN_STATE_KEY not in ctx.state
+
+
+@pytest.mark.parametrize("raw", [42, True])
+def test_requirements_that_are_no_list_are_an_invalid_plan(
+    decision: DecisionFactory, raw: object
+) -> None:
+    """ADK passes a value that is no list unconverted, so admission answers it
+    as any malformed draft, and the turn goes on."""
+    ctx = _FakeToolContext()
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=raw,
+        tool_context=ctx,
+    )
+
+    assert (result["outcome"], result["code"]) == ("invalid_input", "invalid_plan")
     assert PLAN_STATE_KEY not in ctx.state
 
 

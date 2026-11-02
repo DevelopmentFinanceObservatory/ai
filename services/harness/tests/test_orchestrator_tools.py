@@ -101,6 +101,7 @@ from planner.parties import PartyRole
 from planner.plan import (
     MAX_ASK_CHARS,
     MAX_PLAN_ASKS,
+    SCOPE_UNREAD_BLOCK_KEY,
     AskBreakdown,
     DatasetRequirement,
     current_earlier_block,
@@ -1043,7 +1044,8 @@ async def test_fetch_adds_its_summary_or_refusal_to_the_reading_of_its_spec_id()
 async def test_fetch_of_a_nearest_series_adds_a_settled_reading_for_it():
     """A `no_data` part's nearest real series is fetched as a candidate is:
     its block is stored, so the fetch adds a `chosen` reading the planner
-    may pin with no second search."""
+    may pin with no second search. The stored block is marked for a scope
+    read, since Search states no scope choices on a nearest series."""
     envelope = {
         "status": "no_data",
         "parts": [
@@ -1064,7 +1066,10 @@ async def test_fetch_of_a_nearest_series_adds_a_settled_reading_for_it():
         ("no_data", None, "net flows"),
         ("chosen", SPEC_LIFE, "net flows"),
     ]
-    assert ctx.state["orchestrator:specs"][SPEC_LIFE] == SINGLE_BLOCK
+    assert ctx.state["orchestrator:specs"][SPEC_LIFE] == {
+        **SINGLE_BLOCK,
+        SCOPE_UNREAD_BLOCK_KEY: True,
+    }
 
 
 async def test_fetch_of_a_chosen_candidate_adds_a_reading_for_it():

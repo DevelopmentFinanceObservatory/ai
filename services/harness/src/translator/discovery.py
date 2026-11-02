@@ -141,7 +141,6 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.scope_choices import PartScope, mark_planner_axes
 from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
-    SCOPE_UNREAD_BLOCK_KEY,
     AggregateRequirement,
     DatasetRequirement,
     Entity,
@@ -168,6 +167,7 @@ from planner.plan import (
     retrieves_period,
     save_found_sources,
     save_plan,
+    scope_unread,
     side_entities,
     split_of,
     windowed_pins,
@@ -3292,15 +3292,12 @@ def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
     (`harness.scope_choices.mark_planner_axes`), as for a search the planner
     makes itself. A block whose scope choices this release cannot read marks none.
     A block of an answer that is not definite, a candidate or a nearest
-    series, is marked `SCOPE_UNREAD_BLOCK_KEY`, since Search states no scope
-    choices on one, whatever choices its series has.
+    series, is marked unread as any such block is (`planner.plan.scope_unread`).
     """
-    unread = (
-        {SCOPE_UNREAD_BLOCK_KEY: True} if outcome.status is not DiscoveryStatus.DEFINITE else {}
-    )
+    definite = outcome.status is DiscoveryStatus.DEFINITE
     found: dict[str, dict[str, Any]] = {}
     for source, block in zip(outcome.sources, outcome.blocks, strict=True):
-        digest: dict[str, Any] = {"spec_block": {**block, **unread}}
+        digest: dict[str, Any] = {"spec_block": dict(block) if definite else scope_unread(block)}
         raw = (block.get("resolved") or {}).get("scope_choices")
         try:
             scope = PartScope.from_search(raw) if raw is not None else None

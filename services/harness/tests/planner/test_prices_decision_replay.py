@@ -23,6 +23,8 @@ import pytest
 from compiler.sources import outcome_from_envelope
 from compiler.surface import ToolCallResult
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY, store_search, stored_mapping
+from harness.tool_contracts import resolver_digest
 from planner import agent as planner_agent
 from planner.agent import build_planner_tools
 from planner.plan import (
@@ -35,6 +37,7 @@ from planner.plan import (
     alignments,
     found_sources,
     load_plan,
+    pin_sources,
     plan_revision,
     save_found_sources,
     save_pin_sources,
@@ -59,6 +62,7 @@ RECORDED: dict[str, Any] = json.loads(_FIXTURE.read_text())
 PART = "spec_20bdd20a52e5f19f51a96c54bb40c2de"
 FOUND = "spec_bf915cf71ebfc1b5772ca64b393e50ec"
 _TOTAL = "spec_8877bd41b91e6a87835be50f04331cf6"
+_AFRICA = "spec_8e4d7752bce78dd20af5e103a074db50"
 
 
 class RecordedSearch:
@@ -66,16 +70,20 @@ class RecordedSearch:
     dev Search answered it with in `resolves`, matched on its arguments, and
     answering every call as `answer` says when given: `refused`, as data-mcp
     refuses one Search rejects, or `candidates`, an answer that is not
-    definite. `calls` holds each call's arguments."""
+    definite. A read of a spec_id in `definite`, posting no scope entries,
+    is answered with the definite part it maps to. `calls` holds each call's
+    arguments."""
 
     def __init__(
         self,
         resolves: list[Mapping[str, Any]],
         *,
         answer: Literal["refused", "candidates"] | None = None,
+        definite: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.resolves = resolves
         self.answer = answer
+        self.definite = definite or {}
         self.calls: list[Mapping[str, Any]] = []
 
     async def list_tools(self) -> list[Any]:
@@ -94,6 +102,8 @@ class RecordedSearch:
             )
         if self.answer == "candidates":
             envelope = as_candidates()
+        elif arguments["spec_id"] in self.definite and not arguments.get("scope_entries"):
+            envelope = {"parts": [self.definite[arguments["spec_id"]]]}
         else:
             (envelope,) = [
                 one["envelope"] for one in self.resolves if one["arguments"] == arguments
@@ -131,22 +141,28 @@ def _turn_so_far(ctx: _FakeToolContext) -> None:
     ctx.session.events = [_clarify_ask_event(candidates), _clarify_answer_event(_option("o2"))]
 
 
+def _searched(spec_id: str) -> dict[str, Any]:
+    """The part the orchestrator's constant-price search answered for `spec_id`."""
+    (part,) = (
+        part for part in RECORDED["searches"]["constant"] if part["spec"]["spec_id"] == spec_id
+    )
+    return part
+
+
+def _served_as_candidate(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """`spec` as Search serves it in a candidates part: with no `resolved.scope_choices`."""
+    served = copy.deepcopy(dict(spec))
+    del served["resolved"]["scope_choices"]
+    return served
+
+
 def as_candidates() -> dict[str, Any]:
     """Translation's search answered as a `candidates` part offering `FOUND` and
     `8877`, each spec as Search serves a candidate: with no
     `resolved.scope_choices`, which dfo-apis states on a definite part alone
     (`search.engine.assemble.build_candidates_part` there)."""
     (found,) = (part["spec"] for part in RECORDED["translator"]["parts"])
-    (total,) = (
-        part["spec"]
-        for part in RECORDED["searches"]["constant"]
-        if part["spec"]["spec_id"] == _TOTAL
-    )
-    specs = []
-    for spec in (found, total):
-        served = copy.deepcopy(spec)
-        del served["resolved"]["scope_choices"]
-        specs.append(served)
+    specs = [_served_as_candidate(spec) for spec in (found, _searched(_TOTAL)["spec"])]
     candidates = {"ordering": "relevance", "max_candidates": 6, "specs": specs, "truncated": False}
     return {"parts": [{"variable_text": "ODA", "status": "candidates", "candidates": candidates}]}
 
@@ -456,3 +472,102 @@ def test_a_read_that_leaves_a_candidate_unread_is_made_once(
     assert answer["code"] == "scope_unread", answer
     assert [item["spec_id"] for item in answer["detail"]["read"]] == [FOUND]
     assert reads == [FOUND]
+
+
+def test_a_share_whose_every_input_is_an_unread_candidate_has_each_read_first() -> None:
+    """Both of the share's inputs are pinned to candidates Search offered with
+    no scope choices: `FOUND`, the re-pin of `uk_total_oda`, and the net
+    DAC2a series of `uk_oda_africa`, which a referral offered in place of the
+    one the planner was shown. Neither carries a choice until it is read, and
+    admitted unread the share would divide net disbursements by `FOUND`'s
+    OECD headline total. Each is read before the share aligns, and
+    `uk_total_oda` lands on `FOUND`'s compile on net disbursements."""
+    search = RecordedSearch(RECORDED["resolves"], definite={_AFRICA: _searched(_AFRICA)})
+    tools, ctx = after_hand_back(envelope=as_candidates(), search=search)
+    save_pin_sources(ctx.state, {k: v for k, v in pin_sources(ctx.state).items() if k != _AFRICA})
+    africa = {
+        "variable_text": "ODA to Africa",
+        "status": "candidates",
+        "candidates": {
+            "ordering": "relevance",
+            "max_candidates": 6,
+            "specs": [_served_as_candidate(_searched(_AFRICA)["spec"])],
+            "truncated": False,
+        },
+    }
+    save_found_sources(ctx.state, found_blocks(outcome_from_envelope({"parts": [africa]})))
+    (call,) = [call for call in RECORDED["calls"] if call["at"] == "11:22:56.327"]
+
+    answer = _propose(tools, ctx, call["arguments"])
+
+    assert answer["outcome"] == "ok", answer
+    assert sorted(one["spec_id"] for one in search.calls if not one["scope_entries"]) == sorted(
+        [FOUND, _AFRICA]
+    )
+    aligned = alignments(ctx.state)["uk_total_oda"]
+    assert (aligned.origin, aligned.option_ids) == (FOUND, ("measure_basis:net",))
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("uk_total_oda").source_spec_id == aligned.spec_id
+
+
+def _shown_as_candidate(ctx: _FakeToolContext) -> None:
+    """Show the planner `FOUND` with the block the orchestrator stores for it
+    when its search answers it as a candidate (`store_search`)."""
+    store = _FakeToolContext().state
+    store_search(store, resolver_digest(as_candidates()))
+    block = stored_mapping(store, ORCHESTRATOR_SPECS_KEY)[FOUND]
+    save_pin_sources(ctx.state, {**pin_sources(ctx.state), FOUND: PinSource(block=dict(block))})
+
+
+@pytest.mark.parametrize("found", ["definite", "candidate", None])
+def test_a_candidate_the_planner_was_shown_leaves_the_share_aligned(
+    found: Literal["definite", "candidate"] | None,
+) -> None:
+    """The planner was shown `FOUND` as a candidate, whose block states no
+    scope choices, and translation's discovery holds a block of it too:
+    `definite`, the recorded answer stating `FOUND`'s choices, `candidate`,
+    one marked unread, or none. The block that says how `FOUND` is counted
+    is the one read, or `FOUND` is read first, so `uk_total_oda` lands on
+    `FOUND`'s compile on net disbursements, as the share's numerator is
+    counted."""
+    search = RecordedSearch(RECORDED["resolves"])
+    tools, ctx = after_hand_back(
+        held=found is not None,
+        envelope=RECORDED["translator"] if found == "definite" else as_candidates(),
+        search=search,
+    )
+    _shown_as_candidate(ctx)
+    (call,) = [call for call in RECORDED["calls"] if call["at"] == "11:22:56.327"]
+
+    answer = _propose(tools, ctx, call["arguments"])
+
+    assert answer["outcome"] == "ok", answer
+    aligned = alignments(ctx.state)["uk_total_oda"]
+    assert (aligned.origin, aligned.option_ids) == (FOUND, ("measure_basis:net",))
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("uk_total_oda").source_spec_id == aligned.spec_id
+
+
+def test_a_candidate_read_as_stating_no_choices_is_admitted_on_that_answer() -> None:
+    """The planner was shown `FOUND` as a candidate, and Search's answer to
+    the read of its scope states no choices. That answer is the block on
+    record from then on, so `FOUND` is read once and the re-pin lands on
+    `FOUND` as Search counts it, with nothing to align it on."""
+    (part,) = RECORDED["translator"]["parts"]
+    search = RecordedSearch(
+        RECORDED["resolves"], definite={FOUND: {**part, "spec": _served_as_candidate(part["spec"])}}
+    )
+    tools, ctx = after_hand_back(held=False, envelope=as_candidates(), search=search)
+    _shown_as_candidate(ctx)
+    (call,) = [call for call in RECORDED["calls"] if call["at"] == "11:22:56.327"]
+
+    answer = _propose(tools, ctx, call["arguments"])
+
+    assert answer["outcome"] == "ok", answer
+    assert [one["spec_id"] for one in search.calls] == [FOUND]
+    assert "uk_total_oda" not in alignments(ctx.state)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("uk_total_oda").source_spec_id == FOUND
