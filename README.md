@@ -31,6 +31,7 @@ Without cloud access you need [`just`](https://github.com/casey/just) and [`uv`]
 
 ```bash
 uv sync --all-packages
+uv run playwright install --only-shell chromium   # headless Chromium for the browser tests
 just check        # lint, type check, and the full test suite
 ```
 
@@ -39,7 +40,7 @@ With access, authenticate and start the harness on `localhost:8080`, with the th
 ```bash
 gcloud auth login
 gcloud auth application-default login
-just setup        # generates .env, syncs dependencies, installs pre-commit hooks
+just setup        # generates .env, syncs dependencies, installs headless Chromium and pre-commit hooks
 just dev
 ```
 

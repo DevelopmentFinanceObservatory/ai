@@ -1175,7 +1175,7 @@ async def test_the_renderer_is_prefabs_cdn_page_pinned_to_the_installed_version(
     assert listed[uri].mime_type == UI_MIME_TYPE
     assert read.mime_type == UI_MIME_TYPE
     assert isinstance(read, mcp_types.TextResourceContents)
-    assert read.text == renderer_html()
+    assert read.text == renderer_html(_BASE_URL)
     assert read.text.lstrip().lower().startswith("<!doctype html>")
     base = f"https://cdn.jsdelivr.net/npm/@prefecthq/prefab-ui@{version('prefab-ui')}/dist/app"
     assert _asset_urls(read.text) == [f"{base}/renderer.css", f"{base}/renderer.js"]
@@ -1196,7 +1196,7 @@ async def test_an_old_renderer_uri_returns_what_the_listed_uri_returns(
 
     assert isinstance(current, mcp_types.TextResourceContents)
     assert isinstance(stale, mcp_types.TextResourceContents)
-    assert stale.text == current.text == renderer_html()
+    assert stale.text == current.text == renderer_html(_BASE_URL)
     assert stale.mime_type == current.mime_type == UI_MIME_TYPE
     assert stale.meta == current.meta
     assert stale.meta is not None

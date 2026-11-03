@@ -529,7 +529,7 @@ async def test_every_listed_tool_has_a_title_and_explicit_annotations(
         "write_component",
         "export_data",
     }
-    assert {t.name for t in tools if t.annotations.open_world_hint} == {"write_component"}
+    assert not {t.name for t in tools if t.annotations.open_world_hint}
     (export_data,) = [t for t in tools if t.name == "export_data"]
     assert (export_data.annotations.destructive_hint, export_data.annotations.idempotent_hint) == (
         False,

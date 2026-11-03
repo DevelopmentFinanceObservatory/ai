@@ -1,0 +1,266 @@
+{
+  "_meta": {
+    "org.one.dfo/view_state": {
+      "data": {
+        "rows": [
+          {
+            "period": "2010",
+            "s0": 0.386701
+          },
+          {
+            "period": "2011",
+            "s0": 0.386793
+          },
+          {
+            "period": "2012",
+            "s0": 0.37176
+          },
+          {
+            "period": "2013",
+            "s0": 0.380866
+          },
+          {
+            "period": "2014",
+            "s0": 0.418735
+          },
+          {
+            "period": "2015",
+            "s0": 0.523176
+          },
+          {
+            "period": "2016",
+            "s0": 0.699296
+          },
+          {
+            "period": "2017",
+            "s0": 0.667405
+          },
+          {
+            "period": "2018",
+            "s1": 0.611912
+          },
+          {
+            "period": "2019",
+            "s1": 0.61151
+          },
+          {
+            "period": "2020",
+            "s1": 0.734188
+          },
+          {
+            "period": "2021",
+            "s1": 0.764995
+          },
+          {
+            "period": "2022",
+            "s1": 0.847095
+          },
+          {
+            "period": "2023",
+            "s1": 0.817542
+          },
+          {
+            "period": "2024",
+            "s1": 0.680289
+          },
+          {
+            "period": "2025",
+            "s1": 0.558135
+          }
+        ]
+      },
+      "loaded": true
+    }
+  },
+  "content": [
+    {
+      "text": "Line chart of Value for Official development assistance\u2026, Official development assistance\u2026, Official development assistance\u2026 and 3 more, 2010 to 2025 (`cmp_01M6GWWZ42CJ68FDEDEY0VGK0Z`, revision 1).\nTitle, written by the model: Net ODA as a share of GNI, 2010\u20132025 (UK, France, Germany)\n\nThe data table is left out. This server cannot tell whether this client draws the component as a view. `describe_component` with `include_projection` set to `full` returns the table.\n\nData through 2025.\nSource: OECD DAC1 (2026), via the Development Finance Observatory",
+      "type": "text"
+    },
+    {
+      "text": "{\"component_id\":\"cmp_01M6GWWZ42CJ68FDEDEY0VGK0Z\",\"revision\":1,\"catalog_version\":\"2026.10.0\",\"composition_id\":null,\"composition_revision\":null,\"stored_intent\":{\"type\":\"line_chart\",\"range\":{\"max\":0.9,\"min\":0},\"title\":\"Net ODA as a share of GNI, 2010\u20132025 (UK, France, Germany)\",\"select\":{\"financingProvider\":[\"country/DEU\",\"country/FRA\",\"country/GBR\"]},\"frame_ref\":{\"spec_id\":\"spec_a41eacdd6a966814534ff4dd79974388\",\"content_version\":\"cv_6b045ee15423f2f1108e430d75ec7c3e\"}},\"fact_summary\":{\"changed\":[],\"series\":[{\"id\":\"s_ae0de199d5bf218e\",\"label\":\"Official development assistance (net disbursements, % of GNI) / Germany\",\"coordinates\":{\"unit\":\"Percent\",\"stat_var\":\"dcid:Amount_FinancialFlow_Net_Disbursement_DAC1AidType1010_Nominal_AsAFractionOf_PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal\",\"provenance\":\"provenance/ONEOECDHeadlineODA\",\"financingProvider\":\"country/DEU\",\"measurementMethod\":null},\"point_count\":8,\"first_value\":\"0.387\",\"last_value\":\"0.667\"},{\"id\":\"s_87d8d6adff471c17\",\"label\":\"Official development assistance (grant equivalents, % of GNI) / Germany\",\"coordinates\":{\"unit\":\"Percent\",\"stat_var\":\"dcid:GrantEquivalent_FinancialFlow_Disbursement_DAC1AidType1010_Nominal_AsAFractionOf_PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal\",\"provenance\":\"provenance/ONEOECDHeadlineODA\",\"financingProvider\":\"country/DEU\",\"measurementMethod\":null},\"point_count\":8,\"first_value\":\"0.612\",\"last_value\":\"0.558\"},{\"id\":\"s_f3c0f262b5bdce23\",\"label\":\"Official development assistance (net disbursements, % of GNI) / France\",\"coordinates\":{\"unit\":\"Percent\",\"stat_var\":\"dcid:Amount_FinancialFlow_Net_Disbursement_DAC1AidType1010_Nominal_AsAFractionOf_PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal\",\"provenance\":\"provenance/ONEOECDHeadlineODA\",\"financingProvider\":\"country/FRA\",\"measurementMethod\":null},\"point_count\":8,\"first_value\":\"0.495\",\"last_value\":\"0.428\"},{\"id\":\"s_64a77e95c7858b3e\",\"label\":\"Official development assistance (grant equivalents, % of GNI) / France\",\"coordinates\":{\"unit\":\"Percent\",\"stat_var\":\"dcid:GrantEquivalent_FinancialFlow_Disbursement_DAC1AidType1010_Nominal_AsAFractionOf_PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal\",\"provenance\":\"provenance/ONEOECDHeadlineODA\",\"financingProvider\":\"country/FRA\",\"measurementMethod\":null},\"point_count\":8,\"first_value\":\"0.427\",\"last_value\":\"0.423\"},{\"id\":\"s_9c46249e7862c4b7\",\"label\":\"Official development assistance (net disbursements, % of GNI) / United Kingdom\",\"coordinates\":{\"unit\":\"Percent\",\"stat_var\":\"dcid:Amount_FinancialFlow_Net_Disbursement_DAC1AidType1010_Nominal_AsAFractionOf_PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal\",\"provenance\":\"provenance/ONEOECDHeadlineODA\",\"financingProvider\":\"country/GBR\",\"measurementMethod\":null},\"point_count\":8,\"first_value\":\"0.573\",\"last_value\":\"0.698\"},{\"id\":\"s_82f8d65508a144d0\",\"label\":\"Official development assistance (grant equivalents, % of GNI) / United Kingdom\",\"coordinates\":{\"unit\":\"Percent\",\"stat_var\":\"dcid:GrantEquivalent_FinancialFlow_Disbursement_DAC1AidType1010_Nominal_AsAFractionOf_PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal\",\"provenance\":\"provenance/ONEOECDHeadlineODA\",\"financingProvider\":\"country/GBR\",\"measurementMethod\":null},\"point_count\":8,\"first_value\":\"0.695\",\"last_value\":\"0.432\"}],\"series_cut\":0,\"window\":{\"end\":\"2025\",\"start\":\"2010\"},\"unit\":\"Percent\",\"change\":null,\"source_refs\":null,\"defaults\":[]},\"retention\":{\"pinned\":false,\"held_until\":\"2026-12-03T14:22:09.689967Z\"}}",
+      "type": "text"
+    }
+  ],
+  "isError": false,
+  "structuredContent": {
+    "$prefab": {
+      "version": "0.3"
+    },
+    "view": {
+      "cssClass": "pf-app-root",
+      "type": "Div",
+      "children": [
+        {
+          "cssClass": "dfo-card",
+          "type": "Column",
+          "children": [
+            {
+              "cssClass": "dfo-head",
+              "type": "Div",
+              "children": [
+                {
+                  "cssClass": "dfo-title",
+                  "content": "Net ODA as a share of GNI, 2010\u20132025 (UK, France, Germany)",
+                  "type": "H3"
+                },
+                {
+                  "cssClass": "dfo-caption",
+                  "content": "Value, Percent",
+                  "type": "Small"
+                }
+              ]
+            },
+            {
+              "cssClass": "dfo-legend",
+              "type": "Div",
+              "children": [
+                {
+                  "cssClass": "dfo-legend-item",
+                  "type": "Div",
+                  "children": [
+                    {
+                      "cssClass": "dfo-legend-swatch",
+                      "content": "",
+                      "code": false,
+                      "type": "Span",
+                      "style": {
+                        "--series-dark": "#6467de",
+                        "--series-light": "#8285e7"
+                      }
+                    },
+                    {
+                      "content": "Official development assistance (net disbursements, % of GNI) / Germany",
+                      "code": false,
+                      "type": "Span"
+                    }
+                  ]
+                },
+                {
+                  "cssClass": "dfo-legend-item",
+                  "type": "Div",
+                  "children": [
+                    {
+                      "cssClass": "dfo-legend-swatch",
+                      "content": "",
+                      "code": false,
+                      "type": "Span",
+                      "style": {
+                        "--series-dark": "#f6935a",
+                        "--series-light": "#f9b170"
+                      }
+                    },
+                    {
+                      "content": "Official development assistance (grant equivalents, % of GNI) / Germany",
+                      "code": false,
+                      "type": "Span"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "LineChart",
+              "data": "{{ data.rows }}",
+              "series": [
+                {
+                  "dataKey": "s0",
+                  "label": "Official development assistance (net disbursements, % of GNI) / Germany",
+                  "color": "#6467de"
+                },
+                {
+                  "dataKey": "s1",
+                  "label": "Official development assistance (grant equivalents, % of GNI) / Germany",
+                  "color": "#f6935a"
+                }
+              ],
+              "xAxis": "period",
+              "height": 300,
+              "curve": "linear",
+              "showDots": false,
+              "showLegend": false,
+              "showTooltip": true,
+              "animate": true,
+              "showGrid": true,
+              "showYAxis": true,
+              "valueFormat": "compact"
+            },
+            {
+              "type": "Condition",
+              "cases": [
+                {
+                  "when": "{{ !loaded }}",
+                  "children": [
+                    {
+                      "content": "This view could not read its data. Restarting the app loads the current view.",
+                      "type": "Muted"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "cssClass": "dfo-chrome",
+              "type": "Div",
+              "children": [
+                {
+                  "cssClass": "dfo-more",
+                  "type": "Accordion",
+                  "multiple": false,
+                  "collapsible": true,
+                  "children": [
+                    {
+                      "type": "AccordionItem",
+                      "title": "OECD headline ODA (net flows to 2017, grant equivalents from 2018)",
+                      "children": [
+                        {
+                          "cssClass": "dfo-details",
+                          "type": "Column",
+                          "children": [
+                            {
+                              "content": "Line chart of Value for Official development assistance\u2026, Official development assistance\u2026, Official development assistance\u2026 and 3 more, 2010 to 2025.",
+                              "type": "Muted"
+                            },
+                            {
+                              "content": "OECD headline ODA (net flows to 2017, grant equivalents from 2018), retrieved 2026-11-03",
+                              "type": "Small"
+                            },
+                            {
+                              "content": "Data through 2025.",
+                              "type": "Muted"
+                            },
+                            {
+                              "content": "OECD DAC1 (2026), via the Development Finance Observatory",
+                              "type": "Muted"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "cssClass": "dfo-built-with",
+                  "content": "Built with",
+                  "code": false,
+                  "type": "Span"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "state": {
+      "data": {
+        "rows": []
+      },
+      "loaded": false
+    },
+    "mode": "light",
+    "stylesheets": [
+      "https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;700;800&family=DM+Mono:wght@400;500&display=swap",
+      "https://developmentfinance.org/mcp/presentation/theme-ce14856c7aaa.css"
+    ]
+  }
+}

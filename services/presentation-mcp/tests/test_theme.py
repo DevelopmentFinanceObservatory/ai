@@ -8,6 +8,7 @@ import json
 import re
 from collections.abc import Iterator
 from importlib.metadata import version
+from importlib.resources import files
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -17,7 +18,6 @@ from prefab_ui.components import Text
 from prefab_ui.renderer import get_renderer_csp, get_renderer_html
 from presentation_mcp import theme
 from presentation_mcp.app_view import app_shell
-from presentation_mcp.platform_contract import VIEW_STATE_META_KEY
 
 from .stub_assembler import resolved_revision
 
@@ -65,7 +65,7 @@ def css() -> str:
 
 
 def test_the_renderer_resource_is_prefabs_cdn_page_pinned_to_the_installed_version() -> None:
-    page = theme.renderer_html()
+    page = theme.renderer_html(BASE_URL)
     base = f"https://cdn.jsdelivr.net/npm/@prefecthq/prefab-ui@{version('prefab-ui')}/dist/app"
 
     assert re.sub(r"<script>.*?</script>\n", "", page, flags=re.DOTALL) == get_renderer_html(
@@ -73,20 +73,30 @@ def test_the_renderer_resource_is_prefabs_cdn_page_pinned_to_the_installed_versi
     )
     assert f'href="{base}/renderer.css"' in page
     assert f'src="{base}/renderer.js"' in page
-    assert len(page) < 1500
+    # An inlined bundle would be megabytes and a module script of its own.
+    assert re.findall(r"<script type=\"module\"[^>]*>", page) == [
+        f'<script type="module" crossorigin src="{base}/renderer.js">'
+    ]
+    assert len(page) < 16_000
 
 
-def test_the_view_state_script_sits_in_the_head_ahead_of_prefabs_module_script() -> None:
-    page = theme.renderer_html()
+def test_the_hydration_script_sits_in_the_head_ahead_of_prefabs_module_script() -> None:
+    page = theme.renderer_html(BASE_URL)
 
     (script,) = re.findall(r"<script>(.*?)</script>", page, flags=re.DOTALL)
     assert page.index("<script>") < page.index("</head>") < page.index('<script type="module"')
-    assert 'addEventListener("message"' in script
-    assert "event.source !== window.parent" in script
-    assert '"ui/notifications/tool-result"' in script
-    assert json.dumps(VIEW_STATE_META_KEY) in script
-    assert "structuredContent" in script
-    assert "state" in script
+    assert "__DFO_CONFIG__" not in script
+    config = json.dumps(theme._hydration_config(BASE_URL))
+    assert f"const DFO = {config};" in script
+
+
+def test_the_hydration_script_ships_as_package_data() -> None:
+    source = files("presentation_mcp").joinpath("view_hydration.js").read_text(encoding="utf-8")
+    page = theme.renderer_html(BASE_URL)
+
+    head, tail = source.split("__DFO_CONFIG__")
+    assert head in page
+    assert tail in page
 
 
 def test_the_theme_is_unlayered_so_it_beats_prefabs_tailwind_layers(css: str) -> None:
@@ -205,14 +215,16 @@ def test_the_uri_names_the_prefab_version_and_csp_by_hash(monkeypatch: pytest.Mo
 def test_the_uri_changes_with_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
     uri = theme.renderer_uri(BASE_URL)
 
-    monkeypatch.setattr(theme, "renderer_html", lambda: "<html>another page</html>")
+    monkeypatch.setattr(theme, "renderer_html", lambda _base_url: "<html>another page</html>")
 
     assert theme.renderer_uri(BASE_URL) != uri
 
 
-def test_the_uri_changes_with_the_theme_origin_and_not_with_its_path() -> None:
+def test_the_uri_changes_with_the_base_url() -> None:
+    # The origin reaches the CSP, and the whole URL the page's notice, whose
+    # stylesheet sits under it.
     uri = theme.renderer_uri(BASE_URL)
 
     assert theme.renderer_uri("https://other.example.test/mcp/presentation") != uri
     assert theme.renderer_uri("http://example.test:8443/mcp/presentation") != uri
-    assert theme.renderer_uri("https://example.test:8443/elsewhere") == uri
+    assert theme.renderer_uri("https://example.test:8443/elsewhere") != uri

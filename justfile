@@ -40,12 +40,16 @@ _default:
 
 # ── Setup & Configuration ────────────────────────────
 
-# First-time setup: check prerequisites, create the env file, sync deps, install hooks
+# First-time setup: check prerequisites, create the env file, sync deps, install Chromium, install hooks
 setup: _check-prerequisites env
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Syncing dependencies..."
     uv sync --all-packages
+    echo ""
+    # presentation-mcp's browser tests draw the view page in headless Chromium.
+    echo "Installing headless Chromium for the browser tests..."
+    uv run playwright install --only-shell chromium
     echo ""
     # The hooks run `just typecheck`, which resolves imports against .venv -- so
     # the workspace has to be synced before the hooks are installed, not after.
