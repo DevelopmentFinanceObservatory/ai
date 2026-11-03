@@ -155,6 +155,7 @@ from planner.plan import (
     period_window,
     pin_slot_moves,
     pin_sources,
+    pin_verdicts,
     plan_revision,
     record_optional_decline,
     record_unsupported,
@@ -167,7 +168,6 @@ from planner.plan import (
     search_pin_slot,
     split_of,
     stored_plan,
-    unusable_definition,
     windowed_pins,
 )
 from planner.records import (
@@ -217,6 +217,7 @@ from submission.service import (
     _window_pins,
     first_year_reads,
     identity_on_record,
+    identity_or_refusal,
     save_aligned_pin,
     scope_choice_decisions,
     searched_pins,
@@ -239,6 +240,7 @@ from translator.referral import (
     Referral,
     ReferralKind,
     StalePin,
+    clear_referral,
     load_referral,
     save_referral,
 )
@@ -2051,6 +2053,33 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
     assert result is not None
     assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
     assert result["detail"] == {"requirement_id": "net_flows", "datasets": sorted([DAC2A, other])}
+
+
+def test_a_refused_combination_ask_leaves_the_refusal_for_the_next_ask() -> None:
+    """The tool refuses the first ask (a second ask in one response, say) and the model
+    asks again. The refused ask reached nobody, so the second ask is the one the refusal
+    binds, the user's pick of adding the two stands for the sum, and the refused ask's
+    body is no decline."""
+    refused_body = {
+        "outcome": Outcome.INVALID_INPUT.value,
+        "code": ProblemCode.INVALID_ARGUMENTS.value,
+        "message": "m",
+    }
+    ctx = _FakeToolContext()
+    ctx.session.events.extend(
+        [
+            *_combination_asked(call_id="ask-1"),
+            _ask_response("ask-1", refused_body),
+            *_combination_asked({"spec_id": COMBINE_OPTION}, about=None, call_id="ask-2")[:1],
+            _ask_response("ask-2", dict(ASK_ACCEPTED)),
+            _ask_response("ask-2", {"result": {"spec_id": COMBINE_OPTION}}),
+        ]
+    )
+
+    picks, declined = CallSession(AdkCall(ctx)).combination_picks()
+
+    assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
+    assert declined is False
 
 
 def _with_debt_side(
@@ -4105,6 +4134,53 @@ def test_a_recorded_pin_is_copied_over_the_requirements_period_only_when_its_win
     assert {
         spec_id: copy.windowed_from for spec_id, copy in windowed_pins(ctx.state).items()
     } == copies
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("pin", "also_shown"),
+    [
+        (_AID_2020_2024_SPEC, ()),
+        (_AID_SPEC, ()),
+        (_AID_SPEC, (_AID_2020_2024_SPEC,)),
+    ],
+    ids=["not-moved", "moved-to-a-copy", "moved-to-a-dataset-on-record"],
+)
+def test_the_verdict_on_a_pin_names_the_pin_its_requirement_holds_after_windowing(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    pin: str,
+    also_shown: tuple[str, ...],
+) -> None:
+    """The verdict recorded with the plan names the requirement's pin once admission
+    moved it over the requirement's period, a minted copy or, where the copy is
+    a dataset the planner was shown and so no copy, that dataset, so the
+    translator compares it with the pin it reads."""
+    ctx = _FakeToolContext()
+    save_pin_sources(
+        ctx.state, {spec_id: PinSource(settled=True) for spec_id in (pin, *also_shown)}
+    )
+
+    result = _propose_pinned(
+        _tools_by_name(),
+        ctx,
+        pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT),
+        [requirement(source_spec_id=pin, period=Period(start=2020, end=2024))],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (pinned,) = plan.evidence_requirements
+    assert isinstance(pinned, DatasetRequirement)
+    assert pinned.source_spec_id == _AID_2020_2024_SPEC
+    assert {
+        verdict.requirement_id: (verdict.spec_id, verdict.narrowed)
+        for verdict in pin_verdicts(ctx.state).values()
+    } == {pinned.id: (_AID_2020_2024_SPEC, False)}
+    assert (_AID_2020_2024_SPEC in windowed_pins(ctx.state)) is (
+        not also_shown and pin == _AID_SPEC
+    )
 
 
 # --- the envelope's own spec_id, synthesized into a Decision ---------------------------
@@ -10625,6 +10701,47 @@ def test_a_sum_of_provider_rows_searched_in_words_keeps_each_row(
     assert _pins(ctx) == [(rid, block["spec_id"]) for rid, block in blocks.items()]
 
 
+async def test_a_search_for_an_unpinned_input_is_shown_with_the_requests_warnings() -> None:
+    """A warning on the search request (`diagnostics.warnings`), as `role_text_not_recognised`
+    is, covers its part as much as one on the part itself: the source the planner is shown
+    carries both, request-level first, as the compiler reads them."""
+    block = _SUM_BLOCKS["dac_countries_bilateral"]
+    envelope = {
+        "diagnostics": {"warnings": [{"code": "role_text_not_recognised", "message": "m"}]},
+        "parts": [
+            {
+                "status": "definite",
+                "spec": block,
+                "warnings": [{"code": "wide_scope", "message": "m"}],
+            }
+        ],
+    }
+
+    class _Searches:
+        async def call_tool(self, **_: Any) -> ToolCallResult:
+            return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
+
+    read = await planner_agent.pin_by_search(
+        cast(Any, _Searches()),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    assert read(state) is None
+
+    assert pin_sources(state)[block["spec_id"]].warnings == (
+        "role_text_not_recognised",
+        "wide_scope",
+    )
+
+
 def _another_part(block: dict[str, Any]) -> dict[str, Any]:
     """A copy of `block` as a part of its own (`PartScope.base`), under a spec_id of its
     own, binding the same donor and compiling to the same identity."""
@@ -12800,6 +12917,23 @@ def test_an_answer_to_the_planners_prices_ask_sets_or_releases_the_choice(
     ]
 
     assert prices_chosen(AdkCall(ctx)) == held
+
+
+def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> None:
+    """The tool refused the planner's first prices ask, which reached nobody. The prices
+    refusal still sends the planner to the user, so the ask that follows is the one
+    it binds, and the user's pick of current prices is held."""
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        *_prices_ask_events(),
+        _prices_refused_event(_GROSS, asks_user=True),
+        _prices_options_ask(),
+        _ask_response("ask-prices", {"outcome": Outcome.INVALID_INPUT.value, "message": "m"}),
+        _prices_options_ask(call_id="ask-again"),
+        _ask_response("ask-again", {"result": {"spec_id": "prices:current"}}),
+    ]
+
+    assert prices_chosen(AdkCall(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
 
 
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
@@ -16504,7 +16638,7 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
     whatever its pin (`translator.discovery.narrowed_pin`), so the plan is recorded
     with the pin as written. Shown with a block whose identity is past
     `MAX_IDENTITY_BYTES`, the refusal names that cause
-    (`planner.plan.unusable_definition`)."""
+    (`planner.plan.identity_or_refusal`)."""
     ctx = _FakeToolContext()
     pin, block = _AID_SPEC, None
     if past_cap:
@@ -16534,7 +16668,7 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
             [dataset.id],
         )
         if block is not None:
-            cause = unusable_definition(pin, block)
+            _, cause = identity_or_refusal(pin, shown={pin: PinSource(block=block, settled=True)})
             assert cause is not None
             assert cause in result["message"]
         return
@@ -18018,6 +18152,51 @@ def _assert_asked(result: Any, ctx: Any) -> None:
     asked = load_pending_ask(ctx.state)
     assert asked is not None and asked.call_id == ctx.function_call_id
     assert ctx.actions.skip_summarization is True
+
+
+@pytest.mark.parametrize(
+    "first_accepted",
+    [False, True],
+    ids=["first-refused-then-the-referral-cleared", "first-accepted"],
+)
+def test_an_ask_beside_another_reads_the_outcome_of_the_earlier_ask(first_accepted: bool) -> None:
+    """[ask, propose_plan, ask] in one response. The first ask is refused under the
+    pending entity referral (it offers no pick of it), then `propose_plan` clears the
+    referral. The second is the one question that reaches the user: judging the first
+    afresh against the cleared referral would find it acceptable and refuse the second,
+    and neither would be asked. An accepted first ask still refuses the second."""
+    ctx: Any = _FakeToolContext()
+    reading = _congo_both_ends(_CONGO_REQUIREMENT)
+    save_referral(ctx.state, reading)
+    picks = [
+        {"spec_id": candidate.pick, "label": candidate.label}
+        for candidate in reading.ambiguous_entities[0].candidates
+    ]
+    first_args = {
+        "message": "Which Congo?",
+        "candidates": picks if first_accepted else [{"spec_id": "unrelated", "label": "Other"}],
+    }
+    ctx.session.events.append(
+        SimpleNamespace(
+            get_function_calls=lambda: [
+                SimpleNamespace(id="first", name=PLANNER_ASK, args=first_args),
+                SimpleNamespace(id="plan", name="propose_plan", args={}),
+                SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
+            ]
+        )
+    )
+    ctx.function_call_id = "first"
+    first = ask_user_question(cast(Any, ctx), **first_args)
+    assert (first == ASK_ACCEPTED) is first_accepted
+    clear_referral(ctx.state)
+
+    ctx.function_call_id = "second"
+    second = ask_user_question(cast(Any, ctx), message="Which years?")
+
+    asked = load_pending_ask(ctx.state)
+    assert asked is not None
+    assert (second == ASK_ACCEPTED) is not first_accepted
+    assert asked.call_id == ("first" if first_accepted else "second")
 
 
 @pytest.mark.parametrize(("offered_for", "refused"), [("debt", False), ("debt_history", True)])

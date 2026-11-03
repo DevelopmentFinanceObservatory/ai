@@ -72,10 +72,13 @@ class Step(NamedTuple):
     interrupt's `adk_request_input`, with its id and `args`. `answer` is a
     response to one, with its id, the `args` of the nearest preceding call
     sharing that id (`None` when none precedes it) and the response body.
-    `response` is any other tool's response, with its `name` and body.
+    `refused` is the response of a `PLANNER_ASK` call that never reached the
+    user (the tool refused it, or ADK rejected the call), with the call's id
+    and no answer. `response` is any other tool's response, with its `name`
+    and body.
     """
 
-    kind: Literal["message", "call", "answer", "response"]
+    kind: Literal["message", "call", "answer", "refused", "response"]
     call_id: str | None = None
     args: dict[str, Any] | None = None
     body: Mapping[str, Any] = MappingProxyType({})
@@ -200,6 +203,11 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
         elif step.kind == "call":
             if refused is not None and (step.args or {}).get("options") == offered:
                 asked[str(step.call_id)], refused = refused, None
+        elif step.kind == "refused":
+            # The ask never reached the user, so the refusal it answered still
+            # sends the planner to them: the next ask binds it.
+            unasked = asked.pop(str(step.call_id), None)
+            refused = refused if refused is not None else unasked
         elif _is_amendment(step.body):
             chosen.clear()
         elif (switched := _prices_switched(step.body)) is not None:
@@ -528,6 +536,8 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
         elif step.kind == "call":
             if referral is not None:
                 asks[str(step.call_id)] = _offered_candidates(step.args or {})
+        elif step.kind == "refused":
+            asks.pop(str(step.call_id), None)
         elif step.kind == "answer":
             if _is_amendment(step.body):
                 picked_ever.clear()
@@ -617,6 +627,11 @@ def combination_picks(
                 asks[str(step.call_id)], refused = refused, None
             else:
                 asks.pop(str(step.call_id), None)
+        elif step.kind == "refused":
+            # The ask never reached the user, so the refusal it answered is
+            # still unasked: the next ask binds it.
+            unasked = asks.pop(str(step.call_id), None)
+            refused = refused or unasked
         elif step.kind == "response":
             refused = _refused_combination(step.body) or refused
         elif step.kind == "answer" and step.call_id in asks:

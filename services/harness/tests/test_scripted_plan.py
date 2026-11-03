@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import pytest
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult
-from compiler.surface import ProgressReport, ToolSchema
+from compiler.surface import ProgressReport, ToolSchema, ToolSurfaceUnavailableError
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
 from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
@@ -185,3 +185,12 @@ async def test_the_default_scripted_surface_reports_no_progress() -> None:
     )
 
     assert reports == []
+
+
+async def test_a_tool_the_scripted_surface_does_not_answer_is_not_retryable() -> None:
+    with pytest.raises(ToolSurfaceUnavailableError) as excinfo:
+        await ScriptedSurface().call_tool(
+            tool=ToolId(server="data-mcp", name="search"), arguments={}
+        )
+
+    assert excinfo.value.retryable is False

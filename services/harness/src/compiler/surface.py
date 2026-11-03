@@ -32,7 +32,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.client.progress import ProgressHandler
 from fastmcp.client.transports import ClientTransport
 from mcp import MCPError
-from mcp.types import REQUEST_TIMEOUT, TextContent, Tool
+from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, TextContent, Tool
 from planner.workflow import ToolId
 from pydantic import BaseModel, Field
 
@@ -216,7 +216,46 @@ class ToolSurfaceUnavailableError(RuntimeError):
     someone fixes it, so retrying is pointless. An unreachable server is worth
     another attempt: the tools are fine and the attempt simply did not
     complete.
+
+    `retryable` is the raise site's verdict on whether a later attempt can
+    succeed: `True` for a call that was cut off or never issued for lack of
+    time, a connection that closed, a timeout, or a session that ended under
+    the call (`retryable_call_failure`); `False` for a failure no retry
+    changes, such as a server this surface does not cover. A site whose
+    cause is a transport error leaves it `False` and lets the cause speak
+    (`harness.studio_translate._transient_fault` walks `__cause__`).
     """
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+# The MCP error codes of a call whose connection closed or that timed out:
+# the server may answer the same call later.
+TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
+
+# Raised by `fastmcp.client.client.Client._await_with_session_monitoring`
+# (fastmcp 3) as a bare `RuntimeError` when the MCP session's task ends
+# without an exception while a call waits on it: the server closed the
+# stream. fastmcp offers no other signal: the error has no type of its own,
+# `Client.is_connected()` stays true until the client exits, and the session
+# task is private state. The message is all that tells it from any other
+# `RuntimeError`, so this module is the one place that reads it, and
+# `test_surface.py` pins it against the real client.
+_FASTMCP_SESSION_ENDED = "Session task completed unexpectedly"
+
+
+def retryable_call_failure(exc: Exception) -> bool:
+    """Whether `exc`, raised by a fastmcp `Client` call, is a failure the same
+    call may not meet again: an MCP error whose connection closed or whose
+    request timed out (`TRANSIENT_MCP_CODES`), a `TimeoutError`, or the
+    session ending under the call. Any other exception is left to its cause."""
+    if isinstance(exc, MCPError):
+        return exc.error.code in TRANSIENT_MCP_CODES
+    if isinstance(exc, TimeoutError):
+        return True
+    return type(exc) is RuntimeError and exc.args == (_FASTMCP_SESSION_ENDED,)
 
 
 # What a server is reached through: its URL, the `FastMCP` instance itself over
@@ -415,7 +454,8 @@ class McpSurface:
         source = self._sources.get(tool.server)
         if source is None:
             raise ToolSurfaceUnavailableError(
-                f"no server named {tool.server!r} is covered; covered: {sorted(self._sources)!r}"
+                f"no server named {tool.server!r} is covered; covered: {sorted(self._sources)!r}",
+                retryable=False,
             )
         timeout = self._call_timeouts.get(tool, self._default_call_timeout_s)
         clients = self._call_clients[tool.server]
@@ -445,7 +485,8 @@ class McpSurface:
                 )
                 await clients.discard(client)
             raise ToolSurfaceUnavailableError(
-                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}"
+                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}",
+                retryable=retryable_call_failure(exc),
             ) from exc
         except Exception as exc:
             logger.warning(
@@ -458,7 +499,8 @@ class McpSurface:
             if client is not None:
                 await clients.discard(client)
             raise ToolSurfaceUnavailableError(
-                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}"
+                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}",
+                retryable=retryable_call_failure(exc),
             ) from exc
         finally:
             if client is not None:
@@ -492,7 +534,8 @@ class McpSurface:
                 return await client.list_tools()
         except Exception as exc:
             raise ToolSurfaceUnavailableError(
-                f"could not read the tool surface at {_source_label(source)!r}: {exc}"
+                f"could not read the tool surface at {_source_label(source)!r}: {exc}",
+                retryable=retryable_call_failure(exc),
             ) from exc
 
 
@@ -534,5 +577,7 @@ class FixtureSurface:
     ) -> ToolCallResult:
         del arguments, on_progress  # a canned answer depends on neither
         if tool.name not in self._responses:
-            raise ToolSurfaceUnavailableError(f"no canned answer for {tool.name!r}")
+            raise ToolSurfaceUnavailableError(
+                f"no canned answer for {tool.name!r}", retryable=False
+            )
         return self._responses[tool.name]

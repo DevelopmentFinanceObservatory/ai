@@ -48,6 +48,7 @@ from planner.plan import (
     FirstYear,
     GrowthRequirement,
     PinSource,
+    PinVerdict,
     Plan,
     PlanStatus,
     Unit,
@@ -61,6 +62,7 @@ from planner.plan import (
     pin_sources,
     plan_revision,
     save_pin_sources,
+    save_pin_verdicts,
     save_windowed_pins,
 )
 from planner.records import (
@@ -799,7 +801,7 @@ async def test_a_re_pin_to_the_source_a_source_mismatch_referral_offers_reads_it
         assert source_from_spec_block(block) == source.model_copy(update={"searched_as": None})
 
 
-@pytest.mark.parametrize("referral", ["stale pin", "source mismatch"])
+@pytest.mark.parametrize("referral", ["stale pin", "source mismatch", "source ambiguous"])
 async def test_a_plan_a_referral_can_still_offer_a_found_source_from_keeps_its_block(
     referral: str,
     surface: McpSurface,
@@ -810,18 +812,22 @@ async def test_a_plan_a_referral_can_still_offer_a_found_source_from_keeps_its_b
     context_holding: ContextHolding,
 ) -> None:
     # Discovery found SPEC_KENYA, in place of a stale pin or for a
-    # requirement stating a source SPEC_KENYA does not name, and the next plan
-    # leaves that requirement as it was. Its translation offers SPEC_KENYA
-    # again from the log with no search made for it: beside another
-    # referral when the stale pin's own search fails, or in a
-    # `source_mismatch` referral once the compile reads the source the log
-    # settled. Recording that plan keeps the block a re-pin to it reads.
+    # requirement stating a source SPEC_KENYA does not name, or found
+    # candidates for a requirement with no pin, and the next plan leaves that
+    # requirement as it was. Its translation offers them again from the log
+    # with no search made for them: beside another referral when the stale
+    # pin's own search fails, in a `source_mismatch` referral once the compile
+    # reads the source the log settled, or in a `source_ambiguous` referral.
+    # Recording that plan keeps the blocks a re-pin to them reads.
     if referral == "stale pin":
         kept = requirement(source_spec_id=SPEC_OTHER)
         plan = draft(
             decisions=[pinning_decision(SPEC_OTHER)],
             evidence_requirements=[kept, derived_requirement()],
         )
+    elif referral == "source ambiguous":
+        kept = requirement(measure="aid disbursements")
+        plan = draft(evidence_requirements=[kept, derived_requirement()])
     else:
         kept = requirement(source="World Development Indicators")
         plan = draft(evidence_requirements=[kept, derived_requirement()])
@@ -829,20 +835,25 @@ async def test_a_plan_a_referral_can_still_offer_a_found_source_from_keeps_its_b
     await _discover(surface, context)
     log = load_log(context.state)
     key = _requirement_key(context)
-    offered = (
-        log.stale_pin_sources(key, kept.id, SPEC_OTHER)
-        if referral == "stale pin"
-        else log.pinnable_for(key, kept.id)
-    )
-    assert [source.spec_id for source in offered or ()] == [SPEC_KENYA]
+    match referral:
+        case "stale pin":
+            offered = log.stale_pin_sources(key, kept.id, SPEC_OTHER)
+        case "source ambiguous":
+            offered = log.candidates_for(key, kept.id)
+        case _:
+            offered = log.pinnable_for(key, kept.id)
+    expected = [SPEC_OTHER, SPEC_THIRD] if referral == "source ambiguous" else [SPEC_KENYA]
+    assert [source.spec_id for source in offered or ()] == expected
 
     keep_found_sources(
         context.state, plan, alignments=(), windowed_pins=(), offered=log.offered_for(plan)
     )
 
-    block = held_sources(context.state)[SPEC_KENYA].block
-    assert block is not None
-    assert source_from_spec_block(block).spec_id == SPEC_KENYA
+    held = held_sources(context.state)
+    for spec_id in expected:
+        block = held[spec_id].block
+        assert block is not None
+        assert source_from_spec_block(block).spec_id == spec_id
 
 
 async def test_no_data_and_unsupported_carry_the_servers_detail(
@@ -1344,6 +1355,62 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
     assert log.sources["annual_debt_service"][spec_id].coverage_window == Period(
         start=2010, end=2023
     )
+
+
+@pytest.mark.parametrize(
+    ("stamped_with", "honoured"),
+    [("copy", True), ("origin", True), ("moved", False)],
+    ids=["final-pin", "pre-window-pin", "pin-moved-since"],
+)
+async def test_admissions_verdict_on_a_copied_pin_is_the_one_the_translator_reads(
+    stamped_with: str,
+    honoured: bool,
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # Admission judged the pin not narrowed and stamped the verdict with the
+    # requirement's final pin, the copy. The origin's own record carries a
+    # dropped-role warning, which judged afresh would read the pin as
+    # narrowed and search it again. A verdict stamped with the pin the copy
+    # copies (stored before the final pin was stamped) reads the same; one
+    # stamped with some other pin is a pin moved since, and is judged afresh.
+    answered = _KENYA_OVER["2010-2023"]
+    spec_id = answered["spec_id"]
+    identity = answered["definition"]["identity"]
+    earlier = _KENYA_OVER["2015-2023"]["spec_id"]
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(source_spec_id=spec_id, period=Period(start=2010, end=2023)),
+                derived_requirement(),
+            ],
+        )
+    )
+    save_windowed_pins(
+        context.state, [WindowedPin(spec_id=spec_id, identity=identity, windowed_from=earlier)]
+    )
+    _shown(context, earlier, None, "role_text_not_recognised")
+    save_pin_verdicts(
+        context.state,
+        [
+            PinVerdict(
+                requirement_id="annual_debt_service",
+                spec_id={"copy": spec_id, "origin": earlier, "moved": SPEC_OTHER}[stamped_with],
+                narrowed=False,
+            )
+        ],
+    )
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
+
+    await _discover(_SearchAndResolve(surface, resolving), context)
+
+    assert (search_calls == []) is honoured
 
 
 @pytest.mark.parametrize("whole_history", [True, False], ids=["whole-history", "stated-period"])

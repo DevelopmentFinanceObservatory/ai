@@ -80,6 +80,7 @@ from harness.scope_choices import (
     PartScope,
     ScopeChoice,
     mark_planner_axes,
+    mark_searched_axes,
     option_axis,
     planner_axes,
     switch_entries,
@@ -785,12 +786,15 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
     read, and no producer in the harness sends a user-typed event that also
     carries a function part. Every other event yields a `call` step for each
     ask carrying an id, an `answer` step for each response to one, paired
-    with the `args` of the nearest preceding call sharing its id, and a
-    `response` step for each other tool's response.
+    with the `args` of the nearest preceding call sharing its id, a
+    `refused` step for the response of a `PLANNER_ASK` call that never
+    reached the user, and a `response` step for each other tool's response.
 
     An ask is the planner's own (`PLANNER_ASK`) or one of the workflow's
     interrupts. The planner's call holds its question flat in `args`. A
-    refused one's answer is its tool's refusal. An accepted one's tool
+    refused one's response is its tool's refusal, or ADK's rejection of the
+    call, which carry no `result` and make a `refused` step in place of an
+    answer: no user said anything. An accepted one's tool
     answers `ASK_ACCEPTED`, which says nothing the user did and is not read,
     and the graph's planner node pauses on it with a `RequestInput` under
     the call's own id, so the user's answer to that interrupt is the
@@ -827,7 +831,9 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
             body = response.response or {}
             if response.name == PLANNER_ASK and body.get("outcome") == Outcome.OK.value:
                 continue
-            if response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
+            if response.name == PLANNER_ASK and "result" not in body:
+                yield Step("refused", response.id)
+            elif response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
                 yield Step("answer", response.id, calls.get(response.id or ""), body)
             else:
                 yield Step("response", body=body, name=response.name)
@@ -1672,8 +1678,10 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     and with no message of the user's, so every axis an entry settled on
     Search's answer is marked as the planner's
     (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
-    shown to the planner as a source of its own, with its part's warning
-    codes (`planner.plan.save_pin_sources`), and held as a
+    shown to the planner as a source of its own, with the codes of its
+    part's warnings and the request's
+    (`harness.tool_contracts.graph_envelope`; `planner.plan.save_pin_sources`),
+    and held as a
     `submission.service.SearchedPin` with its digest, and the time the
     search was made as one settling on its spec_id
     (`planner.plan.record_spec_searched`), so the next proposal
@@ -1726,16 +1734,10 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     if not isinstance(spec_id, str) or not isinstance(envelope, dict):
         return lambda into: save_searched_pin(into, searched)
     digest = resolver_digest(cast(dict[str, Any], envelope))
-    scope = part_scope(spec_id, digest["spec_block"])
-    mark_planner_axes(
-        digest,
-        (choice.axis for choice in scope.choices if choice.provenance != "default")
-        if scope is not None
-        else (),
-    )
+    mark_searched_axes(digest, spec_id=spec_id)
     shown = PinSource(
         block=digest["spec_block"],
-        warnings=warning_codes(part.get("warnings") if isinstance(part, dict) else None),
+        warnings=warning_codes(digest["warnings"]),
         settled=True,
         asked_roles=unpinned.asked_roles,
     )
@@ -2050,19 +2052,21 @@ def _ask_beside_ask(tool_context: ToolContext) -> dict[str, object] | None:
     The user answers one question at a time. The calls of one response run
     concurrently, and an accepted ask ends the run before the model is
     called again, so the only way two asks can wait together is two in one
-    response. The first that its own checks accept (`_ask_check`) is the one
-    the response puts to the user; an earlier ask they refuse leaves a later
-    one free. `tool_context.session.events` holds the call's own model
-    response by the time its tool runs.
+    response. The first that its tool accepts is the one the response puts to
+    the user, and it waits in the session state under its call id
+    (`PENDING_ASK_STATE_KEY`). An earlier ask the tool refused leaves a later
+    one free. The earlier asks' outcome is read off that record, since another
+    call of the response may have changed the state their checks read
+    (`propose_plan` clears the referral). `tool_context.session.events` holds
+    the call's own model response by the time its tool runs.
     """
     own = tool_context.function_call_id
     for event in reversed(tool_context.session.events):
-        calls = event.get_function_calls()
-        ids = [call.id for call in calls]
+        ids = [call.id for call in event.get_function_calls()]
         if own not in ids:
             continue
-        earlier = [call for call in calls[: ids.index(own)] if call.name == PLANNER_ASK]
-        if all(_ask_check(call.args or {}, tool_context.state) is not None for call in earlier):
+        pending = load_pending_ask(tool_context.state)
+        if pending is None or pending.call_id not in ids[: ids.index(own)]:
             return None
         return problem(
             ProblemCode.INVALID_ARGUMENTS,

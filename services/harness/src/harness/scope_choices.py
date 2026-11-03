@@ -30,6 +30,7 @@ line's words for reason codes, the ones the search digest uses
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection, Iterable, Mapping
 from typing import Annotated, Any, Literal, NamedTuple, get_args
 
@@ -44,7 +45,9 @@ from data_mcp.scope import (
     ScopeReasonCode,
 )
 from planner.records import OptionStatus, StrictModel
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
+
+logger = logging.getLogger(__name__)
 
 # The scope axis of whose spending a part counts.
 PROVIDER_AXIS = "provider"
@@ -460,6 +463,39 @@ def mark_planner_axes(digest: dict[str, Any], axes: Iterable[str]) -> None:
     for holder in (digest, *(digest.get("part_digests") or ())):
         if isinstance(holder.get("spec_block"), Mapping):
             holder["spec_block"] = {**holder["spec_block"], PLANNER_AXES_BLOCK_KEY: marked}
+
+
+def part_scope(spec_id: str, block: Mapping[str, Any] | None) -> PartScope | None:
+    """The scope choices `block`, the spec block of `spec_id`, carries; `None` when it carries none or none this release reads.
+
+    Every reader of a block's scope choices parses them here, so a record
+    this release cannot read is read as none, and logged, by one rule.
+    """
+    raw = ((block or {}).get("resolved") or {}).get("scope_choices")
+    if raw is None:
+        return None
+    try:
+        return PartScope.from_search(raw)
+    except ValidationError as exc:
+        logger.warning("scope choices unreadable: spec_id=%s: %s", spec_id, exc)
+        return None
+
+
+def mark_searched_axes(digest: dict[str, Any], *, spec_id: str) -> None:
+    """Mark each axis the scope choices of `digest`'s spec block (`spec_id`) settled
+    other than by default as the planner's (`mark_planner_axes`).
+
+    For a search made in the planner's own words, as `planner.agent.pin_by_search`
+    makes and `translator.discovery.found_blocks` reads from discovery's. A block
+    whose scope choices this release cannot read (`part_scope`) marks none.
+    """
+    scope = part_scope(spec_id, digest["spec_block"])
+    mark_planner_axes(
+        digest,
+        (choice.axis for choice in scope.choices if choice.provenance != "default")
+        if scope is not None
+        else (),
+    )
 
 
 def carried_entries(

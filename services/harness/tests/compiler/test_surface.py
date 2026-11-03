@@ -25,6 +25,7 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     UnhashableSchemaError,
     _auth_for,
+    retryable_call_failure,
     schema_hash,
     schema_hash_error,
 )
@@ -32,6 +33,8 @@ from data_mcp.server import mcp as data_mcp
 from fastmcp import Client, Context, FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp import MCPError
+from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, REQUEST_TIMEOUT
 from planner.workflow import ToolId
 
 UNREACHABLE_URL = "http://127.0.0.1:9/mcp"
@@ -336,6 +339,72 @@ async def test_a_non_timeout_failure_discards_the_held_client(
     assert _held(surface, "data-mcp") is not broken
 
 
+@pytest.mark.parametrize(
+    ("raised", "retryable"),
+    [
+        (RuntimeError("Session task completed unexpectedly"), True),
+        (RuntimeError("transport closed"), False),
+        (MCPError(code=CONNECTION_CLOSED, message="Connection closed"), True),
+        (MCPError(code=REQUEST_TIMEOUT, message="Timed out"), True),
+        (MCPError(code=INTERNAL_ERROR, message="Internal error"), False),
+        (TimeoutError(), True),
+    ],
+    ids=[
+        "session-ended",
+        "other-runtime-error",
+        "mcp-connection-closed",
+        "mcp-request-timeout",
+        "mcp-server-error",
+        "timeout",
+    ],
+)
+async def test_a_failed_call_is_marked_retryable_by_the_type_that_failed_it(
+    monkeypatch: pytest.MonkeyPatch, raised: Exception, retryable: bool
+) -> None:
+    surface = McpSurface(sources={"data-mcp": _answering_server()})
+
+    async def _fails(self: Client, *args: object, **kwargs: object) -> object:
+        raise raised
+
+    monkeypatch.setattr(Client, "call_tool", _fails)
+
+    with pytest.raises(ToolSurfaceUnavailableError) as excinfo:
+        await surface.call_tool(
+            tool=ToolId(server="data-mcp", name="search"), arguments={"parts": []}
+        )
+
+    assert excinfo.value.retryable is retryable
+
+
+async def test_the_error_fastmcp_raises_when_its_session_task_ends_is_retryable() -> None:
+    """The text `retryable_call_failure` matches is the one the installed
+    fastmcp raises: a finished session task under a call, built here by
+    replacing the task with one that completed without an exception."""
+    async with Client(_answering_server()) as client:
+        ended = asyncio.get_running_loop().create_future()
+        ended.set_result(None)
+        client._session_state.session_task = ended  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await client.call_tool("search", {"parts": []})
+
+    assert retryable_call_failure(excinfo.value) is True
+
+
+async def test_a_failed_read_is_marked_retryable_by_the_type_that_failed_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _session_ends(self: Client) -> object:
+        raise RuntimeError("Session task completed unexpectedly")
+
+    monkeypatch.setattr(Client, "list_tools", _session_ends)
+
+    with pytest.raises(ToolSurfaceUnavailableError) as excinfo:
+        await McpSurface(sources={"data-mcp": _answering_server()}).list_tools()
+
+    assert excinfo.value.retryable is True
+
+
 async def test_a_non_timeout_failure_does_not_tear_down_a_concurrent_call_on_the_same_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -535,8 +604,10 @@ async def test_call_tool_on_an_uncovered_server_raises_naming_the_covered_ones()
 
     with pytest.raises(
         ToolSurfaceUnavailableError, match=r"no server named 'analysis-mcp'.*'data-mcp'"
-    ):
+    ) as excinfo:
         await surface.call_tool(tool=ToolId(server="analysis-mcp", name="aggregate"), arguments={})
+
+    assert excinfo.value.retryable is False
 
 
 async def test_call_tool_on_an_unreachable_server_raises_naming_the_tool() -> None:
@@ -554,8 +625,11 @@ async def test_the_fixture_surface_answers_from_its_canned_responses() -> None:
         await surface.call_tool(tool=ToolId(server="data-mcp", name="search"), arguments={})
         == canned
     )
-    with pytest.raises(ToolSurfaceUnavailableError, match="no canned answer for 'describe'"):
+    with pytest.raises(
+        ToolSurfaceUnavailableError, match="no canned answer for 'describe'"
+    ) as excinfo:
         await surface.call_tool(tool=ToolId(server="data-mcp", name="describe"), arguments={})
+    assert excinfo.value.retryable is False
 
 
 def _reporting_server() -> FastMCP:

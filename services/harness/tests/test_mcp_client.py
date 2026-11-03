@@ -27,7 +27,7 @@ from common.auth import apply_gate
 from common.caller import conversation_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
-from compiler.surface import ProgressReport
+from compiler.surface import ProgressReport, ToolSurfaceUnavailableError
 from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
@@ -108,7 +108,7 @@ class _RaisingClient:
     """A `Client` stand-in whose `call_tool` always raises, for testing
     `_call_tool`'s timeout handling in isolation from the transport."""
 
-    def __init__(self, error: MCPError) -> None:
+    def __init__(self, error: Exception) -> None:
         self._error = error
 
     async def call_tool(
@@ -162,6 +162,28 @@ async def test_call_tool_leaves_a_non_timeout_mcp_error_untouched() -> None:
 
     assert excinfo.value is error
     assert getattr(excinfo.value, "timeout_tool", None) is None
+
+
+async def test_call_tool_marks_a_session_that_ended_under_the_call_retryable() -> None:
+    """fastmcp raises a bare `RuntimeError` when the session task ends under
+    a call; `_call_tool` raises it as a retryable `ToolSurfaceUnavailableError`
+    so `_stream_fatal` reads it by type."""
+    ended = RuntimeError("Session task completed unexpectedly")
+
+    with pytest.raises(ToolSurfaceUnavailableError) as excinfo:
+        await _call_tool(_RaisingClient(ended), "search", {})  # type: ignore[arg-type]
+
+    assert excinfo.value.retryable is True
+    assert excinfo.value.__cause__ is ended
+
+
+async def test_call_tool_leaves_any_other_runtime_error_untouched() -> None:
+    error = RuntimeError("Event loop is closed")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _call_tool(_RaisingClient(error), "search", {})  # type: ignore[arg-type]
+
+    assert excinfo.value is error
 
 
 async def test_call_tool_tags_a_real_client_deadline_as_a_timeout() -> None:

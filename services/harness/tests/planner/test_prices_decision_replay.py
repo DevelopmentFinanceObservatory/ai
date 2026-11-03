@@ -783,6 +783,21 @@ def test_a_plan_sentence_reads_the_block_admission_reads() -> None:
     assert SCOPE_UNREAD_BLOCK_KEY not in blocks[FOUND]
 
 
+def test_a_plan_sentence_reads_this_turns_definite_block_over_a_found_unread_one() -> None:
+    """This turn's search answered `FOUND` definite, and the planner was not shown it
+    (no pin source). Discovery holds a block of `FOUND` marked unread, which says
+    less about its scope choices. The block a sentence about the plan names
+    `FOUND`'s pin from is the definite one: `standing_block` ranks the two."""
+    ctx = _FakeToolContext()
+    store_search(ctx.state, resolver_digest(RECORDED["translator"]))
+    definite = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)[FOUND]
+    save_found_sources(ctx.state, {FOUND: {**definite, SCOPE_UNREAD_BLOCK_KEY: True}})
+
+    blocks = planner_seam._spec_blocks(ctx.state)
+
+    assert blocks[FOUND] == definite
+
+
 def test_a_later_search_offering_a_settled_series_as_a_candidate_leaves_it_as_settled() -> None:
     """One search answered `FOUND` definite, stating its scope choices and
     binding the United Kingdom as donor, and a later one offered it as a

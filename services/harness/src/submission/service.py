@@ -88,6 +88,7 @@ from harness.scope_choices import (
     block_dataset,
     holds_streams,
     option_axis,
+    part_scope,
     planner_axes,
     scope_money,
 )
@@ -181,6 +182,7 @@ from planner.plan import (
     full_history,
     held_sources,
     identity_on_record,
+    identity_or_refusal,
     inputs_of,
     is_code_written,
     is_scope_choice,
@@ -219,7 +221,6 @@ from planner.plan import (
     unaligned_requirement,
     unstated_period_reductions,
     unstated_result_scopes,
-    unusable_definition,
     whole_of_fault,
     windowed_pin,
     windowed_pins,
@@ -549,6 +550,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     held_alignments = alignments(view.state) if previous is not None else {}
     patch = _unwindowed_patch(patch, to_origin)
     removed_decisions = patch.removed_decisions
+    drafts = _without_user_prices(patch.decisions)
     evidence_requirements = [
         unaligned_requirement(requirement, held_alignments)
         for requirement in patch.evidence_requirements
@@ -616,7 +618,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 pick,
                 _decisions_after(
                     previous,
-                    settle_decisions(_without_user_prices(patch.decisions), written),
+                    settle_decisions(drafts, written),
                     removed=removed_decisions,
                 ),
                 written,
@@ -658,7 +660,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     wholes = {rid: pin for rid, pin in targets.items() if pin.whole_axis is not None}
     moved = {rid: pin for rid, pin in targets.items() if pin.whole_axis is None}
     settled, evidence_requirements = _without_replaced_whole_decisions(
-        settle_decisions(_without_user_prices(patch.decisions), aligned_after),
+        settle_decisions(drafts, aligned_after),
         evidence_requirements,
         carried=previous.decisions if previous is not None else (),
         after=aligned_after,
@@ -881,6 +883,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             definition_lookup=definition_lookup,
             narrowed={verdict.requirement_id for verdict in verdicts if verdict.narrowed},
         )
+        verdicts = _verdicts_on_final_pins(verdicts, plan)
     except (ValidationError, ValueError) as exc:
         # The plan-level rules: unique slots and ids, every citation naming
         # a decision, every decision cited, the length and count limits on
@@ -3472,19 +3475,16 @@ def _first_year_unknown_cause(exc: ValueError) -> RollingPlanError | None:
 
 
 def _no_source_on_record(
-    requirement_id: str, pin: str | None, *, shown: Mapping[str, PinSource]
+    requirement_id: str, pin: str | None, *, cause: str | None
 ) -> RollingPlanError:
-    """The refusal of `requirement_id`, stating `period_end_open`, whose pin `pin` has no identity on record (`identity_on_record`).
+    """The refusal of `requirement_id`, stating `period_end_open`, whose pin `pin` has no identity on record (`identity_or_refusal`).
 
-    Where the pin's block in `shown` carries a definition that cannot be put
-    on record (`planner.plan.unusable_definition`), the refusal names why,
-    and asks for fixed years: no pin of that dataset can be retrieved with
-    no end year. Otherwise no search recorded a definition of the pin, and
-    no block the session holds for it carries one.
+    Where the pin's block carries a definition that cannot be put on
+    record, `cause` is why, the refusal names it, and asks for fixed years:
+    no pin of that dataset can be retrieved with no end year. Otherwise no
+    search recorded a definition of the pin, and no block the session holds
+    for it carries one.
     """
-    source = shown.get(pin) if pin is not None else None
-    block = source.spec_block(pin) if source is not None and pin is not None else None
-    cause = unusable_definition(pin, block) if pin is not None and block is not None else None
     if cause is not None:
         message = (
             f"{requirement_id!r} states `period_end_open`, which retrieves its dataset with "
@@ -3534,11 +3534,11 @@ def _first_year_refusal(
     """
     (requirement_id,) = refused.requirement_ids
     pin = refused.spec_id
-    if (
-        pin is None
-        or identity_on_record(pin, shown=shown, definition_lookup=definition_lookup) is None
-    ):
-        return _no_source_on_record(requirement_id, pin, shown=shown)
+    if pin is None:
+        return _no_source_on_record(requirement_id, None, cause=None)
+    recorded, cause = identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup)
+    if recorded is None:
+        return _no_source_on_record(requirement_id, pin, cause=cause)
     history = _first_year_on_record(pin, shown=shown, read=read)
     if history is None and pin in read:
         return RollingPlanError(
@@ -3670,6 +3670,28 @@ def _pin_verdicts(
     )
 
 
+def _verdicts_on_final_pins(verdicts: Sequence[PinVerdict], plan: Plan) -> tuple[PinVerdict, ...]:
+    """`verdicts`, each stamped with the pin its requirement holds in `plan`, the plan `_window_pins` returned.
+
+    `_pin_verdicts` judges the pin as the planner stated it. A requirement
+    `_window_pins` moves to a copy, or to a dataset on record that the copy
+    equals (which mints no `WindowedPin`), is pinned to something else by the
+    time the translator reads the verdict, so the verdict names the pin the
+    plan holds, which the translator compares with the requirement's.
+    """
+    pinned = {
+        requirement.id: requirement.source_spec_id
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+    }
+    return tuple(
+        verdict.model_copy(
+            update={"spec_id": pinned.get(verdict.requirement_id) or verdict.spec_id}
+        )
+        for verdict in verdicts
+    )
+
+
 def _window_pins(
     plan: Plan,
     *,
@@ -3746,10 +3768,10 @@ def _window_pins(
         pin = requirement.source_spec_id
         if pin is None or requirement.id in narrowed:
             continue
-        recorded = identity_on_record(pin, shown=shown, definition_lookup=definition_lookup)
+        recorded, cause = identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup)
         if recorded is None:
             if requirement.period_end_open:
-                raise _no_source_on_record(requirement.id, pin, shown=shown)
+                raise _no_source_on_record(requirement.id, pin, cause=cause)
             # The pin keeps its own window. The translator honours its block
             # where that covers the requirement's period, and searches otherwise.
             logger.debug(
@@ -4071,18 +4093,6 @@ def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[De
         if written:
             decisions[spec_id] = written
     return decisions
-
-
-def part_scope(spec_id: str, block: Mapping[str, Any] | None) -> PartScope | None:
-    """The scope choices `block`, the spec block of `spec_id`, carries; `None` when it carries none or none this release reads."""
-    raw = ((block or {}).get("resolved") or {}).get("scope_choices")
-    if raw is None:
-        return None
-    try:
-        return PartScope.from_search(raw)
-    except ValidationError as exc:
-        logger.warning("scope choices unreadable: spec_id=%s: %s", spec_id, exc)
-        return None
 
 
 def _scope_decision(

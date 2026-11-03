@@ -122,6 +122,7 @@ from planner.plan import (
     save_plan,
     save_plan_rounds,
     save_refused_specs,
+    standing_block,
     warning_codes,
     windowed_pins,
 )
@@ -1684,17 +1685,16 @@ def _spec_blocks(state: SessionState) -> dict[str, Mapping[str, Any]]:
     record for each spec_id a pin may name (`held_sources`), as admission and
     translation read it, and this turn's searches' (`ORCHESTRATOR_SPECS_KEY`)
     for each spec_id none is on record for. A pin of a shown dataset reads
-    the block it was shown with, holding the scope content of a compile or
-    found source of its spec_id that says more about its scope choices
-    (`planner.plan.standing_block`)."""
-    return {
-        **stored_mapping(state, ORCHESTRATOR_SPECS_KEY),
-        **{
-            spec_id: block
-            for spec_id, held in held_sources(state).items()
-            if (block := held.spec_block(spec_id)) is not None
-        },
-    }
+    the block it was shown with. Where both hold a block for one spec_id,
+    `planner.plan.standing_block` decides which says more about its scope
+    choices: the one on record on a tie, with the scope content of this
+    turn's search where that says more."""
+    specs = stored_mapping(state, ORCHESTRATOR_SPECS_KEY)
+    blocks = dict(specs)
+    for spec_id, held in held_sources(state).items():
+        if (block := held.spec_block(spec_id)) is not None:
+            blocks[spec_id] = standing_block(block, specs.get(spec_id))
+    return blocks
 
 
 def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSource]:
