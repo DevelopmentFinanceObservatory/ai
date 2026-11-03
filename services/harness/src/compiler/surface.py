@@ -318,10 +318,10 @@ def permanent_fault(exc: BaseException) -> bool:
 def retryable_failure(exc: BaseException) -> bool:
     """Whether a call that failed with `exc`, caught by a site that does not
     classify it further, can succeed later. It can unless a known permanent
-    fault is in the cause chain (`permanent_fault`): an answer the server gave
+    fault is in the cause chain (`permanent_fault`). An answer the server gave
     in error, such as the `MCPError` the mcp client raises for a 5xx or a
     terminated session, a refused connection, a failed name lookup, a timeout
-    and a closed connection all read as a fault a later attempt may not meet."""
+    and a closed connection are all faults a later attempt may not meet."""
     return not permanent_fault(exc)
 
 
@@ -373,7 +373,7 @@ def _transient_link(exc: BaseException) -> bool:
     unexpectedly"). A TLS failure is transient except a certificate that
     failed verification (`ssl.SSLCertVerificationError`), and a transport
     error that is a permanent fault (`permanent_fault`) is not transient
-    either; `transient` refuses these and any wrapper of one before this reads
+    either. `transient` refuses these and any wrapper of one before this reads
     the link. Any other `OSError`, such as `FileNotFoundError`, and any other
     aiohttp error, such as `InvalidURL`, is a fault in this code, and any
     other MCP error an answer the server or this client got wrong, which a
