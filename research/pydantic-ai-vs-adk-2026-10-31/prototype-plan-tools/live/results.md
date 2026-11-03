@@ -96,3 +96,19 @@
 | `share-two-donors-of-kenya-oda`                     | 0/1      | -      | none                            | 0/1 (0, 0)           | 0/1          | 37         | 1,981,339    | 19,894            |
 | `sum-oda-oof-ethiopia`                              | 0/1      | -      | none                            | 0/1 (0, 0)           | 0/1          | 21         | 665,840      | 4,796             |
 | all                                                 | 0/10     | mean - |                                 | 0/10 (0, 0)          | 0/10         | 24         | 854,281      | 6,845             |
+
+## luna-nonstrict-\* (10 runs)
+
+| Task                                                | Accepted | Rounds   | Refusal codes before acceptance                       | Right (kinds, years) | Run finished | Tool calls | Input tokens | Output + thinking |
+| --------------------------------------------------- | -------- | -------- | ----------------------------------------------------- | -------------------- | ------------ | ---------- | ------------ | ----------------- |
+| `aggregate-health-population-oda-germany-by-sector` | 1/1      | 2        | `invalid_plan`                                        | 0/1 (1, 0)           | 1/1          | 15         | 643,975      | 11,836            |
+| `aggregate-total-oda-kenya`                         | 1/1      | 3        | `invalid_plan`, `translation:pinned_source_not_found` | 1/1 (1, 1)           | 1/1          | 7          | 278,414      | 2,749             |
+| `growth-total-oda-ghana`                            | 1/1      | 4        | `invalid_plan`, `translation:pinned_source_not_found` | 1/1 (1, 1)           | 1/1          | 8          | 322,053      | 4,408             |
+| `join-gdp-debt-service-ghana`                       | 1/1      | 1        | none                                                  | 1/1 (1, 1)           | 1/1          | 9          | 294,277      | 2,848             |
+| `quotient-oda-per-person-ethiopia`                  | 1/1      | 1        | none                                                  | 1/1 (1, 1)           | 1/1          | 11         | 359,811      | 2,577             |
+| `rank-top-donors-malawi`                            | 1/1      | 2        | `invalid_plan`                                        | 1/1 (1, 1)           | 1/1          | 9          | 334,277      | 5,051             |
+| `series-gdp-ghana`                                  | 1/1      | 3        | `invalid_plan`, `translation:requirement_unmeetable`  | 1/1 (1, 1)           | 1/1          | 14         | 564,103      | 6,042             |
+| `series-oda-germany-kenya`                          | 1/1      | 1        | none                                                  | 1/1 (1, 1)           | 1/1          | 8          | 289,284      | 2,953             |
+| `share-two-donors-of-kenya-oda`                     | 1/1      | 4        | `invalid_plan`, `translation:pinned_source_not_found` | 1/1 (1, 1)           | 1/1          | 8          | 347,062      | 8,677             |
+| `sum-oda-oof-ethiopia`                              | 1/1      | 10       | `combination_unasked`, `measure_fixed_by_pin`         | 0/1 (0, 1)           | 1/1          | 32         | 1,701,390    | 24,699            |
+| all                                                 | 10/10    | mean 3.1 |                                                       | 8/10 (9, 9)          | 10/10        | 12         | 513,465      | 7,184             |
