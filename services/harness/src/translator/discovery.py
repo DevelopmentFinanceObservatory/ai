@@ -2470,7 +2470,7 @@ async def resolve_definition_at(
         answer, at = await answered_once_at(RESOLVE_DEFINITION, arguments, call)
     except ToolSurfaceUnavailableError as exc:
         raise DefinitionNotResolvedError(
-            str(exc), retryable=True, not_issued=isinstance(exc, NoTimeLeftError)
+            str(exc), retryable=exc.retryable, not_issued=isinstance(exc, NoTimeLeftError)
         ) from exc
     if answer.is_error:
         refusal = answer.structured_content or {}

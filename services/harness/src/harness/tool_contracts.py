@@ -25,6 +25,7 @@ from compiler.sources import (
     readable_wire_groups,
     resolved_source_mentions,
     total_reading,
+    warning_code,
 )
 from data_mcp.digest import source_codes
 from pydantic import ValidationError
@@ -194,7 +195,7 @@ def _float_or_none(value: Any) -> float | None:
 def _wire_warnings(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
-            "code": str(warning.get("code", "unspecified")),
+            "code": warning_code(warning),
             "severity": _SEVERITY_TO_WIRE.get(str(warning.get("severity", "")), "warn"),
             "message": str(warning.get("message", "")),
         }

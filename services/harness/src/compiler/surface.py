@@ -24,7 +24,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Protocol
+from typing import Protocol, Self
 
 import rfc8785
 from common.auth import bearer_token
@@ -229,6 +229,17 @@ class ToolSurfaceUnavailableError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message)
         self.retryable = retryable
+
+    def __reduce__(self) -> tuple[Callable[..., Self], tuple[object, ...], dict[str, object]]:
+        # `BaseException.__reduce__` rebuilds as `cls(*args)`, which fails for
+        # the required keyword-only `retryable` and for a subclass with its own
+        # signature. This rebuilds without `__init__` and restores `__dict__`.
+        return _rebuild, (type(self), *self.args), self.__dict__
+
+
+def _rebuild[E: BaseException](cls: type[E], *args: object) -> E:
+    """A `cls` holding `args`, made without calling its `__init__`."""
+    return cls.__new__(cls, *args)
 
 
 # The MCP error codes of a call whose connection closed or that timed out:

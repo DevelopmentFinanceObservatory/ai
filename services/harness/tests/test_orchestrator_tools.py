@@ -4664,11 +4664,19 @@ async def test_get_skill_reports_a_refusal_and_its_absence():
 
 
 class UnreachableSurface(FakeSurface):
-    """A surface whose call times out, as `compiler.surface`'s per-tool timeout raises."""
+    """A surface whose call times out, as `compiler.surface`'s per-tool timeout raises.
+
+    `retryable` is the mark the raise site gives the error."""
+
+    def __init__(self, result: ToolCallResult, *, retryable: bool = True) -> None:
+        super().__init__(result)
+        self.retryable = retryable
 
     async def call_tool(self, *, tool, arguments, on_progress=None) -> ToolCallResult:
         self.calls.append((tool, arguments))
-        raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s", retryable=True)
+        raise ToolSurfaceUnavailableError(
+            f"{tool.name} timed out after 30s", retryable=self.retryable
+        )
 
 
 @pytest.mark.parametrize(
@@ -4693,6 +4701,18 @@ async def test_a_skill_read_that_does_not_complete_is_a_retryable_error_for_the_
         "retry_mode": "retry_after_delay",
     }
     assert len(surface.calls) == 1
+
+
+@pytest.mark.parametrize("tool", ["get_skill", "get_skill_file"])
+async def test_a_skill_read_that_cannot_complete_on_a_retry_is_not_offered_one(tool: str):
+    surface = UnreachableSurface(ToolCallResult(is_error=False, text=""), retryable=False)
+    tools, ctx = _tools(surface=surface)
+    arguments = ("oda-measures",) if tool == "get_skill" else ("oda-measures", "a.md")
+
+    answered = await tools[tool](*arguments, ctx)
+
+    assert _stated(answered) == ("tool_not_configured", "do_not_retry")
+    assert "Call it again" not in answered["error"]
 
 
 class ByToolSurface(FakeSurface):

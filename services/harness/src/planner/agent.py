@@ -773,12 +773,55 @@ class AdkCall:
         """The id of the function call the tool serves."""
         return self.tool_context.function_call_id
 
+    @functools.cached_property
+    def _steps(self) -> tuple[Step, ...]:
+        return tuple(_session_steps(self.tool_context.session.events, serving=self.call_id))
+
     def steps(self) -> Sequence[Step]:
-        """`_session_steps` over the call's session events."""
-        return tuple(_session_steps(self.tool_context.session.events))
+        """`_session_steps` over the call's session events, read once per call.
+
+        An `AdkCall` serves one tool call, and ADK appends a model response's
+        events only after its tool calls finish, so the events a call sees do
+        not change while it runs and the cached view cannot outlive the
+        response it was read in.
+        """
+        return self._steps
 
 
-def _session_steps(events: Sequence[Event]) -> Iterator[Step]:
+def _function_calls(event: Any) -> list[Any]:
+    """The function calls of `event`'s parts, in order."""
+    if not (event.content and event.content.parts):
+        return []
+    return [part.function_call for part in event.content.parts if part.function_call]
+
+
+def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[str]:
+    """The ids of the calls in the model response that holds the call `serving`
+    which no event answers yet.
+
+    `serving` is a tool that reads steps, never an ask, which decides from its
+    response's call list instead (`_ask_beside_ask`).
+
+    ADK appends a response's merged answers after all its calls finish, so
+    while one call of the response runs, its siblings have no answer in the
+    session, whether they have finished or not.
+    """
+    if serving is None:
+        return frozenset()
+    answered = {
+        part.function_response.id
+        for event in events
+        for part in (event.content.parts if event.content and event.content.parts else ())
+        if part.function_response is not None
+    }
+    for event in reversed(events):
+        calls = _function_calls(event)
+        if any(call.id == serving and call.name != PLANNER_ASK for call in calls):
+            return frozenset(call.id for call in calls if call.id and call.id not in answered)
+    return frozenset()
+
+
+def _session_steps(events: Sequence[Event], *, serving: str | None = None) -> Iterator[Step]:
     """The steps of a session's `events`, in event order (`planner.call.Step`).
 
     The only reader of ADK events in the planner. A message the user typed
@@ -806,8 +849,15 @@ def _session_steps(events: Sequence[Event]) -> Iterator[Step]:
     `create_request_input_response`, which `harness.studio`'s `/interrupt`
     route sends, builds the answer with `FunctionResponse.id` set to that
     same `interrupt_id`.
+
+    `serving` is the id of the tool call being served. The calls of its own
+    model response that no event answers yet (`_in_flight_calls`) yield no
+    step, so a call running beside an ask reads the session as it stood
+    before that response, and the ask, which may still be refused or may be
+    accepted, is not counted as put to the user.
     """
     refused = _refused_asks(events)
+    in_flight = _in_flight_calls(events, serving)
     calls: dict[str, dict[str, Any]] = {}
     planner_asks: set[str] = set()
     for event in events:
@@ -819,6 +869,8 @@ def _session_steps(events: Sequence[Event]) -> Iterator[Step]:
         for part in event.content.parts:
             call = part.function_call
             if call is not None and call.id is not None:
+                if call.id in in_flight:
+                    continue
                 if call.name == PLANNER_ASK:
                     if call.id in refused:
                         continue
@@ -1717,7 +1769,9 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     answers `None` once the search is held, or `SURFACE_UNAVAILABLE` when
     Search did not answer, or refused in a way that can succeed later
     (`translator.discovery.refusal_retryable`); nothing is held then, so the
-    next proposal searches again.
+    next proposal searches again. A call that failed for a reason no retry
+    changes (a `ToolSurfaceUnavailableError` not marked `retryable`) is held
+    as a refused search.
     """
     arguments = {"parts": [unpinned.part]}
     try:
@@ -1727,7 +1781,16 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
             lambda: call_within_entry(surface, tool=SEARCH, arguments=arguments),
         )
     except ToolSurfaceUnavailableError as exc:
-        return _refusing(_search_unavailable(unpinned, str(exc)))
+        if exc.retryable:
+            return _refusing(_search_unavailable(unpinned, str(exc)))
+        # A search no later attempt can make is held as a refused one.
+        refused = SearchedPin(
+            requirement_key=unpinned.requirement_key,
+            status="refused",
+            asked_roles=unpinned.asked_roles,
+            open_roles=unpinned.open_roles,
+        )
+        return lambda into: save_searched_pin(into, refused)
     if answer.is_error and refusal_retryable(answer):
         refusal = answer.structured_content or {}
         cause = refusal.get("message") or answer.text or "Search refused it for now"

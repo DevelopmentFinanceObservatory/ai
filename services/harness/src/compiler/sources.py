@@ -72,6 +72,21 @@ class DiscoveryStatus(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+# The code a warning that states none carries, on the wire and in every record
+# of what search said.
+UNSPECIFIED_WARNING_CODE = "unspecified"
+
+
+def warning_code(warning: Mapping[Any, object]) -> str:
+    """The `code` of a search `warning`, `UNSPECIFIED_WARNING_CODE` when it states none.
+
+    The one place a warning's code is read, so a warning the digest puts on
+    the wire, a stored reading keeps, and a pin is judged on carries the same
+    code.
+    """
+    return str(warning.get("code") or UNSPECIFIED_WARNING_CODE)
+
+
 class PartWarning(StrictModel):
     """One warning `search` attached to its answer.
 
@@ -1379,7 +1394,7 @@ def _warning(warning: Mapping[str, object]) -> PartWarning:
     # A field the producer left out reads as empty rather than failing the
     # envelope: the warning's presence is the signal, its wording is detail.
     return PartWarning(
-        code=_text(warning.get("code")) or "",
+        code=warning_code(warning),
         severity=_text(warning.get("severity")) or "",
         message=_text(warning.get("message")) or "",
         spec_id=_text(warning.get("spec_id")),

@@ -773,7 +773,7 @@ class _RecordingSurface:
                     "outcome": "refusal",
                     "refusal": {
                         "code": RefusalKind.TRANSPORT_FAILED.value,
-                        "retry_mode": "retry_after_delay",
+                        "retry_mode": "retry_after_delay" if exc.retryable else "do_not_retry",
                         "fix": None,
                         "message": str(exc)[:_STEP_DETAIL_CAP],
                     },

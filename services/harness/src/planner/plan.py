@@ -53,7 +53,7 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, over
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from compiler.sources import source_from_spec_block
+from compiler.sources import source_from_spec_block, warning_code
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
@@ -6363,14 +6363,15 @@ class PinSource(StrictModel):
 
 
 def warning_codes(warnings: object) -> tuple[str, ...]:
-    """The `code` of each warning dict in `warnings`, a list as search returns it."""
+    """The `warning_code` of each warning dict in `warnings`, a list as search returns it.
+
+    Every pin source reads its warnings here, whether `pin_by_search` took
+    them from a digest or the orchestrator's stored block did, so a warning
+    stating no code is `unspecified` on both.
+    """
     if not isinstance(warnings, list):
         return ()
-    return tuple(
-        str(code)
-        for warning in warnings
-        if isinstance(warning, dict) and (code := warning.get("code"))
-    )
+    return tuple(warning_code(warning) for warning in warnings if isinstance(warning, Mapping))
 
 
 class PinVerdict(StrictModel):

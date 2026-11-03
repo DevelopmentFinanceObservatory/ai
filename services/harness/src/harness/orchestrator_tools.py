@@ -2604,7 +2604,8 @@ def build_orchestrator_tools(
 
         A call that does not complete, `compiler.surface`'s per-tool timeout or
         an unreachable data-mcp, is an error the model may retry, as
-        `planner.skills` answers the planner, so the turn goes on.
+        `planner.skills` answers the planner, so the turn goes on. One its
+        raise site marked not `retryable` answers as a server with no skills.
         """
         spent = _spend(tool_context, tool.name)
         if spent:
@@ -2619,6 +2620,10 @@ def build_orchestrator_tools(
             logger.warning(
                 "orchestrator %s(%s) did not complete: %s", tool.name, dict(arguments), exc
             )
+            if not exc.retryable:
+                return _failed(
+                    HarnessCode.TOOL_NOT_CONFIGURED, "skills are not available on this server"
+                )
             return _failed(
                 HarnessCode.TRANSIENT_UNAVAILABLE,
                 f"{tool.name} could not reach data-mcp just now. Call it again, or answer "

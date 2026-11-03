@@ -33,7 +33,13 @@ import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import CompileIssueCode, compile_plan
 from compiler.sources import PROVIDER_ACCOUNT, DiscoveryStatus, source_from_spec_block
-from compiler.surface import FixtureSurface, McpSurface, ToolCallResult, ToolSurface
+from compiler.surface import (
+    FixtureSurface,
+    McpSurface,
+    ToolCallResult,
+    ToolSurface,
+    ToolSurfaceUnavailableError,
+)
 from data_mcp.definition_store import InMemoryDefinitionStore, canonicalize, spec_id_for
 from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
@@ -10777,6 +10783,81 @@ async def test_a_search_for_an_unpinned_input_is_shown_with_the_requests_warning
     )
 
 
+async def test_a_warning_stating_no_code_reads_the_same_on_both_pin_source_paths() -> None:
+    """Search's warnings reach a `PinSource` from the planner's own search
+    (`pin_by_search`) and from the block the orchestrator stored
+    (`_reading_pin_sources`). Both name a warning that states no code
+    `unspecified`, as the digest puts it on the wire."""
+    block = _SUM_BLOCKS["dac_countries_bilateral"]
+    spec_id = block["spec_id"]
+    warnings = [{"message": "m"}, {"code": "wide_scope", "message": "m"}]
+    expected = ("unspecified", "wide_scope")
+
+    class _Searches:
+        async def call_tool(self, **_: Any) -> ToolCallResult:
+            envelope = {"parts": [{"status": "definite", "spec": block, "warnings": warnings}]}
+            return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
+
+    read = await planner_agent.pin_by_search(
+        cast(Any, _Searches()),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    assert read(state) is None
+    stored = _reading_pin_sources(
+        [{"text": "t", "status": "definite", "spec_id": spec_id}],
+        [spec_id],
+        blocks={spec_id: block},
+        earlier=set(),
+        warnings={spec_id: warnings},
+    )
+
+    assert pin_sources(state)[spec_id].warnings == expected
+    assert stored[spec_id].warnings == expected
+
+
+@pytest.mark.parametrize("retryable", [True, False])
+async def test_a_search_that_did_not_complete_is_asked_again_only_when_it_can_succeed(
+    retryable: bool,
+) -> None:
+    class _Unreachable:
+        async def call_tool(self, **_: Any) -> ToolCallResult:
+            raise ToolSurfaceUnavailableError("data-mcp is down", retryable=retryable)
+
+    read = await planner_agent.pin_by_search(
+        cast(Any, _Unreachable()),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    refusal = read(state)
+
+    if retryable:
+        assert refusal is not None
+        assert refusal["code"] == ProblemCode.SURFACE_UNAVAILABLE.value
+        assert searched_pins(state) == ()
+    else:
+        assert refusal is None
+        assert [(pin.requirement_key, pin.status) for pin in searched_pins(state)] == [
+            ("k", "refused")
+        ]
+
+
 def _another_part(block: dict[str, Any]) -> dict[str, Any]:
     """A copy of `block` as a part of its own (`PartScope.base`), under a spec_id of its
     own, binding the same donor and compiling to the same identity."""
@@ -18204,6 +18285,46 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
         assert refusal["code"] == ProblemCode.INVALID_PLAN.value
 
 
+@pytest.mark.parametrize(
+    ("serving", "valid"),
+    [("plan", True), ("a-later-response", False)],
+    ids=["ask-in-the-same-response", "ask-pending-from-an-earlier-one"],
+)
+def test_an_ask_in_the_proposals_own_response_is_not_an_unanswered_pick(
+    decision, requirements, serving, valid
+):
+    """[ask, propose_plan] in one response after an entity referral. ADK writes the
+    response's answers after every call ends, so the ask has none while the proposal runs. It
+    may still be refused, and reaches the user only once the run ends, so the proposal reads
+    the session as it stood before the response and does not hold the ask's candidates
+    unanswered. The same ask left over from an earlier response is a pick still wanted."""
+    dataset, derived = requirements
+    ctx: Any = _FakeToolContext()
+    save_referral(ctx.state, _congo_both_ends(dataset.id))
+    ask = _congo_ask("donor", call_id="a1").content.parts[0].function_call
+    ctx.session.events.extend(
+        [
+            _referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id),
+            _model_response(ask, SimpleNamespace(id="plan", name="propose_plan", args={})),
+        ]
+    )
+    ctx.function_call_id = serving
+    plan = Plan(
+        question="question",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset.model_copy(
+                update={"entities": (Entity(name="Congo", role="donor", dcid="country/COD"),)}
+            ),
+            derived,
+        ],
+    )
+
+    refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+
+    assert (refusal is None) is valid
+
+
 def _congo_split_draft(decision):
     draft = split_draft(decision)
     entities = (Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient"))
@@ -18228,6 +18349,26 @@ def _assert_asked(result: Any, ctx: Any) -> None:
     asked = load_pending_ask(ctx.state)
     assert asked is not None and asked.call_id == ctx.function_call_id
     assert ctx.actions.skip_summarization is True
+
+
+def test_a_call_reads_the_session_events_once() -> None:
+    """Every reader of a call's steps shares one pass over the events, the refused-ask scan
+    included."""
+    ctx: Any = _FakeToolContext()
+    ctx.session.events.extend(_ask_answered_events())
+    call = AdkCall(ctx)
+
+    assert call.steps() is call.steps()
+    assert [step.kind for step in call.steps()] == ["call", "answer"]
+
+
+def _model_response(*calls: Any) -> Any:
+    """A fake session event holding one model response's `calls`, as ADK writes them together."""
+    return SimpleNamespace(
+        content=SimpleNamespace(
+            parts=[SimpleNamespace(function_call=call, function_response=None) for call in calls]
+        )
+    )
 
 
 @pytest.mark.parametrize("second_runs_first", [False, True], ids=["in-order", "second-first"])

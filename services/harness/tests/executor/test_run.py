@@ -323,6 +323,26 @@ async def test_a_transport_failure_on_a_retryable_tool_is_retried_and_the_run_go
     assert len(sleeps.delays) == 1
 
 
+async def test_a_transport_failure_its_raise_site_marked_final_is_not_retried(
+    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+) -> None:
+    surface = _surface(
+        real_schemas,
+        manifest(),
+        aggregate=[
+            ToolSurfaceUnavailableError("no such server", retryable=False),
+            ok(RESULT_FRAME),
+        ],
+    )
+
+    outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
+
+    assert isinstance(outcome, Refused)
+    assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
+    # One get_data call, then one `aggregate` call that is not asked again.
+    assert len(surface.calls) == 2
+
+
 async def test_a_transport_that_never_answers_stops_the_run_after_the_last_attempt(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:

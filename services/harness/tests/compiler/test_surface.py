@@ -9,7 +9,9 @@ changes its required arguments.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
+import pickle
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -172,6 +174,39 @@ def test_an_in_memory_server_must_be_keyed_by_its_own_name() -> None:
     # compile steps against one name and call another.
     with pytest.raises(ValueError, match="named 'analysis-mcp'"):
         McpSurface(sources={"data-mcp": analysis_mcp})
+
+
+@pytest.mark.parametrize("retryable", [True, False])
+@pytest.mark.parametrize(
+    "rebuild",
+    [lambda exc: pickle.loads(pickle.dumps(exc)), copy.copy, copy.deepcopy],
+    ids=["pickle", "copy", "deepcopy"],
+)
+def test_an_unavailable_error_keeps_its_retryable_mark_through_pickle_and_copy(
+    rebuild: Callable[[ToolSurfaceUnavailableError], ToolSurfaceUnavailableError], retryable: bool
+) -> None:
+    rebuilt = rebuild(ToolSurfaceUnavailableError("gone", retryable=retryable))
+
+    assert (type(rebuilt), rebuilt.args, rebuilt.retryable) == (
+        ToolSurfaceUnavailableError,
+        ("gone",),
+        retryable,
+    )
+
+
+class _TimedOutError(ToolSurfaceUnavailableError):
+    def __init__(self, tool: str) -> None:
+        super().__init__(f"{tool} timed out", retryable=True)
+
+
+def test_a_subclass_with_its_own_signature_rebuilds_as_itself() -> None:
+    rebuilt = pickle.loads(pickle.dumps(_TimedOutError("search")))
+
+    assert (type(rebuilt), rebuilt.args, rebuilt.retryable) == (
+        _TimedOutError,
+        ("search timed out",),
+        True,
+    )
 
 
 async def test_a_server_that_cannot_be_read_raises_naming_it() -> None:

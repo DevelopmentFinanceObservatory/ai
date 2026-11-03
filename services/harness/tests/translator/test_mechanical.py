@@ -843,11 +843,20 @@ async def test_every_proposal_round_compiles_against_one_listing_of_the_surface(
     assert read == [listed[0], listed[0]]
 
 
-async def test_a_surface_that_cannot_be_listed_refers_the_plan_as_transient(
-    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+@pytest.mark.parametrize(
+    ("retryable", "kind", "outcome"),
+    [(True, "surface_unavailable", "transient"), (False, "internal_failure", "internal")],
+)
+async def test_a_surface_that_cannot_be_listed_refers_the_plan_as_its_error_says(
+    retryable: bool,
+    kind: str,
+    outcome: str,
+    draft: DraftFactory,
+    core: TranslatorCore,
+    context_holding: ContextHolding,
 ) -> None:
     async def list_tools() -> list[Any]:
-        raise ToolSurfaceUnavailableError("data-mcp did not answer", retryable=True)
+        raise ToolSurfaceUnavailableError("data-mcp did not answer", retryable=retryable)
 
     core = dataclasses.replace(_compile_failure_core(core, []), list_tools=list_tools)
 
@@ -856,7 +865,7 @@ async def test_a_surface_that_cannot_be_listed_refers_the_plan_as_transient(
         (await run_translate(context_holding(draft()).state, core=core))["referral"],
     )
 
-    assert (referral["kind"], referral["outcome"]) == ("surface_unavailable", "transient")
+    assert (referral["kind"], referral["outcome"]) == (kind, outcome)
 
 
 def _needs_repair(code: str) -> dict[str, object]:

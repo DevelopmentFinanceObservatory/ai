@@ -1119,7 +1119,9 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
     events = await harness.events()
-    fake_tool_context = SimpleNamespace(state={}, session=SimpleNamespace(events=events))
+    fake_tool_context = SimpleNamespace(
+        state={}, function_call_id=None, session=SimpleNamespace(events=events)
+    )
     assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset()
 
 
@@ -5165,7 +5167,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     )
 
     fake_tool_context = SimpleNamespace(
-        state={}, session=SimpleNamespace(events=await harness.events())
+        state={}, function_call_id=None, session=SimpleNamespace(events=await harness.events())
     )
     assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset({SPEC_B})
 
@@ -5250,6 +5252,10 @@ def _held_since_1995() -> ToolCallResult:
 
 def _unreachable() -> ToolCallResult:
     raise ToolSurfaceUnavailableError("data-mcp did not answer", retryable=True)
+
+
+def _unreachable_for_good() -> ToolCallResult:
+    raise ToolSurfaceUnavailableError("data-mcp cannot be reached from here", retryable=False)
 
 
 def _last_five_years_plan() -> dict[str, Any]:
@@ -5399,8 +5405,12 @@ def _no_first_year() -> ToolCallResult:
 
 @pytest.mark.parametrize(
     ("answer", "code"),
-    [(_unreachable, "surface_unavailable"), (_no_first_year, "invalid_plan")],
-    ids=["read-did-not-complete", "answer-states-no-first-year"],
+    [
+        (_unreachable, "surface_unavailable"),
+        (_unreachable_for_good, "invalid_plan"),
+        (_no_first_year, "invalid_plan"),
+    ],
+    ids=["read-did-not-complete", "read-cannot-complete-on-a-retry", "answer-states-no-first-year"],
 )
 async def test_a_first_year_that_cannot_be_read_refuses_saying_the_read_failed(
     answer: Callable[[], ToolCallResult], code: str

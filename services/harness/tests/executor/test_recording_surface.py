@@ -1231,8 +1231,11 @@ async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("retryable", "retry_mode"), [(True, "retry_after_delay"), (False, "do_not_retry")]
+)
 async def test_a_transport_failure_is_recorded_as_a_failed_activity(
-    real_schemas: list[ToolSchema],
+    real_schemas: list[ToolSchema], retryable: bool, retry_mode: str
 ) -> None:
     class _Unreachable:
         async def list_tools(self) -> list[ToolSchema]:
@@ -1246,7 +1249,7 @@ async def test_a_transport_failure_is_recorded_as_a_failed_activity(
             on_progress: ProgressCallback | None = None,
         ) -> Any:
             del tool, arguments
-            raise ToolSurfaceUnavailableError("data-mcp is unreachable", retryable=True)
+            raise ToolSurfaceUnavailableError("data-mcp is unreachable", retryable=retryable)
 
     surface = _RecordingSurface(_Unreachable())
     tool = ToolId(server="data-mcp", name="get_data")
@@ -1260,7 +1263,7 @@ async def test_a_transport_failure_is_recorded_as_a_failed_activity(
         "outcome": "refusal",
         "refusal": {
             "code": "transport_failed",
-            "retry_mode": "retry_after_delay",
+            "retry_mode": retry_mode,
             "fix": None,
             "message": "data-mcp is unreachable",
         },

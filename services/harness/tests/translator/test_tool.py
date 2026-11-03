@@ -154,9 +154,13 @@ GOOD_TRANSLATION: dict[str, Any] = {
 
 
 class _UnreadableSurface(FixtureSurface):
+    def __init__(self, *, retryable: bool = True, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._retryable = retryable
+
     async def list_tools(self) -> list[ToolSchema]:
         raise ToolSurfaceUnavailableError(
-            "could not read the tool surface at 'data-mcp'", retryable=True
+            "could not read the tool surface at 'data-mcp'", retryable=self._retryable
         )
 
 
@@ -643,7 +647,12 @@ async def test_propose_operations_without_a_plan_returns_an_error(
     assert result["code"] == "plan_missing"
 
 
+@pytest.mark.parametrize(
+    ("retryable", "code"), [(True, "surface_unavailable"), (False, "operation_unsupported")]
+)
 async def test_an_unreadable_surface_is_an_error_and_keeps_the_draft(
+    retryable: bool,
+    code: str,
     real_schemas: list[ToolSchema],
     draft: DraftFactory,
     source: SourceFactory,
@@ -651,13 +660,15 @@ async def test_an_unreadable_surface_is_an_error_and_keeps_the_draft(
 ) -> None:
     context = context_holding(draft())
     _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
-    core = build_translator_core(surface=_UnreadableSurface(schemas=real_schemas))
+    core = build_translator_core(
+        surface=_UnreadableSurface(retryable=retryable, schemas=real_schemas)
+    )
 
     result = await core.propose_operations(
         translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
     )
 
-    assert result["code"] == "surface_unavailable"
+    assert result["code"] == code
     assert _stored(context).status == PlanStatus.DRAFT
 
 

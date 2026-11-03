@@ -1566,7 +1566,10 @@ class _UnreachableStore:
 
 
 class _UnreachableDataMcp:
-    """A surface whose data-mcp cannot be reached."""
+    """A surface whose data-mcp cannot be reached, `retryable` as its raise site marks it."""
+
+    def __init__(self, *, retryable: bool = True) -> None:
+        self._retryable = retryable
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -1579,7 +1582,7 @@ class _UnreachableDataMcp:
         on_progress: ProgressCallback | None = None,
     ) -> ToolCallResult:
         del arguments, on_progress
-        raise ToolSurfaceUnavailableError(f"{tool.server} timed out", retryable=True)
+        raise ToolSurfaceUnavailableError(f"{tool.server} timed out", retryable=self._retryable)
 
 
 @pytest.mark.parametrize(
@@ -1629,6 +1632,19 @@ async def test_a_windowed_pin_search_could_not_be_asked_about_is_retryable(
     )
     assert said in result["message"]
     assert "annual_debt_service" not in load_log(context.state).sources
+
+
+@pytest.mark.parametrize("retryable", [True, False])
+async def test_a_resolve_that_did_not_complete_is_retryable_as_its_raise_site_marked_it(
+    retryable: bool,
+) -> None:
+    with pytest.raises(DefinitionNotResolvedError) as raised:
+        await resolve_definition(
+            _UnreachableDataMcp(retryable=retryable), spec_id=SPEC_KENYA, identity={"seed": "x"}
+        )
+
+    assert raised.value.retryable is retryable
+    assert raised.value.refused is False
 
 
 def _kenya_without_its_definition() -> dict[str, Any]:

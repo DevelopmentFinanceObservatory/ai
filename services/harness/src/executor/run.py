@@ -44,9 +44,9 @@ Transient failures are retried, with the delay a refusal names (capped) or a
 doubling backoff, spread by jitter (`executor.classify.jittered_retry_delay`)
 so calls refused together retry apart. A `ToolSurfaceUnavailableError` -- the call never reached
 the server, or its answer never came back -- is retried up to
-`MAX_ATTEMPTS_PER_STEP` unless the step's tool capability sets
-`retry_on_transport_failure=False`, in which case the first such failure is
-final: `get_data`'s mint is not safely retryable, so a transport failure on
+`MAX_ATTEMPTS_PER_STEP`. The first such failure is final when its raise site
+marked it not `retryable`, or when the step's tool capability sets
+`retry_on_transport_failure=False`: `get_data`'s mint is not safely retryable, so a transport failure on
 it is never retried, however early in the attempt count it happens. This is
 a per-tool boolean read live from the capability table at run time. It
 carries no attempt count or backoff of its own, and it is never hashed into
@@ -2509,8 +2509,10 @@ class _Run:
                 )
             except ToolSurfaceUnavailableError as exc:
                 capability = self.capabilities.get(tool)
-                final = last or (
-                    capability is not None and not capability.retry_on_transport_failure
+                final = (
+                    last
+                    or not exc.retryable
+                    or (capability is not None and not capability.retry_on_transport_failure)
                 )
                 if final:
                     raise self._refused(
