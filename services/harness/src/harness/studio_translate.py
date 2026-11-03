@@ -39,17 +39,11 @@ import asyncio
 import functools
 import json
 import logging
-import socket
-import ssl
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-import aiohttp
-import anyio
-import asyncpg
-import httpx2
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
 from common.refusal import refusal_code
@@ -60,17 +54,14 @@ from compiler.surface import (
     ToolSchema,
     ToolSurface,
     ToolSurfaceUnavailableError,
+    transient,
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
 from executor.classify import internal_fault
 from executor.outcomes import RefusalKind
-from executor.run import current_step_id, transient_status
+from executor.run import current_step_id
 from google.adk.events import Event
-from google.auth import exceptions as google_auth_errors
-from google.genai import errors as genai_errors
-from mcp import MCPError
-from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.agent import PROPOSE_PLAN
@@ -80,7 +71,6 @@ from planner.plan import Plan as PlannerPlan
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
-from sqlalchemy import exc as sa_exc
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -274,104 +264,6 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
     }
 
 
-# The MCP error codes of a call that did not complete: the session's
-# connection closed under it, or it ran past its deadline on a path
-# `mcp_client._call_tool` does not tag.
-_TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
-
-# What fastmcp's `Client._await_with_session_monitoring` raises, a bare
-# `RuntimeError` with no cause, when the MCP session's task ends on its own
-# while a call waits on it: the server closed the stream. The message is all
-# that tells it from any other `RuntimeError`.
-_FASTMCP_SESSION_ENDED = "Session task completed unexpectedly"
-
-# The Postgres errors that end the connection itself: the server shutting
-# down or crashing, starting up, or closing an idle session. A later turn
-# opens a new connection.
-_POSTGRES_CONNECTION_ENDED = (
-    asyncpg.AdminShutdownError,
-    asyncpg.CrashShutdownError,
-    asyncpg.CannotConnectNowError,
-    asyncpg.IdleSessionTimeoutError,
-)
-
-
-def _transient_fault(exc: BaseException) -> bool:
-    """Whether `exc`, raised with no refusal, or an exception it was raised
-    from (`__cause__`), is a fault a later turn may not meet. A wrapper such
-    as `executor.run.RunAbandonedError` keeps the class of the transport
-    error under it. An exception merely raised while another was handled is
-    its own fault, such as a bug in an `except` block. An exception group,
-    as anyio's task groups raise, is transient when every exception in it
-    is, so one bug among dropped connections still reads as a fault."""
-    seen: set[int] = set()
-    link: BaseException | None = exc
-    while link is not None and id(link) not in seen:
-        if isinstance(link, BaseExceptionGroup):
-            return all(_transient_fault(leaf) for leaf in link.exceptions)
-        if _transient_link(link):
-            return True
-        seen.add(id(link))
-        link = link.__cause__
-    return False
-
-
-def _transient_link(exc: BaseException) -> bool:
-    """Whether `exc` alone is transient: a timeout, the session store's pool
-    timeout among them (`sqlalchemy.exc.TimeoutError`, every pooled
-    connection busy under load); a connection that failed or dropped, a
-    Postgres one included (`PostgresConnectionError`, or a server ending
-    the connection, `_POSTGRES_CONNECTION_ENDED`, or refusing one when its
-    connection slots are full, `TooManyConnectionsError`), or one SQLAlchemy
-    invalidated as a disconnect (`DBAPIError.connection_invalidated`); a
-    name lookup or TLS failure; a transport error, httpx2's, aiohttp's
-    connection or payload error (the Gemini SDK's transport, under which a
-    peer's reset reads as `ClientPayloadError`), or google-auth's while
-    fetching a token (a `RefreshError` raised from one is read by its
-    cause); an HTTP or model answer of 429 or 5xx after the client's
-    retries, httpx2's included (`executor.run.transient_status`); or an MCP call whose connection closed or that timed out,
-    fastmcp's session ending under a call included (anyio's closed or
-    broken stream, under its "Server session was closed unexpectedly", or
-    `_FASTMCP_SESSION_ENDED`). Any other `OSError`, such as `FileNotFoundError`, and any
-    other aiohttp error, such as `InvalidURL`, is a fault in this code, and
-    any other MCP error an answer the server or this client got wrong, which
-    a later turn meets again. Any other `DBAPIError` is read by the asyncpg
-    error it was raised from (`_transient_fault` walks `__cause__`), so a
-    connection error under it is transient and a SQL error a fault."""
-    match exc:
-        case (
-            genai_errors.APIError(code=status)
-            | aiohttp.ClientResponseError(status=status)
-            | httpx2.HTTPStatusError(response=httpx2.Response(status_code=status))
-        ):
-            return transient_status(status)
-    if isinstance(exc, MCPError):
-        return exc.error.code in _TRANSIENT_MCP_CODES
-    if isinstance(exc, sa_exc.DBAPIError):
-        return exc.connection_invalidated
-    if type(exc) is RuntimeError:
-        return exc.args == (_FASTMCP_SESSION_ENDED,)
-    return isinstance(
-        exc,
-        (
-            TimeoutError,
-            ConnectionError,
-            socket.gaierror,
-            ssl.SSLError,
-            asyncpg.PostgresConnectionError,
-            asyncpg.TooManyConnectionsError,
-            *_POSTGRES_CONNECTION_ENDED,
-            sa_exc.TimeoutError,
-            httpx2.TransportError,
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientPayloadError,
-            google_auth_errors.TransportError,
-            anyio.ClosedResourceError,
-            anyio.BrokenResourceError,
-        ),
-    )
-
-
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
     """A stream-fatal error frame. A resolver refusal keeps its real code
     when the wire grammar knows it (e.g. `capability_unavailable` on an
@@ -385,12 +277,12 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     plan step's tool has changed since the plan was compiled, still
     honours the refusal's own `retry_mode` rather than defaulting to a
     transient one: `retry_after_delay` (or no `retry_mode` at all, for a
-    `_transient_fault`) becomes `transient_unavailable`, anything else
+    `transient`) becomes `transient_unavailable`, anything else
     becomes `capability_unavailable`, the closest true member, so a
     do-not-retry refusal is never told to the user as a reason to retry.
 
     An exception that states no refusal reads as `internal_error`, not to be
-    retried, unless it is a `_transient_fault`, which reads as `raised` and
+    retried, unless `transient` holds for it, which reads as `raised` and
     `retry_after_delay`.
 
     The frame's `detail`, which Studio shows as the reply, is the sentence
@@ -405,9 +297,7 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
         refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key)
         wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
     else:
-        refusal = getattr(exc, "refusal", None) or (
-            {} if _transient_fault(exc) else internal_fault()
-        )
+        refusal = getattr(exc, "refusal", None) or ({} if transient(exc) else internal_fault())
         wire_code = refusal.get("code")
     try:
         error_code = ErrorCode(wire_code)
@@ -756,7 +646,7 @@ class _RecordingSurface:
                     "outcome": "refusal",
                     "refusal": {
                         "code": RefusalKind.TRANSPORT_FAILED.value,
-                        "retry_mode": "retry_after_delay",
+                        "retry_mode": "retry_after_delay" if exc.retryable else "do_not_retry",
                         "fix": None,
                         "message": str(exc)[:_STEP_DETAIL_CAP],
                     },

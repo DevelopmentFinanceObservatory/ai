@@ -195,7 +195,9 @@ class ScriptedSurface:
         self.calls.append((tool.name, dict(arguments)))
         queue = self.queues.get(tool.name)
         if not queue:
-            raise ToolSurfaceUnavailableError(f"no scripted answer for {tool.name!r}")
+            raise ToolSurfaceUnavailableError(
+                f"no scripted answer for {tool.name!r}", retryable=True
+            )
         item = queue.popleft() if len(queue) > 1 else queue[0]
         delay = self.delays.get(tool.name)
         if delay:

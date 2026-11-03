@@ -479,7 +479,7 @@ async def test_the_resolution_is_retried_and_reported_like_a_steps_call(
         plan,
         real_schemas,
         manifest(),
-        resolve_anchor=[ToolSurfaceUnavailableError("connection reset"), _anchor()],
+        resolve_anchor=[ToolSurfaceUnavailableError("connection reset", retryable=True), _anchor()],
     )
     heard: list[tuple[str, float]] = []
 
@@ -505,7 +505,7 @@ async def test_a_resolution_that_never_answers_stops_the_run_before_any_rolling_
         plan,
         real_schemas,
         manifest(),
-        resolve_anchor=[ToolSurfaceUnavailableError("connection reset")],
+        resolve_anchor=[ToolSurfaceUnavailableError("connection reset", retryable=True)],
     )
 
     outcome = await _run(plan, surface)

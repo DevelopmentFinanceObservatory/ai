@@ -711,10 +711,13 @@ async def run_translate(state: SessionState, *, core: TranslatorCore) -> dict[st
         return resolved.result
 
     # Listed once for every proposal round. A surface that cannot be listed
-    # refers the plan as `propose_operations` refers it.
+    # refers the plan as `propose_operations` refers it, as an internal
+    # failure when the error says no retry helps.
     try:
         schemas = await core.list_tools()
     except ToolSurfaceUnavailableError as exc:
+        if not exc.retryable:
+            return _internal_failure(core, state, f"the tool surface could not be listed: {exc}")
         return _uncompiled(
             core,
             state,

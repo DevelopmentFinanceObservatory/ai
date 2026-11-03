@@ -29,7 +29,7 @@ from typing import Any, Literal, NamedTuple, cast
 
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
-from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count
+from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count, warning_code
 from data_mcp.scope import ScopeAxis, ScopeEntry, TextOrigin
 from executor.classify import RECOVERABLE_SPEC_CODES
 from executor.ledger import RunStatus
@@ -851,12 +851,12 @@ class SearchReading(StrictModel):
             sentence=_str_or_none(part.get("resolved")),
             warnings=tuple(
                 WarningReading(
-                    code=str(warning["code"]),
+                    code=warning_code(warning),
                     severity=_str_or_none(warning.get("severity")),
                     message=_str_or_none(warning.get("message")),
                 )
                 for warning in part.get("warnings") or ()
-                if isinstance(warning, Mapping) and warning.get("code")
+                if isinstance(warning, Mapping)
             ),
             departures=tuple(
                 DepartureReading.model_validate(departure)

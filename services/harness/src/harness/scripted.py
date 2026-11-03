@@ -370,4 +370,4 @@ class ScriptedSurface:
                 structured_content=scripted_aggregate_result(),
                 text="scripted aggregate result",
             )
-        raise ToolSurfaceUnavailableError(f"no scripted answer for {tool.name!r}")
+        raise ToolSurfaceUnavailableError(f"no scripted answer for {tool.name!r}", retryable=False)

@@ -593,7 +593,7 @@ async def _read_member_cells(
     args = frame.get("fetch_args") or {"spec_id": str(frame["ref"]["spec_id"])}
     try:
         data = await executor(tool="get_data", args={**args, "place_types": True})
-    except (MCPError, httpx2.TransportError):
+    except (MCPError, httpx2.TransportError, ToolSurfaceUnavailableError):
         logger.warning("make_charts: the kind read of %s failed", frame["ref"], exc_info=True)
         return None
     if data.get("outcome") != "ok":
@@ -2087,7 +2087,7 @@ def build_orchestrator_tools(
             return found
         try:
             data = await executor(tool="get_data", args=args)
-        except (MCPError, httpx2.TransportError) as exc:
+        except (MCPError, httpx2.TransportError, ToolSurfaceUnavailableError) as exc:
             logger.warning(
                 "fetch: get_data(%s) did not complete: %s",
                 spec_id,
@@ -2100,6 +2100,13 @@ def build_orchestrator_tools(
                     "refusal": "get_data ran past its deadline. Do not repeat the same fetch "
                     "unchanged: narrow it, or answer without this data.",
                     "code": HarnessCode.DEADLINE_EXCEEDED.value,
+                }
+            elif isinstance(exc, ToolSurfaceUnavailableError) and not exc.retryable:
+                refused = {
+                    "spec_id": spec_id,
+                    "refusal": "get_data is not available on this server. Answer without this "
+                    "data.",
+                    "code": HarnessCode.TOOL_NOT_CONFIGURED.value,
                 }
             else:
                 refused = {
@@ -2604,7 +2611,8 @@ def build_orchestrator_tools(
 
         A call that does not complete, `compiler.surface`'s per-tool timeout or
         an unreachable data-mcp, is an error the model may retry, as
-        `planner.skills` answers the planner, so the turn goes on.
+        `planner.skills` answers the planner, so the turn goes on. One its
+        raise site marked not `retryable` answers as a server with no skills.
         """
         spent = _spend(tool_context, tool.name)
         if spent:
@@ -2619,6 +2627,10 @@ def build_orchestrator_tools(
             logger.warning(
                 "orchestrator %s(%s) did not complete: %s", tool.name, dict(arguments), exc
             )
+            if not exc.retryable:
+                return _failed(
+                    HarnessCode.TOOL_NOT_CONFIGURED, "skills are not available on this server"
+                )
             return _failed(
                 HarnessCode.TRANSIENT_UNAVAILABLE,
                 f"{tool.name} could not reach data-mcp just now. Call it again, or answer "

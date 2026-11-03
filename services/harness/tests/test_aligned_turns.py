@@ -532,4 +532,4 @@ class _Unreachable:
     ) -> ToolCallResult:
         del on_progress
         self.calls.append((tool.name, arguments.get("spec_id")))
-        raise ToolSurfaceUnavailableError(f"{tool.name} unreachable")
+        raise ToolSurfaceUnavailableError(f"{tool.name} unreachable", retryable=True)

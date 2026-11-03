@@ -21,20 +21,29 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import socket
+import ssl
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Protocol
+from typing import Protocol, Self
 
+import aiohttp
+import anyio
+import asyncpg
+import httpx2
 import rfc8785
 from common.auth import bearer_token
 from fastmcp import Client, FastMCP
 from fastmcp.client.progress import ProgressHandler
 from fastmcp.client.transports import ClientTransport
+from google.auth import exceptions as google_auth_errors
+from google.genai import errors as genai_errors
 from mcp import MCPError
-from mcp.types import REQUEST_TIMEOUT, TextContent, Tool
+from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, TextContent, Tool
 from planner.workflow import ToolId
 from pydantic import BaseModel, Field
+from sqlalchemy import exc as sa_exc
 
 from compiler.caller_clients import CallerClients, caller_transport, session_call_meta
 
@@ -216,7 +225,193 @@ class ToolSurfaceUnavailableError(RuntimeError):
     someone fixes it, so retrying is pointless. An unreachable server is worth
     another attempt: the tools are fine and the attempt simply did not
     complete.
+
+    `retryable` is `True` exactly when a later attempt can succeed, and an
+    explicit `False` is final. A raise site that wraps an exception it did not
+    classify itself sets it to `retryable_failure(cause)`: retryable unless
+    the cause chain holds a fault a retry meets again. A site that knows the
+    fault is permanent, such as a server this surface does not cover, sets it
+    `False`, and one whose call was cut off or never issued for lack of time
+    sets it `True`.
     """
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+    def __reduce__(self) -> tuple[Callable[..., Self], tuple[object, ...], dict[str, object]]:
+        # `BaseException.__reduce__` rebuilds as `cls(*args)`, which fails for
+        # the required keyword-only `retryable` and for a subclass with its own
+        # signature. This rebuilds without `__init__` and restores `__dict__`.
+        return _rebuild, (type(self), *self.args), self.__dict__
+
+
+def _rebuild[E: BaseException](cls: type[E], *args: object) -> E:
+    """A `cls` holding `args`, made without calling its `__init__`."""
+    return cls.__new__(cls, *args)
+
+
+# The MCP error codes of a call whose connection closed or that timed out:
+# the server may answer the same call later.
+TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
+
+# Raised by `fastmcp.client.client.Client._await_with_session_monitoring`
+# (fastmcp 4) as a bare `RuntimeError` when the MCP session's task ends
+# without an exception while a call waits on it: the server closed the
+# stream. fastmcp offers no other signal: the error has no type of its own,
+# `Client.is_connected()` stays true until the client exits, and the session
+# task is private state. The message is all that tells it from any other
+# `RuntimeError`, so this module is the one place that reads it, and
+# `test_surface.py` pins it against the real client.
+_FASTMCP_SESSION_ENDED = "Session task completed unexpectedly"
+
+
+# The Postgres errors that end the connection itself: the server shutting
+# down or crashing, starting up, or closing an idle session. A later attempt
+# opens a new connection.
+_POSTGRES_CONNECTION_ENDED = (
+    asyncpg.AdminShutdownError,
+    asyncpg.CrashShutdownError,
+    asyncpg.CannotConnectNowError,
+    asyncpg.IdleSessionTimeoutError,
+)
+
+
+def transient_status(status: int | None) -> bool:
+    """Whether an HTTP `status` says to try again later: a rate limit (429) or
+    a server error (5xx). Any other 4xx repeats for the same request."""
+    return status is not None and (status == httpx2.codes.TOO_MANY_REQUESTS or status >= 500)
+
+
+# The faults a retry meets again: a certificate that failed verification, a
+# URL no client can send to (a scheme httpx2 does not speak, or a malformed
+# one), and a request httpx2 itself refused to write.
+_PERMANENT_FAULTS = (
+    ssl.SSLCertVerificationError,
+    httpx2.UnsupportedProtocol,
+    httpx2.LocalProtocolError,
+    httpx2.InvalidURL,
+)
+
+
+def permanent_fault(exc: BaseException) -> bool:
+    """Whether `exc`, an exception it was raised from (`__cause__`), or a
+    member of an exception group among them, is a fault the next attempt
+    meets again (`_PERMANENT_FAULTS`). A transport wraps one, as httpx2's
+    `ConnectError` and aiohttp's `ClientConnectorCertificateError` wrap a
+    failed certificate, in an error that reads as a dropped connection. An
+    exception merely raised while another was handled is its own fault."""
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        if isinstance(link, _PERMANENT_FAULTS):
+            return True
+        if isinstance(link, BaseExceptionGroup) and any(
+            permanent_fault(member) for member in link.exceptions
+        ):
+            return True
+        seen.add(id(link))
+        link = link.__cause__
+    return False
+
+
+def retryable_failure(exc: BaseException) -> bool:
+    """Whether a call that failed with `exc`, caught by a site that does not
+    classify it further, can succeed later. It can unless a known permanent
+    fault is in the cause chain (`permanent_fault`). An answer the server gave
+    in error, such as the `MCPError` the mcp client raises for a 5xx or a
+    terminated session, a refused connection, a failed name lookup, a timeout
+    and a closed connection are all faults a later attempt may not meet."""
+    return not permanent_fault(exc)
+
+
+def transient(exc: BaseException) -> bool:
+    """Whether `exc`, or an exception it was raised from (`__cause__`), is a
+    fault a later attempt may not meet. A wrapper such as
+    `executor.run.RunAbandonedError`, or fastmcp's `RuntimeError('Client
+    failed to connect: ...')` over an httpx2 `ConnectError`, keeps the class
+    of the transport error under it. An exception merely raised while another
+    was handled is its own fault, such as a bug in an `except` block. An
+    exception group, as anyio's task groups raise, is transient when every
+    exception in it is, so one bug among dropped connections still reads as a
+    fault. A permanent fault anywhere in the chain makes it not transient
+    (`permanent_fault`), whatever wraps it. A `ToolSurfaceUnavailableError`
+    states its own answer, `retryable`, which is final."""
+    if permanent_fault(exc):
+        return False
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        if isinstance(link, ToolSurfaceUnavailableError):
+            return link.retryable
+        if isinstance(link, BaseExceptionGroup):
+            return all(transient(leaf) for leaf in link.exceptions)
+        if _transient_link(link):
+            return True
+        seen.add(id(link))
+        link = link.__cause__
+    return False
+
+
+def _transient_link(exc: BaseException) -> bool:
+    """Whether `exc` alone is transient: a timeout, the session store's pool
+    timeout among them (`sqlalchemy.exc.TimeoutError`, every pooled
+    connection busy under load); a connection that failed or dropped, a
+    Postgres one included (`PostgresConnectionError`, or a server ending
+    the connection, `_POSTGRES_CONNECTION_ENDED`, or refusing one when its
+    connection slots are full, `TooManyConnectionsError`), or one SQLAlchemy
+    invalidated as a disconnect (`DBAPIError.connection_invalidated`); a
+    name lookup or TLS failure; a transport error, httpx2's, aiohttp's
+    connection or payload error (the Gemini SDK's transport, under which a
+    peer's reset reads as `ClientPayloadError`), or google-auth's while
+    fetching a token (a `RefreshError` raised from one is read by its
+    cause); an HTTP or model answer of 429 or 5xx after the client's
+    retries, httpx2's included (`transient_status`); an MCP call whose
+    connection closed or that timed out (`TRANSIENT_MCP_CODES`), fastmcp's
+    session ending under a call included (`_FASTMCP_SESSION_ENDED`; anyio's
+    closed or broken stream, under its "Server session was closed
+    unexpectedly"). A TLS failure is transient except a certificate that
+    failed verification (`ssl.SSLCertVerificationError`), and a transport
+    error that is a permanent fault (`permanent_fault`) is not transient
+    either. `transient` refuses these and any wrapper of one before this reads
+    the link. Any other `OSError`, such as `FileNotFoundError`, and any other
+    aiohttp error, such as `InvalidURL`, is a fault in this code, and any
+    other MCP error an answer the server or this client got wrong, which a
+    later attempt meets again. Any other `DBAPIError` is read by the asyncpg error it was
+    raised from (`transient` walks `__cause__`), so a connection error under
+    it is transient and a SQL error a fault."""
+    match exc:
+        case (
+            genai_errors.APIError(code=status)
+            | aiohttp.ClientResponseError(status=status)
+            | httpx2.HTTPStatusError(response=httpx2.Response(status_code=status))
+        ):
+            return transient_status(status)
+    if isinstance(exc, sa_exc.DBAPIError):
+        return exc.connection_invalidated
+    if isinstance(exc, MCPError):
+        return exc.error.code in TRANSIENT_MCP_CODES
+    if type(exc) is RuntimeError and exc.args == (_FASTMCP_SESSION_ENDED,):
+        return True
+    return isinstance(
+        exc,
+        (
+            TimeoutError,
+            ConnectionError,
+            socket.gaierror,
+            ssl.SSLError,
+            asyncpg.PostgresConnectionError,
+            asyncpg.TooManyConnectionsError,
+            *_POSTGRES_CONNECTION_ENDED,
+            sa_exc.TimeoutError,
+            httpx2.TransportError,
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            google_auth_errors.TransportError,
+            anyio.ClosedResourceError,
+            anyio.BrokenResourceError,
+        ),
+    )
 
 
 # What a server is reached through: its URL, the `FastMCP` instance itself over
@@ -415,7 +610,8 @@ class McpSurface:
         source = self._sources.get(tool.server)
         if source is None:
             raise ToolSurfaceUnavailableError(
-                f"no server named {tool.server!r} is covered; covered: {sorted(self._sources)!r}"
+                f"no server named {tool.server!r} is covered; covered: {sorted(self._sources)!r}",
+                retryable=False,
             )
         timeout = self._call_timeouts.get(tool, self._default_call_timeout_s)
         clients = self._call_clients[tool.server]
@@ -445,7 +641,8 @@ class McpSurface:
                 )
                 await clients.discard(client)
             raise ToolSurfaceUnavailableError(
-                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}"
+                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}",
+                retryable=retryable_failure(exc),
             ) from exc
         except Exception as exc:
             logger.warning(
@@ -458,7 +655,8 @@ class McpSurface:
             if client is not None:
                 await clients.discard(client)
             raise ToolSurfaceUnavailableError(
-                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}"
+                f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}",
+                retryable=retryable_failure(exc),
             ) from exc
         finally:
             if client is not None:
@@ -492,7 +690,8 @@ class McpSurface:
                 return await client.list_tools()
         except Exception as exc:
             raise ToolSurfaceUnavailableError(
-                f"could not read the tool surface at {_source_label(source)!r}: {exc}"
+                f"could not read the tool surface at {_source_label(source)!r}: {exc}",
+                retryable=retryable_failure(exc),
             ) from exc
 
 
@@ -534,5 +733,7 @@ class FixtureSurface:
     ) -> ToolCallResult:
         del arguments, on_progress  # a canned answer depends on neither
         if tool.name not in self._responses:
-            raise ToolSurfaceUnavailableError(f"no canned answer for {tool.name!r}")
+            raise ToolSurfaceUnavailableError(
+                f"no canned answer for {tool.name!r}", retryable=False
+            )
         return self._responses[tool.name]

@@ -153,7 +153,9 @@ async def test_a_refusal_reaches_the_model_as_data_mcps_text(tool: str) -> None:
 async def test_a_call_that_does_not_complete_answers_with_one_sentence(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    surface = _RecordingSurface(ToolSurfaceUnavailableError("could not call 'get_skill'"))
+    surface = _RecordingSurface(
+        ToolSurfaceUnavailableError("could not call 'get_skill'", retryable=True)
+    )
 
     with caplog.at_level(logging.WARNING, logger="planner.skills"):
         answer = await _tools(surface)["get_skill"](skill_id="dfo-faq")
@@ -190,7 +192,7 @@ async def test_each_page_read_without_an_error_is_recorded_once_in_read_order() 
     "answer",
     [
         ToolCallResult(is_error=True, text="skill_not_found: no skill has that id."),
-        ToolSurfaceUnavailableError("could not call 'get_skill'"),
+        ToolSurfaceUnavailableError("could not call 'get_skill'", retryable=True),
     ],
     ids=["refusal", "not-completed"],
 )

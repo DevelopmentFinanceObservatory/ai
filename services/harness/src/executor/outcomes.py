@@ -19,7 +19,13 @@ from planner.records import Identifier, Period, SpecId, StrictModel
 from planner.workflow import ToolId
 from pydantic import Field, JsonValue, TypeAdapter
 
-from executor.classify import Disposition, ToolFailure, classify_refusal, is_harness_fault
+from executor.classify import (
+    Disposition,
+    ExecutorCode,
+    ToolFailure,
+    classify_refusal,
+    is_harness_fault,
+)
 
 # The session-state slot holding the latest `RunOutcome`. Separate from the
 # plan's own slot, so the plan stays a control record.
@@ -203,6 +209,11 @@ class Refused(StrictModel):
     passed the answer check an accepted run applies (`executor.run._Run.
     _answer_refusal`). `anchors` holds the newest period of each group of
     rolling steps the run resolved before it stopped.
+
+    `retryable` says whether a later attempt can get past a
+    `TRANSPORT_FAILED` stop: `False` when the tool surface reported a failure
+    no retry changes (`compiler.surface.ToolSurfaceUnavailableError`), such as
+    a server it does not cover. It is `True` for every other stop.
     """
 
     kind: Literal["refused"] = "refused"
@@ -210,6 +221,7 @@ class Refused(StrictModel):
     run_id: str | None = None
     refusal: RefusalKind
     detail: str
+    retryable: bool = True
     step_id: Identifier | None = None
     requirement_id: Identifier | None = None
     payload: ToolFailure | None = None
@@ -316,6 +328,11 @@ STOP_MESSAGES: dict[RefusalKind, str] = {
 }
 
 
+# What the orchestrator is told of a transport stop no later attempt can get
+# past (`Refused.retryable`), which it reads as the system fault it is.
+PERMANENT_TRANSPORT_MESSAGE = "a data service this step needs is not available"
+
+
 class StopCause(StrEnum):
     """The cause of a refused run's stop, which decides where a caller outside the run routes it."""
 
@@ -352,17 +369,25 @@ STOP_CAUSES: dict[RefusalKind, StopCause] = {
 }
 
 
+def permanent_transport_stop(outcome: Refused) -> bool:
+    """Whether `outcome` is a transport stop no later attempt can get past."""
+    return outcome.refusal is RefusalKind.TRANSPORT_FAILED and not outcome.retryable
+
+
 def stop_cause(outcome: Refused) -> StopCause:
     """Whose `outcome`'s stop is.
 
     A stop carrying a tool's refusal is transient when the tool says waiting
     helps (`classify_refusal`), the harness's when the code says the harness
     wrote the call wrong or a server failed of itself (`is_harness_fault`),
-    and the data's otherwise. Any other stop is told by its kind
-    (`STOP_CAUSES`).
+    and the data's otherwise. A transport stop is transient when a later
+    attempt can get past it (`Refused.retryable`) and the harness's when none
+    can. Any other stop is told by its kind (`STOP_CAUSES`).
     """
     failure = outcome.payload
     if failure is None:
+        if permanent_transport_stop(outcome):
+            return StopCause.HARNESS
         return STOP_CAUSES[outcome.refusal]
     if classify_refusal(failure) is Disposition.RETRY_LATER:
         return StopCause.TRANSIENT
@@ -433,6 +458,13 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
         if (remedy := ISSUE_REMEDIES.get(failing[0].code)) is not None:
             failed["remedy"] = remedy
         return failed
+    if permanent_transport_stop(outcome):
+        return {
+            "step_id": outcome.step_id,
+            "tool": None,
+            "code": ExecutorCode.INTERNAL_ERROR.value,
+            "message": PERMANENT_TRANSPORT_MESSAGE,
+        }
     return {
         "step_id": outcome.step_id,
         "tool": None,

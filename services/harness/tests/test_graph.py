@@ -3027,6 +3027,36 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
     assert failure_detail(failed) == f"{gone.cause}, {gone.advice}."
 
 
+@pytest.mark.parametrize("retryable", [True, False], ids=["retryable", "permanent"])
+async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
+    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch, retryable: bool
+) -> None:
+    """A step the tool surface failed for a fault no later attempt gets past
+    closes the turn without a replan, which would spend an approval on the
+    same failure. A retryable transport stop replans."""
+    plan = _seam_plan(schemas=real_schemas)
+    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+
+    async def _stub_wave(drafted_plan: Any, **_kwargs: Any) -> Any:
+        stop = Refused(
+            revision=plan_revision(drafted_plan),
+            refusal=RefusalKind.TRANSPORT_FAILED,
+            detail="could not call 'get_data'",
+            step_id="get_data",
+            retryable=retryable,
+        )
+        return drafted_plan, stop
+
+    monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
+    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    await _start(runner)
+
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+
+    assert len(seam.calls) == (2 if retryable else 1)
+    assert (_pending_interrupt(events) == APPROVE_INTERRUPT) is retryable
+
+
 async def test_a_not_approved_outcome_raises_instead_of_replanning(
     real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -53,7 +53,7 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, over
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from compiler.sources import source_from_spec_block
+from compiler.sources import source_from_spec_block, warning_code
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
@@ -6145,22 +6145,6 @@ def block_identity(block: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return identity if isinstance(identity, Mapping) else None
 
 
-def shown_identity(spec_id: str, block: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The identity `block`, a spec block for `spec_id`, carries; `None` when
-    data-mcp's `resolve_definition` would refuse it (`caller_definition`:
-    it does not hash to `spec_id`, has no RFC 8785 form, or its compact
-    JSON is past `MAX_IDENTITY_BYTES`). `harness.studio_state._turn_identities`
-    leaves such an identity off the record too."""
-    identity = block_identity(block)
-    if identity is None:
-        return None
-    try:
-        caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
-    except (IdentityMismatch, IdentityUnusable):
-        return None
-    return identity
-
-
 def windowed_pin(
     spec_id: str, recorded: RecordedDefinition, window: Mapping[str, Any]
 ) -> WindowedPin:
@@ -6244,27 +6228,73 @@ class _ShownDefinition(NamedTuple):
     resolved_sources: tuple[ResolvedSourceMention, ...] = ()
 
 
-def unusable_definition(spec_id: str, block: Mapping[str, Any]) -> str | None:
-    """Why the definition `block`, a spec block for `spec_id`, carries cannot be put on record (`identity_on_record`).
+class DefinitionOnRecord(NamedTuple):
+    """Whether a dataset's definition can be put on record, and if not, why.
 
-    data-mcp's refusal (`caller_definition`: it does not hash to `spec_id`,
-    has no RFC 8785 form, or is past `MAX_IDENTITY_BYTES`), or the named sets
-    of a block that is not readable as a source
-    (`compiler.sources.source_from_spec_block`). `None` when the block
-    carries no definition, or one that can be put on record.
+    `definition` is the definition on record. `reason` says why none is when
+    a block carries a definition that cannot be put on record. Both are
+    `None` when no definition is on record and none is refused.
+    """
+
+    definition: RecordedDefinition | None = None
+    reason: str | None = None
+
+
+def shown_definition(spec_id: str, block: Mapping[str, Any]) -> DefinitionOnRecord:
+    """The definition `block`, a spec block for `spec_id`, puts on record.
+
+    Neither field is set when the block carries no definition. `reason` is
+    set when it carries one that cannot be put on record: data-mcp's refusal
+    (`caller_definition`: it does not hash to `spec_id`, has no RFC 8785
+    form, or its compact JSON is past `MAX_IDENTITY_BYTES`;
+    `harness.studio_state._turn_identities` leaves such an identity off the
+    record too), or the named sets of a block that is not readable as a
+    source (`compiler.sources.source_from_spec_block`).
     """
     identity = block_identity(block)
     if identity is None:
-        return None
+        return DefinitionOnRecord()
     try:
         caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
     except (IdentityMismatch, IdentityUnusable) as exc:
-        return str(exc)
+        return DefinitionOnRecord(reason=str(exc))
     try:
-        source_from_spec_block(block)
+        source = source_from_spec_block(block)
     except ValueError:
-        return "its named sets cannot be read"
-    return None
+        return DefinitionOnRecord(reason="its named sets cannot be read")
+    return DefinitionOnRecord(_ShownDefinition(identity, source.groups, source.resolved_sources))
+
+
+def identity_or_refusal(
+    pin: str,
+    *,
+    shown: Mapping[str, PinSource],
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+) -> DefinitionOnRecord:
+    """The definition on record for `pin`, and why none is when `pin`'s block in `shown` carries one that cannot be.
+
+    The definition is the one a search in the conversation recorded
+    (`recorded_identity`), else the one `definition_lookup` answers:
+    `submission.service.admit` and the translator pass the discovery log's
+    (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
+    each source the translator offered. Otherwise it is the one `pin`'s
+    block in `shown` carries, when data-mcp would take it
+    (`shown_definition`). A pin compiled in code is on record through that
+    block alone: a scope choice switched on the plan card
+    (`harness.graph.switch`) or an input put on its calculation's basis
+    (`planner.agent.compile_on_basis`, `planner.agent.compile_whole`) is
+    held in `held_sources` and in no search record.
+
+    The reason is `None` with a definition, and when none is on record
+    because no search recorded one and `pin`'s block, if any, carries none.
+    """
+    recorded: RecordedDefinition | None = recorded_identity(pin)
+    if recorded is None and definition_lookup is not None:
+        recorded = definition_lookup(pin)
+    if recorded is not None or pin not in shown:
+        return DefinitionOnRecord(recorded)
+    block = shown[pin].spec_block(pin)
+    return shown_definition(pin, block) if block is not None else DefinitionOnRecord()
 
 
 def identity_on_record(
@@ -6273,36 +6303,12 @@ def identity_on_record(
     shown: Mapping[str, PinSource],
     definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
 ) -> RecordedDefinition | None:
-    """The definition on record for `pin`; `None` when none is.
+    """The definition on record for `pin`; `None` when none is (`identity_or_refusal`).
 
-    The definition is the one a search in the conversation recorded
-    (`recorded_identity`), else the one `definition_lookup` answers:
-    `submission.service.admit` and the translator pass the discovery log's
-    (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
-    each source the translator offered. Otherwise it is the one `pin`'s
-    block in `shown` carries, when data-mcp would take it
-    (`shown_identity`). A pin compiled in code is on record through that
-    block alone: a scope choice switched on the plan card
-    (`harness.graph.switch`) or an input put on its calculation's basis
-    (`planner.agent.compile_on_basis`, `planner.agent.compile_whole`) is
-    held in `held_sources` and in no search record. A shown block that is
-    not readable as a source (`compiler.sources.source_from_spec_block`)
-    puts none on record.
+    A shown block that cannot be put on record, or is not readable as a
+    source (`compiler.sources.source_from_spec_block`), puts none on record.
     """
-    recorded: RecordedDefinition | None = recorded_identity(pin)
-    if recorded is None and definition_lookup is not None:
-        recorded = definition_lookup(pin)
-    if recorded is not None or pin not in shown:
-        return recorded
-    block = shown[pin].spec_block(pin)
-    identity = shown_identity(pin, block) if block is not None else None
-    if block is None or identity is None:
-        return None
-    try:
-        source = source_from_spec_block(block)
-    except ValueError:
-        return None
-    return _ShownDefinition(identity, source.groups, source.resolved_sources)
+    return identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup).definition
 
 
 # The seconds a discovery call made now may take inside a planner entry. That is
@@ -6357,21 +6363,23 @@ class PinSource(StrictModel):
 
 
 def warning_codes(warnings: object) -> tuple[str, ...]:
-    """The `code` of each warning dict in `warnings`, a list as search returns it."""
+    """The `warning_code` of each warning dict in `warnings`, a list as search returns it.
+
+    Every pin source reads its warnings here, whether `pin_by_search` took
+    them from a digest or the orchestrator's stored block did, so a warning
+    stating no code is `unspecified` on both.
+    """
     if not isinstance(warnings, list):
         return ()
-    return tuple(
-        str(code)
-        for warning in warnings
-        if isinstance(warning, dict) and (code := warning.get("code"))
-    )
+    return tuple(warning_code(warning) for warning in warnings if isinstance(warning, Mapping))
 
 
 class PinVerdict(StrictModel):
     """Whether admission judged the pin `spec_id` of the dataset requirement
     `requirement_id` to answer a narrower question than the one asked
-    (`narrowed`, `translator.discovery.narrowed_pin`). `spec_id` is the pin
-    before admission moved it to a copy (`WindowedPin.windowed_from`)."""
+    (`narrowed`, `translator.discovery.narrowed_pin`). `spec_id` is the pin the
+    requirement holds in the plan recorded with the verdict: the copy
+    (`WindowedPin`) or the dataset on record admission moved it to."""
 
     requirement_id: str
     spec_id: SpecId

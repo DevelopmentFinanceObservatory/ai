@@ -27,7 +27,7 @@ from common.auth import apply_gate
 from common.caller import conversation_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
-from compiler.surface import ProgressReport
+from compiler.surface import ProgressReport, ToolSurfaceUnavailableError
 from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
@@ -108,7 +108,7 @@ class _RaisingClient:
     """A `Client` stand-in whose `call_tool` always raises, for testing
     `_call_tool`'s timeout handling in isolation from the transport."""
 
-    def __init__(self, error: MCPError) -> None:
+    def __init__(self, error: Exception) -> None:
         self._error = error
 
     async def call_tool(
@@ -162,6 +162,47 @@ async def test_call_tool_leaves_a_non_timeout_mcp_error_untouched() -> None:
 
     assert excinfo.value is error
     assert getattr(excinfo.value, "timeout_tool", None) is None
+
+
+def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
+    outer.__cause__ = cause
+    return outer
+
+
+@pytest.mark.parametrize(
+    ("raised", "retryable"),
+    [
+        (RuntimeError("Session task completed unexpectedly"), True),
+        (RuntimeError("Event loop is closed"), True),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: All connection attempts failed"),
+                httpx2.ConnectError("All connection attempts failed"),
+            ),
+            True,
+        ),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: unsupported protocol"),
+                httpx2.UnsupportedProtocol("Request URL has an unsupported protocol 'ftp://'"),
+            ),
+            False,
+        ),
+    ],
+    ids=["session-ended", "other-runtime-error", "connect-failure", "unsupported-protocol"],
+)
+async def test_call_tool_marks_a_runtime_error_retryable_unless_its_cause_is_permanent(
+    raised: BaseException, retryable: bool
+) -> None:
+    """fastmcp raises a bare `RuntimeError` when the session task ends under a
+    call or the connection fails; `_call_tool` raises it as a
+    `ToolSurfaceUnavailableError`, retryable unless a permanent fault is under
+    it, so `_stream_fatal` reads it by type."""
+    with pytest.raises(ToolSurfaceUnavailableError) as excinfo:
+        await _call_tool(_RaisingClient(raised), "search", {})  # type: ignore[arg-type]
+
+    assert excinfo.value.retryable is retryable
+    assert excinfo.value.__cause__ is raised
 
 
 async def test_call_tool_tags_a_real_client_deadline_as_a_timeout() -> None:

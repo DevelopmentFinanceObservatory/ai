@@ -33,7 +33,13 @@ import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import CompileIssueCode, compile_plan
 from compiler.sources import PROVIDER_ACCOUNT, DiscoveryStatus, source_from_spec_block
-from compiler.surface import FixtureSurface, McpSurface, ToolCallResult, ToolSurface
+from compiler.surface import (
+    FixtureSurface,
+    McpSurface,
+    ToolCallResult,
+    ToolSurface,
+    ToolSurfaceUnavailableError,
+)
 from data_mcp.definition_store import InMemoryDefinitionStore, canonicalize, spec_id_for
 from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
@@ -155,6 +161,7 @@ from planner.plan import (
     period_window,
     pin_slot_moves,
     pin_sources,
+    pin_verdicts,
     plan_revision,
     record_optional_decline,
     record_unsupported,
@@ -167,7 +174,6 @@ from planner.plan import (
     search_pin_slot,
     split_of,
     stored_plan,
-    unusable_definition,
     windowed_pins,
 )
 from planner.records import (
@@ -217,6 +223,7 @@ from submission.service import (
     _window_pins,
     first_year_reads,
     identity_on_record,
+    identity_or_refusal,
     save_aligned_pin,
     scope_choice_decisions,
     searched_pins,
@@ -268,6 +275,7 @@ from ..session_events import response_event
 from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
 from ..test_turn_records import _switchable_scope
+from ..unreachable_surface import unreachable_surface
 
 # The `decision`, `requirement`, `derived_requirement` and `requirements`
 # fixtures, from conftest.py. Annotated structurally rather than imported: a
@@ -397,6 +405,14 @@ def _ask_response(call_id: str, body: dict[str, Any]) -> Any:
     response = SimpleNamespace(id=call_id, name=PLANNER_ASK, response=body)
     part = SimpleNamespace(function_call=None, function_response=response)
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
+
+
+def _event_of(*events: Any) -> Any:
+    """One session event carrying the parts of `events`, as ADK writes the calls of one
+    model response, or the responses of its tools, together."""
+    return SimpleNamespace(
+        content=SimpleNamespace(parts=[part for event in events for part in event.content.parts])
+    )
 
 
 def _ask_answered_events(
@@ -2051,6 +2067,61 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
     assert result is not None
     assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
     assert result["detail"] == {"requirement_id": "net_flows", "datasets": sorted([DAC2A, other])}
+
+
+def test_a_refused_combination_ask_leaves_the_refusal_for_the_next_ask() -> None:
+    """The tool refuses the first ask (a second ask in one response, say) and the model
+    asks again. The refused ask reached nobody, so the second ask is the one the refusal
+    binds, the user's pick of adding the two stands for the sum, and the refused ask's
+    body is no decline."""
+    refused_body = {
+        "outcome": Outcome.INVALID_INPUT.value,
+        "code": ProblemCode.INVALID_ARGUMENTS.value,
+        "message": "m",
+    }
+    ctx = _FakeToolContext()
+    ctx.session.events.extend(
+        [
+            *_combination_asked(call_id="ask-1"),
+            _ask_response("ask-1", refused_body),
+            *_combination_asked({"spec_id": COMBINE_OPTION}, about=None, call_id="ask-2")[:1],
+            _ask_response("ask-2", dict(ASK_ACCEPTED)),
+            _ask_response("ask-2", {"result": {"spec_id": COMBINE_OPTION}}),
+        ]
+    )
+
+    picks, declined = CallSession(AdkCall(ctx)).combination_picks()
+
+    assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
+    assert declined is False
+
+
+def test_a_response_of_refused_asks_leaves_the_combination_refusal_for_the_next_ask() -> None:
+    """The model asks twice in one response and the tool refuses both (the second as an ask
+    beside another). Neither reached the user, so the refusal binds the ask of the next
+    response, and the user's pick of adding the two stands for the sum."""
+    refused_body = {
+        "outcome": Outcome.INVALID_INPUT.value,
+        "code": ProblemCode.INVALID_ARGUMENTS.value,
+        "message": "m",
+    }
+    (refusal, first) = _combination_asked(call_id="ask-1")
+    (second,) = _combination_asked(about=None, call_id="ask-2")
+    third, answer = _combination_asked({"spec_id": COMBINE_OPTION}, about=None, call_id="ask-3")
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        refusal,
+        _event_of(first, second),
+        _event_of(_ask_response("ask-1", refused_body), _ask_response("ask-2", refused_body)),
+        third,
+        _ask_response("ask-3", dict(ASK_ACCEPTED)),
+        answer,
+    ]
+
+    picks, declined = CallSession(AdkCall(ctx)).combination_picks()
+
+    assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
+    assert declined is False
 
 
 def _with_debt_side(
@@ -4105,6 +4176,53 @@ def test_a_recorded_pin_is_copied_over_the_requirements_period_only_when_its_win
     assert {
         spec_id: copy.windowed_from for spec_id, copy in windowed_pins(ctx.state).items()
     } == copies
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("pin", "also_shown"),
+    [
+        (_AID_2020_2024_SPEC, ()),
+        (_AID_SPEC, ()),
+        (_AID_SPEC, (_AID_2020_2024_SPEC,)),
+    ],
+    ids=["not-moved", "moved-to-a-copy", "moved-to-a-dataset-on-record"],
+)
+def test_the_verdict_on_a_pin_names_the_pin_its_requirement_holds_after_windowing(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    pin: str,
+    also_shown: tuple[str, ...],
+) -> None:
+    """The verdict recorded with the plan names the requirement's pin once admission
+    moved it over the requirement's period, a minted copy or, where the copy is
+    a dataset the planner was shown and so no copy, that dataset, so the
+    translator compares it with the pin it reads."""
+    ctx = _FakeToolContext()
+    save_pin_sources(
+        ctx.state, {spec_id: PinSource(settled=True) for spec_id in (pin, *also_shown)}
+    )
+
+    result = _propose_pinned(
+        _tools_by_name(),
+        ctx,
+        pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT),
+        [requirement(source_spec_id=pin, period=Period(start=2020, end=2024))],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (pinned,) = plan.evidence_requirements
+    assert isinstance(pinned, DatasetRequirement)
+    assert pinned.source_spec_id == _AID_2020_2024_SPEC
+    assert {
+        verdict.requirement_id: (verdict.spec_id, verdict.narrowed)
+        for verdict in pin_verdicts(ctx.state).values()
+    } == {pinned.id: (_AID_2020_2024_SPEC, False)}
+    assert (_AID_2020_2024_SPEC in windowed_pins(ctx.state)) is (
+        not also_shown and pin == _AID_SPEC
+    )
 
 
 # --- the envelope's own spec_id, synthesized into a Decision ---------------------------
@@ -10625,6 +10743,143 @@ def test_a_sum_of_provider_rows_searched_in_words_keeps_each_row(
     assert _pins(ctx) == [(rid, block["spec_id"]) for rid, block in blocks.items()]
 
 
+async def test_a_search_for_an_unpinned_input_is_shown_with_the_requests_warnings() -> None:
+    """A warning on the search request (`diagnostics.warnings`), as `role_text_not_recognised`
+    is, covers its part as much as one on the part itself: the source the planner is shown
+    carries both, request-level first, as the compiler reads them."""
+    block = _SUM_BLOCKS["dac_countries_bilateral"]
+    envelope = {
+        "diagnostics": {"warnings": [{"code": "role_text_not_recognised", "message": "m"}]},
+        "parts": [
+            {
+                "status": "definite",
+                "spec": block,
+                "warnings": [{"code": "wide_scope", "message": "m"}],
+            }
+        ],
+    }
+
+    class _Searches:
+        async def call_tool(self, **_: Any) -> ToolCallResult:
+            return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
+
+    read = await planner_agent.pin_by_search(
+        cast(Any, _Searches()),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    assert read(state) is None
+
+    assert pin_sources(state)[block["spec_id"]].warnings == (
+        "role_text_not_recognised",
+        "wide_scope",
+    )
+
+
+async def test_a_warning_stating_no_code_reads_the_same_on_both_pin_source_paths() -> None:
+    """Search's warnings reach a `PinSource` from the planner's own search
+    (`pin_by_search`) and from the block the orchestrator stored
+    (`_reading_pin_sources`). Both name a warning that states no code
+    `unspecified`, as the digest puts it on the wire."""
+    block = _SUM_BLOCKS["dac_countries_bilateral"]
+    spec_id = block["spec_id"]
+    warnings = [{"message": "m"}, {"code": "wide_scope", "message": "m"}]
+    expected = ("unspecified", "wide_scope")
+
+    class _Searches:
+        async def call_tool(self, **_: Any) -> ToolCallResult:
+            envelope = {"parts": [{"status": "definite", "spec": block, "warnings": warnings}]}
+            return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
+
+    read = await planner_agent.pin_by_search(
+        cast(Any, _Searches()),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    assert read(state) is None
+    stored = _reading_pin_sources(
+        [{"text": "t", "status": "definite", "spec_id": spec_id}],
+        [spec_id],
+        blocks={spec_id: block},
+        earlier=set(),
+        warnings={spec_id: warnings},
+    )
+
+    assert pin_sources(state)[spec_id].warnings == expected
+    assert stored[spec_id].warnings == expected
+
+
+@pytest.mark.parametrize("retryable", [True, False])
+async def test_a_search_that_did_not_complete_is_asked_again_only_when_it_can_succeed(
+    retryable: bool,
+) -> None:
+    class _Unreachable:
+        async def call_tool(self, **_: Any) -> ToolCallResult:
+            raise ToolSurfaceUnavailableError("data-mcp is down", retryable=retryable)
+
+    read = await planner_agent.pin_by_search(
+        cast(Any, _Unreachable()),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    refusal = read(state)
+
+    if retryable:
+        assert refusal is not None
+        assert refusal["code"] == ProblemCode.SURFACE_UNAVAILABLE.value
+        assert searched_pins(state) == ()
+    else:
+        assert refusal is None
+        assert [(pin.requirement_key, pin.status) for pin in searched_pins(state)] == [
+            ("k", "refused")
+        ]
+
+
+async def test_a_search_against_a_server_that_is_down_is_asked_again() -> None:
+    read = await planner_agent.pin_by_search(
+        unreachable_surface(),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    refusal = read(state)
+
+    assert refusal is not None
+    assert refusal["code"] == ProblemCode.SURFACE_UNAVAILABLE.value
+    assert searched_pins(state) == ()
+
+
 def _another_part(block: dict[str, Any]) -> dict[str, Any]:
     """A copy of `block` as a part of its own (`PartScope.base`), under a spec_id of its
     own, binding the same donor and compiling to the same identity."""
@@ -12800,6 +13055,62 @@ def test_an_answer_to_the_planners_prices_ask_sets_or_releases_the_choice(
     ]
 
     assert prices_chosen(AdkCall(ctx)) == held
+
+
+def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> None:
+    """The tool refused the planner's first prices ask, which reached nobody. The prices
+    refusal still sends the planner to the user, so the ask that follows is the one
+    it binds, and the user's pick of current prices is held."""
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        *_prices_ask_events(),
+        _prices_refused_event(_GROSS, asks_user=True),
+        _prices_options_ask(),
+        _ask_response("ask-prices", {"outcome": Outcome.INVALID_INPUT.value, "message": "m"}),
+        _prices_options_ask(call_id="ask-again"),
+        _ask_response("ask-again", {"result": {"spec_id": "prices:current"}}),
+    ]
+
+    assert prices_chosen(AdkCall(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
+
+
+def test_a_response_of_refused_asks_leaves_the_prices_refusal_for_the_next_ask() -> None:
+    """The model asks twice in one response and the tool refuses both. Neither reached the
+    user, so the prices refusal binds the ask of the next response, and the user's pick of
+    current prices is held."""
+    refused_body = {"outcome": Outcome.INVALID_INPUT.value, "message": "m"}
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        *_prices_ask_events(),
+        _prices_refused_event(_GROSS, asks_user=True),
+        _event_of(_prices_options_ask("ask-1"), _prices_options_ask("ask-2")),
+        _event_of(_ask_response("ask-1", refused_body), _ask_response("ask-2", refused_body)),
+        _prices_options_ask("ask-3"),
+        _ask_response("ask-3", dict(ASK_ACCEPTED)),
+        _ask_response("ask-3", {"result": {"spec_id": "prices:current"}}),
+    ]
+
+    assert prices_chosen(AdkCall(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
+
+
+def test_a_refused_ask_beside_a_plan_that_clears_the_prices_refusal_leaves_it_cleared() -> None:
+    """`propose_plan` and an ask the tool refuses come in one response. The plan landing
+    clears the prices refusal, and the refused ask, which reached nobody, restores nothing,
+    so the answer to a later ask offering `PRICES_OPTIONS` binds to no part."""
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        _prices_refused_event(_GROSS, asks_user=True),
+        _prices_options_ask("ask-1"),
+        _event_of(
+            _LANDED,
+            _ask_response("ask-1", {"outcome": Outcome.INVALID_INPUT.value, "message": "m"}),
+        ),
+        _prices_options_ask("ask-2"),
+        _ask_response("ask-2", dict(ASK_ACCEPTED)),
+        _ask_response("ask-2", {"result": {"spec_id": "prices:current"}}),
+    ]
+
+    assert prices_chosen(AdkCall(ctx)) == {}
 
 
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
@@ -16504,7 +16815,7 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
     whatever its pin (`translator.discovery.narrowed_pin`), so the plan is recorded
     with the pin as written. Shown with a block whose identity is past
     `MAX_IDENTITY_BYTES`, the refusal names that cause
-    (`planner.plan.unusable_definition`)."""
+    (`planner.plan.identity_or_refusal`)."""
     ctx = _FakeToolContext()
     pin, block = _AID_SPEC, None
     if past_cap:
@@ -16534,7 +16845,9 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
             [dataset.id],
         )
         if block is not None:
-            cause = unusable_definition(pin, block)
+            cause = identity_or_refusal(
+                pin, shown={pin: PinSource(block=block, settled=True)}
+            ).reason
             assert cause is not None
             assert cause in result["message"]
         return
@@ -17994,6 +18307,46 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
         assert refusal["code"] == ProblemCode.INVALID_PLAN.value
 
 
+@pytest.mark.parametrize(
+    ("serving", "valid"),
+    [("plan", True), ("a-later-response", False)],
+    ids=["ask-in-the-same-response", "ask-pending-from-an-earlier-one"],
+)
+def test_an_ask_in_the_proposals_own_response_is_not_an_unanswered_pick(
+    decision, requirements, serving, valid
+):
+    """[ask, propose_plan] in one response after an entity referral. ADK writes the
+    response's answers after every call ends, so the ask has none while the proposal runs. It
+    may still be refused, and reaches the user only once the run ends, so the proposal reads
+    the session as it stood before the response and does not hold the ask's candidates
+    unanswered. The same ask left over from an earlier response is a pick still wanted."""
+    dataset, derived = requirements
+    ctx: Any = _FakeToolContext()
+    save_referral(ctx.state, _congo_both_ends(dataset.id))
+    ask = _congo_ask("donor", call_id="a1").content.parts[0].function_call
+    ctx.session.events.extend(
+        [
+            _referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id),
+            _model_response(ask, SimpleNamespace(id="plan", name="propose_plan", args={})),
+        ]
+    )
+    ctx.function_call_id = serving
+    plan = Plan(
+        question="question",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset.model_copy(
+                update={"entities": (Entity(name="Congo", role="donor", dcid="country/COD"),)}
+            ),
+            derived,
+        ],
+    )
+
+    refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+
+    assert (refusal is None) is valid
+
+
 def _congo_split_draft(decision):
     draft = split_draft(decision)
     entities = (Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient"))
@@ -18018,6 +18371,81 @@ def _assert_asked(result: Any, ctx: Any) -> None:
     asked = load_pending_ask(ctx.state)
     assert asked is not None and asked.call_id == ctx.function_call_id
     assert ctx.actions.skip_summarization is True
+
+
+def test_a_call_reads_the_session_events_once() -> None:
+    """Every reader of a call's steps shares one pass over the events, the refused-ask scan
+    included."""
+    ctx: Any = _FakeToolContext()
+    ctx.session.events.extend(_ask_answered_events())
+    call = AdkCall(ctx)
+
+    assert call.steps() is call.steps()
+    assert [step.kind for step in call.steps()] == ["call", "answer"]
+
+
+def _model_response(*calls: Any) -> Any:
+    """A fake session event holding one model response's `calls`, as ADK writes them together."""
+    return SimpleNamespace(
+        content=SimpleNamespace(
+            parts=[SimpleNamespace(function_call=call, function_response=None) for call in calls]
+        )
+    )
+
+
+@pytest.mark.parametrize("second_runs_first", [False, True], ids=["in-order", "second-first"])
+@pytest.mark.parametrize(
+    "first_accepted",
+    [False, True],
+    ids=["first-refused-then-the-referral-cleared", "first-accepted"],
+)
+def test_an_ask_after_the_first_ask_of_a_response_is_refused(
+    first_accepted: bool, second_runs_first: bool
+) -> None:
+    """[ask, propose_plan, ask] in one response. The first ask is accepted, or refused under
+    the pending entity referral (it offers no pick of it). The second ask is refused either way and whichever of the two runs first:
+    the model's call list names the first, so the response puts at most one question to the
+    user and the model asks the second in its next response."""
+    ctx: Any = _FakeToolContext()
+    reading = _congo_both_ends(_CONGO_REQUIREMENT)
+    save_referral(ctx.state, reading)
+    picks = [
+        {"spec_id": candidate.pick, "label": candidate.label}
+        for candidate in reading.ambiguous_entities[0].candidates
+    ]
+    first_args = {
+        "message": "Which Congo?",
+        "candidates": picks if first_accepted else [{"spec_id": "unrelated", "label": "Other"}],
+    }
+    ctx.session.events.append(
+        SimpleNamespace(
+            get_function_calls=lambda: [
+                SimpleNamespace(id="first", name=PLANNER_ASK, args=first_args),
+                SimpleNamespace(id="plan", name="propose_plan", args={}),
+                SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
+            ]
+        )
+    )
+
+    def ask_first() -> dict[str, object]:
+        ctx.function_call_id = "first"
+        return ask_user_question(cast(Any, ctx), **first_args)
+
+    def ask_second() -> dict[str, object]:
+        ctx.function_call_id = "second"
+        return ask_user_question(cast(Any, ctx), message="Which years?")
+
+    if second_runs_first:
+        second = ask_second()
+        first = ask_first()
+    else:
+        first = ask_first()
+        second = ask_second()
+
+    assert (first == ASK_ACCEPTED) is first_accepted
+    assert second["code"] == ProblemCode.INVALID_ARGUMENTS.value
+    asked = load_pending_ask(ctx.state)
+    assert (asked.call_id if asked else None) == ("first" if first_accepted else None)
 
 
 @pytest.mark.parametrize(("offered_for", "refused"), [("debt", False), ("debt_history", True)])

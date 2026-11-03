@@ -1119,7 +1119,9 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
     events = await harness.events()
-    fake_tool_context = SimpleNamespace(state={}, session=SimpleNamespace(events=events))
+    fake_tool_context = SimpleNamespace(
+        state={}, function_call_id=None, session=SimpleNamespace(events=events)
+    )
     assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset()
 
 
@@ -1211,10 +1213,10 @@ async def test_a_terminal_refusal_beside_an_accepted_ask_ends_the_entry_on_the_r
     assert load_pending_ask(await harness.state()) is None
 
 
-async def test_an_ask_after_a_refused_ask_in_the_same_response_is_put_to_the_user() -> None:
+async def test_an_ask_after_a_refused_ask_in_the_same_response_is_refused_too() -> None:
     """The first ask of a response offers options it wrote itself, which its
-    tool refuses, so the second, valid, is the one the response puts to the
-    user."""
+    tool refuses. The second, valid, is refused as a second ask: the response
+    puts no question to the user, and the entry ends without a plan."""
     authored = {
         "message": "Constant or current dollars?",
         "options": [{"spec_id": "constant_2024_usd", "label": "Constant 2024 US dollars"}],
@@ -1225,17 +1227,18 @@ async def test_an_ask_after_a_refused_ask_in_the_same_response_is_put_to_the_use
     )
     harness = _SeamHarness()
 
-    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    result = await harness.run(seam, question="kenya debt", readings=[])
 
-    asked = load_pending_ask(await harness.state())
-    assert asked is not None and asked.args["message"] == "Which years?"
+    assert result is not None
+    assert result["refused"]["code"] == SeamCode.PLAN_NOT_READY
+    assert load_pending_ask(await harness.state()) is None
     answers = [
         (response.response or {}).get("code", (response.response or {}).get("status"))
         for event in await harness.events()
         for response in event.get_function_responses()
         if response.name == PLANNER_ASK
     ]
-    assert answers == [ProblemCode.INVALID_ARGUMENTS, "asked"]
+    assert answers == [ProblemCode.INVALID_ARGUMENTS, ProblemCode.INVALID_ARGUMENTS]
 
 
 async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
@@ -3974,7 +3977,7 @@ class _RecordingSearch(FixtureSurface):
     ) -> ToolCallResult:
         del on_progress
         if tool.name != "search":
-            raise ToolSurfaceUnavailableError(f"no canned answer for {tool.name!r}")
+            raise ToolSurfaceUnavailableError(f"no canned answer for {tool.name!r}", retryable=True)
         self.sent.append(arguments)
         return self._answers[min(len(self.sent), len(self._answers)) - 1]
 
@@ -5164,7 +5167,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     )
 
     fake_tool_context = SimpleNamespace(
-        state={}, session=SimpleNamespace(events=await harness.events())
+        state={}, function_call_id=None, session=SimpleNamespace(events=await harness.events())
     )
     assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset({SPEC_B})
 
@@ -5222,7 +5225,7 @@ class _DefinitionReads:
     ) -> ToolCallResult:
         del on_progress
         if tool.name != "resolve_definition":
-            raise ToolSurfaceUnavailableError(f"{tool.name} is not served here")
+            raise ToolSurfaceUnavailableError(f"{tool.name} is not served here", retryable=True)
         self.calls.append(arguments)
         return self._answer()
 
@@ -5248,7 +5251,11 @@ def _held_since_1995() -> ToolCallResult:
 
 
 def _unreachable() -> ToolCallResult:
-    raise ToolSurfaceUnavailableError("data-mcp did not answer")
+    raise ToolSurfaceUnavailableError("data-mcp did not answer", retryable=True)
+
+
+def _unreachable_for_good() -> ToolCallResult:
+    raise ToolSurfaceUnavailableError("data-mcp cannot be reached from here", retryable=False)
 
 
 def _last_five_years_plan() -> dict[str, Any]:
@@ -5398,8 +5405,12 @@ def _no_first_year() -> ToolCallResult:
 
 @pytest.mark.parametrize(
     ("answer", "code"),
-    [(_unreachable, "surface_unavailable"), (_no_first_year, "invalid_plan")],
-    ids=["read-did-not-complete", "answer-states-no-first-year"],
+    [
+        (_unreachable, "surface_unavailable"),
+        (_unreachable_for_good, "invalid_plan"),
+        (_no_first_year, "invalid_plan"),
+    ],
+    ids=["read-did-not-complete", "read-cannot-complete-on-a-retry", "answer-states-no-first-year"],
 )
 async def test_a_first_year_that_cannot_be_read_refuses_saying_the_read_failed(
     answer: Callable[[], ToolCallResult], code: str

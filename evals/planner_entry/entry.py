@@ -411,7 +411,9 @@ class TranslationCalls:
             return ToolCallResult.model_validate(self._calls[key])
         if self._live is None:
             self.misses.append(key)
-            raise ToolSurfaceUnavailableError(f"the recording holds no answer for {key}")
+            raise ToolSurfaceUnavailableError(
+                f"the recording holds no answer for {key}", retryable=False
+            )
         try:
             answer = await self._live(tool, arguments)
         except BaseException as exc:
@@ -596,7 +598,9 @@ class RecordedSurface:
         key = surface_key(tool.name, arguments)
         if key not in self._results:
             self.misses.append(key)
-            raise ToolSurfaceUnavailableError(f"the recording holds no answer for {key}")
+            raise ToolSurfaceUnavailableError(
+                f"the recording holds no answer for {key}", retryable=False
+            )
         return ToolCallResult.model_validate(self._results[key])
 
 

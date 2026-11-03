@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, cast
 
@@ -20,7 +21,13 @@ import anyio
 import asyncpg
 import httpx2
 import pytest
-from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
+from aiohttp.client_reqrep import ConnectionKey
+from compiler.surface import (
+    ProgressCallback,
+    ToolCallResult,
+    ToolSchema,
+    ToolSurfaceUnavailableError,
+)
 from executor.run import RunAbandonedError, current_step_id
 from google.adk import Context
 from google.adk.events import Event, EventActions
@@ -99,6 +106,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from submission.service import scope_choice_decisions
+from translator.discovery import NoTimeLeftError
 from translator.referral import (
     ENTITY_CHOICE_REPAIR,
     REFERRAL_STATE_KEY,
@@ -2435,7 +2443,44 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
             ),
             True,
         ),
+        # fastmcp's session-ended `RuntimeError`, unwrapped: a path that calls the
+        # client outside `compiler.surface` and `harness.mcp_client` raises it bare.
         (RuntimeError("Session task completed unexpectedly"), True),
+        (ToolSurfaceUnavailableError("could not call 'search'", retryable=True), True),
+        (ToolSurfaceUnavailableError("no server named 'x' is covered", retryable=False), False),
+        (
+            _raised_from(
+                ToolSurfaceUnavailableError("could not call", retryable=False), TimeoutError()
+            ),
+            False,
+        ),
+        (NoTimeLeftError("'search' was not called: the planner entry has no time left"), True),
+        (ssl.SSLCertVerificationError("certificate verify failed"), False),
+        (ssl.SSLError("handshake failure"), True),
+        (
+            _raised_from(
+                httpx2.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED]"),
+                ssl.SSLCertVerificationError("certificate verify failed"),
+            ),
+            False,
+        ),
+        (
+            _raised_from(
+                aiohttp.ClientConnectorCertificateError(
+                    ConnectionKey("dev.example.org", 443, True, True, None, None, None),
+                    ssl.SSLCertVerificationError("certificate verify failed"),
+                ),
+                ssl.SSLCertVerificationError("certificate verify failed"),
+            ),
+            False,
+        ),
+        (
+            _raised_from(
+                httpx2.ConnectError("[SSL: handshake failure]"), ssl.SSLError("handshake failure")
+            ),
+            True,
+        ),
+        (_raised_while_handling(TimeoutError("slow"), ssl.SSLCertVerificationError("c")), True),
         (anyio.BrokenResourceError(), True),
         (RuntimeError("Event loop is closed"), False),
         (
@@ -2505,6 +2550,16 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         "mcp-server-error",
         "fastmcp-session-closed",
         "fastmcp-session-ended",
+        "surface-unavailable-retryable",
+        "surface-unavailable-not-retryable",
+        "surface-unavailable-final-over-a-timeout",
+        "planner-entry-out-of-time",
+        "tls-certificate-failed-verification",
+        "tls-other-error",
+        "httpx-connect-error-over-a-failed-certificate",
+        "aiohttp-certificate-error",
+        "httpx-connect-error-over-another-tls-error",
+        "timeout-raised-while-handling-a-failed-certificate",
         "anyio-broken-stream",
         "runtime-error",
         "group-of-link-faults",

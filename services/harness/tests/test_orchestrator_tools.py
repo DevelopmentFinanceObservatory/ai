@@ -108,6 +108,7 @@ from planner.plan import (
     current_recorded_identity,
 )
 from planner.records import Period
+from planner.workflow import ToolId
 from submission import service as submission_service
 
 from . import drawn_cards
@@ -122,6 +123,7 @@ from .test_turn_records import (
     _served_identity,
     _top_donors,
 )
+from .unreachable_surface import unreachable_surface
 
 SPEC_AID = "spec_" + "a" * 32
 SPEC_LIFE = "spec_" + "b" * 32
@@ -1338,6 +1340,56 @@ async def test_fetch_returns_a_refusal_when_get_data_does_not_complete(error: Ex
     assert found["spec_id"] == SPEC_LIFE
     assert found["code"] == code
     assert "frames" not in found
+
+
+class SurfaceExecutor(FakeExecutor):
+    """An executor whose `get_data` call goes to `surface`, as `McpExecutor`'s does."""
+
+    def __init__(self, surface: Any) -> None:
+        super().__init__()
+        self.surface = surface
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "get_data":
+            await self.surface.call_tool(tool=ToolId(server="data-mcp", name=tool), arguments=args)
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+class UncoveredServerSurface:
+    """A surface that covers no server, whose failure no retry changes."""
+
+    async def call_tool(self, *, tool: ToolId, arguments: Any, on_progress: Any = None):
+        raise ToolSurfaceUnavailableError("no server named 'data-mcp' is covered", retryable=False)
+
+
+@pytest.mark.parametrize(
+    ("surface", "code"),
+    [
+        (unreachable_surface(), "transient_unavailable"),
+        (UncoveredServerSurface(), "tool_not_configured"),
+    ],
+    ids=["server-down", "server-not-covered"],
+)
+async def test_fetch_answers_a_surface_failure_by_whether_a_retry_can_help(surface: Any, code: str):
+    tools, ctx = _tools(executor=SurfaceExecutor(surface))
+
+    found = await tools["fetch"](SPEC_LIFE, ctx)
+
+    assert (found["spec_id"], found["code"]) == (SPEC_LIFE, code)
+    assert "frames" not in found
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [unreachable_surface(), UncoveredServerSurface()],
+    ids=["server-down", "server-not-covered"],
+)
+async def test_the_kind_read_of_a_frame_names_nothing_when_the_surface_fails(surface: Any):
+    cells = await orchestrator_tools._read_member_cells(
+        {"ref": {"spec_id": SPEC_LIFE}}, SurfaceExecutor(surface)
+    )
+
+    assert cells is None
 
 
 def _role_open_block(spec_id: str, **identity: Any) -> dict[str, Any]:
@@ -4664,11 +4716,19 @@ async def test_get_skill_reports_a_refusal_and_its_absence():
 
 
 class UnreachableSurface(FakeSurface):
-    """A surface whose call times out, as `compiler.surface`'s per-tool timeout raises."""
+    """A surface whose call times out, as `compiler.surface`'s per-tool timeout raises.
+
+    `retryable` is the mark the raise site gives the error."""
+
+    def __init__(self, result: ToolCallResult, *, retryable: bool = True) -> None:
+        super().__init__(result)
+        self.retryable = retryable
 
     async def call_tool(self, *, tool, arguments, on_progress=None) -> ToolCallResult:
         self.calls.append((tool, arguments))
-        raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s")
+        raise ToolSurfaceUnavailableError(
+            f"{tool.name} timed out after 30s", retryable=self.retryable
+        )
 
 
 @pytest.mark.parametrize(
@@ -4695,6 +4755,26 @@ async def test_a_skill_read_that_does_not_complete_is_a_retryable_error_for_the_
     assert len(surface.calls) == 1
 
 
+async def test_a_skill_read_against_a_server_that_is_down_is_a_retryable_error_for_the_model():
+    tools, ctx = _tools(surface=unreachable_surface())
+
+    answered = await tools["get_skill"]("oda-measures", ctx)
+
+    assert _stated(answered) == ("transient_unavailable", "retry_after_delay")
+
+
+@pytest.mark.parametrize("tool", ["get_skill", "get_skill_file"])
+async def test_a_skill_read_that_cannot_complete_on_a_retry_is_not_offered_one(tool: str):
+    surface = UnreachableSurface(ToolCallResult(is_error=False, text=""), retryable=False)
+    tools, ctx = _tools(surface=surface)
+    arguments = ("oda-measures",) if tool == "get_skill" else ("oda-measures", "a.md")
+
+    answered = await tools[tool](*arguments, ctx)
+
+    assert _stated(answered) == ("tool_not_configured", "do_not_retry")
+    assert "Call it again" not in answered["error"]
+
+
 class ByToolSurface(FakeSurface):
     """A surface answering each tool with its own result; a tool mapped to
     `None` raises as a call that does not complete."""
@@ -4707,7 +4787,7 @@ class ByToolSurface(FakeSurface):
         self.calls.append((tool, arguments))
         result = self.results[tool.name]
         if result is None:
-            raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s")
+            raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s", retryable=True)
         return result
 
 

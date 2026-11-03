@@ -80,6 +80,7 @@ from harness.scope_choices import (
     PartScope,
     ScopeChoice,
     mark_planner_axes,
+    mark_searched_axes,
     option_axis,
     planner_axes,
     switch_entries,
@@ -772,12 +773,55 @@ class AdkCall:
         """The id of the function call the tool serves."""
         return self.tool_context.function_call_id
 
+    @functools.cached_property
+    def _steps(self) -> tuple[Step, ...]:
+        return tuple(_session_steps(self.tool_context.session.events, serving=self.call_id))
+
     def steps(self) -> Sequence[Step]:
-        """`_session_steps` over the call's session events."""
-        return tuple(_session_steps(self.tool_context.session.events))
+        """`_session_steps` over the call's session events, read once per call.
+
+        An `AdkCall` serves one tool call, and ADK appends a model response's
+        events only after its tool calls finish, so the events a call sees do
+        not change while it runs and the cached view cannot outlive the
+        response it was read in.
+        """
+        return self._steps
 
 
-def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
+def _function_calls(event: Any) -> list[Any]:
+    """The function calls of `event`'s parts, in order."""
+    if not (event.content and event.content.parts):
+        return []
+    return [part.function_call for part in event.content.parts if part.function_call]
+
+
+def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[str]:
+    """The ids of the calls in the model response that holds the call `serving`
+    which no event answers yet.
+
+    `serving` is a tool that reads steps, never an ask, which decides from its
+    response's call list instead (`_ask_beside_ask`).
+
+    ADK appends a response's merged answers after all its calls finish, so
+    while one call of the response runs, its siblings have no answer in the
+    session, whether they have finished or not.
+    """
+    if serving is None:
+        return frozenset()
+    answered = {
+        part.function_response.id
+        for event in events
+        for part in (event.content.parts if event.content and event.content.parts else ())
+        if part.function_response is not None
+    }
+    for event in reversed(events):
+        calls = _function_calls(event)
+        if any(call.id == serving and call.name != PLANNER_ASK for call in calls):
+            return frozenset(call.id for call in calls if call.id and call.id not in answered)
+    return frozenset()
+
+
+def _session_steps(events: Sequence[Event], *, serving: str | None = None) -> Iterator[Step]:
     """The steps of a session's `events`, in event order (`planner.call.Step`).
 
     The only reader of ADK events in the planner. A message the user typed
@@ -790,8 +834,11 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
 
     An ask is the planner's own (`PLANNER_ASK`) or one of the workflow's
     interrupts. The planner's call holds its question flat in `args`. A
-    refused one's answer is its tool's refusal. An accepted one's tool
-    answers `ASK_ACCEPTED`, which says nothing the user did and is not read,
+    planner ask whose response is its tool's refusal, or ADK's rejection of
+    the call, never reached the user: it yields no step at all, so every
+    reader sees the session as if the ask had not been made. An accepted
+    one's tool answers `ASK_ACCEPTED`, which says nothing the user did and is
+    not read,
     and the graph's planner node pauses on it with a `RequestInput` under
     the call's own id, so the user's answer to that interrupt is the
     answer to the call, and the interrupt's own call repeats the question.
@@ -802,7 +849,15 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
     `create_request_input_response`, which `harness.studio`'s `/interrupt`
     route sends, builds the answer with `FunctionResponse.id` set to that
     same `interrupt_id`.
+
+    `serving` is the id of the tool call being served. The calls of its own
+    model response that no event answers yet (`_in_flight_calls`) yield no
+    step, so a call running beside an ask reads the session as it stood
+    before that response, and the ask, which may still be refused or may be
+    accepted, is not counted as put to the user.
     """
+    refused = _refused_asks(events)
+    in_flight = _in_flight_calls(events, serving)
     calls: dict[str, dict[str, Any]] = {}
     planner_asks: set[str] = set()
     for event in events:
@@ -814,7 +869,11 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
         for part in event.content.parts:
             call = part.function_call
             if call is not None and call.id is not None:
+                if call.id in in_flight:
+                    continue
                 if call.name == PLANNER_ASK:
+                    if call.id in refused:
+                        continue
                     planner_asks.add(call.id)
                 elif call.name != REQUEST_INPUT_FUNCTION_CALL_NAME or call.id in planner_asks:
                     continue
@@ -825,12 +884,28 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
             if response is None:
                 continue
             body = response.response or {}
-            if response.name == PLANNER_ASK and body.get("outcome") == Outcome.OK.value:
+            if response.name == PLANNER_ASK and "result" not in body:
                 continue
             if response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
                 yield Step("answer", response.id, calls.get(response.id or ""), body)
             else:
                 yield Step("response", body=body, name=response.name)
+
+
+def _refused_asks(events: Iterable[Event]) -> frozenset[str]:
+    """The ids of the planner asks that never reached the user: their response
+    is neither `ASK_ACCEPTED` nor an answer (no `result`), so it is the tool's
+    refusal or ADK's rejection of the call."""
+    return frozenset(
+        response.id
+        for event in events
+        for part in (event.content.parts if event.content and event.content.parts else ())
+        if (response := part.function_response) is not None
+        and response.id is not None
+        and response.name == PLANNER_ASK
+        and "result" not in (body := response.response or {})
+        and body.get("outcome") != Outcome.OK.value
+    )
 
 
 def _user_message(event: Any) -> bool:
@@ -1672,8 +1747,10 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     and with no message of the user's, so every axis an entry settled on
     Search's answer is marked as the planner's
     (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
-    shown to the planner as a source of its own, with its part's warning
-    codes (`planner.plan.save_pin_sources`), and held as a
+    shown to the planner as a source of its own, with the codes of its
+    part's warnings and the request's
+    (`harness.tool_contracts.graph_envelope`; `planner.plan.save_pin_sources`),
+    and held as a
     `submission.service.SearchedPin` with its digest, and the time the
     search was made as one settling on its spec_id
     (`planner.plan.record_spec_searched`), so the next proposal
@@ -1692,7 +1769,9 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     answers `None` once the search is held, or `SURFACE_UNAVAILABLE` when
     Search did not answer, or refused in a way that can succeed later
     (`translator.discovery.refusal_retryable`); nothing is held then, so the
-    next proposal searches again.
+    next proposal searches again. A call that failed for a reason no retry
+    changes (a `ToolSurfaceUnavailableError` not marked `retryable`) is held
+    as a refused search.
     """
     arguments = {"parts": [unpinned.part]}
     try:
@@ -1702,7 +1781,16 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
             lambda: call_within_entry(surface, tool=SEARCH, arguments=arguments),
         )
     except ToolSurfaceUnavailableError as exc:
-        return _refusing(_search_unavailable(unpinned, str(exc)))
+        if exc.retryable:
+            return _refusing(_search_unavailable(unpinned, str(exc)))
+        # A search no later attempt can make is held as a refused one.
+        refused = SearchedPin(
+            requirement_key=unpinned.requirement_key,
+            status="refused",
+            asked_roles=unpinned.asked_roles,
+            open_roles=unpinned.open_roles,
+        )
+        return lambda into: save_searched_pin(into, refused)
     if answer.is_error and refusal_retryable(answer):
         refusal = answer.structured_content or {}
         cause = refusal.get("message") or answer.text or "Search refused it for now"
@@ -1726,16 +1814,10 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     if not isinstance(spec_id, str) or not isinstance(envelope, dict):
         return lambda into: save_searched_pin(into, searched)
     digest = resolver_digest(cast(dict[str, Any], envelope))
-    scope = part_scope(spec_id, digest["spec_block"])
-    mark_planner_axes(
-        digest,
-        (choice.axis for choice in scope.choices if choice.provenance != "default")
-        if scope is not None
-        else (),
-    )
+    mark_searched_axes(digest, spec_id=spec_id)
     shown = PinSource(
         block=digest["spec_block"],
-        warnings=warning_codes(part.get("warnings") if isinstance(part, dict) else None),
+        warnings=warning_codes(digest["warnings"]),
         settled=True,
         asked_roles=unpinned.asked_roles,
     )
@@ -2026,8 +2108,8 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
 
 def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object] | None:
     """The refusal an ask with `args` earns on its arguments and the pending
-    referral, or `None` for one its tool accepts unless an earlier ask in the
-    same response is (`_ask_beside_ask`).
+    referral, or `None` for one its tool accepts unless it follows another ask
+    in the same response (`_ask_beside_ask`).
 
     A history copy's referral is read as the model wrote the plan
     (`translator.tool.authored_answer`), so its picks are the origin's.
@@ -2045,30 +2127,30 @@ def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object
 
 
 def _ask_beside_ask(tool_context: ToolContext) -> dict[str, object] | None:
-    """The refusal for an ask made after an accepted one in the same model response, or `None`.
+    """The refusal for an ask that is not the first ask of its model response, or `None`.
 
     The user answers one question at a time. The calls of one response run
     concurrently, and an accepted ask ends the run before the model is
     called again, so the only way two asks can wait together is two in one
-    response. The first that its own checks accept (`_ask_check`) is the one
-    the response puts to the user; an earlier ask they refuse leaves a later
-    one free. `tool_context.session.events` holds the call's own model
-    response by the time its tool runs.
+    response. The first ask in the response's call list is the only one that
+    may reach the user; every later one is refused, whatever became of the
+    first. Deciding from the call list rather than from the earlier asks'
+    outcomes gives the same answer under any order the response's calls run
+    in. `tool_context.session.events` holds the call's own model response by
+    the time its tool runs.
     """
     own = tool_context.function_call_id
     for event in reversed(tool_context.session.events):
-        calls = event.get_function_calls()
-        ids = [call.id for call in calls]
-        if own not in ids:
+        asks = [call.id for call in event.get_function_calls() if call.name == PLANNER_ASK]
+        if own not in asks:
             continue
-        earlier = [call for call in calls[: ids.index(own)] if call.name == PLANNER_ASK]
-        if all(_ask_check(call.args or {}, tool_context.state) is not None for call in earlier):
+        if asks[0] == own:
             return None
         return problem(
             ProblemCode.INVALID_ARGUMENTS,
-            f"This response already calls `{PLANNER_ASK}`, and the user answers one "
-            "question at a time. Ask this one once that answer arrives, if it still "
-            "needs asking.",
+            f"This response calls `{PLANNER_ASK}` more than once, and the user answers one "
+            "question at a time. Ask this one in your next response, if it still needs "
+            "asking.",
             outcome=Outcome.INVALID_INPUT,
         )
     return None

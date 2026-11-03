@@ -720,7 +720,7 @@ class _Resolves:
     `blocks`, of the dataset whose base it posts from, with each posted option active
     and explicit. Its identity is the base identity posted, its window kept, with a
     slot binding each posted option, and its spec_id is the one that identity hashes
-    to, so its block puts it on record (`planner.plan.shown_identity`). With
+    to, so its block puts it on record (`planner.plan.identity_on_record`). With
     `searched`, its `search` answers that part."""
 
     def __init__(self, *blocks: Mapping[str, Any], searched: dict[str, Any] | None = None) -> None:
