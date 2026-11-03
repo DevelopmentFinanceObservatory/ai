@@ -1,0 +1,100 @@
+{
+  "declarations": {
+    "A": {
+      "tools": {
+        "get_skill": 644,
+        "get_skill_file": 1045,
+        "adk_request_input": 2007,
+        "propose_plan": 35719,
+        "reject_plan": 215
+      },
+      "instruction": 20138,
+      "total": 59768
+    },
+    "B": {
+      "tools": {
+        "get_skill": 644,
+        "get_skill_file": 1045,
+        "record_user_answer": 653,
+        "propose_plan": 32177
+      },
+      "instruction": 20055,
+      "total": 54574
+    }
+  },
+  "results": {
+    "combination_unasked (sum-oda-oof-ethiopia reference)": {
+      "A": 977,
+      "B": 979,
+      "B through McpToolset": 2088,
+      "A code": "combination_unasked",
+      "B code": "combination_unasked",
+      "B adds": []
+    },
+    "invalid_plan (growth-total-oda-ghana, period.start 'twenty twelve')": {
+      "A": 380,
+      "B": 482,
+      "B through McpToolset": 1086,
+      "A code": "invalid_plan",
+      "B code": "invalid_plan",
+      "B adds": [
+        "expected"
+      ]
+    },
+    "record_user_answer ask, as the model sends it": {
+      "chars": 221
+    }
+  },
+  "code_lines": {
+    "goes_at_dev": {
+      "services/harness/src/planner/agent.py": {
+        "_approval_summary": 20,
+        "_execution_blocked": 54,
+        "declare_ready": 24,
+        "ToolContextSession": 64,
+        "_AskTool": 21,
+        "build_planner_tools": 227
+      },
+      "services/harness/src/harness/planner_seam.py": {
+        "PlannerSeam.__call__": 235,
+        "PlannerSeam._persist_durable": 71,
+        "PlannerSeam.revise": 42,
+        "PlannerSeam._revised": 49,
+        "_readings_ledger": 15,
+        "store_searched_pin_readings": 35,
+        "_reading_pin_sources": 49
+      },
+      "services/harness/src/harness/graph/execute.py": {
+        "whole file": 659
+      }
+    },
+    "comes": {
+      "harness-ab/mcp_planner.py": 378,
+      "plan_tools.py": 630,
+      "server.py": 524,
+      "outward.py": 268,
+      "execution.py": 108,
+      "store.py": 109
+    }
+  },
+  "run_plan": {
+    "dev execute": {
+      "n": 30,
+      "median_ms": 17.95,
+      "p90_ms": 19.2,
+      "mean_ms": 18.6
+    },
+    "run_plan inproc": {
+      "n": 30,
+      "median_ms": 21.45,
+      "p90_ms": 23.07,
+      "mean_ms": 21.92
+    },
+    "run_plan http": {
+      "n": 30,
+      "median_ms": 25.02,
+      "p90_ms": 25.9,
+      "mean_ms": 25.05
+    }
+  }
+}
