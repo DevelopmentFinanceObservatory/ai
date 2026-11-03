@@ -17,10 +17,12 @@ address at which the service's routes are reachable from a browser
 (`Settings.presentation_public_url`). Its origin joins the font origins in
 the renderer's CSP (`renderer_csp`).
 
-The renderer resource is Prefab's CDN page, `renderer_html()`: a stub of about
-470 bytes that loads `renderer.js` and `renderer.css` from jsDelivr, pinned to
-the installed prefab-ui version, plus a short inline script that merges the
-data a result carries in its `_meta` into the view's state. A view therefore
+The renderer resource is Prefab's CDN page, `renderer_html(base_url)`: a stub
+of about 470 bytes that loads `renderer.js` and `renderer.css` from jsDelivr,
+pinned to the installed prefab-ui version, plus the inline hydration script in
+`view_hydration.js`, which repairs each tool result the host sends, merges
+the data it carries in its `_meta` into the view's state, and re-reads a
+component whose result arrived with no view, or draws a notice. A view therefore
 needs jsDelivr reachable from its iframe. `renderer_csp` declares that origin, from Prefab's own
 `get_renderer_csp(mode="cdn")`, beside the font and theme origins.
 
@@ -47,6 +49,7 @@ import functools
 import hashlib
 import json
 from importlib.metadata import version
+from importlib.resources import files
 from string import Template
 from typing import Any
 from urllib.parse import urlsplit
@@ -356,46 +359,87 @@ def themed_app(view: Component, *, base_url: str, state: dict[str, Any] | None =
     )
 
 
-# Prefab's renderer builds a view's state from `structuredContent.state` alone.
-# This listener runs before Prefab's module script, so it sees each
-# `ui/notifications/tool-result` message first and merges the result's
-# `_meta[VIEW_STATE_META_KEY]` into that state in place. A host that keeps
-# `_meta` from the view leaves the state as the shell wrote it. Like Prefab's
-# own bridge transport, it ignores a message whose source is not the host window.
-_VIEW_STATE_SCRIPT = Template("""<script>
-window.addEventListener("message", function (event) {
-  if (event.source !== window.parent) return;
-  var message = event.data;
-  if (!message || message.method !== "ui/notifications/tool-result") return;
-  var params = message.params;
-  var content = params && params.structuredContent;
-  var incoming = params && params._meta && params._meta[$key];
-  if (!content || !incoming || typeof incoming !== "object" || Array.isArray(incoming)) return;
-  var state = content.state || (content.state = {});
-  for (var name in incoming) {
-    if (Object.prototype.hasOwnProperty.call(incoming, name)) state[name] = incoming[name];
-  }
-});
-</script>
-""").substitute(key=json.dumps(VIEW_STATE_META_KEY))
+# The placeholder in `view_hydration.js` that `_hydration_script` replaces with
+# the script's config object.
+_CONFIG_PLACEHOLDER = "__DFO_CONFIG__"
+
+# How long the view waits for its own describe_component re-read before it
+# draws the notice. The public server's `_CallLimit` (`harness.combined_mcp`)
+# stops every call from an outside client at `EXTERNAL_CALL_LIMIT_S`, 45 s
+# (`data_mcp/deadline.py`), so a reply comes before this or not at all.
+_REREAD_DEADLINE_MS = 60_000
+
+# What the view draws when the host's result has no view and no re-read can
+# supply one. Every client also gets the result's text, which the model reads.
+_HYDRATION_NOTICE = "This view could not load here."
+
+
+def _hydration_source() -> str:
+    """`view_hydration.js`, checked to hold one config placeholder and no `</script`."""
+    source = files("presentation_mcp").joinpath("view_hydration.js").read_text(encoding="utf-8")
+    if source.count(_CONFIG_PLACEHOLDER) != 1 or "</script" in source.lower():
+        raise ValueError("view_hydration.js must hold one config placeholder and no </script")
+    return source
+
+
+_HYDRATION_SOURCE = _hydration_source()
+
+
+def _hydration_config(base_url: str) -> dict[str, Any]:
+    """The config `view_hydration.js` reads. Its notice shell names the
+    stylesheet under `base_url`."""
+    # `app_view` imports this module for `themed_app`.
+    from presentation_mcp.app_view import notice_view  # noqa: PLC0415 -- breaks an import cycle
+
+    return {
+        "viewStateKey": VIEW_STATE_META_KEY,
+        "rereadTool": "describe_component",
+        "rereadDeadlineMs": _REREAD_DEADLINE_MS,
+        "notice": notice_view(_HYDRATION_NOTICE, base_url=base_url),
+    }
+
+
+def _hydration_script(config: dict[str, Any]) -> str:
+    """`view_hydration.js` as an inline `<script>` element, `config` filled in.
+
+    The config is JSON with `<` escaped, so no value in it can close the element.
+    """
+    filled = json.dumps(config).replace("<", "\\u003c")
+    return f"<script>\n{_HYDRATION_SOURCE.replace(_CONFIG_PLACEHOLDER, filled)}</script>\n"
+
+
+def _with_hydration_script(page: str, script: str) -> str:
+    """`page` with `script` ahead of its first script, or before `</head>`
+    when that comes first, so the hydration listener is registered before any
+    of Prefab's code runs.
+
+    Prefab's bundled page inlines its renderer in a module script that itself
+    contains `</head>`, so the first `</head>` can fall inside that script.
+    """
+    anchors = [index for index in (page.find("<script"), page.find("</head>")) if index >= 0]
+    if not anchors:
+        raise ValueError(
+            "Prefab's renderer page has no <script or </head> to place the hydration script before"
+        )
+    at = min(anchors)
+    return page[:at] + script + page[at:]
 
 
 @functools.cache
-def renderer_html() -> str:
+def renderer_html(base_url: str) -> str:
     """Prefab's CDN renderer page, which loads `renderer.js` and `renderer.css`
-    from jsDelivr at the installed prefab-ui version, with `_VIEW_STATE_SCRIPT`
-    before `</head>`, ahead of Prefab's module script."""
-    page = get_renderer_html(mode="cdn")
-    if "</head>" not in page:
-        raise ValueError("Prefab's renderer page has no </head> to place the view-state script in")
-    return page.replace("</head>", _VIEW_STATE_SCRIPT + "</head>", 1)
+    from jsDelivr at the installed prefab-ui version, with the hydration
+    script ahead of Prefab's first script. The script's
+    notice names the theme stylesheet under `base_url`."""
+    script = _hydration_script(_hydration_config(base_url))
+    return _with_hydration_script(get_renderer_html(mode="cdn"), script)
 
 
 def renderer_uri(base_url: str) -> str:
     """The renderer resource's URI, named by a hash of Prefab's version,
-    `renderer_csp(base_url)`, and the page `renderer_html` returns, so a host
-    that caches UI resources by URI fetches a changed page or CSP.
+    `renderer_csp(base_url)`, and the page `renderer_html(base_url)` returns,
+    so a host that caches UI resources by URI fetches a changed page or CSP.
     """
     csp = json.dumps(renderer_csp(base_url), sort_keys=True)
-    content = f"{version('prefab-ui')}\n{csp}\n{renderer_html()}".encode()
+    content = f"{version('prefab-ui')}\n{csp}\n{renderer_html(base_url)}".encode()
     return f"ui://presentation-mcp/renderer-{hashlib.sha256(content).hexdigest()[:8]}.html"

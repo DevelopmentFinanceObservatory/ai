@@ -152,13 +152,13 @@ _APP_META = {"ui": app_config_to_meta_dict(AppConfig(resource_uri=_RENDERER_URI)
 # `write_component` creates a component or appends a revision to one, and
 # earlier revisions stay readable, so the write is additive. A second call
 # with the same arguments can store a second draft, so the write is not
-# idempotent. Anyone holding a component's id can read it, so the write
-# reaches beyond DFO's own catalogue and is open-world.
+# idempotent. The write goes only to DFO's own component store, so the tool
+# is closed-world, like `export_data`.
 _WRITE_ANNOTATIONS = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=False,
     idempotent_hint=False,
-    open_world_hint=True,
+    open_world_hint=False,
 )
 
 # Per member type, the intent fields in the catalogue's intent schemas that
@@ -985,7 +985,7 @@ def _renderer_result() -> ResourceResult:
     return ResourceResult(
         [
             ResourceContent(
-                renderer_html(),
+                renderer_html(settings.presentation_public_url),
                 mime_type=UI_MIME_TYPE,
                 meta={"ui": {"csp": csp.model_dump(by_alias=True, exclude_none=True)}},
             )

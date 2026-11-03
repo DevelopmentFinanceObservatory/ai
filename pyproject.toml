@@ -39,6 +39,10 @@ dev = [
     # snapshot (`just graph-models`). Pinned exactly: another release renders
     # the same schema differently, which the drift test reads as drift.
     "datamodel-code-generator==0.83.0",
+    # Drives presentation-mcp's view page in headless Chromium against the
+    # wheel's bundled Prefab renderer (`-m browser`). CI installs the browser
+    # with `playwright install`.
+    "playwright>=1.64",
 ]
 
 [tool.ruff]
@@ -135,3 +139,6 @@ asyncio_mode = "auto"
 # failed test's teardown runs on to CI's timeout-minutes instead.
 faulthandler_timeout = 120
 faulthandler_exit_on_timeout = true
+markers = [
+    "browser: drives a page in headless Chromium (needs `playwright install chromium`)",
+]
