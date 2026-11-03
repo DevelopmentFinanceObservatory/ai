@@ -1,0 +1,1 @@
+{"at": "2026-11-03T06:58:57.678251+00:00", "run": "x", "type": "call", "client": "cli", "server": "plan", "tool": "start_plan", "args": {}, "is_error": true, "seen": "Error calling tool 'start_plan': 'brief'", "structured": null, "elapsed_ms": 65}

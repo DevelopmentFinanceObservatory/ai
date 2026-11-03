@@ -1,0 +1,20 @@
+{
+  "task": "aggregate-health-population-oda-germany-by-sector",
+  "opening": "Total gross ODA disbursements for health including population policy, programmes and reproductive health, from Germany, 2018 to 2023",
+  "meaning": {
+    "brief": "Germany's total gross ODA disbursements across all recipients for health and population policy, programme, and reproductive health from 2018 to 2023, using the OECD Creditor Reporting System breakdown level 1.",
+    "asks": [
+      "Germany gross ODA disbursements for health by year, 2018 to 2023",
+      "Germany gross ODA disbursements for population policy, programme, and reproductive health by year, 2018 to 2023",
+      "Combined total gross ODA disbursements for health and population policy/programmes/reproductive health by year, 2018 to 2023",
+      "Overall total combined gross ODA disbursements across 2018 to 2023"
+    ]
+  },
+  "answers": [
+    {
+      "if_asked": "anything else the question does not settle (a source, a year, a unit, a definition)",
+      "say": "No preference beyond what I asked; choose what answers my question and say what you chose."
+    }
+  ],
+  "approve": "Approve a plan only if what it says it will produce answers the question: every one of the asks above, for the places, flows and years asked. If it misses or changes one, say which and do not approve."
+}

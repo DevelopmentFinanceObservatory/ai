@@ -1,0 +1,68 @@
+{
+  "arms": {
+    "baseline": {
+      "runs": 30,
+      "scored_runs": 27,
+      "first_ok": 14,
+      "kind_pass": 24,
+      "kind_pass_tasks": 8,
+      "kind_tasks": 9,
+      "refusal_runs": 3,
+      "expected_ending": 0,
+      "unit_stated": 0,
+      "datasets": 41,
+      "mean_calls": 2.6666666666666665,
+      "usage_unknown": 0,
+      "mean_input_tokens": 45680.03333333333,
+      "mean_cached_tokens": 41093.333333333336,
+      "mean_output_tokens": 653.5333333333333,
+      "mean_thinking_tokens": 0.0,
+      "mean_wall_s": 10.3377,
+      "p90_wall_s": 16.1018,
+      "max_wall_s": 39.202,
+      "budget_closed": 0,
+      "budget_closures": {},
+      "stops": {
+        "accepted": 29,
+        "asked_user": 1
+      },
+      "first_refusals": {
+        "invalid_plan rule": 8,
+        "invalid_plan shape": 3,
+        "measure_fixed_by_pin": 2
+      },
+      "years_accepted": 29,
+      "years_expected": 29,
+      "years_unloaded": 0,
+      "unmarked_accepted": 21,
+      "unmarked_reducing": 0,
+      "period_first_refusals": 0,
+      "rule_tasks": 3,
+      "rule_runs": 9,
+      "rule_accepted": 8,
+      "rule_mean_rounds": 2.25
+    }
+  },
+  "attempts": {
+    "baseline": 30
+  },
+  "left_out": {
+    "baseline": {
+      "errored": {},
+      "missed the recording": {}
+    }
+  },
+  "changed_inputs": [],
+  "tasks_per_kind": {
+    "dataset": 2,
+    "aggregate": 2,
+    "growth": 1,
+    "comparison": 0,
+    "sum_of": 1,
+    "rank": 1,
+    "share_of": 1,
+    "quotient_of": 1,
+    "join": 1,
+    "filter": 0
+  }
+}

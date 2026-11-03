@@ -1,0 +1,17 @@
+{
+  "task": "growth-total-oda-ghana",
+  "opening": "By what percentage did the total ODA Ghana received from all donors change between 2012 and 2021?",
+  "meaning": {
+    "brief": "By what percentage did the total ODA Ghana received from all donors change between 2012 and 2021?",
+    "asks": [
+      "Percentage change in total ODA to Ghana from all donors, 2012 to 2021"
+    ]
+  },
+  "answers": [
+    {
+      "if_asked": "anything else the question does not settle (a source, a year, a unit, a definition)",
+      "say": "No preference beyond what I asked; choose what answers my question and say what you chose."
+    }
+  ],
+  "approve": "Approve a plan only if what it says it will produce answers the question: every one of the asks above, for the places, flows and years asked. If it misses or changes one, say which and do not approve."
+}

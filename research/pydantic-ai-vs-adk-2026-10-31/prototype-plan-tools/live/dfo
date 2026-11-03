@@ -1,0 +1,4 @@
+#!/bin/sh
+# DFO's public /mcp and plan-mcp, as a model sees them. See dfo_cli.py.
+here="$(cd "$(dirname "$0")" && pwd)"
+PYTHONWARNINGS=ignore exec /Users/jorge/repos/dfo-ai-worktrees/pai-research/.venv/bin/python "$here/dfo_cli.py" "$@"

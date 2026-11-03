@@ -1,0 +1,17 @@
+{
+  "task": "quotient-oda-per-person-ethiopia",
+  "opening": "How much ODA per person did Ethiopia receive in each year from 2015 to 2022?",
+  "meaning": {
+    "brief": "How much ODA per person did Ethiopia receive in each year from 2015 to 2022?",
+    "asks": [
+      "ODA per person received by Ethiopia, each year 2015 to 2022"
+    ]
+  },
+  "answers": [
+    {
+      "if_asked": "anything else the question does not settle (a source, a year, a unit, a definition)",
+      "say": "No preference beyond what I asked; choose what answers my question and say what you chose."
+    }
+  ],
+  "approve": "Approve a plan only if what it says it will produce answers the question: every one of the asks above, for the places, flows and years asked. If it misses or changes one, say which and do not approve."
+}

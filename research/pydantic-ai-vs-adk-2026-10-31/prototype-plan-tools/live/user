@@ -1,0 +1,6 @@
+#!/bin/sh
+# The simulated user, for a tester playing the client model. See user_cli.py.
+here="$(cd "$(dirname "$0")" && pwd)"
+cd /Users/jorge/repos/dfo-ai-worktrees/pai-research && PYDANTIC_AI_NO_BANNER=1 PYTHONWARNINGS=ignore \
+  exec uv run --quiet --with 'pydantic-ai-slim[google,mcp]==2.64.0' \
+  --env-file /Users/jorge/repos/dfo-ai/.env --package harness python "$here/user_cli.py" "$@"

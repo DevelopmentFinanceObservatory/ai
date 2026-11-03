@@ -1,0 +1,41 @@
+{
+  "task": "rank-top-donors-malawi",
+  "opening": "Which donors give the most to Malawi?",
+  "meaning": {
+    "brief": "Which donors give the most official development assistance to Malawi? The user named no period.",
+    "asks": [
+      "The donors that give the most ODA to Malawi"
+    ]
+  },
+  "answers": [
+    {
+      "if_asked": "How many donors the ranking keeps.",
+      "options": [
+        "5",
+        "10"
+      ],
+      "say": "No preference; choose what is usual and say what you chose."
+    },
+    {
+      "if_asked": "Which donors the ranking compares.",
+      "options": [
+        "every donor",
+        "a named list of donors"
+      ],
+      "say": "No preference; choose what is usual and say what you chose."
+    },
+    {
+      "if_asked": "Which year the ranking reads.",
+      "options": [
+        "2024, the newest year most donors have reported",
+        "2025, which 9 donors have reported so far"
+      ],
+      "say": "No preference; choose what is usual and say what you chose."
+    },
+    {
+      "if_asked": "anything else the question does not settle (a source, a year, a unit, a definition)",
+      "say": "No preference beyond what I asked; choose what answers my question and say what you chose."
+    }
+  ],
+  "approve": "Approve a plan only if what it says it will produce answers the question: every one of the asks above, for the places, flows and years asked. If it misses or changes one, say which and do not approve."
+}
