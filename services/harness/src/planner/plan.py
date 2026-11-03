@@ -46,18 +46,18 @@ import itertools
 import json
 import logging
 import re
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
+from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from compiler.sources import source_from_spec_block
-from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.definition_writes import windowed_identity
+from compiler.sources import source_from_spec_block, warning_code
+from data_mcp.definition_store import IdentityMismatch
+from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.scope import ChoiceProvenance, ScopeAxis
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -244,11 +244,40 @@ WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 # `planner.agent.with_source_reads` writes (`submission.service.save_aligned_pin`).
 ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 
+# The session-state slot holding the spec block of each source a referral
+# offers the planner in place of a pin (`translator.discovery.discover_source`),
+# or that a scope read answered (`planner.agent.read_scope`), by spec_id.
+# `held_sources` reads it. Recording a plan drops each block it
+# cannot pin (`keep_found_sources`).
+FOUND_SOURCES_STATE_KEY = "planner:found_sources"
+
+# The key a spec block carries when Search served it other than as a definite
+# search part's own spec, as a candidate, a nearest series or a resolve posting
+# no scope entries, and it states no `resolved.scope_choices` (`scope_unread`):
+# whether its series has any is unknown until its identity is resolved
+# (`submission.service._aligned_bases`).
+SCOPE_UNREAD_BLOCK_KEY = "_scope_unread"
+
+# The session-state slot holding, for each pin compiled (`AlignedPin.key`),
+# the warning codes on its origin's record when it was compiled
+# (`CompileWarnings`), written beside it by
+# `submission.service.save_aligned_pin`, an empty list included. Kept off
+# `AlignedPin`, so a build that predates it still loads the compiles. A
+# compile with no entry was held before the slot existed.
+ALIGNED_PIN_WARNINGS_STATE_KEY = "planner:aligned_pin_warnings"
+
 # The session-state slot holding an `AlignedInput` for every dataset
 # requirement of the plan `planner.agent.propose_plan` last recorded that
 # admission pinned to a compiled pin (`AlignedPin`) in place of the pin it
 # states. Unset until a plan holds one.
 ALIGNMENTS_STATE_KEY = "planner:alignments"
+
+# The session-state slot holding a `PinVerdict` for every pinned dataset
+# requirement of the plan `planner.agent.propose_plan` last recorded: whether
+# admission judged its pin to answer a narrower question than the one asked
+# (`submission.service._pin_verdicts`), which the translator reads in place
+# of judging it again. Unset until a plan is recorded with them.
+PIN_VERDICTS_STATE_KEY = "planner:pin_verdicts"
 
 # The session-state slot holding what `planner.agent.propose_plan` read about
 # every year a pinned dataset holds, by the pin's spec_id, as its first year and
@@ -6034,9 +6063,8 @@ def full_history(block: Mapping[str, Any]) -> FullHistory | None:
     to the current one. `None` when the answer is over a window or states no
     first year.
     """
-    definition = block.get("definition")
-    identity = definition.get("identity") if isinstance(definition, Mapping) else None
-    requested = identity.get("requested_window") if isinstance(identity, Mapping) else None
+    identity = block_identity(block)
+    requested = identity.get("requested_window") if identity is not None else None
     if not isinstance(requested, Mapping) or requested.get("kind") != "all":
         return None
     resolved = block.get("resolved")
@@ -6110,18 +6138,11 @@ def save_full_history(state: SessionState, spec_id: str, history: FullHistory | 
     state[FULL_HISTORIES_STATE_KEY] = stored
 
 
-def shown_identity(spec_id: str, source: PinSource) -> Mapping[str, Any] | None:
-    """The identity the block the planner was shown for `spec_id` carries, when it hashes to it."""
-    block = source.spec_block(spec_id)
-    definition = block.get("definition") if block is not None else None
+def block_identity(block: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The identity `block`'s definition carries; `None` when either is not a mapping."""
+    definition = block.get("definition")
     identity = definition.get("identity") if isinstance(definition, Mapping) else None
-    if not isinstance(identity, Mapping):
-        return None
-    try:
-        hashed = spec_id_for(canonicalize(identity))
-    except rfc8785.CanonicalizationError:
-        return None
-    return identity if hashed == spec_id else None
+    return identity if isinstance(identity, Mapping) else None
 
 
 def windowed_pin(
@@ -6198,30 +6219,6 @@ def recorded_identity(spec_id: str) -> RecordedDefinition | None:
     return lookup(spec_id) if lookup is not None else None
 
 
-@contextmanager
-def definitions_on_record(definitions: Mapping[str, RecordedDefinition]) -> Iterator[None]:
-    """Put `definitions`, by spec_id, on record inside the block (`recorded_identity`).
-
-    Each is looked up before what the conversation recorded. A plan card
-    switch (`harness.graph.switch`) puts the datasets Search compiled for it
-    on record while the plan is revised, since the conversation records a
-    search only once the node that made it yields.
-    """
-    outer = current_recorded_identity.get()
-
-    def lookup(spec_id: str) -> RecordedDefinition | None:
-        found = definitions.get(spec_id)
-        if found is None and outer is not None:
-            return outer(spec_id)
-        return found
-
-    token = current_recorded_identity.set(lookup)
-    try:
-        yield
-    finally:
-        current_recorded_identity.reset(token)
-
-
 class _ShownDefinition(NamedTuple):
     """The definition of a dataset the planner was shown, as its block carries it,
     with the sets its places were asked for as."""
@@ -6231,45 +6228,87 @@ class _ShownDefinition(NamedTuple):
     resolved_sources: tuple[ResolvedSourceMention, ...] = ()
 
 
-def identity_on_record(
+class DefinitionOnRecord(NamedTuple):
+    """Whether a dataset's definition can be put on record, and if not, why.
+
+    `definition` is the definition on record. `reason` says why none is when
+    a block carries a definition that cannot be put on record. Both are
+    `None` when no definition is on record and none is refused.
+    """
+
+    definition: RecordedDefinition | None = None
+    reason: str | None = None
+
+
+def shown_definition(spec_id: str, block: Mapping[str, Any]) -> DefinitionOnRecord:
+    """The definition `block`, a spec block for `spec_id`, puts on record.
+
+    Neither field is set when the block carries no definition. `reason` is
+    set when it carries one that cannot be put on record: data-mcp's refusal
+    (`caller_definition`: it does not hash to `spec_id`, has no RFC 8785
+    form, or its compact JSON is past `MAX_IDENTITY_BYTES`;
+    `harness.studio_state._turn_identities` leaves such an identity off the
+    record too), or the named sets of a block that is not readable as a
+    source (`compiler.sources.source_from_spec_block`).
+    """
+    identity = block_identity(block)
+    if identity is None:
+        return DefinitionOnRecord()
+    try:
+        caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
+    except (IdentityMismatch, IdentityUnusable) as exc:
+        return DefinitionOnRecord(reason=str(exc))
+    try:
+        source = source_from_spec_block(block)
+    except ValueError:
+        return DefinitionOnRecord(reason="its named sets cannot be read")
+    return DefinitionOnRecord(_ShownDefinition(identity, source.groups, source.resolved_sources))
+
+
+def identity_or_refusal(
     pin: str,
     *,
     shown: Mapping[str, PinSource],
-    end_open: bool,
     definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
-) -> RecordedDefinition | None:
-    """The definition on record for `pin`; `None` when none is.
+) -> DefinitionOnRecord:
+    """The definition on record for `pin`, and why none is when `pin`'s block in `shown` carries one that cannot be.
 
     The definition is the one a search in the conversation recorded
     (`recorded_identity`), else the one `definition_lookup` answers:
     `submission.service.admit` and the translator pass the discovery log's
     (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
-    each source the translator offered. With `end_open` it is otherwise the
-    one the block the planner was shown carries (`shown_identity`). Admission
-    asks for it only for a requirement stating `period_end_open`: the
-    translator can find a closed requirement's pin by searching its stated
-    years, and no search finds a definition with no end year. The translator
-    always asks for it, since a pin compiled in code during the request (a
-    scope choice switched on the plan card, `harness.graph.switch`, or an
-    input put on its calculation's basis, `planner.agent.compile_on_basis`)
-    is held there and nowhere a search recorded it. A shown block that is
-    not readable as a source (`compiler.sources.source_from_spec_block`)
-    puts none on record.
+    each source the translator offered. Otherwise it is the one `pin`'s
+    block in `shown` carries, when data-mcp would take it
+    (`shown_definition`). A pin compiled in code is on record through that
+    block alone: a scope choice switched on the plan card
+    (`harness.graph.switch`) or an input put on its calculation's basis
+    (`planner.agent.compile_on_basis`, `planner.agent.compile_whole`) is
+    held in `held_sources` and in no search record.
+
+    The reason is `None` with a definition, and when none is on record
+    because no search recorded one and `pin`'s block, if any, carries none.
     """
     recorded: RecordedDefinition | None = recorded_identity(pin)
     if recorded is None and definition_lookup is not None:
         recorded = definition_lookup(pin)
-    if recorded is not None or not end_open or pin not in shown:
-        return recorded
-    identity = shown_identity(pin, shown[pin])
+    if recorded is not None or pin not in shown:
+        return DefinitionOnRecord(recorded)
     block = shown[pin].spec_block(pin)
-    if identity is None or block is None:
-        return None
-    try:
-        source = source_from_spec_block(block)
-    except ValueError:
-        return None
-    return _ShownDefinition(identity, source.groups, source.resolved_sources)
+    return shown_definition(pin, block) if block is not None else DefinitionOnRecord()
+
+
+def identity_on_record(
+    pin: str,
+    *,
+    shown: Mapping[str, PinSource],
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+) -> RecordedDefinition | None:
+    """The definition on record for `pin`; `None` when none is (`identity_or_refusal`).
+
+    A shown block that cannot be put on record, or is not readable as a
+    source (`compiler.sources.source_from_spec_block`), puts none on record.
+    """
+    return identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup).definition
 
 
 # The seconds a discovery call made now may take inside a planner entry. That is
@@ -6323,6 +6362,55 @@ class PinSource(StrictModel):
         return earlier_block(spec_id) if self.earlier_turn else self.block
 
 
+def warning_codes(warnings: object) -> tuple[str, ...]:
+    """The `warning_code` of each warning dict in `warnings`, a list as search returns it.
+
+    Every pin source reads its warnings here, whether `pin_by_search` took
+    them from a digest or the orchestrator's stored block did, so a warning
+    stating no code is `unspecified` on both.
+    """
+    if not isinstance(warnings, list):
+        return ()
+    return tuple(warning_code(warning) for warning in warnings if isinstance(warning, Mapping))
+
+
+class PinVerdict(StrictModel):
+    """Whether admission judged the pin `spec_id` of the dataset requirement
+    `requirement_id` to answer a narrower question than the one asked
+    (`narrowed`, `translator.discovery.narrowed_pin`). `spec_id` is the pin the
+    requirement holds in the plan recorded with the verdict: the copy
+    (`WindowedPin`) or the dataset on record admission moved it to."""
+
+    requirement_id: str
+    spec_id: SpecId
+    narrowed: bool
+
+
+def pin_verdicts(state: SessionState) -> dict[str, PinVerdict]:
+    """The verdicts `PIN_VERDICTS_STATE_KEY` holds, by requirement id; empty when unset.
+
+    An entry stored in a shape `PinVerdict` rejects is left out, and the
+    omission is logged; the translator then judges that pin itself.
+    """
+    held: dict[str, PinVerdict] = {}
+    errors: list[ValidationError] = []
+    for raw in state.get(PIN_VERDICTS_STATE_KEY) or []:
+        try:
+            verdict = PinVerdict.model_validate(raw)
+        except ValidationError as exc:
+            errors.append(exc)
+        else:
+            held[verdict.requirement_id] = verdict
+    if errors:
+        warn_left_out(logger, PIN_VERDICTS_STATE_KEY, errors, entries=len(errors))
+    return held
+
+
+def save_pin_verdicts(state: SessionState, verdicts: Iterable[PinVerdict]) -> None:
+    """Record `verdicts` as admission's judgement of the recorded plan's pins."""
+    state[PIN_VERDICTS_STATE_KEY] = [verdict.model_dump(mode="json") for verdict in verdicts]
+
+
 def pin_sources(state: SessionState) -> dict[str, PinSource]:
     """The datasets `PIN_SOURCES_STATE_KEY` holds, by spec_id in the order shown; empty when unset."""
     stored = state.get(PIN_SOURCES_STATE_KEY) or {}
@@ -6349,6 +6437,9 @@ class AlignedPin(StrictModel):
     the part pinned to `origin` with its choice on `whole_axis` left open
     and every other choice on the part's options, and moves no option
     (`option_ids` empty, `submission.service.Realignment.whole_axis`).
+
+    The warning codes on the origin's record when it was compiled are held
+    beside it (`compile_warnings`).
     """
 
     origin: str
@@ -6374,22 +6465,268 @@ def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
     return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
 
 
+def found_sources(state: SessionState) -> dict[str, dict[str, Any]]:
+    """The spec blocks `FOUND_SOURCES_STATE_KEY` holds, by spec_id; empty when unset."""
+    return dict(state.get(FOUND_SOURCES_STATE_KEY) or {})
+
+
+def save_found_sources(state: SessionState, blocks: Mapping[str, Mapping[str, Any]]) -> None:
+    """Hold `blocks`, by spec_id, beside the found sources' blocks already held
+    (`with_blocks`)."""
+    state[FOUND_SOURCES_STATE_KEY] = with_blocks(found_sources(state), blocks)
+
+
+def _states_scope_choices(block: Mapping[str, Any]) -> bool:
+    """Whether `block` states `resolved.scope_choices`, so it says how its series
+    is counted: as a choice, or as no choice where it has none."""
+    return (block.get("resolved") or {}).get("scope_choices") is not None
+
+
+def scope_unread(block: Mapping[str, Any]) -> dict[str, Any]:
+    """`block`, a spec block Search served other than as a `definite` search
+    part's own spec, marked `SCOPE_UNREAD_BLOCK_KEY` where it states no
+    `resolved.scope_choices`.
+
+    Search states a part's scope choices on a `definite` search part, and on
+    a resolve that posts scope entries, alone. A candidate, a nearest series,
+    or a resolve posting none states none whatever choices its series has, so
+    admission reads them first (`submission.service._aligned_bases`). A
+    block stating them says how it is counted wherever it came from.
+    """
+    if _states_scope_choices(block):
+        return dict(block)
+    return {**block, SCOPE_UNREAD_BLOCK_KEY: True}
+
+
+# The keys a spec block carries for the search answer that served it rather
+# than for the series its spec_id names: the source constraints the part was
+# asked with and the entity rows it bound (`compiler.sources.outcome_from_envelope`).
+_SHOWING_KEYS = ("_resolved_sources", "_bound_refs")
+
+
+@overload
+def standing_block(
+    holder: Mapping[str, Any],
+    *rivals: Mapping[str, Any] | None,
+    compiled: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]: ...
+
+
+@overload
+def standing_block(
+    holder: Mapping[str, Any] | None,
+    *rivals: Mapping[str, Any] | None,
+    compiled: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any] | None: ...
+
+
+def standing_block(
+    holder: Mapping[str, Any] | None,
+    *rivals: Mapping[str, Any] | None,
+    compiled: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any] | None:
+    """The block read for one spec_id that an entry holds as `holder`, where
+    `rivals`, blocks a search or a scope read answered, and `compiled`, the
+    block of a compile, are held for the same spec_id. `holder` itself, the
+    same object, when it stands; `None` when every block is `None`.
+
+    Every reader that meets two blocks of one spec_id decides by this rule
+    (`with_blocks`, `held_sources`):
+
+    - One spec_id names one series, so its blocks differ in what they say
+      about its scope choices (`_scope_rank`): stated, then none where
+      Search counts it no other way, then unread (`SCOPE_UNREAD_BLOCK_KEY`).
+      The block saying most stands: `holder`'s on a tie, then `compiled`'s,
+      then each of `rivals` in order.
+    - Only the scope content moves. `holder` keeps the record of the answer
+      that served it (`_SHOWING_KEYS`, and the warnings its entry holds
+      beside the block), and no other block's record moves to it.
+    - The axes a block marks as the planner's (`PLANNER_AXES_BLOCK_KEY`) say
+      who settled the scope choices it states, so they move with a search's
+      or a read's choices. A compile's marks name the axes alignment moved
+      for the pin it was compiled from, so a compile standing for `holder`
+      keeps `holder`'s marks, and the user's or Search's choices on those
+      axes are not read as the planner's.
+    """
+    best, marks = holder, holder
+    for rival, moves_marks in ((compiled, False), *((rival, True) for rival in rivals)):
+        if rival is not None and _scope_rank(rival) > _scope_rank(best):
+            best, marks = rival, rival if moves_marks else holder
+    if best is holder or best is None:
+        return best
+    record = {key: holder[key] for key in _SHOWING_KEYS if holder is not None and key in holder}
+    axes = (marks or {}).get(PLANNER_AXES_BLOCK_KEY)
+    return {
+        **{
+            key: value
+            for key, value in best.items()
+            if key not in _SHOWING_KEYS and key != PLANNER_AXES_BLOCK_KEY
+        },
+        **record,
+        **({PLANNER_AXES_BLOCK_KEY: axes} if axes else {}),
+    }
+
+
+def _scope_rank(block: Mapping[str, Any] | None) -> int:
+    """How much `block` says about its spec_id's scope choices: 2 where it states
+    them, 1 where it states none and is not marked, as a series Search counts
+    no other way, 0 where it is marked unread (`SCOPE_UNREAD_BLOCK_KEY`), and
+    -1 where it is absent."""
+    if block is None:
+        return -1
+    if block.get(SCOPE_UNREAD_BLOCK_KEY):
+        return 0
+    return 2 if _states_scope_choices(block) else 1
+
+
+def with_blocks(
+    held: Mapping[str, Mapping[str, Any]], blocks: Mapping[str, Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """`held`, spec blocks by spec_id, with each of `blocks`, a newer answer,
+    held for its spec_id: the newer answer holds it, and the held block's
+    scope content stands where it says more (`standing_block`)."""
+    return {
+        **{spec_id: dict(block) for spec_id, block in held.items()},
+        **{
+            spec_id: dict(standing_block(block, held.get(spec_id)))
+            for spec_id, block in blocks.items()
+        },
+    }
+
+
+def keep_found_sources(
+    state: SessionState,
+    plan: Plan,
+    *,
+    alignments: Iterable[AlignedInput],
+    windowed_pins: Iterable[WindowedPin],
+    offered: Collection[str],
+) -> None:
+    """Drop each found source's block `plan` cannot pin, as it is recorded.
+
+    Kept are the block of each requirement's pin, of the pin each compile in
+    `alignments` was compiled from (`AlignedInput.origin`), of the pin each
+    copy in `windowed_pins` copies (`WindowedPin.windowed_from`), and of each
+    source in `offered`: those a referral of `plan` can still offer from the
+    discovery log with no search made for it in that translation
+    (`translator.discovery.DiscoveryLog.offered_for`). Translation of `plan`
+    holds the blocks each search it makes offers. Writes nothing when
+    nothing drops.
+    """
+    held = found_sources(state)
+    pinned = {
+        *(
+            requirement.source_spec_id
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement)
+        ),
+        *(alignment.origin for alignment in alignments),
+        *(pin.windowed_from for pin in windowed_pins),
+        *offered,
+    }
+    kept = {spec_id: block for spec_id, block in held.items() if spec_id in pinned}
+    if len(kept) < len(held):
+        state[FOUND_SOURCES_STATE_KEY] = kept
+
+
+type CompileKey = tuple[str, tuple[str, ...], str | None]
+
+
+class CompileWarnings(StrictModel):
+    """The warning codes under which Search dropped part of the ask for the
+    origin of the compile `origin`, `option_ids`, `whole_axis` names
+    (`AlignedPin.key`), as the origin's record held them when it was compiled
+    (`translator.discovery.pin_warnings`). A compile from a part that
+    answered a narrower question answers that narrower question too."""
+
+    origin: str
+    option_ids: tuple[str, ...]
+    whole_axis: str | None = None
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def key(self) -> CompileKey:
+        """The compile these warnings are for (`AlignedPin.key`)."""
+        return self.origin, self.option_ids, self.whole_axis
+
+
+def compile_warnings(state: SessionState) -> dict[CompileKey, tuple[str, ...]]:
+    """The warning codes `ALIGNED_PIN_WARNINGS_STATE_KEY` holds, by compile; empty when unset.
+
+    An entry stored in a shape `CompileWarnings` rejects is left out, and the
+    omission is logged; its compile is then read as one held before the slot
+    existed.
+    """
+    held: dict[CompileKey, tuple[str, ...]] = {}
+    errors: list[ValidationError] = []
+    for raw in state.get(ALIGNED_PIN_WARNINGS_STATE_KEY) or []:
+        try:
+            entry = CompileWarnings.model_validate(raw)
+        except ValidationError as exc:
+            errors.append(exc)
+        else:
+            held[entry.key] = entry.warnings
+    if errors:
+        warn_left_out(logger, ALIGNED_PIN_WARNINGS_STATE_KEY, errors, entries=len(errors))
+    return held
+
+
 def held_sources(state: SessionState) -> dict[str, PinSource]:
     """The spec block on record for each spec_id `state` holds one for: the datasets
     the planner was shown (`pin_sources`), then each compiled pin's
-    (`AlignedPin.block`) the planner was not shown.
+    (`AlignedPin.block`) the planner was not shown, then each source
+    translation's discovery found or a scope read answered (`found_sources`)
+    that neither holds.
 
     Read for what a spec_id is, its identity, years and codes, which every
-    holder of the spec_id shares. A compiled pin's entry states that block
-    alone, so nothing about how the pin was chosen is read from it.
+    holder of the spec_id shares. A compiled pin's or found source's entry
+    states that block alone, so nothing about how the pin was chosen is read
+    from it. Where several hold a block for one spec_id, the entry is the
+    first of them and its block the one `standing_block` reads: a shown
+    entry keeps what it records of the showing, and reads the scope content
+    of a compiled or found block that says more about its scope choices.
+    Only the spec_ids held more than once are ranked.
     """
-    shown = pin_sources(state)
-    compiled = {
-        pin.spec_id: PinSource(block=dict(block))
-        for pin in aligned_pins(state)
-        if pin.spec_id not in shown and (block := pin.block) is not None
+    return held_blocks(pin_sources(state), aligned_pins(state), found_sources(state))
+
+
+def held_blocks(
+    shown: Mapping[str, PinSource],
+    compiled: Iterable[AlignedPin],
+    found: Mapping[str, Mapping[str, Any]],
+) -> dict[str, PinSource]:
+    """`held_sources` of a state whose `pin_sources` are `shown`, whose
+    `aligned_pins` are `compiled` and whose `found_sources` are `found`."""
+    compiled_blocks = {pin.spec_id: block for pin in compiled if (block := pin.block) is not None}
+    held = {
+        **{
+            spec_id: PinSource(block=dict(block))
+            for spec_id, block in compiled_blocks.items()
+            if spec_id not in shown
+        },
+        **shown,
     }
-    return {**compiled, **shown}
+    held |= {
+        spec_id: PinSource(block=dict(block))
+        for spec_id, block in found.items()
+        if spec_id not in held
+    }
+    rivalled = shown.keys() & (compiled_blocks.keys() | found.keys()) | (
+        compiled_blocks.keys() & found.keys()
+    )
+    for spec_id in rivalled:
+        source = held[spec_id]
+        if spec_id in shown:
+            holder = source.spec_block(spec_id)
+            block = standing_block(
+                holder, found.get(spec_id), compiled=compiled_blocks.get(spec_id)
+            )
+        else:
+            holder = compiled_blocks[spec_id]
+            block = standing_block(holder, found.get(spec_id))
+        if block is not holder and block is not None:
+            held[spec_id] = source.model_copy(update={"block": dict(block), "earlier_turn": False})
+    return held
 
 
 class AlignedInput(StrictModel):

@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Agentic loop for the DFO site's chat+canvas: Google ADK + FastAPI, SSE event stream. Also ships planner (the plan record and the Planner Agent), compiler, translator, executor, orchestrator and submission (see tool.uv.build-backend below)."
 requires-python = ">=3.13"
 dependencies = [
+    # harness.studio_translate classifies the Gemini SDK's aiohttp transport
+    # errors as transient.
+    "aiohttp>=3.14.3",
     "analysis_mcp",
     "asyncpg>=0.30",
     "cloud-sql-python-connector[asyncpg]>=1.15",

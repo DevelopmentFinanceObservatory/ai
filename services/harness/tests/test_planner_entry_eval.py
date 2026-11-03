@@ -33,8 +33,9 @@ from typing import Any, get_args
 import pytest
 from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
+from planner.agent import PENDING_ASK_STATE_KEY
 from planner.plan import EvidenceRequirement
 from pydantic import ValidationError
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
@@ -236,7 +237,7 @@ async def _refused_for_now() -> Any:
 
 
 async def _cut() -> Any:
-    raise ToolSurfaceUnavailableError("search timed out")
+    raise ToolSurfaceUnavailableError("search timed out", retryable=True)
 
 
 async def _broken() -> Any:
@@ -445,11 +446,11 @@ _PLAIN = "aggregate-total-oda-kenya"
 # Its first proposal is refused with `combination_unasked`.
 _REFUSAL = "sum-net-flows-aid-debt-ghana"
 _COMBINATION_ASK = (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
+    PLANNER_ASK,
     {"message": "Add these?", "options": [dict(option) for option in COMBINATION_OPTIONS]},
 )
 _UNOFFERED_ASK = (
-    REQUEST_INPUT_FUNCTION_CALL_NAME,
+    PLANNER_ASK,
     {"message": "Add these?", "options": [{"label": "Yes", "spec_id": "yes"}]},
 )
 _ADDED = [{"result": {"spec_id": COMBINE_OPTION}}]
@@ -463,8 +464,9 @@ _ADDED = [{"result": {"spec_id": COMBINE_OPTION}}]
         # Two proposals in one response: the first records the plan, the second is rejected.
         (_PLAIN, [["plan", "empty plan"]], [], "accepted", "ok"),
         (_REFUSAL, [["plan"], [_COMBINATION_ASK]], [], "asked_user", "refused"),
-        # The tool rejects an ask whose options no refusal offered.
-        (_REFUSAL, [["plan"], [_UNOFFERED_ASK]], [], "no_plan", "refused"),
+        # The tool rejects an ask whose options no refusal offered, and the planner then
+        # ends its turns with no plan.
+        (_REFUSAL, [["plan"], [_UNOFFERED_ASK]], [], "plan_not_ready", "refused"),
         # The user answers the ask, and the planner then ends its turns with no plan.
         (_REFUSAL, [["plan"], [_COMBINATION_ASK]], _ADDED, "plan_not_ready", "refused"),
     ],
@@ -498,6 +500,27 @@ async def test_a_record_credits_the_proposal_that_recorded_the_plan_and_an_ask_l
     )
 
     assert (record["stop_reason"], record["first_proposal"]["outcome"]) == (stop, first)
+
+
+@pytest.mark.parametrize(("refused_code", "stop"), [(None, "asked_user"), ("gave_up", "gave_up")])
+def test_a_refusal_the_entry_ended_on_wins_over_an_ask_left_on_record(
+    refused_code: str | None, stop: str
+) -> None:
+    probe = entry.Probe()
+    probe.refused_code = refused_code
+    run = entry.EntryRun(
+        events=[],
+        state={PENDING_ASK_STATE_KEY: {"call_id": "c1", "args": {"message": "Which years?"}}},
+        probe=probe,
+        inputs="",
+        budget_closed=None,
+        surface_misses=[],
+        error=None,
+        timed_out=False,
+        wall_s=0.0,
+    )
+
+    assert entry.stop_reason(run) == stop
 
 
 def _summing_years(payload: dict[str, Any]) -> dict[str, Any]:

@@ -9,9 +9,13 @@ changes its required arguments.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
+import pickle
+import ssl
 from collections.abc import Awaitable, Callable
 
+import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import apply_gate
@@ -27,14 +31,17 @@ from compiler.surface import (
     _auth_for,
     schema_hash,
     schema_hash_error,
+    transient,
 )
 from data_mcp.server import mcp as data_mcp
 from fastmcp import Client, Context, FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp import MCPError
+from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, INVALID_REQUEST, REQUEST_TIMEOUT
 from planner.workflow import ToolId
 
-UNREACHABLE_URL = "http://127.0.0.1:9/mcp"
+from ..unreachable_surface import UNREACHABLE_URL
 
 
 def _held(surface: McpSurface, server: str, caller: str | None = None) -> Client | None:
@@ -171,9 +178,48 @@ def test_an_in_memory_server_must_be_keyed_by_its_own_name() -> None:
         McpSurface(sources={"data-mcp": analysis_mcp})
 
 
+@pytest.mark.parametrize("retryable", [True, False])
+@pytest.mark.parametrize(
+    "rebuild",
+    [lambda exc: pickle.loads(pickle.dumps(exc)), copy.copy, copy.deepcopy],
+    ids=["pickle", "copy", "deepcopy"],
+)
+def test_an_unavailable_error_keeps_its_retryable_mark_through_pickle_and_copy(
+    rebuild: Callable[[ToolSurfaceUnavailableError], ToolSurfaceUnavailableError], retryable: bool
+) -> None:
+    rebuilt = rebuild(ToolSurfaceUnavailableError("gone", retryable=retryable))
+
+    assert (type(rebuilt), rebuilt.args, rebuilt.retryable) == (
+        ToolSurfaceUnavailableError,
+        ("gone",),
+        retryable,
+    )
+
+
+class _TimedOutError(ToolSurfaceUnavailableError):
+    def __init__(self, tool: str) -> None:
+        super().__init__(f"{tool} timed out", retryable=True)
+
+
+def test_a_subclass_with_its_own_signature_rebuilds_as_itself() -> None:
+    rebuilt = pickle.loads(pickle.dumps(_TimedOutError("search")))
+
+    assert (type(rebuilt), rebuilt.args, rebuilt.retryable) == (
+        _TimedOutError,
+        ("search timed out",),
+        True,
+    )
+
+
 async def test_a_server_that_cannot_be_read_raises_naming_it() -> None:
-    with pytest.raises(ToolSurfaceUnavailableError, match=UNREACHABLE_URL):
+    with pytest.raises(ToolSurfaceUnavailableError, match=UNREACHABLE_URL) as excinfo:
         await McpSurface(sources={"data-mcp": UNREACHABLE_URL}).list_tools()
+
+    # fastmcp's `RuntimeError('Client failed to connect: ...')` over the
+    # transport's `ConnectError`: a later attempt may find the server up.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert isinstance(excinfo.value.__cause__.__cause__, httpx2.ConnectError)
+    assert excinfo.value.retryable is True
 
 
 async def test_one_unreadable_server_fails_the_whole_read() -> None:
@@ -334,6 +380,151 @@ async def test_a_non_timeout_failure_discards_the_held_client(
     )
     assert result.is_error is False
     assert _held(surface, "data-mcp") is not broken
+
+
+def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
+    outer.__cause__ = cause
+    return outer
+
+
+@pytest.mark.parametrize(
+    ("raised", "retryable"),
+    [
+        (RuntimeError("Session task completed unexpectedly"), True),
+        (RuntimeError("transport closed"), True),
+        (MCPError(code=CONNECTION_CLOSED, message="Connection closed"), True),
+        (MCPError(code=REQUEST_TIMEOUT, message="Timed out"), True),
+        (MCPError(code=INTERNAL_ERROR, message="Server returned an error response"), True),
+        (MCPError(code=INVALID_REQUEST, message="Session terminated"), True),
+        (TimeoutError(), True),
+        (ConnectionRefusedError(), True),
+        (ValueError("a bug"), True),
+        (httpx2.UnsupportedProtocol("Request URL has an unsupported protocol 'ftp://'"), False),
+        (httpx2.LocalProtocolError("Illegal header value"), False),
+        (httpx2.InvalidURL("Invalid non-printable ASCII character in URL"), False),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: certificate"),
+                _raised_from(
+                    httpx2.ConnectError("certificate"), ssl.SSLCertVerificationError("expired")
+                ),
+            ),
+            False,
+        ),
+    ],
+    ids=[
+        "session-ended",
+        "other-runtime-error",
+        "mcp-connection-closed",
+        "mcp-request-timeout",
+        "mcp-server-error",
+        "mcp-session-terminated",
+        "timeout",
+        "connection-refused",
+        "bug",
+        "unsupported-protocol",
+        "local-protocol-error",
+        "invalid-url",
+        "failed-certificate",
+    ],
+)
+async def test_a_failed_call_is_retryable_unless_a_permanent_fault_caused_it(
+    monkeypatch: pytest.MonkeyPatch, raised: Exception, retryable: bool
+) -> None:
+    surface = McpSurface(sources={"data-mcp": _answering_server()})
+
+    async def _fails(self: Client, *args: object, **kwargs: object) -> object:
+        raise raised
+
+    monkeypatch.setattr(Client, "call_tool", _fails)
+
+    with pytest.raises(ToolSurfaceUnavailableError) as excinfo:
+        await surface.call_tool(
+            tool=ToolId(server="data-mcp", name="search"), arguments={"parts": []}
+        )
+
+    assert excinfo.value.retryable is retryable
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        (httpx2.ConnectError("All connection attempts failed"), True),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: All connection attempts failed"),
+                httpx2.ConnectError("All connection attempts failed"),
+            ),
+            True,
+        ),
+        (RuntimeError("Client failed to connect: bad request"), False),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: certificate"),
+                _raised_from(
+                    httpx2.ConnectError("certificate"), ssl.SSLCertVerificationError("expired")
+                ),
+            ),
+            False,
+        ),
+        (ExceptionGroup("tasks", [httpx2.ConnectError("down"), TimeoutError()]), True),
+        (ExceptionGroup("tasks", [httpx2.ConnectError("down"), ValueError("bug")]), False),
+        (ToolSurfaceUnavailableError("cut off", retryable=True), True),
+        (ToolSurfaceUnavailableError("not covered", retryable=False), False),
+        (
+            _raised_from(
+                ToolSurfaceUnavailableError("not covered", retryable=False), TimeoutError()
+            ),
+            False,
+        ),
+        (httpx2.UnsupportedProtocol("unsupported protocol 'ftp://'"), False),
+        (ValueError("a bug"), False),
+    ],
+    ids=[
+        "connect-error",
+        "fastmcp-connect-failure",
+        "other-runtime-error",
+        "failed-certificate",
+        "group-of-transient",
+        "group-with-a-bug",
+        "marked-retryable",
+        "marked-final",
+        "marked-final-over-a-timeout",
+        "unsupported-protocol",
+        "bug",
+    ],
+)
+def test_transient_reads_the_whole_cause_chain(raised: BaseException, expected: bool) -> None:
+    assert transient(raised) is expected
+
+
+async def test_the_error_fastmcp_raises_when_its_session_task_ends_is_retryable() -> None:
+    """The text `transient` matches is the one the installed
+    fastmcp raises: a finished session task under a call, built here by
+    replacing the task with one that completed without an exception."""
+    async with Client(_answering_server()) as client:
+        ended = asyncio.get_running_loop().create_future()
+        ended.set_result(None)
+        client._session_state.session_task = ended  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await client.call_tool("search", {"parts": []})
+
+    assert transient(excinfo.value) is True
+
+
+async def test_a_failed_read_is_marked_retryable_by_the_type_that_failed_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _session_ends(self: Client) -> object:
+        raise RuntimeError("Session task completed unexpectedly")
+
+    monkeypatch.setattr(Client, "list_tools", _session_ends)
+
+    with pytest.raises(ToolSurfaceUnavailableError) as excinfo:
+        await McpSurface(sources={"data-mcp": _answering_server()}).list_tools()
+
+    assert excinfo.value.retryable is True
 
 
 async def test_a_non_timeout_failure_does_not_tear_down_a_concurrent_call_on_the_same_client(
@@ -535,15 +726,19 @@ async def test_call_tool_on_an_uncovered_server_raises_naming_the_covered_ones()
 
     with pytest.raises(
         ToolSurfaceUnavailableError, match=r"no server named 'analysis-mcp'.*'data-mcp'"
-    ):
+    ) as excinfo:
         await surface.call_tool(tool=ToolId(server="analysis-mcp", name="aggregate"), arguments={})
+
+    assert excinfo.value.retryable is False
 
 
 async def test_call_tool_on_an_unreachable_server_raises_naming_the_tool() -> None:
     surface = McpSurface(sources={"data-mcp": UNREACHABLE_URL})
 
-    with pytest.raises(ToolSurfaceUnavailableError, match="could not call 'search'"):
+    with pytest.raises(ToolSurfaceUnavailableError, match="could not call 'search'") as excinfo:
         await surface.call_tool(tool=ToolId(server="data-mcp", name="search"), arguments={})
+
+    assert excinfo.value.retryable is True
 
 
 async def test_the_fixture_surface_answers_from_its_canned_responses() -> None:
@@ -554,8 +749,11 @@ async def test_the_fixture_surface_answers_from_its_canned_responses() -> None:
         await surface.call_tool(tool=ToolId(server="data-mcp", name="search"), arguments={})
         == canned
     )
-    with pytest.raises(ToolSurfaceUnavailableError, match="no canned answer for 'describe'"):
+    with pytest.raises(
+        ToolSurfaceUnavailableError, match="no canned answer for 'describe'"
+    ) as excinfo:
         await surface.call_tool(tool=ToolId(server="data-mcp", name="describe"), arguments={})
+    assert excinfo.value.retryable is False
 
 
 def _reporting_server() -> FastMCP:

@@ -44,9 +44,9 @@ Transient failures are retried, with the delay a refusal names (capped) or a
 doubling backoff, spread by jitter (`executor.classify.jittered_retry_delay`)
 so calls refused together retry apart. A `ToolSurfaceUnavailableError` -- the call never reached
 the server, or its answer never came back -- is retried up to
-`MAX_ATTEMPTS_PER_STEP` unless the step's tool capability sets
-`retry_on_transport_failure=False`, in which case the first such failure is
-final: `get_data`'s mint is not safely retryable, so a transport failure on
+`MAX_ATTEMPTS_PER_STEP`. The first such failure is final when its raise site
+marked it not `retryable`, or when the step's tool capability sets
+`retry_on_transport_failure=False`: `get_data`'s mint is not safely retryable, so a transport failure on
 it is never retried, however early in the attempt count it happens. This is
 a per-tool boolean read live from the capability table at run time. It
 carries no attempt count or backoff of its own, and it is never hashed into
@@ -226,6 +226,7 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     UnhashableSchemaError,
     deliver_progress,
+    transient,
 )
 from data_mcp.artifact_resource import ArtifactRefusalError
 from data_mcp.deadline import CallDeadline
@@ -484,10 +485,7 @@ def _is_transient(exc: Exception) -> bool:
     """Whether a failed statistics fetch is one a later try can get past."""
     if isinstance(exc, ArtifactRefusalError):
         return exc.code in TRANSIENT_CODES
-    if isinstance(exc, httpx2.HTTPStatusError):
-        status = exc.response.status_code
-        return status == httpx2.codes.TOO_MANY_REQUESTS or status >= 500
-    return isinstance(exc, (TimeoutError, httpx2.TransportError))
+    return transient(exc)
 
 
 # What `execute_approved_plan` hands each progress report to, with the id of
@@ -1800,7 +1798,9 @@ class _Run:
         try:
             schemas = {schema.name: schema for schema in await self.surface.list_tools()}
         except ToolSurfaceUnavailableError as exc:
-            raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc)) from exc
+            raise self._refused(
+                RefusalKind.TRANSPORT_FAILED, str(exc), retryable=exc.retryable
+            ) from exc
         for step in self.workflow.steps:
             self._check_as_compiled(
                 schemas.get(step.tool.name),
@@ -2504,12 +2504,17 @@ class _Run:
                 )
             except ToolSurfaceUnavailableError as exc:
                 capability = self.capabilities.get(tool)
-                final = last or (
-                    capability is not None and not capability.retry_on_transport_failure
+                final = (
+                    last
+                    or not exc.retryable
+                    or (capability is not None and not capability.retry_on_transport_failure)
                 )
                 if final:
                     raise self._refused(
-                        RefusalKind.TRANSPORT_FAILED, str(exc), step_id=step_id
+                        RefusalKind.TRANSPORT_FAILED,
+                        str(exc),
+                        step_id=step_id,
+                        retryable=exc.retryable,
                     ) from exc
                 await self._before_retry(
                     jittered_retry_delay({}, attempt, jitter=self.jitter), attempt, on_progress
@@ -2713,6 +2718,7 @@ class _Run:
         requirement_id: str | None = None,
         payload: ToolFailure | None = None,
         issues: tuple[EvidenceIssue, ...] = (),
+        retryable: bool = True,
     ) -> _Stopped:
         return _Stopped(
             Refused(
@@ -2720,6 +2726,7 @@ class _Run:
                 run_id=self.run_id,
                 refusal=kind,
                 detail=detail,
+                retryable=retryable,
                 step_id=step_id,
                 requirement_id=requirement_id,
                 payload=payload,

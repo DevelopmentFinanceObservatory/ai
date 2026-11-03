@@ -244,7 +244,7 @@ def _declaration_chars(declaration: Any) -> int:
 def _declarations(config: Any) -> list[dict[str, Any]]:
     """Every function declaration the request offers, largest first.
 
-    One `Tool` may carry several declarations. `adk_request_input` arrives as
+    One `Tool` may carry several declarations. `ask_user_question` arrives as
     its own tool today, so this flattens
     across every tool's declarations, without assuming a one-to-one mapping.
     """

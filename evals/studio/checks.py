@@ -1622,15 +1622,18 @@ def translation_stops_on_a_repeated_failure(evidence: Evidence) -> list[str]:
     ]
 
 
-# The search warning codes under which part of the ask was dropped
-# (`translator.discovery.BLOCKING_WARNING_CODES`).
-_BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_parsed"})
+# The search warning codes under which a source answers a narrower question
+# than the plan's (`translator.discovery.NARROWING_WARNING_CODES`). A part that
+# dropped only the question's years is retrieved over the plan's own period,
+# so `time_text_not_parsed` is not among them.
+_NARROWING_WARNING_CODES = frozenset({"role_text_not_recognised"})
 
 
 def blocked_reading_is_searched_again(evidence: Evidence) -> list[str]:
-    """A source whose search reading carries a blocking warning is searched
-    again before a plan retrieves it. The warning says the search dropped part
-    of the ask, so its source answers a narrower question than the plan's."""
+    """A source whose search reading carries a narrowing warning
+    (`_NARROWING_WARNING_CODES`) is searched again before a plan retrieves it.
+    The warning says the search dropped part of the ask, so its source answers
+    a narrower question than the plan's."""
     if missing := _need_log(evidence, "blocked_reading_is_searched_again"):
         return missing
     blocked = set()
@@ -1642,7 +1645,7 @@ def blocked_reading_is_searched_again(evidence: Evidence) -> list[str]:
                     continue
                 for reading in (response.get("response") or {}).get("parts", []):
                     codes = {w["code"] for w in reading.get("warnings") or []}
-                    if reading.get("spec_id") and codes & _BLOCKING_WARNING_CODES:
+                    if reading.get("spec_id") and codes & _NARROWING_WARNING_CODES:
                         blocked.add(reading["spec_id"])
     if not blocked:
         return ["blocked_reading_is_searched_again: no search reading carried a blocking warning"]

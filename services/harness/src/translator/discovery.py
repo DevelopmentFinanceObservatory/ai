@@ -97,11 +97,12 @@ import json
 import logging
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from enum import StrEnum
+from functools import cached_property
 from typing import Any, Literal, NamedTuple, cast
 from weakref import WeakValueDictionary
 
@@ -118,6 +119,7 @@ from compiler.shapes import BREAKDOWN_CODE_SYSTEMS
 from compiler.sources import (
     EXACT_COVERAGE,
     SOURCE_CODE_REFUSALS,
+    DiscoveryOutcome,
     DiscoveryStatus,
     PartWarning,
     bound_codes,
@@ -136,35 +138,49 @@ from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import CodeNode
 from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness.scope_choices import mark_searched_axes
 from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
+    AlignedInput,
+    AlignedPin,
+    CompileKey,
     DatasetRequirement,
     Entity,
+    PinSource,
+    PinVerdict,
     Plan,
     PlanStatus,
     QuotientRequirement,
     RankRequirement,
+    RecordedDefinition,
     SessionState,
     ShareOfRequirement,
     Unit,
+    WindowedPin,
     aligned_entry,
+    aligned_pins,
     alignments,
     authored,
-    compiled_pin,
+    compile_warnings,
     dataset_of,
     discovery_time_left,
+    found_sources,
     frame_shapes,
-    held_sources,
+    held_blocks,
     identity_on_record,
     inputs_of,
     load_plan,
     pin_sources,
+    pin_verdicts,
     plan_revision,
     retrieves_period,
+    save_found_sources,
     save_plan,
+    scope_unread,
     side_entities,
     split_of,
+    standing_block,
     windowed_pins,
     with_authored_requirements,
 )
@@ -236,6 +252,17 @@ DESCRIBE_ID_BATCH_MAX = 8
 # `facet_binding_unsupported`, `default_not_declared` -- is advisory and
 # rides out with the answer.
 BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_parsed"})
+
+# Of `BLOCKING_WARNING_CODES`, the ones under which Search dropped only the
+# question's years. A pin is honoured only over the requirement's own period,
+# through a copy over it (`planner.plan.windowed_pins`) or an identity already
+# over it (`planner.plan.retrieves_period`), so the dropped years never reach
+# a retrieval and these block no pin (`answers_narrower`).
+WINDOW_ONLY_WARNING_CODES = frozenset({"time_text_not_parsed"})
+
+# The codes under which a pin answers a narrower question than the one asked,
+# and so is neither windowed nor honoured (`answers_narrower`).
+NARROWING_WARNING_CODES = BLOCKING_WARNING_CODES - WINDOW_ONLY_WARNING_CODES
 
 # The answers of the translator's own search a pin may be honoured from. A
 # pin the planner chose among a `source_ambiguous` referral's candidates is
@@ -741,6 +768,35 @@ class DiscoveryLog(StrictModel):
             found = self.sources.get(requirement_id, {})
             return tuple(found[spec_id] for spec_id in record.spec_ids)
         return None
+
+    def offered_for(self, plan: Plan) -> frozenset[str]:
+        """The spec_ids a referral of `plan` can offer from this log with no search made for them.
+
+        A requirement that already has a settled record at its key is not
+        searched again (`selectable`), and a search that fails records no
+        status, so a referral reads the latest answer an earlier translation
+        recorded: the sources found in place of a stale pin, offered beside
+        another referral (`stale_pin_sources`), the sources found for a
+        requirement stating a `source`, which a `source_mismatch` referral
+        offers when the source found names another (`pinnable_for`), and the
+        candidates found for a requirement with no pin, which a
+        `source_ambiguous` referral offers (`candidates_for`).
+        """
+        offered: set[str] = set()
+        for requirement in plan.evidence_requirements:
+            if not isinstance(requirement, DatasetRequirement):
+                continue
+            key = requirement_revision(requirement)
+            if requirement.source_spec_id is not None:
+                stale = self.stale_pin_sources(key, requirement.id, requirement.source_spec_id)
+                offered.update(source.spec_id for source in stale or ())
+            if requirement.source is not None:
+                offered.update(source.spec_id for source in self.pinnable_for(key, requirement.id))
+            if requirement.source_spec_id is None:
+                offered.update(
+                    source.spec_id for source in self.candidates_for(key, requirement.id)
+                )
+        return frozenset(offered)
 
     def nearest_for(self, requirement_key: str, requirement_id: str) -> tuple[SelectedSource, ...]:
         """The nearest real sources the latest matching `no_data` answer for `requirement_id` named.
@@ -2140,7 +2196,13 @@ async def call_within_entry(
 
 
 class NoTimeLeftError(ToolSurfaceUnavailableError):
-    """A call `call_within_entry` never issued, the planner entry having no time left for it."""
+    """A call `call_within_entry` never issued, the planner entry having no time left for it.
+
+    A later entry has its own time, so it is always retryable.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=True)
 
 
 def _no_time_left(tool: ToolId) -> NoTimeLeftError:
@@ -2151,7 +2213,8 @@ def _no_time_left(tool: ToolId) -> NoTimeLeftError:
 
 def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
     return ToolSurfaceUnavailableError(
-        f"{tool.name!r} did not answer in the {time_left:.0f} s the planner entry had left"
+        f"{tool.name!r} did not answer in the {time_left:.0f} s the planner entry had left",
+        retryable=True,
     )
 
 
@@ -2358,6 +2421,7 @@ async def resolve_definition_at(
     identity: Mapping[str, Any],
     groups: Sequence[ResolvedGroup] = (),
     scope_entries: Sequence[Mapping[str, Any]] = (),
+    compile_scope: bool = False,
 ) -> tuple[Mapping[str, Any], datetime | None]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`, and the time that call was made.
 
@@ -2376,7 +2440,10 @@ async def resolve_definition_at(
     `scope_entries`, the explicit and carried entries of a part's stored
     scope choices (`data_mcp.scope.ScopeEntry` as JSON), are posted beside
     a part's base identity, and Search answers with the identity they
-    compile to, under that identity's own spec_id.
+    compile to, under that identity's own spec_id. `compile_scope` posts
+    them even when there are none, so Search states the identity's scope
+    choices on its answer, which it states on a resubmit only where entries
+    are posted.
 
     data-mcp stores the definition the part carries, on the service `surface`
     reaches, which is the one whose `get_data` retrieves it. The part is
@@ -2391,7 +2458,7 @@ async def resolve_definition_at(
     arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
     if groups:
         arguments["entity_groups"] = wire_groups(groups)
-    if scope_entries:
+    if scope_entries or compile_scope:
         arguments["scope_entries"] = [dict(entry) for entry in scope_entries]
 
     def call() -> Awaitable[ToolCallResult]:
@@ -2403,7 +2470,7 @@ async def resolve_definition_at(
         answer, at = await answered_once_at(RESOLVE_DEFINITION, arguments, call)
     except ToolSurfaceUnavailableError as exc:
         raise DefinitionNotResolvedError(
-            str(exc), retryable=True, not_issued=isinstance(exc, NoTimeLeftError)
+            str(exc), retryable=exc.retryable, not_issued=isinstance(exc, NoTimeLeftError)
         ) from exc
     if answer.is_error:
         refusal = answer.structured_content or {}
@@ -2482,8 +2549,19 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
     return spec
 
 
+def definition_on_record(
+    spec_id: str, *, held: Mapping[str, PinSource], log: DiscoveryLog
+) -> RecordedDefinition | None:
+    """The definition on record for `spec_id` (`planner.plan.identity_on_record`),
+    hashing to it: one a search in the conversation recorded, else one this
+    session's discovery `log` holds (`DiscoveryLog.recorded_definition`), else
+    the one its block on record in `held` (`planner.plan.held_sources`)
+    carries; `None` when none is."""
+    return identity_on_record(spec_id, shown=held, definition_lookup=log.recorded_definition)
+
+
 async def _recorded_source(
-    state: SessionState,
+    records: _PinRecords,
     *,
     requirement: DatasetRequirement,
     first_year: int | None,
@@ -2511,11 +2589,8 @@ async def _recorded_source(
     back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
-    recorded = windowed_pins(state).get(spec_id) or identity_on_record(
-        spec_id,
-        shown=held_sources(state),
-        end_open=True,
-        definition_lookup=load_log(state).recorded_definition,
+    recorded = records.copies.get(spec_id) or definition_on_record(
+        spec_id, held=held_blocks(records.shown, records.compiled, records.found), log=records.log
     )
     identity = recorded.identity if recorded is not None else None
     if (
@@ -2554,41 +2629,38 @@ async def _recorded_source(
 
 
 def _resolve_pin_block(
-    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+    records: _PinRecords, *, plan: Plan, requirement: DatasetRequirement
 ) -> Mapping[str, object] | None:
     """The spec block of the dataset `requirement` pins, when the planner was shown it or admission compiled it, else `None`.
 
     A requirement admission pinned to a compile (`planner.plan.alignments`)
     reads the block Search answered the compile with
-    (`planner.plan.AlignedPin`), when the source of the pin it states
-    carries no blocking warning. Any other pin is the planner's
+    (`planner.plan.AlignedPin`). Any other pin is the planner's
     assertion that the dataset answers the
     requirement, so a dataset it was shown this entry
     (`planner.plan.pin_sources`) is reused when `requirement` is the only
     dataset requirement in `plan` pinning it as its own. With several, nothing tells
-    which one the search that returned it was about. `None` too when the
-    search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
-    since one means the search dropped part of the ask and answered a
-    narrower one, and when no block was carried forward for it. An earlier
+    which one the search that returned it was about. `None` too when no
+    block was carried forward for it. An earlier
     turn's source reads the block that turn stored (`PinSource.spec_block`).
     The compiler checks the reused source's entities and window against the requirement.
+
+    A pin admission moved to a copy over the requirement's period
+    (`planner.plan.windowed_pins`) is neither shown nor compiled, so it
+    reads `None`, and Search confirms the copy (`_recorded_source`).
+    `_pin_source` reads neither for a pin that answers a narrower question
+    (`narrowed_pin`).
     """
     pin = requirement.source_spec_id
     if pin is None:
         return None
-    shown = pin_sources(state)
-    held = alignments(state)
+    held = records.alignments
     entry = aligned_entry(requirement, held)
     if entry is not None:
-        compiled = compiled_pin(state, entry)
-        origin = shown.get(entry.stated_pin or "")
-        if compiled is None or (
-            origin is not None and BLOCKING_WARNING_CODES.intersection(origin.warnings)
-        ):
-            return None
-        return compiled.block
-    source = shown.get(pin)
-    if source is None or BLOCKING_WARNING_CODES.intersection(source.warnings):
+        compiled = next((p for p in records.compiled if p.key == entry.key), None)
+        return compiled.block if compiled is not None else None
+    source = records.shown.get(pin)
+    if source is None:
         return None
     pinning = [
         item
@@ -2602,11 +2674,157 @@ def _resolve_pin_block(
     return source.spec_block(pin)
 
 
+def answers_narrower(warnings: Iterable[str]) -> bool:
+    """Whether a pin whose record carries the warning codes `warnings` answers a narrower question than the one asked.
+
+    It does when Search dropped part of the ask other than its years: a code
+    in `NARROWING_WARNING_CODES`.
+    """
+    return not NARROWING_WARNING_CODES.isdisjoint(warnings)
+
+
+def pin_warnings(
+    pin: str,
+    *,
+    entry: AlignedInput | None,
+    shown: Mapping[str, PinSource],
+    compiled: Iterable[AlignedPin],
+    recorded: Mapping[CompileKey, tuple[str, ...]],
+) -> tuple[str, ...]:
+    """The codes in `BLOCKING_WARNING_CODES` on the record of `pin`, made when the pin was.
+
+    A requirement admission pinned to a compile (`entry`,
+    `planner.plan.aligned_entry`) reads that compile's codes (`recorded`,
+    `planner.plan.compile_warnings`). Any other pin reads the search part it
+    was shown from (`PinSource.warnings` in `shown`, the
+    `planner.plan.pin_sources`), else those of every compile of `compiled`
+    Search answered as `pin`. A dataset shown from a search of its own is
+    judged by that search, whatever compile shares its spec_id. A compile
+    `recorded` holds no codes for was held before they were recorded, and is
+    judged by its origin's part as `shown` holds it now.
+    """
+
+    def of(compile_: AlignedPin) -> tuple[str, ...]:
+        codes = recorded.get(compile_.key)
+        if codes is not None:
+            return codes
+        origin = shown.get(compile_.origin)
+        return origin.warnings if origin is not None else ()
+
+    if entry is not None:
+        held = [of(p) for p in compiled if p.key == entry.key]
+    elif pin in shown:
+        held = [shown[pin].warnings]
+    else:
+        held = [of(p) for p in compiled if p.spec_id == pin]
+    codes = dict.fromkeys(code for warnings in held for code in warnings)
+    return tuple(code for code in codes if code in BLOCKING_WARNING_CODES)
+
+
+def narrowed_pin(
+    pin: str,
+    *,
+    entry: AlignedInput | None,
+    shown: Mapping[str, PinSource],
+    compiled: Iterable[AlignedPin],
+    recorded: Mapping[CompileKey, tuple[str, ...]],
+) -> bool:
+    """Whether `pin` answers a narrower question than its requirement asks (`answers_narrower` of `pin_warnings`).
+
+    Admission moves no such pin to a copy over the requirement's period
+    (`submission.service._window_pins`), and the translator honours none
+    (`_pin_source`), so the two read one rule over the same record.
+    """
+    return answers_narrower(
+        pin_warnings(pin, entry=entry, shown=shown, compiled=compiled, recorded=recorded)
+    )
+
+
+class _PinRecords:
+    """What session state records of the pins a plan states, each read on first use for one requirement's pin.
+
+    `copies` are `planner.plan.windowed_pins`, `alignments`
+    `planner.plan.alignments`, `shown` `planner.plan.pin_sources`,
+    `compiled` `planner.plan.aligned_pins`, `found`
+    `planner.plan.found_sources`, `compile_warnings`
+    `planner.plan.compile_warnings`, `verdicts` `planner.plan.pin_verdicts`,
+    and `log` the discovery log. A record is parsed and validated only when a
+    reader asks for it, and once: a pin that admission's verdict settles
+    reads neither the log nor the blocks.
+    """
+
+    def __init__(self, state: SessionState) -> None:
+        self._state = state
+
+    @cached_property
+    def copies(self) -> Mapping[str, WindowedPin]:
+        return windowed_pins(self._state)
+
+    @cached_property
+    def alignments(self) -> Mapping[str, AlignedInput]:
+        return alignments(self._state)
+
+    @cached_property
+    def shown(self) -> Mapping[str, PinSource]:
+        return pin_sources(self._state)
+
+    @cached_property
+    def compiled(self) -> tuple[AlignedPin, ...]:
+        return aligned_pins(self._state)
+
+    @cached_property
+    def found(self) -> Mapping[str, Mapping[str, Any]]:
+        return found_sources(self._state)
+
+    @cached_property
+    def compile_warnings(self) -> Mapping[CompileKey, tuple[str, ...]]:
+        return compile_warnings(self._state)
+
+    @cached_property
+    def verdicts(self) -> Mapping[str, PinVerdict]:
+        return pin_verdicts(self._state)
+
+    @cached_property
+    def log(self) -> DiscoveryLog:
+        return load_log(self._state)
+
+
+def _narrowed(records: _PinRecords, requirement: DatasetRequirement) -> bool:
+    """Whether the pin `requirement` states answers a narrower question (`narrowed_pin`).
+
+    Admission's verdict on the pin stands (`planner.plan.PinVerdict`), so
+    admission and the translator never disagree on one. The verdict is
+    stamped with the requirement's final pin, which may be a copy over the
+    requirement's period (`planner.plan.windowed_pins`); one stored before
+    that is stamped with the pin the copy copies. Either reads. A pin
+    admission gave no verdict on, as in a plan recorded before verdicts were
+    or one whose pin moved since, is judged from the records held now.
+    """
+    pin = requirement.source_spec_id
+    if pin is None:
+        return False
+    copy = records.copies.get(pin)
+    origin = copy.windowed_from if copy is not None else pin
+    verdict = records.verdicts.get(requirement.id)
+    if verdict is not None and verdict.spec_id in {pin, origin}:
+        return verdict.narrowed
+    entry = aligned_entry(
+        requirement.model_copy(update={"source_spec_id": origin}), records.alignments
+    )
+    return narrowed_pin(
+        origin,
+        entry=entry,
+        shown=records.shown,
+        compiled=records.compiled,
+        recorded=records.compile_warnings,
+    )
+
+
 def _block_source(
-    state: SessionState, *, plan: Plan, requirement: DatasetRequirement
+    records: _PinRecords, *, plan: Plan, requirement: DatasetRequirement
 ) -> SelectedSource | None:
     """The source of the pinned dataset's block as the planner was shown it, when it covers `requirement.period` exactly; `None` otherwise."""
-    block = _resolve_pin_block(state, plan=plan, requirement=requirement)
+    block = _resolve_pin_block(records, plan=plan, requirement=requirement)
     if block is None:
         return None
     try:
@@ -2730,28 +2948,34 @@ async def _pin_source(
     (`HistorySplit.whole_history`), `None` when it reads the stated period.
     The source is stamped with the requirement's `measure` as `searched_as`.
     Honoured means the block or identity reader holds it over the
-    requirement's period. A source read only off the discovery log
-    (`DiscoveryLog.recorded_source`) is not honoured, and serves the scope
+    requirement's period. Neither reader is asked for a pin that answers a
+    narrower question than the one asked (`narrowed_pin`), whether the
+    requirement pins it or a copy of it. A source read
+    only off the discovery log (`DiscoveryLog.recorded_source`) is not
+    honoured, and serves the scope
     check alone. A source that does not confirm the `source` or the
     `source_code` the requirement states
     (`compiler.evidence.source_requirement_matches`) is not honoured either,
     so the caller searches again with them. `None` when no reader holds a
     source; a problem a reader met is returned as it is.
     """
-    source: SelectedSource | dict[str, object] | None = _block_source(
-        state, plan=plan, requirement=requirement
-    )
-    if source is None:
-        source = await _recorded_source(
-            state,
-            requirement=requirement,
-            first_year=first_year,
-            surface=surface,
-        )
+    records = _PinRecords(state)
+    source: SelectedSource | dict[str, object] | None = None
+    if not _narrowed(records, requirement):
+        source = _block_source(records, plan=plan, requirement=requirement)
+        if source is None:
+            source = await _recorded_source(
+                records,
+                requirement=requirement,
+                first_year=first_year,
+                surface=surface,
+            )
     if isinstance(source, dict):
         return source
     honoured = source is not None
     if source is None and requirement.source_spec_id is not None:
+        # Read again: the requirements beside this one record what they find
+        # while Search answers this one's identity.
         source = load_log(state).recorded_source(requirement.source_spec_id)
     if source is None:
         return None
@@ -3274,6 +3498,71 @@ def _ask_not_understood(
     )
 
 
+def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
+    """The block of each source `outcome`, an answer to discovery's search, names,
+    by spec_id, held so a pin of one a referral offers reads its block as a
+    shown one's (`planner.plan.held_sources`).
+
+    Discovery searches the planner's own words, so each axis a block's scope
+    choices settled other than by default is marked as the planner's
+    (`harness.scope_choices.mark_searched_axes`), as for a search the planner
+    makes itself (`planner.agent.pin_by_search`). A block whose scope choices this release cannot read marks none.
+    A block of an answer that is not definite, a candidate or a nearest
+    series, is marked unread as any such block is (`planner.plan.scope_unread`).
+    """
+    definite = outcome.status is DiscoveryStatus.DEFINITE
+    found: dict[str, dict[str, Any]] = {}
+    for source, block in zip(outcome.sources, outcome.blocks, strict=True):
+        digest: dict[str, Any] = {"spec_block": dict(block) if definite else scope_unread(block)}
+        mark_searched_axes(digest, spec_id=source.spec_id)
+        found[source.spec_id] = digest["spec_block"]
+    return found
+
+
+async def read_found_scope(
+    surface: ToolSurface, spec_id: str, *, held: Mapping[str, PinSource], state: SessionState
+) -> dict[str, Mapping[str, Any]]:
+    """The block on record for `spec_id`, a source held with no scope choices
+    (`SCOPE_UNREAD_BLOCK_KEY`), with the scope content Search answers for its
+    definition on record (`definition_on_record`), by spec_id.
+
+    `held` is the blocks on record (`planner.plan.held_sources`), and both it
+    and `state` are read before the call waits on Search, so reads made at
+    once read none of each other's writes (`planner.agent._held_in_order`).
+
+    Search states a part's scope choices on a definite answer to a resubmit
+    posting scope entries, so the resolve posts none (`compile_scope`) and
+    says how the source counts its flow, or that it has no choice. One
+    call, made once a turn (`resolve_definition_at`). The answer resolves
+    the source's own definition, which no words of the planner's chose, so
+    it marks no axis as the planner's. Only its scope content stands in the
+    block on record (`planner.plan.standing_block`), whose record of the
+    answer that served it stays.
+
+    Raises:
+        DefinitionNotResolvedError: If the call did not complete or Search
+            refused it.
+        PartNotResolvedError: If Search does not answer it as the one
+            dataset `spec_id` names (`resolved_spec`).
+        ValueError: If no definition of `spec_id` is on record.
+    """
+    recorded = definition_on_record(spec_id, held=held, log=load_log(state))
+    if recorded is None:
+        raise ValueError(f"no definition of {spec_id} is on record")
+    source = held.get(spec_id)
+    block = source.spec_block(spec_id) if source is not None else None
+    part, _ = await resolve_definition_at(
+        surface,
+        spec_id=spec_id,
+        identity=recorded.identity,
+        groups=recorded.groups,
+        compile_scope=True,
+    )
+    resolved_spec(part, spec_id=spec_id)
+    (read,) = outcome_from_envelope({"parts": [part]}).blocks
+    return {spec_id: read if block is None else standing_block(block, read)}
+
+
 def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[dict[str, object]]]:
     """Build `discover_source`, closing over `surface` for the call."""
 
@@ -3540,6 +3829,25 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
                     ),
                 },
             )
+
+        # A re-pin to a source a referral offers by spec_id reads its block
+        # as a shown one's (`planner.plan.held_sources`). Each such referral
+        # offers the sources of the latest answer a pin may be taken from
+        # (`DiscoveryLog.candidates_for`, `pinnable_for` and
+        # `stale_pin_sources`): a `pinned_source_not_found` one or a stale
+        # pin beside another referral, for a pin this answer does not name;
+        # a `source_ambiguous` one, for a `candidates` answer to a
+        # requirement with no pin it names; and a `source_mismatch` one,
+        # which arises only for a requirement stating a `source`. A `no_data`
+        # answer's nearest series are offered with no spec_id to pin. The
+        # next admission drops the blocks its plan neither pins nor can be
+        # offered again (`planner.plan.keep_found_sources`).
+        referable = not pin_honoured and (
+            requirement.source_spec_id is not None or outcome.status is DiscoveryStatus.CANDIDATES
+        )
+        if honoured and (referable or requirement.source is not None):
+            blocks = found_blocks(outcome)
+            save_found_sources(state, {s.spec_id: blocks[s.spec_id] for s in sources})
 
         fields: dict[str, object] = {
             "requirement_id": requirement_id,

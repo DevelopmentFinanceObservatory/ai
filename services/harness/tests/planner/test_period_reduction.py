@@ -221,7 +221,12 @@ def _context(
         state[AMENDMENT_ENTRY_STATE_KEY] = amendment
     if pins is not None:
         save_pin_sources(state, pins)
-    return SimpleNamespace(state=state, actions=EventActions(), session=SimpleNamespace(events=[]))
+    return SimpleNamespace(
+        state=state,
+        function_call_id=None,
+        actions=EventActions(),
+        session=SimpleNamespace(events=[]),
+    )
 
 
 def _propose(
@@ -750,7 +755,9 @@ def test_an_intervening_version_keeping_its_years_keeps_the_licence_through_stor
         assert recorded is not None
         state = {**ctx.state}
         save_plan(state, recorded)
-        return SimpleNamespace(state=state, actions=EventActions(), session=ctx.session)
+        return SimpleNamespace(
+            state=state, function_call_id=None, actions=EventActions(), session=ctx.session
+        )
 
     ctx = stored(ctx)
     narrowed = _propose(ctx, _INTERVENING[intervening](), [])
@@ -2738,7 +2745,10 @@ def test_the_one_year_each_refusal_offers_is_admitted(
         if output not in _computed_from(stored, refused_step)
     ]
     windowed, minted = _window_pins(
-        _recorded(_model_plan(requirements, cited, asks=asks, answered=answered)), shown=pins
+        _recorded(_model_plan(requirements, cited, asks=asks, answered=answered)),
+        shown=pins,
+        definition_lookup=None,
+        narrowed=(),
     )
     assert _windows_read(stored, windowed_pins(ctx.state), kept) == _windows_read(
         windowed, {copy.spec_id: copy for copy in minted}, kept

@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from compiler.sources import DiscoveryStatus, pinned_stat_var, source_from_spec_block
+from compiler.sources import (
+    DiscoveryStatus,
+    outcome_from_envelope,
+    pinned_stat_var,
+    source_from_spec_block,
+)
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -32,6 +37,7 @@ from data_mcp.definition_writes import windowed_identity
 from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import CodeNode
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.turn_records import RecordedIdentity
 from planner.plan import (
     PLAN_STATE_KEY,
@@ -42,6 +48,7 @@ from planner.plan import (
     FirstYear,
     GrowthRequirement,
     PinSource,
+    PinVerdict,
     Plan,
     PlanStatus,
     Unit,
@@ -49,9 +56,13 @@ from planner.plan import (
     current_discovery_time_left,
     current_earlier_block,
     current_recorded_identity,
+    found_sources,
+    held_sources,
+    keep_found_sources,
     pin_sources,
     plan_revision,
     save_pin_sources,
+    save_pin_verdicts,
     save_windowed_pins,
 )
 from planner.records import (
@@ -82,6 +93,7 @@ from translator.discovery import (
     described_sources,
     fetch_code_paths,
     fetch_definitions,
+    found_blocks,
     load_log,
     requirement_revision,
     resolve_definition,
@@ -94,6 +106,7 @@ from translator.discovery import (
 from translator.referral import ReferralKind
 
 from ..data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub
+from ..unreachable_surface import unreachable_surface
 from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
@@ -584,6 +597,53 @@ async def test_a_pin_cannot_resurrect_an_answer_search_reached_by_dropping_a_phr
     assert log.selectable(requirement_keys=keys, pinned={"annual_debt_service": SPEC_KENYA}) == {}
 
 
+@pytest.mark.parametrize(
+    ("measure", "settled"),
+    [("dropped role debt service", False), ("external debt service paid", True)],
+    ids=["search-narrows-again", "search-confirms"],
+)
+async def test_a_pin_from_a_narrowed_part_is_settled_only_by_a_search_confirming_it(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    measure: str,
+    settled: bool,
+) -> None:
+    # The planner was shown the pin from a search part that dropped the roles
+    # asked, so its block, though over the requirement's period, is not read.
+    # The translator's own search settles the pin only when it answers with
+    # it and drops nothing; otherwise the plan goes back to the planner. A
+    # plan card therefore lists rows of such a pin only for a dataset that
+    # search confirmed for the requirement, and a switch of one may be
+    # honoured (`harness.graph.switch._pin_source`).
+    pinned = requirement(measure=measure, source_spec_id=SPEC_KENYA)
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    _shown(
+        context,
+        SPEC_KENYA,
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+        "role_text_not_recognised",
+    )
+
+    result = await _discover(surface, context)
+
+    assert len(search_calls) == 1
+    if settled:
+        assert result["status"] == "definite", result
+        assert [source["spec_id"] for source in result["sources"]] == [SPEC_KENYA]
+    else:
+        assert result["code"] == "ask_not_understood", result
+
+
 async def test_an_advisory_warning_rides_out_with_the_answer(
     surface: McpSurface,
     draft: DraftFactory,
@@ -622,7 +682,8 @@ async def test_candidates_are_recorded_but_not_selectable(
     context_holding: ContextHolding,
 ) -> None:
     # Which of several sources to use is a methodological decision, so the
-    # candidates are kept for the referral and kept away from the compiler.
+    # candidates are kept for the referral and kept away from the compiler,
+    # each with its block on record for a pin of it.
     context = context_holding(
         draft(
             evidence_requirements=[requirement(measure="aid disbursements"), derived_requirement()]
@@ -638,6 +699,11 @@ async def test_candidates_are_recorded_but_not_selectable(
     keys = _requirement_keys(context, "annual_debt_service")
     log = load_log(context.state)
     assert log.selectable(requirement_keys=keys, pinned={}) == {}
+    held = held_sources(context.state)
+    for source in log.candidates_for(keys["annual_debt_service"], "annual_debt_service"):
+        block = held[source.spec_id].block
+        assert block is not None
+        assert source_from_spec_block(block) == source.model_copy(update={"searched_as": None})
     assert [
         c.spec_id for c in log.candidates_for(keys["annual_debt_service"], "annual_debt_service")
     ] == [
@@ -667,7 +733,9 @@ async def test_an_answer_that_is_not_definite_arrives_with_the_action_to_take(
         draft(evidence_requirements=[requirement(measure="unsupported ask"), derived_requirement()])
     )
 
-    definite = await _discover(surface, context_holding(draft()))
+    definite_context = context_holding(draft())
+
+    definite = await _discover(surface, definite_context)
     candidates = await _discover(surface, candidates_context)
     nothing = await _discover(surface, no_data_context)
     unsupported = await _discover(surface, unsupported_context)
@@ -689,6 +757,104 @@ async def test_an_answer_that_is_not_definite_arrives_with_the_action_to_take(
     assert unsupported["action"]["arguments"]["reason"].startswith(
         "discover_source answered unsupported for 'annual_debt_service'"
     )
+    # Each source a referral may offer by spec_id has its block held: a
+    # `candidates` answer's. A `definite` answer's source is offered only by
+    # a `source_mismatch` referral, which a requirement stating no source
+    # never draws, and a nearest series is offered with no spec_id to pin.
+    assert [
+        list(found_sources(context.state))
+        for context in (definite_context, candidates_context, no_data_context, unsupported_context)
+    ] == [[], [SPEC_OTHER, SPEC_THIRD], [], []]
+
+
+async def test_a_re_pin_to_the_source_a_source_mismatch_referral_offers_reads_its_block(
+    surface: McpSurface,
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # A stated source the `definite` answer's source does not name is
+    # referred back offering that source (`DiscoveryLog.pinnable_for`). A
+    # re-pin of it, once its admission drops what the plan cannot pin, reads
+    # the block discovery found for it.
+    stated = requirement(source="World Development Indicators")
+    context = context_holding(draft(evidence_requirements=[stated, derived_requirement()]))
+
+    result = await _discover(surface, context)
+
+    assert result["status"] == "definite"
+    offered = load_log(context.state).pinnable_for(_requirement_key(context), stated.id)
+    assert [source.spec_id for source in offered] == [SPEC_KENYA]
+    repinned = stated.model_copy(update={"source": None, "source_spec_id": SPEC_KENYA})
+    plan = draft(evidence_requirements=[repinned, derived_requirement()])
+    keep_found_sources(
+        context.state,
+        plan,
+        alignments=(),
+        windowed_pins=(),
+        offered=load_log(context.state).offered_for(plan),
+    )
+    held = held_sources(context.state)
+    for source in offered:
+        block = held[source.spec_id].block
+        assert block is not None
+        assert source_from_spec_block(block) == source.model_copy(update={"searched_as": None})
+
+
+@pytest.mark.parametrize("referral", ["stale pin", "source mismatch", "source ambiguous"])
+async def test_a_plan_a_referral_can_still_offer_a_found_source_from_keeps_its_block(
+    referral: str,
+    surface: McpSurface,
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # Discovery found SPEC_KENYA, in place of a stale pin or for a
+    # requirement stating a source SPEC_KENYA does not name, or found
+    # candidates for a requirement with no pin, and the next plan leaves that
+    # requirement as it was. Its translation offers them again from the log
+    # with no search made for them: beside another referral when the stale
+    # pin's own search fails, in a `source_mismatch` referral once the compile
+    # reads the source the log settled, or in a `source_ambiguous` referral.
+    # Recording that plan keeps the blocks a re-pin to them reads.
+    if referral == "stale pin":
+        kept = requirement(source_spec_id=SPEC_OTHER)
+        plan = draft(
+            decisions=[pinning_decision(SPEC_OTHER)],
+            evidence_requirements=[kept, derived_requirement()],
+        )
+    elif referral == "source ambiguous":
+        kept = requirement(measure="aid disbursements")
+        plan = draft(evidence_requirements=[kept, derived_requirement()])
+    else:
+        kept = requirement(source="World Development Indicators")
+        plan = draft(evidence_requirements=[kept, derived_requirement()])
+    context = context_holding(plan)
+    await _discover(surface, context)
+    log = load_log(context.state)
+    key = _requirement_key(context)
+    match referral:
+        case "stale pin":
+            offered = log.stale_pin_sources(key, kept.id, SPEC_OTHER)
+        case "source ambiguous":
+            offered = log.candidates_for(key, kept.id)
+        case _:
+            offered = log.pinnable_for(key, kept.id)
+    expected = [SPEC_OTHER, SPEC_THIRD] if referral == "source ambiguous" else [SPEC_KENYA]
+    assert [source.spec_id for source in offered or ()] == expected
+
+    keep_found_sources(
+        context.state, plan, alignments=(), windowed_pins=(), offered=log.offered_for(plan)
+    )
+
+    held = held_sources(context.state)
+    for spec_id in expected:
+        block = held[spec_id].block
+        assert block is not None
+        assert source_from_spec_block(block).spec_id == spec_id
 
 
 async def test_no_data_and_unsupported_carry_the_servers_detail(
@@ -1192,6 +1358,62 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
     )
 
 
+@pytest.mark.parametrize(
+    ("stamped_with", "honoured"),
+    [("copy", True), ("origin", True), ("moved", False)],
+    ids=["final-pin", "pre-window-pin", "pin-moved-since"],
+)
+async def test_admissions_verdict_on_a_copied_pin_is_the_one_the_translator_reads(
+    stamped_with: str,
+    honoured: bool,
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # Admission judged the pin not narrowed and stamped the verdict with the
+    # requirement's final pin, the copy. The origin's own record carries a
+    # dropped-role warning, which judged afresh would read the pin as
+    # narrowed and search it again. A verdict stamped with the pin the copy
+    # copies (stored before the final pin was stamped) reads the same; one
+    # stamped with some other pin is a pin moved since, and is judged afresh.
+    answered = _KENYA_OVER["2010-2023"]
+    spec_id = answered["spec_id"]
+    identity = answered["definition"]["identity"]
+    earlier = _KENYA_OVER["2015-2023"]["spec_id"]
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(source_spec_id=spec_id, period=Period(start=2010, end=2023)),
+                derived_requirement(),
+            ],
+        )
+    )
+    save_windowed_pins(
+        context.state, [WindowedPin(spec_id=spec_id, identity=identity, windowed_from=earlier)]
+    )
+    _shown(context, earlier, None, "role_text_not_recognised")
+    save_pin_verdicts(
+        context.state,
+        [
+            PinVerdict(
+                requirement_id="annual_debt_service",
+                spec_id={"copy": spec_id, "origin": earlier, "moved": SPEC_OTHER}[stamped_with],
+                narrowed=False,
+            )
+        ],
+    )
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
+
+    await _discover(_SearchAndResolve(surface, resolving), context)
+
+    assert (search_calls == []) is honoured
+
+
 @pytest.mark.parametrize("whole_history", [True, False], ids=["whole-history", "stated-period"])
 async def test_a_copy_with_no_end_year_is_read_from_the_year_the_plan_retrieves_it_from(
     surface: McpSurface,
@@ -1345,7 +1567,10 @@ class _UnreachableStore:
 
 
 class _UnreachableDataMcp:
-    """A surface whose data-mcp cannot be reached."""
+    """A surface whose data-mcp cannot be reached, `retryable` as its raise site marks it."""
+
+    def __init__(self, *, retryable: bool = True) -> None:
+        self._retryable = retryable
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -1358,7 +1583,7 @@ class _UnreachableDataMcp:
         on_progress: ProgressCallback | None = None,
     ) -> ToolCallResult:
         del arguments, on_progress
-        raise ToolSurfaceUnavailableError(f"{tool.server} timed out")
+        raise ToolSurfaceUnavailableError(f"{tool.server} timed out", retryable=self._retryable)
 
 
 @pytest.mark.parametrize(
@@ -1408,6 +1633,27 @@ async def test_a_windowed_pin_search_could_not_be_asked_about_is_retryable(
     )
     assert said in result["message"]
     assert "annual_debt_service" not in load_log(context.state).sources
+
+
+@pytest.mark.parametrize("retryable", [True, False])
+async def test_a_resolve_that_did_not_complete_is_retryable_as_its_raise_site_marked_it(
+    retryable: bool,
+) -> None:
+    with pytest.raises(DefinitionNotResolvedError) as raised:
+        await resolve_definition(
+            _UnreachableDataMcp(retryable=retryable), spec_id=SPEC_KENYA, identity={"seed": "x"}
+        )
+
+    assert raised.value.retryable is retryable
+    assert raised.value.refused is False
+
+
+async def test_a_resolve_against_a_server_that_is_down_is_retryable() -> None:
+    with pytest.raises(DefinitionNotResolvedError) as raised:
+        await resolve_definition(unreachable_surface(), spec_id=SPEC_KENYA, identity={"seed": "x"})
+
+    assert raised.value.retryable is True
+    assert raised.value.refused is False
 
 
 def _kenya_without_its_definition() -> dict[str, Any]:
@@ -1536,7 +1782,15 @@ def test_resolved_spec_names_how_a_part_is_not_the_dataset(
     assert raised.value.part == part
 
 
-async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dropped_time_text(
+@pytest.mark.parametrize(
+    ("coverage", "searches"),
+    [
+        (_matching_window(), 0),
+        ({"kind": "exact", "has_data": True, "window": {"start_year": 2010, "end_year": 2020}}, 1),
+    ],
+    ids=["over-its-period", "over-other-years"],
+)
+async def test_a_pin_whose_resolve_dropped_time_text_is_honoured_over_its_own_period(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
     draft: DraftFactory,
@@ -1544,12 +1798,14 @@ async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dro
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    coverage: dict[str, Any],
+    searches: int,
 ) -> None:
-    # The resolve's own part carried a blocking warning: `search` dropped
-    # the time text and answered a narrower ask than the requirement states,
-    # so reusing the block would relabel that narrower answer as DEFINITE
-    # for the whole requirement. Falls through to the existing search path,
-    # which applies `ask_not_understood` itself.
+    # The resolve's own part dropped only the time text
+    # (`time_text_not_parsed`). The planner states the requirement's period,
+    # so a pin retrieved over that period answers the whole ask: a block
+    # covering it is honoured with no search. A block over other years, with
+    # no copy over the period, falls through to a fresh search.
     pinned = requirement(source_spec_id=SPEC_KENYA)
     context = context_holding(
         draft(
@@ -1560,13 +1816,13 @@ async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dro
     _shown(
         context,
         SPEC_KENYA,
-        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=coverage),
         "time_text_not_parsed",
     )
 
     await _discover(surface, context)
 
-    assert len(search_calls) == 1
+    assert len(search_calls) == searches
 
 
 @pytest.mark.parametrize(
@@ -3689,3 +3945,30 @@ async def test_a_new_source_constraint_refreshes_an_existing_pin(
     assert log.sources[ask.id][SPEC_KENYA].resolved_sources == (
         ResolvedSourceMention.model_validate(mention),
     )
+
+
+@pytest.mark.parametrize(
+    ("provenance", "marked"), [("default", None), ("explicit", ["measure_basis"])]
+)
+def test_a_found_block_marks_the_axes_its_search_settled_as_the_planners(
+    provenance: str, marked: list[str] | None
+) -> None:
+    """Discovery searches the planner's own words, so a scope choice its
+    answer settled other than by default is the planner's, as for a search
+    the planner makes itself. The envelope is dev Search's answer to
+    translation's search for UK ODA in constant 2024 US dollars."""
+    recorded = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "prices_decision_uk_oda.json").read_text()
+    )
+    envelope = copy.deepcopy(recorded["translator"])
+    (part,) = envelope["parts"]
+    (basis,) = [
+        choice
+        for choice in part["spec"]["resolved"]["scope_choices"]["choices"]
+        if choice["axis"] == "measure_basis"
+    ]
+    basis["provenance"] = provenance
+
+    (block,) = found_blocks(outcome_from_envelope(envelope)).values()
+
+    assert block.get(PLANNER_AXES_BLOCK_KEY) == marked

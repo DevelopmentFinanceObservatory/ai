@@ -118,13 +118,14 @@ _PLANNER_CASES = _cases(_PLANNER_DIR / "harness-planner-v2.evalset.json")
 
 
 class FakeToolContext:
-    """A minimal stand-in for ADK's `ToolContext`: `.state` and
-    `.session.events` are read (the latter by `planner.call.
+    """A minimal stand-in for ADK's `ToolContext`: `.state`, `.function_call_id`
+    and `.session.events` are read (the latter two by `planner.call.
     elected_spec_ids`, which `propose_plan` checks a `resolved_by=user`
     source pin against)."""
 
     def __init__(self) -> None:
         self.state: dict[str, str] = {}
+        self.function_call_id = None
         self.session = SimpleNamespace(events=[])
 
 

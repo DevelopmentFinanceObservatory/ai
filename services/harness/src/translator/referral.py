@@ -88,6 +88,7 @@ from collections.abc import Collection, Mapping, Sequence
 from enum import StrEnum
 
 from compiler.compile import CompileIssueCode
+from harness.turn_events import PLANNER_ASK
 from planner.parties import flow_side, party_role
 from planner.plan import SessionState
 from planner.records import (
@@ -145,11 +146,12 @@ ENTITY_CHOICE_REPAIR = (
     "`ambiguous_entities` names one `entity` and the `candidates` its words could mean. "
     "Restate each entity whose node the question or the brief settles with the "
     "candidate's `ref` as its `dcid`, keeping its name and role. Ask the user about each "
-    "other reading in an `adk_request_input` call of its own, one reading per call, with "
-    "exactly that reading's candidates as options, each as `spec_id` (the candidate's "
-    "`pick`) and `label`. State the `ref` of the candidate the user picked as that "
-    "entity's `dcid`. A candidate with `restate_as` is stated instead by setting the "
-    "entity's `name` to its `restate_as`, `members` true and no `dcid`, keeping its role."
+    f"other reading: one reading per `{PLANNER_ASK}` call, and the next once the user "
+    "has answered. Offer exactly that reading's candidates as options, each as `spec_id` "
+    "(the candidate's `pick`) and `label`. State the `ref` of the candidate the user "
+    "picked as that entity's `dcid`. A candidate with `restate_as` is stated instead by "
+    "setting the entity's `name` to its `restate_as`, `members` true and no `dcid`, keeping "
+    "its role."
 )
 
 # The kinds whose every referral carries how to settle it as its `repair`, the

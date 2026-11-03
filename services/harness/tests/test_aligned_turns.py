@@ -9,10 +9,12 @@ US multilateral ODA as a share of the total, pinning that spec_id directly.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
 from compiler.compile import compile_plan
@@ -40,6 +42,7 @@ from planner.plan import (
     Plan,
     ResolvedBy,
     current_earlier_block,
+    current_recorded_identity,
     load_plan,
     pin_sources,
     plan_revision,
@@ -58,6 +61,7 @@ from .planner.test_agent import (
     _difference,
     _FakeToolContext,
     _french_dac1,
+    _over_period,
     _share,
     _show_blocks,
     _tools_reading,
@@ -178,11 +182,11 @@ async def _turn_one(
     return state, recorded
 
 
-async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
+async def _turn_one_conversation(decision: DecisionFactory) -> ConversationState:
     """Run turn 1 (`_turn_one`), record its plan, whose compile source carries the
     count of the total moved onto it (`PlanSource.aligned_basis`), and close it as
-    the Studio does. Returns the ledger turn 2 opens with, with the closed turn's
-    blocks set as the earlier blocks (`current_earlier_block`)."""
+    the Studio does. Returns the conversation, with the closed turn's blocks set as
+    the earlier blocks (`current_earlier_block`)."""
     state, recorded = await _turn_one(decision)
     conversation = ConversationState(conversation_id="conv_aligned")
     conversation.turn_user_message = _COMPARISON
@@ -197,9 +201,14 @@ async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
     ]
     assert aligned.aligned_basis is not None
     conversation.close_turn(final_text="The US gave more.")
-    prior = conversation.prior_ledger_state()
-    assert prior is not None
     current_earlier_block.set(conversation.earlier_block)
+    return conversation
+
+
+async def _turn_one_closed(decision: DecisionFactory) -> dict[str, Any]:
+    """The ledger turn 2 opens with, after turn 1 closes (`_turn_one_conversation`)."""
+    prior = (await _turn_one_conversation(decision)).prior_ledger_state()
+    assert prior is not None
     return prior
 
 
@@ -346,16 +355,22 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
 
 
 async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
-    decision: DecisionFactory,
+    decision: DecisionFactory, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Turn 1 aligns the US total onto US multilateral ODA's spec_id. Turn 2 asks for
     the same comparison over 2020. Each turn opens a fresh planner session with no
     plan on record, so the planner restates both inputs on the sources it reads: the
     total on its own pin, whose block turn 1 kept as the pin alignment moved. Alignment
     moves it onto the multilateral row again, and the card's provider row for it is
-    the planner's, keyed by the total's id."""
-    prior = await _turn_one_closed(decision)
-    surface = _multilateral_compiles()
+    the planner's, keyed by the total's id. Both inputs pin windowed copies, which the
+    translator reads back from Search, so turn 2 makes one compile and one resolve of
+    each copy, and its translation completes."""
+    conversation = await _turn_one_conversation(decision)
+    prior = conversation.prior_ledger_state()
+    assert prior is not None
+    year = Period(start=2020, end=2020)
+    copies = {_over_period(block, year): block for block in (_US_MULTILATERAL, _FRANCE)}
+    surface = _multilateral_compiles(copies, translates=True)
     turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
     seam = PlannerSeam(settings=Settings(), surface=cast(ToolSurface, surface))
     question = "And in 2020?"
@@ -365,18 +380,21 @@ async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
                 _proposal(
                     question,
                     decision,
-                    _dac_countries("second", _US_TOTAL).model_copy(
-                        update={"period": Period(start=2020, end=2020)}
-                    ),
-                    _dac_countries("other", _FRANCE).model_copy(
-                        update={"period": Period(start=2020, end=2020)}
-                    ),
+                    _dac_countries("second", _US_TOTAL).model_copy(update={"period": year}),
+                    _dac_countries("other", _FRANCE).model_copy(update={"period": year}),
                     _difference("second", "other"),
                 )
             ]
         ]
     )
-    await turn_two.run(seam, question=question, readings=prior["readings"])
+    # The Studio runs each segment with the conversation's record of identities
+    # (`harness.studio`), which holds turn 1's compile.
+    token = current_recorded_identity.set(conversation.recorded_identity)
+    caplog.clear()
+    try:
+        await turn_two.run(seam, question=question, readings=prior["readings"])
+    finally:
+        current_recorded_identity.reset(token)
     state = await turn_two.state()
 
     plan = load_plan(state)
@@ -385,8 +403,18 @@ async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
         r.id: r.source_spec_id
         for r in plan.evidence_requirements
         if isinstance(r, DatasetRequirement)
-    } == {"second": _MULTILATERAL, "other": _FRANCE["spec_id"]}
-    assert len(surface.calls) == 1
+    } == {
+        "second": _over_period(_US_MULTILATERAL, year),
+        "other": _over_period(_FRANCE, year),
+    }
+    (compile_call,) = [call for call in surface.calls if call.get("scope_entries")]
+    assert compile_call["spec_id"] == _US_TOTAL["resolved"]["scope_choices"]["base"]["spec_id"]
+    assert [e["option_id"] for e in compile_call["scope_entries"]][-1:] == ["provider:multilateral"]
+    resolved = [call for call in surface.calls if not call.get("scope_entries")]
+    assert sorted(call["spec_id"] for call in resolved) == sorted(copies)
+    assert len(surface.calls) == 1 + len(copies)
+    assert plan.translation is not None and plan.workflow is not None
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
     provider = [
         (d.slot, d.resolved_by)
         for d in plan.decisions
@@ -504,4 +532,4 @@ class _Unreachable:
     ) -> ToolCallResult:
         del on_progress
         self.calls.append((tool.name, arguments.get("spec_id")))
-        raise ToolSurfaceUnavailableError(f"{tool.name} unreachable")
+        raise ToolSurfaceUnavailableError(f"{tool.name} unreachable", retryable=True)

@@ -112,6 +112,10 @@ class ProblemCode(StrEnum):
     # a basis choice, so the input is searched for before the plan records
     # (`submission.service._aligned_bases`).
     BASIS_UNKNOWN = "basis_unknown"
+    # An input of an aligning calculation pins a candidate Search offered with
+    # no scope choices, so its scope is read before the plan records
+    # (`submission.service._aligned_bases`).
+    SCOPE_UNREAD = "scope_unread"
     # A whole the planner declared (`planner.plan.DatasetRequirement.whole_of`)
     # cannot be compiled from its part's own dataset with the axis left open
     # (`submission.service.share_whole_underivable`).

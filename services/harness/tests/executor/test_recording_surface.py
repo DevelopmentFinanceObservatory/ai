@@ -65,6 +65,7 @@ from planner.workflow import OpenAxis, OpenEntityAxis, SelectedSource, ToolId
 from translator.mechanical import build_translation
 
 from ..resolved_revision import resolved_revision
+from ..unreachable_surface import unreachable_surface
 from .conftest import (
     CONTENT_VERSION,
     RESULT_FRAME,
@@ -1231,8 +1232,11 @@ async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("retryable", "retry_mode"), [(True, "retry_after_delay"), (False, "do_not_retry")]
+)
 async def test_a_transport_failure_is_recorded_as_a_failed_activity(
-    real_schemas: list[ToolSchema],
+    real_schemas: list[ToolSchema], retryable: bool, retry_mode: str
 ) -> None:
     class _Unreachable:
         async def list_tools(self) -> list[ToolSchema]:
@@ -1246,7 +1250,7 @@ async def test_a_transport_failure_is_recorded_as_a_failed_activity(
             on_progress: ProgressCallback | None = None,
         ) -> Any:
             del tool, arguments
-            raise ToolSurfaceUnavailableError("data-mcp is unreachable")
+            raise ToolSurfaceUnavailableError("data-mcp is unreachable", retryable=retryable)
 
     surface = _RecordingSurface(_Unreachable())
     tool = ToolId(server="data-mcp", name="get_data")
@@ -1260,11 +1264,24 @@ async def test_a_transport_failure_is_recorded_as_a_failed_activity(
         "outcome": "refusal",
         "refusal": {
             "code": "transport_failed",
-            "retry_mode": "retry_after_delay",
+            "retry_mode": retry_mode,
             "fix": None,
             "message": "data-mcp is unreachable",
         },
     }
+
+
+async def test_a_call_to_a_server_that_is_down_is_recorded_as_one_to_retry() -> None:
+    surface = _RecordingSurface(unreachable_surface())
+
+    with pytest.raises(ToolSurfaceUnavailableError):
+        await surface.call_tool(
+            tool=ToolId(server="data-mcp", name="get_data"), arguments={"spec_id": SPEC_KENYA}
+        )
+
+    (record,) = surface.drain(current_conversation_id.get())
+    refusal = record.result["refusal"]
+    assert (refusal["code"], refusal["retry_mode"]) == ("transport_failed", "retry_after_delay")
 
 
 async def test_a_plan_steps_summary_is_its_manifests_line_never_the_models_digest(

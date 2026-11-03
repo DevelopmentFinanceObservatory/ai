@@ -18,9 +18,13 @@ from executor.outcomes import (
     RefusalKind,
     Refused,
     StepRecord,
+    StopCause,
+    failed_step,
     load_outcome,
     save_outcome,
+    stop_cause,
 )
+from harness.sentences import FAILURE_CLASS, FailureClass
 from planner.records import EvidenceIssue, EvidenceIssueCode, Period, Severity
 from planner.workflow import ToolId
 from pydantic import ValidationError
@@ -137,3 +141,34 @@ def test_no_outcome_reads_as_none() -> None:
 def test_every_kind_of_stop_has_a_cause() -> None:
     """A caller routes a stop by its cause (`stop_cause`), so a new kind must state one."""
     assert STOP_CAUSES.keys() == set(RefusalKind)
+
+
+@pytest.mark.parametrize(
+    ("retryable", "cause", "failure_class"),
+    [
+        (True, StopCause.TRANSIENT, FailureClass.TRANSIENT),
+        (False, StopCause.HARNESS, FailureClass.SYSTEM_FAULT),
+    ],
+)
+def test_a_transport_stop_is_transient_only_when_a_later_attempt_can_succeed(
+    retryable: bool, cause: StopCause, failure_class: FailureClass
+) -> None:
+    stop = Refused(
+        revision="r" * 64,
+        refusal=RefusalKind.TRANSPORT_FAILED,
+        detail="could not call 'aggregate'",
+        step_id="totals",
+        retryable=retryable,
+    )
+
+    assert stop_cause(stop) is cause
+    assert FAILURE_CLASS[failed_step(stop)["code"]] is failure_class
+
+
+def test_a_stop_that_is_not_a_transport_failure_ignores_the_retryable_mark() -> None:
+    stop = Refused(
+        revision="r" * 64, refusal=RefusalKind.EMPTY_ANSWER, detail="empty", retryable=False
+    )
+
+    assert stop_cause(stop) is StopCause.DATA
+    assert failed_step(stop)["code"] == RefusalKind.EMPTY_ANSWER.value

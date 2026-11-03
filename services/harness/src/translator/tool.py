@@ -572,6 +572,21 @@ def _earned_decline(issues: Sequence[CompileIssue]) -> UnsupportedOperation | No
     return _DECLINES_EARNED.get(_deciding_issue(issues)[1].code)
 
 
+def _surface_unlisted(exc: ToolSurfaceUnavailableError) -> dict[str, object]:
+    """The problem for a tool surface that could not be listed.
+
+    `SURFACE_UNAVAILABLE` when a later attempt can succeed; `OPERATION_UNSUPPORTED`
+    when the error says none can, such as a server the surface does not cover.
+    """
+    if exc.retryable:
+        return problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED)
+    return problem(
+        ProblemCode.OPERATION_UNSUPPORTED,
+        f"The tool surface cannot be listed, and no later attempt changes that: {exc}",
+        outcome=Outcome.UNSUPPORTED,
+    )
+
+
 def _not_compiled(
     result: CompileResult, translation: Translation, state: SessionState
 ) -> dict[str, object]:
@@ -1019,7 +1034,7 @@ def build_translator_core(
             try:
                 schemas = await surface.list_tools()
             except ToolSurfaceUnavailableError as exc:
-                return problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED)
+                return _surface_unlisted(exc)
 
         requirement_keys, pinned, across = dataset_keys(plan)
 

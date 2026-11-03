@@ -412,7 +412,9 @@ class CannedDataSurface(ScriptedSurface):
         if tool.name != "search":
             return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
         if not self._searches:
-            raise ToolSurfaceUnavailableError("the case scripted no further translator search")
+            raise ToolSurfaceUnavailableError(
+                "the case scripted no further translator search", retryable=False
+            )
         envelope = search_envelope(self._searches.pop(0))
         self._log.entries.append(
             {

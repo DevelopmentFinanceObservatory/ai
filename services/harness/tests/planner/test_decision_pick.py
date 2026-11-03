@@ -181,7 +181,10 @@ def _ranked_donors() -> list[Any]:
 def _context() -> Any:
     """The part of ADK's `ToolContext` `propose_plan` reads, holding no asks."""
     return SimpleNamespace(
-        state={ASKS_STATE_KEY: []}, actions=EventActions(), session=SimpleNamespace(events=[])
+        state={ASKS_STATE_KEY: []},
+        function_call_id=None,
+        actions=EventActions(),
+        session=SimpleNamespace(events=[]),
     )
 
 
@@ -1877,21 +1880,24 @@ def test_a_landed_shape_pick_can_be_picked_back(
 
 
 @pytest.mark.parametrize(
-    ("pin", "unit", "refused"),
+    ("pin", "unit", "restates", "refused"),
     [
-        (_CONSTANT_GROSS, Unit(currency="USD", prices="constant", base_year=2023), None),
-        (_GROSS, None, ProblemCode.USER_DECISION_DROPPED),
+        (_CONSTANT_GROSS, Unit(currency="USD", prices="constant", base_year=2023), False, None),
+        (_CONSTANT_GROSS, Unit(currency="USD", prices="constant", base_year=2023), True, None),
+        (_GROSS, None, False, ProblemCode.USER_DECISION_DROPPED),
     ],
-    ids=["held", "dropped"],
+    ids=["held", "restated", "dropped"],
 )
 def test_a_pick_replan_keeps_the_users_prices_choice(
-    pin: str, unit: Unit | None, refused: ProblemCode | None
+    pin: str, unit: Unit | None, restates: bool, refused: ProblemCode | None
 ) -> None:
     """The user chose constant prices for French aid to Kenya, then picked
     other years on the card. The prices decision is admission's to write and
     cite, so the replan need not cite it, and the pick does not release the
-    choice: a replan in constant prices lands citing it, and one stating no
-    unit is refused as dropping it."""
+    choice: a replan in constant prices lands citing it, whatever decision it
+    drafts under the user's prices slot, and one stating no unit is refused
+    as dropping it. The earlier years the pick leaves alone are kept as the
+    card stated them, their citation of the user's decision included."""
     measure = Decision(
         slot="measure",
         description="What to measure.",
@@ -1921,6 +1927,7 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
             unit=Unit(currency="USD", prices="constant", base_year=2023),
         ).model_copy(update=update)
 
+    earlier = aid("earlier", 2010, decision_ids=("measure",), period=Period(start=2010, end=2014))
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block())
     ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
@@ -1929,7 +1936,7 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([measure, years]),
-        evidence_requirements=[aid("all", 2015)],
+        evidence_requirements=[aid("all", 2015), earlier],
         tool_context=ctx,
     )
     assert card["outcome"] == Outcome.OK.value, card
@@ -1937,6 +1944,8 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     assert shown is not None
     priced = f"user_prices_{_GROSS}"
     assert priced in shown.requirement("all").decision_ids
+    kept = shown.requirement("earlier")
+    assert priced in kept.decision_ids
     pick = decision_pick(
         shown,
         choice_id="decision/years",
@@ -1947,6 +1956,16 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     assert pick is not None
     save_decision_pick(ctx.state, pick)
 
+    # A restatement of the user's choice that fixes the unit.
+    restated = Decision(
+        slot=priced,
+        description="Price basis chosen by user",
+        options=("constant prices", "current prices"),
+        chosen="constant prices",
+        resolved_by=ResolvedBy.USER,
+        rationale="User specified constant 2023 US dollars",
+        fixes=DecisionFixes(unit=Unit(currency="USD", prices="constant", base_year=2023)),
+    )
     result = propose(
         amends_version=card["version"],
         decisions=drafts(
@@ -1956,10 +1975,11 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
                         "chosen": "2019-2022",
                         "fixes": DecisionFixes(period=Period(start=2019, end=2022)),
                     }
-                )
+                ),
+                *([restated] if restates else []),
             ]
         ),
-        evidence_requirements=[aid("recent", 2019, source_spec_id=pin, unit=unit)],
+        evidence_requirements=[aid("recent", 2019, source_spec_id=pin, unit=unit), kept],
         removed_evidence_requirements=["all"],
         tool_context=ctx,
     )
@@ -1971,6 +1991,8 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     plan = load_plan(ctx.state)
     assert plan is not None
     assert priced in plan.requirement("recent").decision_ids
+    (decided,) = [d for d in shown.decisions if d.slot == priced]
+    assert [d for d in plan.decisions if d.slot == priced] == [decided]
 
 
 def _switch_event(choice_id: str, option_id: str) -> Any:

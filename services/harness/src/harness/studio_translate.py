@@ -54,9 +54,11 @@ from compiler.surface import (
     ToolSchema,
     ToolSurface,
     ToolSurfaceUnavailableError,
+    transient,
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
+from executor.classify import internal_fault
 from executor.outcomes import RefusalKind
 from executor.run import current_step_id
 from google.adk.events import Event
@@ -274,18 +276,20 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     `executor.outcomes.RefusalKind.SURFACE_CHANGED`, which fires when a
     plan step's tool has changed since the plan was compiled, still
     honours the refusal's own `retry_mode` rather than defaulting to a
-    transient one: `retry_after_delay` (or no `retry_mode` at all, for an
-    exception that carries no refusal shape) becomes `transient_unavailable`
-    as before, anything else becomes `capability_unavailable`, the closest
-    true member, so a do-not-retry refusal is never told to the user as a
-    reason to retry.
+    transient one: `retry_after_delay` (or no `retry_mode` at all, for a
+    `transient`) becomes `transient_unavailable`, anything else
+    becomes `capability_unavailable`, the closest true member, so a
+    do-not-retry refusal is never told to the user as a reason to retry.
+
+    An exception that states no refusal reads as `internal_error`, not to be
+    retried, unless `transient` holds for it, which reads as `raised` and
+    `retry_after_delay`.
 
     The frame's `detail`, which Studio shows as the reply, is the sentence
-    for the refusal's own code, or `raised` for an exception that states
-    none, under the retry mode the frame states (`failure_detail`). The
-    refusal's `fix.detail` and `message` are written for a model or an
-    operator and stay in the log the caller writes, as the turn's trace id
-    does.
+    for the refusal's own code under the retry mode the frame states
+    (`failure_detail`). The refusal's `fix.detail` and `message` are written
+    for a model or an operator and stay in the log the caller writes, as the
+    turn's trace id does.
     """
     timeout_tool = getattr(exc, "timeout_tool", None)
     if timeout_tool is not None:
@@ -293,7 +297,7 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
         refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key)
         wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
     else:
-        refusal = getattr(exc, "refusal", None) or {}
+        refusal = getattr(exc, "refusal", None) or ({} if transient(exc) else internal_fault())
         wire_code = refusal.get("code")
     try:
         error_code = ErrorCode(wire_code)
@@ -642,7 +646,7 @@ class _RecordingSurface:
                     "outcome": "refusal",
                     "refusal": {
                         "code": RefusalKind.TRANSPORT_FAILED.value,
-                        "retry_mode": "retry_after_delay",
+                        "retry_mode": "retry_after_delay" if exc.retryable else "do_not_retry",
                         "fix": None,
                         "message": str(exc)[:_STEP_DETAIL_CAP],
                     },
@@ -1234,9 +1238,10 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
 
 
 def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
-    """The planner's ask as the frame's one question, `q1`. Its
-    `adk_request_input` call args are the question directly: `message`,
-    `candidates`, `options`, `recommended_spec_id` and `rationale`.
+    """The planner's ask as the frame's one question, `q1`. Its call's
+    arguments, which its tool accepted (`planner.agent.ask_refusal`) and
+    carries as its `RequestInput`'s `payload`, are the question directly:
+    `message`, `candidates`, `options`, `recommended_spec_id` and `rationale`.
     `options` are fixed choices that are no source, such as whether to add
     two datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
     only a pick of one, so they take no free text."""
@@ -1957,8 +1962,9 @@ class _Translator:
         # The workflow's own `ask` node raises a `RequestInput` whose `payload`
         # carries one to three `questions`, each with its `candidates`. A
         # lone question is dismissed with the whole pause. Each of several
-        # may be left to the agent instead. The planner's `adk_request_input`
-        # call asks one question (`_planner_question`).
+        # may be left to the agent instead. The planner node's pause on the
+        # planner's ask carries the ask call's arguments as `payload`, one
+        # question (`_planner_question`).
         asked = payload.get("questions")
         if asked:
             several = len(asked) > 1
@@ -1981,7 +1987,7 @@ class _Translator:
             skippable = not several
             pick_replan = False
         else:
-            questions = [_planner_question(args)]
+            questions = [_planner_question(payload)]
             skippable = True
             pick_replan = self._pick_replan
         frame = ElicitationRequest(

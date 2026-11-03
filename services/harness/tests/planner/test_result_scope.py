@@ -182,7 +182,9 @@ def _decisions(variant: str, decision: Callable[..., Decision]) -> list[Decision
 
 def _context() -> Any:
     """The part of ADK's `ToolContext` `propose_plan` reads: state, events and actions."""
-    return SimpleNamespace(state={}, actions=EventActions(), session=SimpleNamespace(events=[]))
+    return SimpleNamespace(
+        state={}, function_call_id=None, actions=EventActions(), session=SimpleNamespace(events=[])
+    )
 
 
 COMPUTED = AnswerMode.COMPUTED

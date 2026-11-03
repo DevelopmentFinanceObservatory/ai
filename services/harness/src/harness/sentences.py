@@ -265,6 +265,7 @@ _NOT_DRAFTED_CODES = frozenset(
         ProblemCode.RESULT_SCOPE_UNSTATED,
         ProblemCode.PERIOD_REDUCTION_UNSTATED,
         ProblemCode.BASIS_UNKNOWN,
+        ProblemCode.SCOPE_UNREAD,
         ProblemCode.MEASURE_FIXED_BY_PIN,
     }
 )

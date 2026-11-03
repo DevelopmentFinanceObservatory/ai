@@ -22,7 +22,7 @@ from compiler.evidence import PriceBasis
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers, stored_mapping
 from harness.plan_display import DECISION_CHOICE_PREFIX, decision_option_id
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn_events import PLANNER_ASK
 from submission.prices_choice import (
     PRICES_BY_LABEL,
     PRICES_OPTIONS,
@@ -40,6 +40,7 @@ from submission.service import (
     ReferralAnswers,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
+from translator.discovery import load_log
 from translator.referral import clear_referral
 
 from planner.plan import (
@@ -47,12 +48,14 @@ from planner.plan import (
     SessionState,
     UnsupportedOperation,
     decision_pick,
+    keep_found_sources,
     load_plan,
     pin_sources,
     record_optional_decline,
     record_reduction_refused_asks,
     record_unsupported,
     save_alignments,
+    save_pin_verdicts,
     save_plan,
     save_plan_rounds,
     save_windowed_pins,
@@ -65,10 +68,11 @@ class Step(NamedTuple):
 
     `message` is a message the user typed into the session, which the
     planner seam's own messages are not (`planner.agent._user_message`).
-    `call` is an `adk_request_input` call, with its id and `args`. `answer`
-    is a response to one, with its id, the `args` of the nearest preceding
-    call sharing that id (`None` when none precedes it) and the response
-    body. `response` is any other tool's response, with its `name` and body.
+    `call` is an ask, the planner's own (`PLANNER_ASK`) or a workflow
+    interrupt's `adk_request_input`, with its id and `args`. `answer` is a
+    response to one, with its id, the `args` of the nearest preceding call
+    sharing that id (`None` when none precedes it) and the response body.
+    `response` is any other tool's response, with its `name` and body.
     """
 
     kind: Literal["message", "call", "answer", "response"]
@@ -113,13 +117,11 @@ def candidate_ids(candidates: Any) -> frozenset[str]:
 
 
 def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
-    """The candidates an `adk_request_input` call's own `args`
-    offered, by the id of the question that offered them, from any shape that
-    name occurs under:
+    """The candidates an ask's own `args` offered, by the id of the question
+    that offered them, from either shape an ask takes:
 
-    - the planner's own `ask_user` tool call: a plain `FunctionTool` call,
-      so `args` is exactly the kwargs the model supplied, flat --
-      `args["candidates"]`, the one question `q1`.
+    - the planner's own `PLANNER_ASK` call: `args` is exactly the kwargs the
+      model supplied, flat -- `args["candidates"]`, the one question `q1`.
     - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
       its `args` hold the whole interrupt request, so the caller's own
       `payload` nests under `args["payload"]` (`planner.agent._session_steps`
@@ -134,7 +136,7 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
 
 
 def _question_candidates(args: dict[str, Any]) -> dict[str, Any]:
-    """The raw candidates list of each question an `adk_request_input` call's
+    """The raw candidates list of each question an ask's
     `args` offers, by question id, read as `_offered_candidates` reads them."""
     candidates = args.get("candidates")
     payload = args.get("payload")
@@ -149,7 +151,7 @@ def _question_candidates(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
-    """The prices the user picked answering `adk_request_input` calls, by the
+    """The prices the user picked answering asks, by the
     part each prices, read off the call's steps.
 
     The `ask` node marks each prices option's candidate with its `part` and
@@ -164,7 +166,8 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
 
     A prices refusal that sends the planner to the user (`detail.part`,
     `submission.prices_choice`) binds the planner's next ask offering
-    `PRICES_OPTIONS` to its part, and the user's pick there sets the part's
+    `PRICES_OPTIONS` that reached the user (a refused ask leaves no step,
+    `planner.agent._session_steps`) to its part, and the user's pick there sets the part's
     prices, marked `asked` so the planner does not ask it again
     (`submission.prices_choice`). The user's own words there release the
     part's choice, as they do on the orchestrator's question, and a skip
@@ -275,7 +278,7 @@ def _prices_refused(body: Mapping[str, Any]) -> str | None:
     if not (
         isinstance(detail, dict)
         and isinstance(action, dict)
-        and action.get("call") == REQUEST_INPUT_FUNCTION_CALL_NAME
+        and action.get("call") == PLANNER_ASK
         and str(detail.get("slot")).startswith(PRICES_SLOT_PREFIX)
     ):
         return None
@@ -314,7 +317,7 @@ def _priced_answers(
 
 
 def _answers(result: object) -> dict[str, dict[str, Any]]:
-    """An `adk_request_input` response's `result` as one answer per question id
+    """An ask's response's `result` as one answer per question id
     (`harness.graph.state.resume_answers`). A missing result and a dismissal of the
     whole pause hold none."""
     return {} if result is None else resume_answers(result) or {}
@@ -343,13 +346,13 @@ def _answered_calls(call: PlannerCall) -> Iterator[tuple[dict[str, Any], object]
 
 
 def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
-    """Every spec_id the user actually chose answering an `adk_request_input`
-    call, read off the call's steps -- the record of what
+    """Every spec_id the user actually chose answering an ask, read off the
+    call's steps -- the record of what
     the user was asked and what they answered, which
     makes a measure decision the user's (`_user_settled_measures`).
 
     Membership in a call's offered `candidates` is not by itself an
-    election: an `adk_request_input` call that offers `{A, B}` records only
+    election: an ask that offers `{A, B}` records only
     a question, not a choice, and a plan pinning `B` after the user picked
     `A` -- or after no answer has arrived at all -- is not a user election
     either. What counts as one is a call's `answer` step, a call paired
@@ -369,7 +372,7 @@ def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
     Every `adk_request_input` call the workflow itself raises (the `ask`
     node of `harness.graph`, under `CLARIFY_INTERRUPT`) shares the one fixed
     id `"clarify"` across every question in a session. The planner's own
-    `ask_user` calls each get their own id. Pairing by id alone
+    `PLANNER_ASK` calls each get their own id. Pairing by id alone
     would let a round-2 offer, re-raised under the same id, retroactively
     read a round-1 answer as electing whatever round 2 happens to also
     offer. The steps walk the session once, in order, and pair each
@@ -405,7 +408,7 @@ def _said(answer: object) -> str:
 
 
 def _is_answer(body: Mapping[str, Any]) -> bool:
-    """Whether an `adk_request_input` response body carries something the user said.
+    """Whether an ask's response body carries something the user said.
 
     A user's answer is `{"result": ...}` (`harness.studio`'s `/interrupt` route wraps
     it, as ADK wraps any non-dict value), read as `harness.graph.state.resume_answers`
@@ -418,7 +421,7 @@ def _is_answer(body: Mapping[str, Any]) -> bool:
 
 
 def _is_amendment(body: Mapping[str, Any]) -> bool:
-    """Whether an `adk_request_input` response body is the user amending the approval card.
+    """Whether an ask's response body is the user amending the approval card.
 
     `harness.studio`'s `/interrupt` route answers the approval card
     (`harness.graph.APPROVE_INTERRUPT`) with `{"result": {"amendment": ...}}`
@@ -435,7 +438,7 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     Read off the call's steps. The first `propose_plan` response carrying `version`
     marks where the plan was recorded. A later response repeating the version records nothing
     (`_transient_retry` answers a bare retry so) and moves no mark. After the mark, the user
-    speaks with an `adk_request_input` response they answered (`_is_answer`: a pick, free text),
+    speaks with an ask's response they answered (`_is_answer`: a pick, free text),
     an amendment of the approval card (`_is_amendment`), or a message of their own
     (a `message` step), as the ADK eval runner sends a case's later messages into one session. A
     refusal, a skip, a referral and the planner seam's own messages are not.
@@ -481,7 +484,7 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
 
     The referral reaches the planner in the `translation` of the response that recorded the
     plan, `propose_plan`'s, carrying its `kind` and `requirement_id`. This walks the steps
-    once, in order. An `adk_request_input` call after that response is an ask the
+    once, in order. An ask after that response is one the
     model raised knowing the referral, and its `id` is remembered. A response counts as the
     user's answer when it pairs by `id` with one of those asks and `_is_answer` holds. An ask
     issued before the referral, a call the tool or ADK rejected, and a skip do not count. A skip
@@ -592,11 +595,13 @@ def combination_picks(
 ) -> tuple[dict[Combination, str | None], bool]:
     """The option id the user last picked for each combination they were asked about, and a flag.
 
-    A combination ask is an `adk_request_input` call whose `options` are `COMBINATION_OPTIONS`.
+    A combination ask is a `PLANNER_ASK` call whose `options` are `COMBINATION_OPTIONS`.
     It asks about the combination the latest `combination_unasked` refusal before it names, read
     off that refusal's own response, so the model cannot point an ask at another sum. A
-    refusal binds the first ask after it and no other, so an ask with no refusal of its own
-    before it asks about nothing. Each response pairs with the nearest preceding call sharing
+    refusal binds the first ask after it that reached the user and no other, so an ask
+    with no refusal of its own before it asks about nothing. An ask the tool or ADK refused
+    leaves no step (`planner.agent._session_steps`), so it binds nothing and leaves the
+    refusal for the next ask. Each response pairs with the nearest preceding call sharing
     its `id`, as `elected_spec_ids` pairs them. The combination ask is one question, `q1`
     (`harness.graph.state.resume_answers`). Each answer about a combination replaces the one
     before it, and free text or a skip records `None`, so a user who changes their mind, or
@@ -688,7 +693,15 @@ class CallSession:
         if admission.windowed_pins is not None:
             save_windowed_pins(state, admission.windowed_pins)
         save_alignments(state, admission.alignments)
+        save_pin_verdicts(state, admission.pin_verdicts)
         save_plan(state, admission.plan)
+        keep_found_sources(
+            state,
+            admission.plan,
+            alignments=admission.alignments,
+            windowed_pins=admission.windowed_pins or (),
+            offered=load_log(state).offered_for(admission.plan),
+        )
         save_plan_rounds(state, admission.rounds)
         # A new proposal supersedes whatever the translator referred back.
         clear_referral(state)

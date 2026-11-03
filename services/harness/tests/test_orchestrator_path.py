@@ -659,7 +659,7 @@ async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both
     )
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     assert session is not None
-    tool_context = SimpleNamespace(state=session.state, session=session)
+    tool_context = SimpleNamespace(state=session.state, function_call_id=None, session=session)
     chosen = CallSession(AdkCall(cast(Any, tool_context))).elected_spec_ids()
     assert {spec_id for spec_id in chosen if spec_id.startswith("spec_")} == elected
 

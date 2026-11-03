@@ -29,7 +29,7 @@ from typing import Any, Literal, NamedTuple, cast
 
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
-from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count
+from compiler.sources import PROVIDER_ACCOUNT, block_concept_label, stat_var_count, warning_code
 from data_mcp.scope import ScopeAxis, ScopeEntry, TextOrigin
 from executor.classify import RECOVERABLE_SPEC_CODES
 from executor.ledger import RunStatus
@@ -56,7 +56,7 @@ from planner.records import (
 )
 from planner.workflow import ElectedMeasure, MeasureAlternative, ResolvedGroup
 from pydantic import ConfigDict, Field, ValidationError, model_validator
-from translator.discovery import BLOCKING_WARNING_CODES
+from translator.discovery import NARROWING_WARNING_CODES
 
 from harness import plan_display
 from harness.scope_choices import (
@@ -851,12 +851,12 @@ class SearchReading(StrictModel):
             sentence=_str_or_none(part.get("resolved")),
             warnings=tuple(
                 WarningReading(
-                    code=str(warning["code"]),
+                    code=warning_code(warning),
                     severity=_str_or_none(warning.get("severity")),
                     message=_str_or_none(warning.get("message")),
                 )
                 for warning in part.get("warnings") or ()
-                if isinstance(warning, Mapping) and warning.get("code")
+                if isinstance(warning, Mapping)
             ),
             departures=tuple(
                 DepartureReading.model_validate(departure)
@@ -1786,8 +1786,9 @@ def render_readings(
 ) -> RenderedReadings:
     """Number `readings` oldest first, as text of at most `budget` characters.
 
-    Every warning code shows once per reading, a blocking one
-    (`BLOCKING_WARNING_CODES`) marked `!`. The skills every reading named
+    Every warning code shows once per reading, one under which a pin of the
+    reading's source answers a narrower question (`NARROWING_WARNING_CODES`)
+    marked `!`. The skills every reading named
     close the text, once each, those in `skills_read` marked `*`.
 
     Levels, tried in order until one fits: everything, then sentences cut to
@@ -1994,7 +1995,7 @@ def _refusal_context(reading: SearchReading, *, detail: int) -> str:
 
 def _warning_codes(reading: SearchReading) -> str:
     codes = dict.fromkeys(warning.code for warning in reading.warnings)
-    return ", ".join(("!" if code in BLOCKING_WARNING_CODES else "") + code for code in codes)
+    return ", ".join(("!" if code in NARROWING_WARNING_CODES else "") + code for code in codes)
 
 
 def _periods(plan: Plan) -> tuple[PlanPeriod, ...]:
