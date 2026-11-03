@@ -1052,7 +1052,11 @@ def public_tool(tool: Tool) -> Tool:
     """`tool` as the combined server lists it, under its child's `PublicShape`:
     the shape's paragraphs after the mount's description, and every property the
     shape hides left out wherever the schema holds one. A tool with no shape is
-    listed as its server declares it."""
+    listed as its server declares it. Each tool's annotations carry its title."""
+    if tool.annotations is not None and tool.title:
+        tool = tool.model_copy(
+            update={"annotations": tool.annotations.model_copy(update={"title": tool.title})}
+        )
     shape = _PUBLIC_SHAPES.get(tool.name)
     if shape is None:
         return tool
