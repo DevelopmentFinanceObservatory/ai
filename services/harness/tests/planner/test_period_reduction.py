@@ -221,7 +221,12 @@ def _context(
         state[AMENDMENT_ENTRY_STATE_KEY] = amendment
     if pins is not None:
         save_pin_sources(state, pins)
-    return SimpleNamespace(state=state, actions=EventActions(), session=SimpleNamespace(events=[]))
+    return SimpleNamespace(
+        state=state,
+        function_call_id=None,
+        actions=EventActions(),
+        session=SimpleNamespace(events=[]),
+    )
 
 
 def _propose(
@@ -750,7 +755,9 @@ def test_an_intervening_version_keeping_its_years_keeps_the_licence_through_stor
         assert recorded is not None
         state = {**ctx.state}
         save_plan(state, recorded)
-        return SimpleNamespace(state=state, actions=EventActions(), session=ctx.session)
+        return SimpleNamespace(
+            state=state, function_call_id=None, actions=EventActions(), session=ctx.session
+        )
 
     ctx = stored(ctx)
     narrowed = _propose(ctx, _INTERVENING[intervening](), [])

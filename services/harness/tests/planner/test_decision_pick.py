@@ -181,7 +181,10 @@ def _ranked_donors() -> list[Any]:
 def _context() -> Any:
     """The part of ADK's `ToolContext` `propose_plan` reads, holding no asks."""
     return SimpleNamespace(
-        state={ASKS_STATE_KEY: []}, actions=EventActions(), session=SimpleNamespace(events=[])
+        state={ASKS_STATE_KEY: []},
+        function_call_id=None,
+        actions=EventActions(),
+        session=SimpleNamespace(events=[]),
     )
 
 
