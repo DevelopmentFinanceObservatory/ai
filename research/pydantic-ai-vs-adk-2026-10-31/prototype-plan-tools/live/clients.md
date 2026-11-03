@@ -17,7 +17,7 @@ Each client drove `start_plan`, `propose_plan`, `record_user_answer` and `run_pl
 
 Haiku first ran under a tester prompt that forbade reading files. Claude Code saves a long command output, here the 54 KB `propose_plan` schema, to a file, so three of Haiku's first six runs stopped without seeing the schema. The table counts ten reruns under a prompt that lets the tester read that saved output, which is what a native MCP client receives. Sonnet ran under the first prompt and landed every plan regardless.
 
-gpt-6-luna was not run: the OpenCode key behind the local relay has expired. `client.py --model luna` is ready for when it is renewed.
+gpt-6-luna, run as a native client through the local relay (`client.py --model luna`), landed no plan in 10 conversations. Every `search` call was refused `request_invalid`, mostly for setting both `name` and `dcid` on an entity or `target_year` on an operation that is no forecast, and Luna repeated the same call 17 to 37 times before giving up. Luna fills every optional field: asked to look up Ghana with a tool whose `dcid` and `target_year` are optional, it sent `dcid: ""` and `target_year: 0` three times out of three. That is what OpenAI's strict function calling does, and the relay sends tool schemas to the Responses API without `strict: false`, so the result says more about the relay than about how ChatGPT would call these tools. It still points at a fix on our side: the public tools should treat an empty string or zero in an optional field as absent, since strict-mode clients send them.
 
 ## Cost
 
