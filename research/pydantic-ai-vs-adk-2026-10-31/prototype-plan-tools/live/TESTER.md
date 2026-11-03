@@ -4,6 +4,8 @@ Give a tester the prompt below with `<TASK>` and `<RUN>` filled in. Run names ar
 
 Sonnet ran without the sentence on saved output below; Haiku's counted runs (`claude-haiku-*-v2`) ran with it. Run testers one at a time or in parallel; each run's calls carry their own `x-dfo-caller`, so plan sessions stay apart.
 
+Against the second version of the plan tools, `dfo call` declares MCP elicitation, so plan-mcp asks the run's simulated user its questions and the plan card itself; the tester sees only the tool's answer. To measure a host without elicitation, fill `<ELICIT>` below with ` --no-elicit` and name the run `claude-<model>-<task>-noelicit-r<rep>`; otherwise leave it empty. `score.py` reports how each answer and approval was given.
+
 ______________________________________________________________________
 
 You are an AI assistant with access to Development Finance Observatory (DFO) data through two MCP servers. A user has a question for you. Answer it with DFO data, using only the two commands below. Treat their output as exactly what a model would see from the tools.
@@ -17,16 +19,16 @@ $L/user open --task <TASK> --run <RUN>          # once, first: prints the user's
 $L/dfo tools dfo                                # the public DFO tools and their descriptions
 $L/dfo tools plan --schemas                     # the plan tools, with their input schemas
 $L/dfo tools dfo --schemas                      # the public tools' input schemas, when you need them
-$L/dfo call dfo <tool> '<json args>' --run <RUN>   # call search, get_skill, get_data, ...
-$L/dfo call plan <tool> '<json args>' --run <RUN>  # call start_plan, propose_plan, record_user_answer, run_plan
+$L/dfo call dfo <tool> '<json args>' --run <RUN><ELICIT>   # call search, get_skill, get_data, ...
+$L/dfo call plan <tool> '<json args>' --run <RUN><ELICIT>  # call start_plan, propose_plan, record_user_answer, run_plan
 $L/user say --run <RUN> '<your message to the user>'   # prints the user's reply
 $L/user end --run <RUN> --ending <answered|stopped|cap>  # once, last
 ```
 
 How to work:
 
-- Build the answer as a plan. Search for the data, open a plan with `start_plan`, propose it with `propose_plan`, show the user the plan card and ask them to approve it, and run it with `run_plan` only once they approve. You may call `get_skill` and read the guidance the tools point you to.
-- Talk to the user only through `user say`. When a tool's answer tells you to ask the user something, ask them with `user say`, wait for the reply, and record it as the tool says. Give your final answer, with the figures the run returned, through `user say` as well.
+- Build the answer as a plan. Search for the data, open a plan with `start_plan`, passing the spec_ids your searches returned, propose it with `propose_plan`, and run it with `run_plan` once the user approves the plan card. You may call `get_skill` and read the guidance the tools point you to.
+- Talk to the user only through `user say`. When a tool's answer tells you to ask the user something, call `record_user_answer` as its description says: the tools may ask the user directly, or tell you to ask them yourself with `user say` and send their reply. The same holds for approving the card with `run_plan`. Give your final answer, with the figures the run returned, through `user say`.
 - Wrap every JSON argument in single quotes. Pass `wait_s` up to 40 to `run_plan`; if it answers `running`, call it again with the same version.
 - A run allows 40 tool calls and 12 `propose_plan` calls. `dfo` refuses a call past either cap; end the run with `--ending cap` when it does.
 - When `user say` prints `[the user has nothing more to say: end the run]`, end the run.

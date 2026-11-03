@@ -21,6 +21,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from compiler.surface import ToolCallResult
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from entry import (
     RecordedResolver,
     RecordedSurface,
@@ -41,6 +43,7 @@ from harness.conversation import current_conversation_id
 from harness.scripted import ScriptedExecutor, ScriptedSurface, scripted_publish_result
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.tool_contracts import resolver_digest
+from outward import outward
 from plan_tools import PlanningService
 from planner.plan import Plan, load_plan, plan_revision
 from scripted import BRIEF, SEARCH, FixedPlanner, scripted_translate
@@ -111,16 +114,68 @@ class Recorded:
     translation: TranslationCalls
 
 
+def searched_parts(recording: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Each definite part a recording's searches answered, by its spec_id."""
+    return {
+        part["spec"]["spec_id"]: part
+        for search in recording["searches"]
+        for part in search["envelope"]["parts"]
+        if part.get("status") == "definite"
+    }
+
+
+class ResolvingSurface:
+    """`inner`, with data-mcp's `resolve_definition` answered by Search's part for the
+    spec_id asked, from `parts`, as the tool carries it in `_meta`. `asked` lists the
+    spec_ids it was asked for."""
+
+    def __init__(self, inner: Any, parts: Mapping[str, Mapping[str, Any]]) -> None:
+        self._inner = inner
+        self._parts = dict(parts)
+        self.asked: list[str] = []
+
+    async def list_tools(self) -> list[Any]:
+        return await self._inner.list_tools()
+
+    async def call_tool(
+        self, *, tool: Any, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        if tool.name != "resolve_definition":
+            return await self._inner.call_tool(
+                tool=tool, arguments=arguments, on_progress=on_progress
+            )
+        self.asked.append(str(arguments["spec_id"]))
+        part = self._parts[str(arguments["spec_id"])]
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+def identities(parts: Mapping[str, Mapping[str, Any]]) -> Any:
+    """A `DefinitionLookup` holding the identity of each part in `parts`."""
+
+    async def lookup(spec_id: str) -> Mapping[str, Any] | None:
+        part = parts.get(spec_id)
+        return part["spec"]["definition"]["identity"] if part else None
+
+    return lookup
+
+
 async def recorded_server(
-    task: Task, *, key: SessionKey = SessionKey.RETURNED, recording: Mapping[str, Any] | None = None
+    task: Task,
+    *,
+    key: SessionKey = SessionKey.RETURNED,
+    recording: Mapping[str, Any] | None = None,
+    elicitation: bool = True,
 ) -> Recorded:
     """plan-mcp answering `task`'s searches, skill reads and translation calls from its
-    recording, as `entry.run_entry` answers them."""
+    recording, as `entry.run_entry` answers them, and reading each spec_id the
+    recorded searches returned as the registry and Search would."""
     recording = recording if recording is not None else load_recording(task.id)
     translation = TranslationCalls(recording.get("translation") or {}, schemas=await tool_schemas())
+    parts = searched_parts(recording) if recording.get("searches") else {}
     service = PlanningService(
         resolver=RecordedResolver(recording["searches"]),
-        surface=RecordedSurface(recording.get("tools") or {}),
+        surface=ResolvingSurface(RecordedSurface(recording.get("tools") or {}), parts),
+        definitions=identities(parts),
         translate=build_translate(
             surface=translation,
             resolve_entities=translation.resolve_entities,
@@ -129,7 +184,7 @@ async def recorded_server(
         ),
         run_graph=_no_run,
     )
-    return Recorded(PlanMcp(service, key=key), translation)
+    return Recorded(PlanMcp(service, key=key, elicitation=elicitation), translation)
 
 
 def opening(task: Task) -> dict[str, Any]:
@@ -207,7 +262,7 @@ async def p1_faults(task: Task, *, body: Mapping[str, Any] | None = None) -> lis
     mine = await mcp_propose(task, payload, body=body)
     faults: list[str] = []
     dev_answers = [
-        c["response"] or {} for c in tool_calls(dev.events) if c["name"] == "propose_plan"
+        outward(c["response"] or {}) for c in tool_calls(dev.events) if c["name"] == "propose_plan"
     ]
     if payload.refusal is not None and body is None and mine.answers[0] != dev_answers[0]:
         faults += [f"first refusal {d}" for d in differences(mine.answers[0], dev_answers[0])]
@@ -262,12 +317,16 @@ async def dev_first_run(
 
 async def mcp_first_answer(
     task: Task, body: Mapping[str, Any], *, recording: Mapping[str, Any] | None = None
-) -> dict[str, Any]:
-    """plan-mcp's `propose_plan` answer to `body` on a session seeded from `task`."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """plan-mcp's `propose_plan` answer to `body` on a session seeded from `task`, and
+    the full schema `propose_plan`'s arguments are read against."""
     recorded = await recorded_server(task, recording=recording)
     async with Client(recorded.server.mcp) as client:
         opened = await call(client, "start_plan", opening(task))
-        return await call(client, "propose_plan", {"plan_session": opened["plan_session"], **body})
+        answer = await call(
+            client, "propose_plan", {"plan_session": opened["plan_session"], **body}
+        )
+    return answer, recorded.server.schemas["propose_plan"]
 
 
 REFUSAL_KEYS = ("outcome", "code", "action")
@@ -304,10 +363,13 @@ def scripted_server(
     check_version: bool = True,
     resolver: Any = None,
     key: SessionKey = SessionKey.RETURNED,
+    elicitation: bool = True,
+    **options: Any,
 ) -> Scripted:
     """plan-mcp over canned searches (`resolver`, one Kenya search by default),
     `scripted_translate`, and dev's `execute` and `plan_done` nodes on
-    `harness.scripted`'s surface and executor."""
+    `harness.scripted`'s surface and executor. `options` go to `PlanningService`
+    (`store`, `read_rows`, `row_cap`, `row_chars_cap`)."""
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     service = PlanningService(
         resolver=resolver or KeyedSearch({BRIEF: definite_envelope()}),
@@ -321,8 +383,9 @@ def scripted_server(
             fetch_series_stats=scripted_fetch_series_stats,
         ),
         check_version=check_version,
+        **options,
     )
-    return Scripted(PlanMcp(service, key=key), ledger)
+    return Scripted(PlanMcp(service, key=key, elicitation=elicitation), ledger)
 
 
 SCRIPTED_OPENING = {"brief": BRIEF, "asks": [BRIEF], "searches": [SEARCH]}

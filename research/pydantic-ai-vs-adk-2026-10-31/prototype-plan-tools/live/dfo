@@ -1,4 +1,8 @@
 #!/bin/sh
-# DFO's public /mcp and plan-mcp, as a model sees them. See dfo_cli.py.
+# DFO's public /mcp and plan-mcp, as a model sees them. See dfo_cli.py. The
+# simulated user answers plan-mcp's elicitations, so this runs with Pydantic AI
+# and the model key, as `user` does.
 here="$(cd "$(dirname "$0")" && pwd)"
-PYTHONWARNINGS=ignore exec /Users/jorge/repos/dfo-ai-worktrees/pai-research/.venv/bin/python "$here/dfo_cli.py" "$@"
+cd /Users/jorge/repos/dfo-ai-worktrees/pai-research && PYDANTIC_AI_NO_BANNER=1 PYTHONWARNINGS=ignore \
+  exec uv run --quiet --with 'pydantic-ai-slim[google,mcp]==2.64.0' \
+  --env-file /Users/jorge/repos/dfo-ai/.env --package harness python "$here/dfo_cli.py" "$@"

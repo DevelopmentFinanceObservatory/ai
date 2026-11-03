@@ -13,6 +13,9 @@ Each accepted `propose_plan` appends the plan on record to
 arguments carry only what changed, so only the stored plan says what kinds an
 accepted version uses. The client never sees this record.
 
+Sessions persist in `--sessions` (`plan-sessions.sqlite3` beside this file), so a
+restart keeps every open session; a run the restart cut short runs again.
+
     DFO_APIS_URL=http://localhost:8083 MCP_API_TOKEN=local-dev \
         uv run --env-file .env --package harness python live/serve_live.py --port 8091
 """
@@ -30,7 +33,7 @@ from fastmcp import FastMCP
 from harness.settings import Settings
 from plan_tools import PlanningService, PlanSession
 from planner.plan import load_plan
-from serve import build
+from serve import DEFAULT_SESSIONS, build, install_frame_store
 
 PLANS = Path(__file__).resolve().parent / "runs" / "plans.jsonl"
 
@@ -62,6 +65,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8091)
+    parser.add_argument("--sessions", type=Path, default=DEFAULT_SESSIONS)
     args = parser.parse_args()
     settings = Settings()
     # The harness clients read the token when built, so the process-wide policy
@@ -69,7 +73,8 @@ def main() -> None:
     # then takes the resolved policy.
     gate = {"token": settings.mcp_api_token, "disabled": settings.mcp_auth_disabled}
     apply_gate(FastMCP("auth-policy"), **gate)
-    plan = build(settings)
+    install_frame_store()
+    plan = build(settings, sessions=args.sessions)
     record_accepted_plans(plan.service)
     apply_gate(plan.mcp, **gate)
     plan.mcp.run(transport="http", host=args.host, port=args.port, path="/mcp")

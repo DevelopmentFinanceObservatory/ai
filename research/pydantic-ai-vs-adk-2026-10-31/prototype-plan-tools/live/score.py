@@ -12,6 +12,10 @@ A client run (`runs/<run>.jsonl`, written by `dfo` or `client.py`) is scored on:
   what the task expects with its years, by the planner-entry eval's own rules
   (`entry.Task.selects_kinds`, `entry.period_reductions`);
 - run finished: a `run_plan` answer with status `finished`;
+- how each answer and approval was given: `record_user_answer` answers recorded
+  `by` the user (asked by plan-mcp through elicitation) or the client (on the
+  model's word; every first-version answer), and each version `run_plan`
+  started `approved_by` the user or the client, and each the user declined;
 - tool calls, and tokens where the client logged usage (`end` line).
 
 A baseline record (`evals/planner_entry/run.py` output) is scored the same way:
@@ -99,8 +103,10 @@ def years(plan: Mapping[str, Any]) -> str | None:
 
 
 def refusal_code(response: Mapping[str, Any]) -> str:
-    """A refused proposal's code, or the translation's kind for an `ok` answer that
-    a translation referral kept from being ready (no `summary`)."""
+    """A refused proposal's code, or the translation's kind for a referral: a
+    `referred` answer, or a first-version `ok` answer with no `summary`."""
+    if response.get("outcome") == "referred":
+        return f"translation:{response.get('code')}"
     if response.get("outcome") == "ok":
         translation = response.get("translation") or {}
         return f"translation:{translation.get('kind', translation.get('outcome'))}"
@@ -121,12 +127,20 @@ def score_run(path: Path, plans: Mapping[tuple[str, int], Mapping[str, Any]]) ->
     ran: int | None = None
     within_caps = False
     asked_user = 0
+    answers_by = {"user": 0, "client": 0}
+    approvals_by: dict[str, set[int]] = {"user": set(), "client": set(), "declined": set()}
     for number, call in enumerate(calls, start=1):
         response = answer(call)
         if call["tool"] == "start_plan" and response.get("plan_session"):
             session = response["plan_session"]
         if call["tool"] == "record_user_answer" and response.get("outcome") == "ok":
             asked_user += 1
+            answers_by[str(response.get("by") or "client")] += 1
+        if call["tool"] == "run_plan" and response.get("run_id"):
+            # A first-version run took the client's word and states no `approved_by`.
+            approvals_by[response.get("approved_by") or "client"].add(response.get("version"))
+        if call["tool"] == "run_plan" and (response.get("detail") or {}).get("by") == "user":
+            approvals_by["declined"].add(call["args"].get("version"))
         if call["tool"] == "run_plan" and response.get("status") == "finished":
             ran = response.get("version")
             session = call["args"].get("plan_session", session)
@@ -154,6 +168,9 @@ def score_run(path: Path, plans: Mapping[tuple[str, int], Mapping[str, Any]]) ->
         "proposals": proposals,
         "codes": codes,
         "asked_user": asked_user,
+        "answers_by": answers_by,
+        "approvals_by": {by: len(versions) for by, versions in approvals_by.items()},
+        "elicits": any(call.get("elicits") for call in calls),
         "accepted_within_caps": within_caps,
         "kinds": kinds,
         "kind_pass": kinds is not None and task.selects_kinds(kinds),
@@ -195,6 +212,9 @@ def score_baseline(record: Mapping[str, Any]) -> dict[str, Any]:
         "proposals": len(proposals),
         "codes": [str(p.get("code")) for p in upto if p.get("outcome") != "ok"],
         "asked_user": int(record.get("stop_reason") == "asked_user"),
+        "answers_by": None,
+        "approvals_by": None,
+        "elicits": None,
         "accepted_within_caps": bool(record.get("accepted")),
         "kinds": kinds,
         "kind_pass": kinds is not None and task.selects_kinds(kinds),
@@ -228,15 +248,27 @@ def right(rows: Sequence[Mapping[str, Any]]) -> str:
     return f"{sum(r['right'] for r in rows)}/{n} ({kinds}, {held})"
 
 
+def given(rows: Sequence[Mapping[str, Any]]) -> str:
+    """How rows' answers and approvals were given: user/client answers, then
+    user/client approvals with the user's refusals in brackets."""
+    if any(r["answers_by"] is None for r in rows):
+        return "- | -"
+    answers = [sum(r["answers_by"][by] for r in rows) for by in ("user", "client")]
+    approvals = [sum(r["approvals_by"][by] for r in rows) for by in ("user", "client", "declined")]
+    return f"{answers[0]}/{answers[1]} | {approvals[0]}/{approvals[1]} ({approvals[2]})"
+
+
 def table(scored: Sequence[Mapping[str, Any]]) -> str:
-    """One row per task: runs accepted, mean rounds, codes met, right, finished, calls, tokens."""
+    """One row per task: runs accepted, mean rounds, codes met, right, finished, how
+    answers and approvals were given, calls, tokens."""
     by_task: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in scored:
         by_task[row["task"]].append(row)
     lines = [
         "| Task | Accepted | Rounds | Refusal codes before acceptance | Right (kinds, years) | Run finished "
+        "| Answers by user/client | Approvals by user/client (declined) "
         "| Tool calls | Input tokens | Output + thinking |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for task_id, rows in by_task.items():
         n = len(rows)
@@ -248,6 +280,7 @@ def table(scored: Sequence[Mapping[str, Any]]) -> str:
             f"| {', '.join(f'`{c}`' for c in codes) or 'none'} "
             f"| {right(rows)} "
             f"| {'-' if None in finished else f'{sum(finished)}/{n}'} "
+            f"| {given(rows)} "
             f"| {_mean(r['tool_calls'] for r in rows)} "
             f"| {_mean(r['input_tokens'] for r in rows)} "
             f"| {_mean((r['output_tokens'] or 0) + (r['thinking_tokens'] or 0) if r['output_tokens'] is not None else None for r in rows)} |"
@@ -259,6 +292,7 @@ def table(scored: Sequence[Mapping[str, Any]]) -> str:
         f"| mean {_mean([r['rounds'] for r in scored], 1)} | "
         f"| {right(scored)} "
         f"| {'-' if None in finished else f'{sum(finished)}/{n}'} "
+        f"| {given(scored)} "
         f"| {_mean(r['tool_calls'] for r in scored)} "
         f"| {_mean(r['input_tokens'] for r in scored)} "
         f"| {_mean((r['output_tokens'] or 0) + (r['thinking_tokens'] or 0) if r['output_tokens'] is not None else None for r in scored)} |"

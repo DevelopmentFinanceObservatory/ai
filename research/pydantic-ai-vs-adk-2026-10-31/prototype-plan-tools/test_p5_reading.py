@@ -21,6 +21,10 @@ from schema_rules import faults, summary
 
 TASKS = load_tasks()
 OUT = Path(__file__).with_name("measurements.json")
+# What an outside model read before its first proposal from plan-mcp's first
+# version: four declarations of 40,972 characters, the guidance of 20,829 and the
+# median planner message of 1,755.
+FIRST_VERSION_TOTAL = 63_556
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -53,6 +57,7 @@ async def _measure() -> dict[str, Any]:
                         "name": tool.name,
                         "description": len(tool.description or ""),
                         "input_schema": compact(schema),
+                        "full_schema": compact(recorded.server.schemas[tool.name]),
                         "chars": len(tool.name) + len(tool.description or "") + compact(schema),
                     }
                 )
@@ -81,6 +86,7 @@ async def _measure() -> dict[str, Any]:
             "guidance": _row("start_plan guidance", len(guidance)),
             "planner_message": message,
             "before_first_proposal": _row("total, median task", outside),
+            "first_version_before_first_proposal": _row("total, median task", FIRST_VERSION_TOTAL),
         },
         "planner_today": {
             **planner,
@@ -99,6 +105,7 @@ async def test_p5_what_an_outside_model_reads_and_what_the_apis_reject() -> None
     assert names == ["start_plan", "propose_plan", "record_user_answer", "run_plan"]
     # Every declaration passes both APIs' non-strict rules.
     assert all(row["both"]["faults"] == 0 for row in measured["api_faults"].values())
+    assert measured["plan_mcp"]["before_first_proposal"]["chars"] < FIRST_VERSION_TOTAL
 
 
 def test_p5_control_the_checker_flags_what_each_api_rejects() -> None:

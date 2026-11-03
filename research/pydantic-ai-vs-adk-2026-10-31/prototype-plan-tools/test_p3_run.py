@@ -38,7 +38,9 @@ async def test_p3_an_accepted_plan_hands_back_what_dev_hands_the_orchestrator() 
         session = await _opened(client)
         accepted = await _accepted(client, session, PROPOSAL)
         assert accepted["card"]["steps"], accepted["card"]
-        ran = await call(client, "run_plan", {"plan_session": session, "version": 1})
+        ran = await call(
+            client, "run_plan", {"plan_session": session, "version": 1, "approved": True}
+        )
     assert ran["status"] == "finished", ran
     plan = scripted.server.service.sessions[session].ready[1]
     dev = await dev_hand_back(plan)
@@ -52,8 +54,14 @@ async def test_p3_a_run_past_its_wait_answers_running_and_the_same_call_waits_on
     async with client_of(scripted.server) as client:
         session = await _opened(client)
         await _accepted(client, session, PROPOSAL)
-        first = await call(client, "run_plan", {"plan_session": session, "version": 1, "wait_s": 0})
-        second = await call(client, "run_plan", {"plan_session": session, "version": 1})
+        first = await call(
+            client,
+            "run_plan",
+            {"plan_session": session, "version": 1, "approved": True, "wait_s": 0},
+        )
+        second = await call(
+            client, "run_plan", {"plan_session": session, "version": 1, "approved": True}
+        )
     assert first["status"] == "running", first
     assert second["status"] == "finished" and second["run_id"] == first["run_id"], second
     assert len(scripted.server.service.sessions[session].runs) == 1
@@ -63,10 +71,16 @@ async def test_p3_run_plan_refuses_an_unknown_session_and_a_version_never_accept
     scripted = scripted_server()
     async with client_of(scripted.server) as client:
         session = await _opened(client)
-        unknown = await call(client, "run_plan", {"plan_session": "ps_unknown", "version": 1})
-        never = await call(client, "run_plan", {"plan_session": session, "version": 1})
+        unknown = await call(
+            client, "run_plan", {"plan_session": "ps_unknown", "version": 1, "approved": True}
+        )
+        never = await call(
+            client, "run_plan", {"plan_session": session, "version": 1, "approved": True}
+        )
         await _accepted(client, session, PROPOSAL)
-        later = await call(client, "run_plan", {"plan_session": session, "version": 2})
+        later = await call(
+            client, "run_plan", {"plan_session": session, "version": 2, "approved": True}
+        )
     assert unknown["code"] == SESSION_UNKNOWN
     assert never["code"] == VERSION_NOT_READY
     assert later["code"] == VERSION_NOT_READY
@@ -79,8 +93,12 @@ async def _superseded_run(*, check_version: bool) -> tuple[dict[str, Any], dict[
         await _accepted(client, session, PROPOSAL)
         second = await _accepted(client, session, amended(1))
         assert second["version"] == 2
-        old = await call(client, "run_plan", {"plan_session": session, "version": 1})
-        current = await call(client, "run_plan", {"plan_session": session, "version": 2})
+        old = await call(
+            client, "run_plan", {"plan_session": session, "version": 1, "approved": True}
+        )
+        current = await call(
+            client, "run_plan", {"plan_session": session, "version": 2, "approved": True}
+        )
     return old, current
 
 

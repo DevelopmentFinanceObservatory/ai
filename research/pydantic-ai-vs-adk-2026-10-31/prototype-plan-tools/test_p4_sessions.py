@@ -65,10 +65,18 @@ async def _interleaved(server: PlanMcp, kenya: Client, other: Client) -> dict[st
     seen["a1"] = await call(kenya, "propose_plan", {"plan_session": a, **_proposal("kenya")})
     seen["b1"] = await call(other, "propose_plan", {"plan_session": b, **_proposal("other")})
     seen["b2"] = await call(other, "propose_plan", {"plan_session": b, **amended(1)})
-    seen["a_run"] = await call(kenya, "run_plan", {"plan_session": a, "version": 1})
-    seen["b_run1"] = await call(other, "run_plan", {"plan_session": b, "version": 1})
-    seen["a_run2"] = await call(kenya, "run_plan", {"plan_session": a, "version": 2})
-    seen["b_run"] = await call(other, "run_plan", {"plan_session": b, "version": 2})
+    seen["a_run"] = await call(
+        kenya, "run_plan", {"plan_session": a, "version": 1, "approved": True}
+    )
+    seen["b_run1"] = await call(
+        other, "run_plan", {"plan_session": b, "version": 1, "approved": True}
+    )
+    seen["a_run2"] = await call(
+        kenya, "run_plan", {"plan_session": a, "version": 2, "approved": True}
+    )
+    seen["b_run"] = await call(
+        other, "run_plan", {"plan_session": b, "version": 2, "approved": True}
+    )
     return seen
 
 
@@ -137,7 +145,9 @@ async def test_p4_two_sessions_on_two_clients_stay_apart(
     ):
         seen = await _interleaved(server, kenya, other)
         borrowed = await call(other, "propose_plan", {"plan_session": seen["a"], **amended(1)})
-        borrowed_run = await call(other, "run_plan", {"plan_session": seen["a"], "version": 1})
+        borrowed_run = await call(
+            other, "run_plan", {"plan_session": seen["a"], "version": 1, "approved": True}
+        )
     assert _apart_faults(server, seen) == []
     assert borrowed["code"] == SESSION_UNKNOWN
     assert borrowed_run["code"] == SESSION_UNKNOWN

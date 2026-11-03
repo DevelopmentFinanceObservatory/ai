@@ -1,6 +1,8 @@
-# plan-mcp against live data, with an outside Gemini client
+# plan-mcp against live data, with outside clients
 
 Gemini 3.8 Flash on Pydantic AI, given only DFO's public `/mcp` and plan-mcp, landed an accepted plan in 20 of 20 conversations, in 1.6 proposals on average, and every accepted plan ran to `finished`. 15 of 20 landed plans are right by the planner-entry eval's own rules (kinds and years). DFO's planner, run through the planner-entry eval on the same 10 tasks three times each, accepted 29 of 30 entries, also in 1.6 proposals, and 24 of 30 are right. The client's conversations cost far more: a mean 539,000 input tokens (87% read from Gemini's cache) and 19,200 output and thinking tokens over 12.2 model requests, against 45,700 and 650 for a planner entry. The two are not like for like: the client's figure covers search, skills, planning, the run and the reply with its charts, where a planner entry stops at the first accepted plan.
+
+The results below are the first version of the tools. The second version (`../NOTES.md`) closes the gaps those runs found: `start_plan` takes the spec_ids the client's searches returned, `run_plan` returns rows and frame pairs the public tools read, strict-mode clients are not refused, the simulated user answers and approves through MCP elicitation, refusals name the shape they expect, and sessions persist in SQLite. The rig below drives the second version; it has not been rerun against it.
 
 ## Results
 
@@ -54,26 +56,18 @@ The smoke run (`runs/smoke-series-gdp-ghana.jsonl`, printed in `logs/smoke.txt`)
 ## The rig
 
 - `harness-server` on :8080 from this worktree, against dev's dfo-apis through `gcloud run services proxy` on :8083. It serves the public `/mcp` (`search`, `get_skill`, the data, analysis and presentation tools).
-- `serve_live.py` on :8091: plan-mcp from `serve.build`, behind the harness's bearer gate, appending each accepted plan to `runs/plans.jsonl`.
-- `dfo` (`dfo_cli.py`): one tool call per process on either server, printing a model's view (text blocks, and `structuredContent` only on an error result, as `~/.claude/dfo-ai-e2e/mcp` does), with the run's own `x-dfo-caller`, appended to `runs/<run>.jsonl`. It refuses a call past 40 tool calls or 12 proposals.
+- `serve_live.py` on :8091: plan-mcp from `serve.build`, behind the harness's bearer gate, appending each accepted plan to `runs/plans.jsonl`. Sessions persist in `plan-sessions.sqlite3` beside it (`--sessions`), so a restart keeps every open session. It installs the materialisation store data-mcp would (`serve.install_frame_store`), so `run_plan` reads a fetched frame's rows when `FRAME_STORE_BUCKET` names the bucket the harness writes to; derived frames are read from dfo-apis either way, and a frame it cannot read comes back with its pair and no rows.
+- `dfo` (`dfo_cli.py`): one tool call per process on either server, printing a model's view (text blocks, and `structuredContent` only on an error result, as `~/.claude/dfo-ai-e2e/mcp` does), with the run's own `x-dfo-caller`, appended to `runs/<run>.jsonl`. It refuses a call past 40 tool calls or 12 proposals. Each call declares MCP elicitation, and its handler (`rig.simulated_user`) puts plan-mcp's question or plan card to the run's simulated user and logs the exchange as `say` lines with `via: elicitation`; `--no-elicit` makes the call as a host without elicitation. It now runs under `uv run` with Pydantic AI and the `.env` key, as `user` does, since the simulated user is a model call.
 - `users/<task>.json` (`make_users.py`): the simulated user's script for each task, derived from the task file alone. The user opens with `question`; what they mean is `brief` and `asks`; a decision the reference records as `resolved_by: user` is answered with its `chosen` option (only `sum-oda-oof-ethiopia` has one: "add them"); one the planner settled by default gets "no preference"; a plan is approved only if it answers every ask.
-- `simuser.py`: the user on `gemini-3.5-flash-lite`, holding the script. A check before the runs: shown a plan in current dollars that sums the years for `series-gdp-ghana`, it refused and named both faults; asked "add or show separately" for `sum-oda-oof-ethiopia`, it said "add them".
-- `user` (`user_cli.py`): the simulated user for a Claude-side tester; `TESTER.md` is the tester's prompt.
-- `client.py`: the Pydantic AI client on `gemini-3.8-flash`, the model `PLANNER_MODEL_NAME` names and the newest flash the key serves. Both servers are `MCPToolset`s; every call goes through `rig.call_tool`, so the model reads what `dfo` prints and each call is logged. Its instruction says to search, open, propose, show the card and run once approved.
-- `score.py`: the scorer, reusing `evals/planner_entry/entry.py` for kinds and years. A Gemini or tester run's landed plan is read from `runs/plans.jsonl`, since an amendment's arguments carry only what changed (`gemini-rank-top-donors-malawi-r1`'s version 2 sends only its `rank`).
+- `simuser.py`: the user on `gemini-3.5-flash-lite`, holding the script. `reply` answers the conversation; `elicit` answers a form plan-mcp sends: a pick among the choices it lists, words of their own, or a card to approve or turn down by the same rule. A check before the first runs: shown a plan in current dollars that sums the years for `series-gdp-ghana`, it refused and named both faults; asked "add or show separately" for `sum-oda-oof-ethiopia`, it said "add them". `elicit` has not run against the live model.
+- `user` (`user_cli.py`): the simulated user for a Claude-side tester; `TESTER.md` is the tester's prompt, with an `<ELICIT>` slot for the run without elicitation.
+- `client.py`: the Pydantic AI client on `gemini-3.8-flash`, or `gpt-6-luna` through the local relay with `--model luna`. Both servers are `MCPToolset`s; every call goes through `rig.call_tool`, so the model reads what `dfo` prints and each call is logged. Both toolsets and every call carry the same elicitation handler, Pydantic AI's `elicitation_handler` on the toolset and FastMCP's on the call's own client; `--no-elicit` drops both. `not_strict` declares each tool whose `_meta` says `strict: false` non-strict to the model, so the relay sends `strict: false` without being told. Its instruction is the first version's, unchanged, so the two batches differ only in the tools.
+- `score.py`: the scorer, reusing `evals/planner_entry/entry.py` for kinds and years. A run's landed plan is read from `runs/plans.jsonl`, since an amendment's arguments carry only what changed. It also reports how each answer and approval was given: `record_user_answer` answers `by` the user or the client, and each version run `approved_by` the user or the client, with the user's refusals. A first-version run counts as the client's throughout. A `referred` answer counts as `translation:<kind>`.
 - `baseline/run/`: `evals/planner_entry/run.py baseline --only <the 10> --reps 3` at 1568eadb, whose harness is dev at 190c7a9c.
 
-## Servers left running
+## Starting the servers
 
-| Server         | Port | pids (uv, Python)                | Log                   |
-| -------------- | ---- | -------------------------------- | --------------------- |
-| dfo-apis proxy | 8083 | 83682 (gcloud), 83700 (listener) | `logs/apis-proxy.log` |
-| harness-server | 8080 | 83808, 83812                     | `logs/harness.log`    |
-| plan-mcp       | 8091 | 88033, 88035                     | `logs/plan-mcp.log`   |
-
-Stop them with `kill 83808 83812 88033 88035 83682 83700`, or by port: `lsof -tiTCP:8080 -sTCP:LISTEN | xargs kill`, and the same for 8091 and 8083. plan sessions live in plan-mcp's memory, so a restart of plan-mcp ends every open session; `runs/plans.jsonl` survives it.
-
-Restart, from `/Users/jorge/repos/dfo-ai-worktrees/pai-research`, with `R=research/pydantic-ai-vs-adk-2026-10-31/prototype-plan-tools`:
+From `/Users/jorge/repos/dfo-ai-worktrees/pai-research`, with `R=research/pydantic-ai-vs-adk-2026-10-31/prototype-plan-tools`:
 
 ```
 perl -MPOSIX -e 'setsid; exec @ARGV' gcloud run services proxy dfo-dev-apis --region northamerica-northeast1 \
@@ -89,44 +83,48 @@ cd $R && DFO_APIS_URL=http://localhost:8083 MCP_API_TOKEN=local-dev PYTHONPATH=.
   python live/serve_live.py --port 8091 > live/logs/plan-mcp.log 2>&1 < /dev/null &
 ```
 
-Then, from `$R/live`:
+Stop them by port: `lsof -tiTCP:8080 -sTCP:LISTEN | xargs kill`, and the same for 8091 and 8083. Delete `live/plan-sessions.sqlite3` to start with no sessions.
+
+Then, from `$R/live`, a smoke run (public `search`, `start_plan` with the spec_ids it returned, the reference plan, `run_plan` approved on the client's word) and the two Pydantic AI batches, with and without elicitation:
 
 ```
-../../../../.venv/bin/python smoke.py series-gdp-ghana
-PYDANTIC_AI_NO_BANNER=1 uv run --with 'pydantic-ai-slim[google,mcp]==2.64.0' --env-file /Users/jorge/repos/dfo-ai/.env \
-  --package harness python client.py --reps 2 --concurrency 4 --prefix gemini
+PYDANTIC_AI_NO_BANNER=1 uv run --with 'pydantic-ai-slim[google,anthropic,mcp]==2.64.0' \
+  --env-file /Users/jorge/repos/dfo-ai/.env --package harness python smoke.py series-gdp-ghana
+PYDANTIC_AI_NO_BANNER=1 uv run --with 'pydantic-ai-slim[google,anthropic,mcp]==2.64.0' \
+  --env-file /Users/jorge/repos/dfo-ai/.env --package harness python client.py --reps 2 --concurrency 4 --prefix gemini2
+PYDANTIC_AI_NO_BANNER=1 uv run --with 'pydantic-ai-slim[google,anthropic,mcp]==2.64.0' \
+  --env-file /Users/jorge/repos/dfo-ai/.env --package harness python client.py --reps 2 --concurrency 4 \
+  --prefix gemini2-noelicit --no-elicit
 ```
 
-`client.py` skips runs whose log already ended cleanly, so the same command resumes a batch. Score from the worktree root:
+`--model luna --prefix luna2` runs gpt-6-luna the same way, through the relay on :8787. `client.py` skips runs whose log already ended cleanly, so the same command resumes a batch. Score from the worktree root, writing to a new file so the first version's `results.md` stays:
 
 ```
-uv run --package harness python $R/live/score.py --runs 'smoke-*' --runs 'gemini-*' \
-  --baseline $R/live/baseline/run/records.jsonl --out $R/live/results.md
+uv run --package harness python $R/live/score.py --runs 'gemini2-r*' --runs 'gemini2-noelicit-*' \
+  --baseline $R/live/baseline/run/records.jsonl --out $R/live/results-v2.md
 ```
 
-The 20 Gemini runs took 130 s each on average (229 s at most), about 11 minutes at four in flight. The baseline took under 10 minutes at the eval's default of four.
+The first 20 Gemini runs took 130 s each on average (229 s at most), about 11 minutes at four in flight. The baseline took under 10 minutes at the eval's default of four.
 
-## Problems met
+## Problems the first runs met
 
-- Dev's dfo-apis answers 403 to a request without an identity token, so `DFO_APIS_URL` from `.env` (the Cloud Run URL) failed every search, and presentation-mcp could not fetch its release. Both servers take `DFO_APIS_URL=http://localhost:8083`, the gcloud proxy. plan-mcp needs it too: `execute` reads series statistics in its own process through `data_mcp.series_statistics`, which failed `step_result_unusable` against the Cloud Run URL.
-- `serve.py` never resolves the harness's auth policy, so `common.auth.bearer_token()` is `None`, the harness clients send no bearer, and every call to the data-mcp mount answered 401. `serve_live.py` runs `apply_gate` before `serve.build` builds those clients, as `harness.server.create_app` does, and gates plan-mcp with the same token.
-- `uv run --env-file` lets a variable already set win over `.env`, so the servers took `MCP_API_TOKEN=local-dev` while a client process took `.env`'s token and got 401. `rig.py` reads its own `RIG_MCP_TOKEN`, default `local-dev`.
-- `propose_plan` answers `outcome: ok`, `status: draft` when translation hands a requirement back (`requirement_unmeetable`, `pinned_source_not_found`), with no `summary` and no `card`. In 4 runs Gemini proposed again without asking the user and was refused `referral_pending`, which costs a round. The scorer counts such an answer as a refusal, `translation:<kind>`.
-- `referral_pending` carries `action: {"call": "adk_request_input"}` with no candidates. One `record_user_answer` was refused `invalid_arguments` because the client sent a `recommended_spec_id` with no candidates; it retried without one.
-- `run_plan`'s hand-back names frames by plan-mcp's short ids (`fde783e`). The public tools cannot read them: 4 `describe_frame` calls were refused `frame_ref_incomplete` and 2 `request_invalid`, and clients fetched the data again with `get_data` (13 calls after a run) to chart it.
-- A connect timeout to the simulated user's model ended the first batch's task group. `simuser.reply` now retries three times, and a failure ends only its own run.
+- Dev's dfo-apis answers 403 to a request without an identity token, so `DFO_APIS_URL` from `.env` (the Cloud Run URL) failed every search, and presentation-mcp could not fetch its release. Both servers take `DFO_APIS_URL=http://localhost:8083`, the gcloud proxy. plan-mcp needs it too: `execute` reads series statistics in its own process, and `serve.held_identity` reads the registry.
+- `serve.py` never resolves the harness's auth policy, so the harness clients sent no bearer and every call to the data-mcp mount answered 401. `serve_live.py` runs `apply_gate` before `serve.build`, as `harness.server.create_app` does, and gates plan-mcp with the same token.
+- `uv run --env-file` lets a variable already set win over `.env`, so a client process took `.env`'s token and got 401. `rig.py` reads its own `RIG_MCP_TOKEN`, default `local-dev`.
+- A translation referral answered `outcome: ok` with no card, and in 4 runs Gemini proposed again without asking the user and was refused `referral_pending`. It now answers `referred`.
+- `referral_pending` named `adk_request_input`; refusals now name `record_user_answer`.
+- `run_plan`'s hand-back named frames by plan-mcp's short ids, which the public tools refused; clients fetched the data again with `get_data` (13 calls after a run). `run_plan` now returns each frame's pair and, when small, its rows.
+- A connect timeout to the simulated user's model ended the first batch's task group. `simuser.reply` and `simuser.elicit` retry three times, and a failure ends only its own run.
 
 ## What a production version would change
 
-- Approval and answers the server can trust. `run_plan` takes the client's word that the user approved, and `record_user_answer` the client's word for what the user said; one run in 20 wrote its own answer. MCP elicitation where the host supports it, or a token shown in the card and echoed back.
-- One accepted shape. A translation referral should answer `refused` with the referral as its detail, so `outcome: ok` always means a ready plan with a card.
-- Frames the public tools can read. The hand-back should carry `spec_id` and `content_version`, so a client charts the run's frames without fetching them again.
-- Fewer tokens per request. Each Gemini request carried about 43,500 input tokens, most of them the tool declarations (`propose_plan` alone is 35,167 characters) and the guidance in `start_plan`'s answer, re-sent on every request. A client host with a prompt cache pays mostly for cached tokens (87% here); one without pays it all.
+- Fewer tokens per request. Each Gemini request carried about 43,500 input tokens, most of them the tool declarations and the guidance in `start_plan`'s answer, re-sent on every request. The second version cuts what is read before the first proposal from 63,556 characters to 58,452; `propose_plan`'s descriptions (about 17,000 characters) and the planner's instruction (20,141) are the rest.
 - Tasks that match today's search: `sum-oda-oof-ethiopia` no longer draws `combination_unasked`, so the eval scores both arms wrong for a plan that answers the question.
+- The rest is in `../NOTES.md`.
 
 ## Not covered
 
-- Claude-side clients: `TESTER.md` is written, and no tester has run.
+- The second version against live clients: the rig is ready and has not run.
 - Periods beyond what `entry.period_reductions` reads, units, and the reply's figures: right means kinds and years only, and no figure in a reply was checked against the data.
 - The planner baseline replays recorded searches; the client searched live, so the two arms planned over different readings.
-- One client model and two repetitions per task; the spread between the two runs of a task (3 and 5 rounds on `aggregate-total-oda-kenya`) says more repetitions are needed before reading a difference of a round.
+- Two repetitions per task; the spread between the two runs of a task (3 and 5 rounds on `aggregate-total-oda-kenya`) says more repetitions are needed before reading a difference of a round.

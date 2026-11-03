@@ -11,6 +11,12 @@ the conversation once the client has answered or stopped.
 Caps per run: 40 tool calls and 12 `propose_plan` calls. Reaching one ends the
 run, logged as `cap`.
 
+Both toolsets declare MCP elicitation (Pydantic AI's `elicitation_handler`) and
+every call carries the same handler (`rig.simulated_user`), so plan-mcp asks the
+simulated user its questions and the plan card directly; `--no-elicit` runs the
+client as a host without elicitation, where the model relays both. A tool whose
+`_meta` says `strict: false` is declared to the model non-strict.
+
     uv run --with 'pydantic-ai-slim[google,anthropic,mcp]==2.64.0' --env-file .env \
         --package harness python client.py --reps 2 --concurrency 4
 
@@ -24,7 +30,7 @@ import argparse
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import simuser
@@ -33,8 +39,9 @@ from pydantic_ai.mcp import CallToolFunc, MCPToolset
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage, UsageLimits
-from rig import SERVERS, TOKEN, RunLog, call_tool, caller_for
+from rig import SERVERS, TOKEN, RunLog, call_tool, caller_for, simulated_user
 from tasks import SAMPLE
 
 CLIENT_MODELS = ("gemini", "luna")
@@ -71,8 +78,11 @@ class Counters:
     proposals: int = 0
 
 
-def toolset(server: str, *, run: str, counters: Counters, model: str) -> MCPToolset:
-    """`server` as an `MCPToolset` whose calls go through `rig.call_tool` under the caps."""
+def toolset(
+    server: str, *, run: str, counters: Counters, model: str, elicitation: Any = None
+) -> MCPToolset:
+    """`server` as an `MCPToolset` whose calls go through `rig.call_tool` under the caps,
+    with `elicitation` answering what the server asks the user."""
 
     async def process(
         ctx: RunContext[Any], call: CallToolFunc, name: str, args: dict[str, Any]
@@ -84,7 +94,9 @@ def toolset(server: str, *, run: str, counters: Counters, model: str) -> MCPTool
             raise CapReachedError(f"{MAX_PROPOSALS} proposals")
         counters.tool_calls += 1
         counters.proposals += name == "propose_plan"
-        return await call_tool(server=server, tool=name, args=args, run=run, client=model)
+        return await call_tool(
+            server=server, tool=name, args=args, run=run, client=model, elicitation=elicitation
+        )
 
     return MCPToolset(
         SERVERS[server],
@@ -93,7 +105,19 @@ def toolset(server: str, *, run: str, counters: Counters, model: str) -> MCPTool
         headers={"x-dfo-caller": caller_for(run)},
         process_tool_call=process,
         read_timeout=300,
+        elicitation_handler=elicitation,
     )
+
+
+async def not_strict(ctx: RunContext[Any], tools: list[ToolDefinition]) -> list[ToolDefinition]:
+    """Each tool whose MCP `_meta` says `strict: false`, declared non-strict."""
+    del ctx
+    return [
+        replace(tool, strict=False)
+        if ((tool.metadata or {}).get("meta") or {}).get("strict") is False
+        else tool
+        for tool in tools
+    ]
 
 
 def usage_dict(usage: RunUsage) -> dict[str, int]:
@@ -107,23 +131,41 @@ def usage_dict(usage: RunUsage) -> dict[str, int]:
     }
 
 
-async def run_task(task_id: str, rep: int, *, prefix: str, model: str) -> dict[str, Any]:
-    """One conversation on `task_id`, logged to `runs/<prefix>-<task>-r<rep>.jsonl`."""
+async def run_task(
+    task_id: str, rep: int, *, prefix: str, model: str, elicit: bool = True
+) -> dict[str, Any]:
+    """One conversation on `task_id`, logged to `runs/<prefix>-<task>-r<rep>.jsonl`.
+    With `elicit`, plan-mcp asks the simulated user directly."""
     run = f"{prefix}-{task_id}-r{rep}"
     log = RunLog(run)
     log.path.unlink(missing_ok=True)
     counters = Counters()
     model_name, agent_model = client_model(model)
+    turns: list[tuple[str, str]] = []
+    elicitation = (
+        simulated_user(task_id, run, lambda: turns, lambda who, text: turns.append((who, text)))
+        if elicit
+        else None
+    )
     client = Agent(
         agent_model,
         instructions=CLIENT_INSTRUCTION,
         toolsets=[
-            toolset(name, run=run, counters=counters, model=model) for name in ("dfo", "plan")
+            toolset(name, run=run, counters=counters, model=model, elicitation=elicitation)
+            for name in ("dfo", "plan")
         ],
+        prepare_tools=not_strict,
     )
-    log.write({"type": "start", "task": task_id, "rep": rep, "client_model": model_name})
+    log.write(
+        {
+            "type": "start",
+            "task": task_id,
+            "rep": rep,
+            "client_model": model_name,
+            "elicits": elicit,
+        }
+    )
     started = time.monotonic()
-    turns: list[tuple[str, str]] = []
     history: list[Any] = []
     total = RunUsage()
     message = simuser.opening(task_id)
@@ -193,6 +235,7 @@ async def main() -> None:
     parser.add_argument("--only", help="comma-separated task ids; default the sample")
     parser.add_argument("--model", choices=CLIENT_MODELS, default="gemini")
     parser.add_argument("--prefix", default="gemini")
+    parser.add_argument("--no-elicit", action="store_true", help="a host without elicitation")
     args = parser.parse_args()
     tasks = args.only.split(",") if args.only else list(SAMPLE)
     gate = asyncio.Semaphore(args.concurrency)
@@ -200,7 +243,15 @@ async def main() -> None:
     async def one(task_id: str, rep: int) -> None:
         async with gate:
             print(
-                json.dumps(await run_task(task_id, rep, prefix=args.prefix, model=args.model)),
+                json.dumps(
+                    await run_task(
+                        task_id,
+                        rep,
+                        prefix=args.prefix,
+                        model=args.model,
+                        elicit=not args.no_elicit,
+                    )
+                ),
                 flush=True,
             )
 

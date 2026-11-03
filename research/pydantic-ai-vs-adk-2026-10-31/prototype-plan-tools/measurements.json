@@ -3,33 +3,37 @@
     "declarations": [
       {
         "name": "start_plan",
-        "description": 1300,
-        "input_schema": 2288,
-        "chars": 3598
+        "description": 270,
+        "input_schema": 2062,
+        "full_schema": 2299,
+        "chars": 2342
       },
       {
         "name": "propose_plan",
         "description": 239,
-        "input_schema": 34916,
-        "chars": 35167
+        "input_schema": 31959,
+        "full_schema": 35515,
+        "chars": 32210
       },
       {
         "name": "record_user_answer",
-        "description": 109,
-        "input_schema": 1292,
-        "chars": 1419
+        "description": 263,
+        "input_schema": 660,
+        "full_schema": 939,
+        "chars": 941
       },
       {
         "name": "run_plan",
-        "description": 385,
-        "input_schema": 395,
-        "chars": 788
+        "description": 275,
+        "input_schema": 461,
+        "full_schema": 473,
+        "chars": 744
       }
     ],
     "guidance": {
       "name": "start_plan guidance",
-      "chars": 20829,
-      "tokens": 5207
+      "chars": 20460,
+      "tokens": 5115
     },
     "planner_message": {
       "median": 1755,
@@ -37,6 +41,11 @@
       "min": 1223
     },
     "before_first_proposal": {
+      "name": "total, median task",
+      "chars": 58452,
+      "tokens": 14613
+    },
+    "first_version_before_first_proposal": {
       "name": "total, median task",
       "chars": 63556,
       "tokens": 15889
@@ -75,10 +84,9 @@
         ]
       },
       "openai_strict": {
-        "faults": 8,
+        "faults": 6,
         "kinds": [
           "additionalProperties is not false",
-          "default",
           "optional properties"
         ]
       }
@@ -89,24 +97,15 @@
         "kinds": []
       },
       "anthropic_strict": {
-        "faults": 106,
+        "faults": 39,
         "kinds": [
-          "additionalProperties is not false",
-          "exclusiveMaximum",
-          "maxItems",
-          "maxLength",
-          "maximum",
-          "minLength",
-          "minimum"
+          "additionalProperties is not false"
         ]
       },
       "openai_strict": {
-        "faults": 102,
+        "faults": 73,
         "kinds": [
           "additionalProperties is not false",
-          "default",
-          "maxLength",
-          "minLength",
           "optional properties"
         ]
       }
@@ -117,16 +116,15 @@
         "kinds": []
       },
       "anthropic_strict": {
-        "faults": 3,
+        "faults": 4,
         "kinds": [
           "additionalProperties is not false"
         ]
       },
       "openai_strict": {
-        "faults": 8,
+        "faults": 5,
         "kinds": [
           "additionalProperties is not false",
-          "default",
           "optional properties"
         ]
       }
@@ -137,13 +135,15 @@
         "kinds": []
       },
       "anthropic_strict": {
-        "faults": 0,
-        "kinds": []
+        "faults": 1,
+        "kinds": [
+          "additionalProperties is not false"
+        ]
       },
       "openai_strict": {
         "faults": 2,
         "kinds": [
-          "default",
+          "additionalProperties is not false",
           "optional properties"
         ]
       }

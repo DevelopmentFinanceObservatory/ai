@@ -1,5 +1,7 @@
-"""P2: refused drafts answer the same `outcome`, `code` and `action` through plan-mcp
-as through the planner's own `propose_plan` on dev's planner entry.
+"""P2: refused drafts answer through plan-mcp as the planner's own `propose_plan`
+answers them on dev's planner entry, as `outward.outward` words them for an outside
+model: the ask tool named `record_user_answer`, a referral answered `referred`, and
+`expected` added to an `invalid_plan` refusal.
 
 The recorded refused drafts are the planner-entry payloads marked
 `first_proposal_refusal`. Each mutated draft breaks one task's reference payload
@@ -22,6 +24,7 @@ from typing import Any
 import pytest
 from checks import dev_first_run, mcp_first_answer, refusal_faults
 from entry import Task, load_tasks, quiet_logs
+from outward import outward
 from validate import task_payloads
 
 TASKS = {task.id: task for task in load_tasks()}
@@ -102,13 +105,13 @@ async def test_p2_a_refused_draft_answers_as_the_planner_answers_it(
 ) -> None:
     task = TASKS[task_id]
     dev, _ = await dev_first_run(task, body)
-    mine = await mcp_first_answer(task, body)
+    mine, schema = await mcp_first_answer(task, body)
     print(
         f"P2 {task_id} {label}: {dev.get('outcome')}/{dev.get('code')} action={dev.get('action')}"
     )
     assert dev.get("outcome") != "ok"
-    assert refusal_faults(mine, dev) == []
-    assert mine == dev
+    assert refusal_faults(mine, outward(dev, schema=schema)) == []
+    assert mine == outward(dev, schema=schema)
 
 
 def test_p2_control_the_comparison_catches_a_changed_code() -> None:
@@ -136,11 +139,11 @@ async def test_p2_the_drc_drafts_answer_as_the_planner_answers_them(version: str
     recording = {"searches": [], "tools": {}, "translation": None}
     task = _drc_task()
     dev, dev_translation = await dev_first_run(task, DRC[version], recording=recording)
-    mine = await mcp_first_answer(task, DRC[version], recording=recording)
+    mine, schema = await mcp_first_answer(task, DRC[version], recording=recording)
     print(f"P2 DRC {version}: {mine.get('outcome')}/{mine.get('code')}")
     if dev_translation is None:
         assert dev.get("outcome") != "ok"
-        assert mine == dev
+        assert mine == outward(dev, schema=schema)
     else:
-        assert mine["outcome"] == "ok"
+        assert mine["outcome"] in ("ok", "referred")
         assert mine["translation"] == dev_translation

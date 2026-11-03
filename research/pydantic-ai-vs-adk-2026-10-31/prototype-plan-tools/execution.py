@@ -5,7 +5,9 @@ builds them, wired `execute` to `plan_done` on the `"ok"` route, and runs them
 under an ADK `Runner` on a session seeded from the plan session's state with the
 approved plan under the graph's `plan` key. What `plan_done` yields is the
 `AgentHandBack` dev's `orchestrate` node answers the orchestrator's `plan` call
-with (`_call_result`); the run answers its `response()`.
+with (`_call_result`); the run answers its `response()`, and the frames
+`plan_done` registered (`ORCHESTRATOR_FRAMES_KEY`), each with the pair it is
+described by and the pair the materialisation store holds it under.
 
 An `execute` that routes `"replan"`, a refusal the planner would draft again
 for, ends the run with that refusal, for the outside model to propose again.
@@ -30,6 +32,7 @@ from harness.graph.execute import execute_node
 from harness.graph.orchestrate import AgentHandBack
 from harness.graph.plan_done import plan_done_node
 from harness.graph.seams import Executor
+from harness.graph.state import ORCHESTRATOR_FRAMES_KEY
 from plan_tools import PlanSession
 from planner.plan import Plan
 
@@ -88,7 +91,11 @@ def dev_run_graph(
             current_conversation_id.reset(token)
         if "plan_done" in outputs:
             hand_back = AgentHandBack.model_validate(outputs["plan_done"][0])
-            return {"status": "finished", "hand_back": hand_back.response()}
+            ended = await sessions.get_session(
+                app_name=_APP, user_id=graph_session.user_id, session_id=graph_session.id
+            )
+            frames = dict((ended.state if ended else {}).get(ORCHESTRATOR_FRAMES_KEY) or {})
+            return {"status": "finished", "hand_back": hand_back.response(), "frames": frames}
         output, routed = outputs.get("execute", (None, None))
         return {"status": "replan" if routed == "replan" else "stopped", "execute": output}
 

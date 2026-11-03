@@ -1,5 +1,8 @@
 """One task end to end by hand, with its reference plan: public `search`,
-`start_plan`, `propose_plan`, `run_plan`. Writes `runs/smoke-<task>.jsonl`.
+`start_plan` with the spec_ids it returned, `propose_plan` with the reference
+plan (its one dataset pinned to the one spec_id, when it has one), and
+`run_plan` approved on the client's word. Writes
+`runs/smoke-<task>.jsonl`.
 
     python smoke.py series-gdp-ghana
 """
@@ -8,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 
 from rig import RunLog, call_tool
@@ -24,27 +28,27 @@ async def smoke(task_id: str) -> None:
         print(f"--- {tool}\n{seen[:1200]}\n")
         return seen
 
+    spec_ids: list[str] = []
     for search in task["searches"]:
-        await call("dfo", "search", {"parts": search["parts"]})
+        seen = await call("dfo", "search", {"parts": search["parts"]})
+        spec_ids += re.findall(r"\[(spec_[0-9a-f]{32})\]", seen)
     opened = json.loads(
         await call(
             "plan",
             "start_plan",
-            {
-                "brief": task["brief"],
-                "asks": task["asks"],
-                "searches": [{"query": s["query"], "parts": s["parts"]} for s in task["searches"]],
-            },
+            {"brief": task["brief"], "asks": task["asks"], "spec_ids": spec_ids},
         )
     )
     session = opened["plan_session"]
-    proposed = json.loads(
-        await call("plan", "propose_plan", {"plan_session": session, **task["reference_payload"]})
-    )
+    body = json.loads(json.dumps(task["reference_payload"]))
+    datasets = [r for r in body["evidence_requirements"] if r["kind"] == "dataset"]
+    if len(datasets) == 1 and len(spec_ids) == 1:
+        datasets[0]["source_spec_id"] = spec_ids[0]
+    proposed = json.loads(await call("plan", "propose_plan", {"plan_session": session, **body}))
     await call(
         "plan",
         "run_plan",
-        {"plan_session": session, "version": proposed["version"], "wait_s": 40},
+        {"plan_session": session, "version": proposed["version"], "approved": True, "wait_s": 40},
     )
 
 

@@ -1,11 +1,14 @@
 """Call any tool on DFO's public `/mcp` or on plan-mcp and print what a model sees.
 
     dfo tools <dfo|plan> [--schemas]
-    dfo call <dfo|plan> <tool> '<json args>' --run <run>
+    dfo call <dfo|plan> <tool> '<json args>' --run <run> [--no-elicit]
     dfo calls --run <run>
 
 One call per process. Every call of a run sends the run's own `x-dfo-caller`,
-and is appended with its result to `runs/<run>.jsonl`. `calls` prints how many
+and is appended with its result to `runs/<run>.jsonl`. A call declares MCP
+elicitation, so plan-mcp asks the run's simulated user (`simuser`) its questions
+and the plan card directly, unless `--no-elicit` says the host cannot; the
+exchange is logged beside the run's own turns. `calls` prints how many
 tool calls the run has made. A run stops at 40 tool calls and 12 `propose_plan`
 calls: a call past either cap is refused without reaching the server.
 """
@@ -18,7 +21,8 @@ import json
 import sys
 
 from fastmcp import Client
-from rig import SERVERS, RunLog, call_tool, caller_for, transport
+from rig import SERVERS, RunLog, call_tool, caller_for, simulated_user, transport
+from user_cli import turns
 
 
 async def list_tools(server: str, *, schemas: bool) -> str:
@@ -66,6 +70,7 @@ def main() -> int:
     call.add_argument("tool")
     call.add_argument("args", nargs="?", default="{}")
     call.add_argument("--run", required=True)
+    call.add_argument("--no-elicit", action="store_true", help="declare no elicitation")
     calls = sub.add_parser("calls")
     calls.add_argument("--run", required=True)
     args = parser.parse_args()
@@ -83,8 +88,19 @@ def main() -> int:
     if cap := cap_reached(args.run, args.tool):
         print(f"cap reached: this run has made {cap}; no more calls. End the run.")
         return 3
+    elicitation = None
+    if not args.no_elicit:
+        task, _, _ = turns(args.run)
+        elicitation = simulated_user(task, args.run, lambda: turns(args.run)[1])
     seen = asyncio.run(
-        call_tool(server=args.server, tool=args.tool, args=arguments, run=args.run, client="cli")
+        call_tool(
+            server=args.server,
+            tool=args.tool,
+            args=arguments,
+            run=args.run,
+            client="cli",
+            elicitation=elicitation,
+        )
     )
     print(seen)
     return 0
