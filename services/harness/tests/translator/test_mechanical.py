@@ -847,7 +847,7 @@ async def test_a_surface_that_cannot_be_listed_refers_the_plan_as_transient(
     draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
 ) -> None:
     async def list_tools() -> list[Any]:
-        raise ToolSurfaceUnavailableError("data-mcp did not answer")
+        raise ToolSurfaceUnavailableError("data-mcp did not answer", retryable=True)
 
     core = dataclasses.replace(_compile_failure_core(core, []), list_tools=list_tools)
 

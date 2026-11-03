@@ -935,7 +935,9 @@ async def test_a_render_refusal_keeps_dfo_apis_code_and_a_failure_is_upstream_un
 async def test_a_tool_call_that_does_not_complete_is_upstream_unavailable(
     apis: RecordedApis,
 ) -> None:
-    replayer = Replayer(apis, ToolSurfaceUnavailableError("analysis-mcp did not answer"))
+    replayer = Replayer(
+        apis, ToolSurfaceUnavailableError("analysis-mcp did not answer", retryable=True)
+    )
     async with client_of(service_over(apis, replayer)) as client:
         response = await refresh(client)
 

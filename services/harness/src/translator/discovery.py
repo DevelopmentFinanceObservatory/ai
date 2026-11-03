@@ -2196,7 +2196,13 @@ async def call_within_entry(
 
 
 class NoTimeLeftError(ToolSurfaceUnavailableError):
-    """A call `call_within_entry` never issued, the planner entry having no time left for it."""
+    """A call `call_within_entry` never issued, the planner entry having no time left for it.
+
+    A later entry has its own time, so it is always retryable.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=True)
 
 
 def _no_time_left(tool: ToolId) -> NoTimeLeftError:
@@ -2207,7 +2213,8 @@ def _no_time_left(tool: ToolId) -> NoTimeLeftError:
 
 def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
     return ToolSurfaceUnavailableError(
-        f"{tool.name!r} did not answer in the {time_left:.0f} s the planner entry had left"
+        f"{tool.name!r} did not answer in the {time_left:.0f} s the planner entry had left",
+        retryable=True,
     )
 
 

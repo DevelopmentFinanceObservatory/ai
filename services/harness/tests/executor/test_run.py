@@ -292,7 +292,9 @@ async def test_a_transport_failure_on_get_data_is_not_retried(
     # (services/data-mcp/src/data_mcp/get_data_tool.py:715-733): a transport
     # failure on it stops the run after one attempt, not
     # `MAX_ATTEMPTS_PER_STEP`.
-    surface = _surface(real_schemas, manifest(), get_data=[ToolSurfaceUnavailableError("gone")])
+    surface = _surface(
+        real_schemas, manifest(), get_data=[ToolSurfaceUnavailableError("gone", retryable=True)]
+    )
 
     outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
 
@@ -311,7 +313,7 @@ async def test_a_transport_failure_on_a_retryable_tool_is_retried_and_the_run_go
     surface = _surface(
         real_schemas,
         manifest(),
-        aggregate=[ToolSurfaceUnavailableError("gone"), ok(RESULT_FRAME)],
+        aggregate=[ToolSurfaceUnavailableError("gone", retryable=True), ok(RESULT_FRAME)],
     )
 
     outcome = await _run(approved_plan(), surface=surface, sleep=sleeps)
@@ -324,7 +326,9 @@ async def test_a_transport_failure_on_a_retryable_tool_is_retried_and_the_run_go
 async def test_a_transport_that_never_answers_stops_the_run_after_the_last_attempt(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
-    surface = _surface(real_schemas, manifest(), aggregate=[ToolSurfaceUnavailableError("gone")])
+    surface = _surface(
+        real_schemas, manifest(), aggregate=[ToolSurfaceUnavailableError("gone", retryable=True)]
+    )
 
     outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
 
@@ -1336,7 +1340,7 @@ async def test_an_unreadable_surface_stops_the_run_before_any_call(
 ) -> None:
     class Unreadable(ScriptedSurface):
         async def list_tools(self) -> list[ToolSchema]:
-            raise ToolSurfaceUnavailableError("could not read the tool surface")
+            raise ToolSurfaceUnavailableError("could not read the tool surface", retryable=True)
 
     surface = Unreadable(schemas=real_schemas, responses={})
 
@@ -1634,7 +1638,7 @@ async def test_a_refusal_on_one_of_two_concurrent_retrievals_names_the_sibling_t
             schemas=real_schemas,
             responses={
                 "get_data": [
-                    ToolSurfaceUnavailableError("debt's connection dropped"),
+                    ToolSurfaceUnavailableError("debt's connection dropped", retryable=True),
                     ok(manifest_for(population_source())),
                 ],
                 "aggregate": [ok(RESULT_FRAME)],

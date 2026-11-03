@@ -237,7 +237,7 @@ async def _refused_for_now() -> Any:
 
 
 async def _cut() -> Any:
-    raise ToolSurfaceUnavailableError("search timed out")
+    raise ToolSurfaceUnavailableError("search timed out", retryable=True)
 
 
 async def _broken() -> Any:

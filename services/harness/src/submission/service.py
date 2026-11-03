@@ -3536,9 +3536,9 @@ def _first_year_refusal(
     pin = refused.spec_id
     if pin is None:
         return _no_source_on_record(requirement_id, None, cause=None)
-    recorded, cause = identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup)
-    if recorded is None:
-        return _no_source_on_record(requirement_id, pin, cause=cause)
+    on_record = identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup)
+    if on_record.definition is None:
+        return _no_source_on_record(requirement_id, pin, cause=on_record.reason)
     history = _first_year_on_record(pin, shown=shown, read=read)
     if history is None and pin in read:
         return RollingPlanError(
@@ -3768,10 +3768,11 @@ def _window_pins(
         pin = requirement.source_spec_id
         if pin is None or requirement.id in narrowed:
             continue
-        recorded, cause = identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup)
+        on_record = identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup)
+        recorded = on_record.definition
         if recorded is None:
             if requirement.period_end_open:
-                raise _no_source_on_record(requirement.id, pin, cause=cause)
+                raise _no_source_on_record(requirement.id, pin, cause=on_record.reason)
             # The pin keeps its own window. The translator honours its block
             # where that covers the requirement's period, and searches otherwise.
             logger.debug(

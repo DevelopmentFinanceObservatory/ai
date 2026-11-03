@@ -6228,11 +6228,23 @@ class _ShownDefinition(NamedTuple):
     resolved_sources: tuple[ResolvedSourceMention, ...] = ()
 
 
-def shown_definition(spec_id: str, block: Mapping[str, Any]) -> _ShownDefinition | str | None:
+class DefinitionOnRecord(NamedTuple):
+    """Whether a dataset's definition can be put on record, and if not, why.
+
+    `definition` is the definition on record. `reason` says why none is when
+    a block carries a definition that cannot be put on record. Both are
+    `None` when no definition is on record and none is refused.
+    """
+
+    definition: RecordedDefinition | None = None
+    reason: str | None = None
+
+
+def shown_definition(spec_id: str, block: Mapping[str, Any]) -> DefinitionOnRecord:
     """The definition `block`, a spec block for `spec_id`, puts on record.
 
-    `None` when the block carries no definition. The reason, a `str`, when
-    it carries one that cannot be put on record: data-mcp's refusal
+    Neither field is set when the block carries no definition. `reason` is
+    set when it carries one that cannot be put on record: data-mcp's refusal
     (`caller_definition`: it does not hash to `spec_id`, has no RFC 8785
     form, or its compact JSON is past `MAX_IDENTITY_BYTES`;
     `harness.studio_state._turn_identities` leaves such an identity off the
@@ -6241,16 +6253,16 @@ def shown_definition(spec_id: str, block: Mapping[str, Any]) -> _ShownDefinition
     """
     identity = block_identity(block)
     if identity is None:
-        return None
+        return DefinitionOnRecord()
     try:
         caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": identity})
     except (IdentityMismatch, IdentityUnusable) as exc:
-        return str(exc)
+        return DefinitionOnRecord(reason=str(exc))
     try:
         source = source_from_spec_block(block)
     except ValueError:
-        return "its named sets cannot be read"
-    return _ShownDefinition(identity, source.groups, source.resolved_sources)
+        return DefinitionOnRecord(reason="its named sets cannot be read")
+    return DefinitionOnRecord(_ShownDefinition(identity, source.groups, source.resolved_sources))
 
 
 def identity_or_refusal(
@@ -6258,7 +6270,7 @@ def identity_or_refusal(
     *,
     shown: Mapping[str, PinSource],
     definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
-) -> tuple[RecordedDefinition | None, str | None]:
+) -> DefinitionOnRecord:
     """The definition on record for `pin`, and why none is when `pin`'s block in `shown` carries one that cannot be.
 
     The definition is the one a search in the conversation recorded
@@ -6280,12 +6292,9 @@ def identity_or_refusal(
     if recorded is None and definition_lookup is not None:
         recorded = definition_lookup(pin)
     if recorded is not None or pin not in shown:
-        return recorded, None
+        return DefinitionOnRecord(recorded)
     block = shown[pin].spec_block(pin)
-    shown_as = shown_definition(pin, block) if block is not None else None
-    if isinstance(shown_as, str):
-        return None, shown_as
-    return shown_as, None
+    return shown_definition(pin, block) if block is not None else DefinitionOnRecord()
 
 
 def identity_on_record(
@@ -6299,7 +6308,7 @@ def identity_on_record(
     A shown block that cannot be put on record, or is not readable as a
     source (`compiler.sources.source_from_spec_block`), puts none on record.
     """
-    return identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup)[0]
+    return identity_or_refusal(pin, shown=shown, definition_lookup=definition_lookup).definition
 
 
 # The seconds a discovery call made now may take inside a planner entry. That is

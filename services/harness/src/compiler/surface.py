@@ -218,7 +218,7 @@ class ToolSurfaceUnavailableError(RuntimeError):
     complete.
 
     `retryable` is the raise site's verdict on whether a later attempt can
-    succeed: `True` for a call that was cut off or never issued for lack of
+    succeed, which every site states: `True` for a call that was cut off or never issued for lack of
     time, a connection that closed, a timeout, or a session that ended under
     the call (`retryable_call_failure`); `False` for a failure no retry
     changes, such as a server this surface does not cover. A site whose
@@ -226,7 +226,7 @@ class ToolSurfaceUnavailableError(RuntimeError):
     (`harness.studio_translate._transient_fault` walks `__cause__`).
     """
 
-    def __init__(self, message: str, *, retryable: bool = True) -> None:
+    def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message)
         self.retryable = retryable
 
@@ -236,7 +236,7 @@ class ToolSurfaceUnavailableError(RuntimeError):
 TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
 
 # Raised by `fastmcp.client.client.Client._await_with_session_monitoring`
-# (fastmcp 3) as a bare `RuntimeError` when the MCP session's task ends
+# (fastmcp 4) as a bare `RuntimeError` when the MCP session's task ends
 # without an exception while a call waits on it: the server closed the
 # stream. fastmcp offers no other signal: the error has no type of its own,
 # `Client.is_connected()` stays true until the client exits, and the session
@@ -246,7 +246,7 @@ TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
 _FASTMCP_SESSION_ENDED = "Session task completed unexpectedly"
 
 
-def retryable_call_failure(exc: Exception) -> bool:
+def retryable_call_failure(exc: BaseException) -> bool:
     """Whether `exc`, raised by a fastmcp `Client` call, is a failure the same
     call may not meet again: an MCP error whose connection closed or whose
     request timed out (`TRANSIENT_MCP_CODES`), a `TimeoutError`, or the

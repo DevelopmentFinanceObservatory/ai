@@ -4668,7 +4668,7 @@ class UnreachableSurface(FakeSurface):
 
     async def call_tool(self, *, tool, arguments, on_progress=None) -> ToolCallResult:
         self.calls.append((tool, arguments))
-        raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s")
+        raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s", retryable=True)
 
 
 @pytest.mark.parametrize(
@@ -4707,7 +4707,7 @@ class ByToolSurface(FakeSurface):
         self.calls.append((tool, arguments))
         result = self.results[tool.name]
         if result is None:
-            raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s")
+            raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s", retryable=True)
         return result
 
 

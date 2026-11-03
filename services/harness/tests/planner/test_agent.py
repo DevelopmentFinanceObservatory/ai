@@ -240,7 +240,6 @@ from translator.referral import (
     Referral,
     ReferralKind,
     StalePin,
-    clear_referral,
     load_referral,
     save_referral,
 )
@@ -399,6 +398,14 @@ def _ask_response(call_id: str, body: dict[str, Any]) -> Any:
     response = SimpleNamespace(id=call_id, name=PLANNER_ASK, response=body)
     part = SimpleNamespace(function_call=None, function_response=response)
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
+
+
+def _event_of(*events: Any) -> Any:
+    """One session event carrying the parts of `events`, as ADK writes the calls of one
+    model response, or the responses of its tools, together."""
+    return SimpleNamespace(
+        content=SimpleNamespace(parts=[part for event in events for part in event.content.parts])
+    )
 
 
 def _ask_answered_events(
@@ -2075,6 +2082,34 @@ def test_a_refused_combination_ask_leaves_the_refusal_for_the_next_ask() -> None
             _ask_response("ask-2", {"result": {"spec_id": COMBINE_OPTION}}),
         ]
     )
+
+    picks, declined = CallSession(AdkCall(ctx)).combination_picks()
+
+    assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
+    assert declined is False
+
+
+def test_a_response_of_refused_asks_leaves_the_combination_refusal_for_the_next_ask() -> None:
+    """The model asks twice in one response and the tool refuses both (the second as an ask
+    beside another). Neither reached the user, so the refusal binds the ask of the next
+    response, and the user's pick of adding the two stands for the sum."""
+    refused_body = {
+        "outcome": Outcome.INVALID_INPUT.value,
+        "code": ProblemCode.INVALID_ARGUMENTS.value,
+        "message": "m",
+    }
+    (refusal, first) = _combination_asked(call_id="ask-1")
+    (second,) = _combination_asked(about=None, call_id="ask-2")
+    third, answer = _combination_asked({"spec_id": COMBINE_OPTION}, about=None, call_id="ask-3")
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        refusal,
+        _event_of(first, second),
+        _event_of(_ask_response("ask-1", refused_body), _ask_response("ask-2", refused_body)),
+        third,
+        _ask_response("ask-3", dict(ASK_ACCEPTED)),
+        answer,
+    ]
 
     picks, declined = CallSession(AdkCall(ctx)).combination_picks()
 
@@ -12936,6 +12971,45 @@ def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> No
     assert prices_chosen(AdkCall(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
 
 
+def test_a_response_of_refused_asks_leaves_the_prices_refusal_for_the_next_ask() -> None:
+    """The model asks twice in one response and the tool refuses both. Neither reached the
+    user, so the prices refusal binds the ask of the next response, and the user's pick of
+    current prices is held."""
+    refused_body = {"outcome": Outcome.INVALID_INPUT.value, "message": "m"}
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        *_prices_ask_events(),
+        _prices_refused_event(_GROSS, asks_user=True),
+        _event_of(_prices_options_ask("ask-1"), _prices_options_ask("ask-2")),
+        _event_of(_ask_response("ask-1", refused_body), _ask_response("ask-2", refused_body)),
+        _prices_options_ask("ask-3"),
+        _ask_response("ask-3", dict(ASK_ACCEPTED)),
+        _ask_response("ask-3", {"result": {"spec_id": "prices:current"}}),
+    ]
+
+    assert prices_chosen(AdkCall(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
+
+
+def test_a_refused_ask_beside_a_plan_that_clears_the_prices_refusal_leaves_it_cleared() -> None:
+    """`propose_plan` and an ask the tool refuses come in one response. The plan landing
+    clears the prices refusal, and the refused ask, which reached nobody, restores nothing,
+    so the answer to a later ask offering `PRICES_OPTIONS` binds to no part."""
+    ctx = _FakeToolContext()
+    ctx.session.events = [
+        _prices_refused_event(_GROSS, asks_user=True),
+        _prices_options_ask("ask-1"),
+        _event_of(
+            _LANDED,
+            _ask_response("ask-1", {"outcome": Outcome.INVALID_INPUT.value, "message": "m"}),
+        ),
+        _prices_options_ask("ask-2"),
+        _ask_response("ask-2", dict(ASK_ACCEPTED)),
+        _ask_response("ask-2", {"result": {"spec_id": "prices:current"}}),
+    ]
+
+    assert prices_chosen(AdkCall(ctx)) == {}
+
+
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
     """A prices refusal sent the planner to the user, and the user then typed
     a message, which releases every choice. A later ask offering
@@ -16668,7 +16742,9 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
             [dataset.id],
         )
         if block is not None:
-            _, cause = identity_or_refusal(pin, shown={pin: PinSource(block=block, settled=True)})
+            cause = identity_or_refusal(
+                pin, shown={pin: PinSource(block=block, settled=True)}
+            ).reason
             assert cause is not None
             assert cause in result["message"]
         return
@@ -18154,17 +18230,19 @@ def _assert_asked(result: Any, ctx: Any) -> None:
     assert ctx.actions.skip_summarization is True
 
 
+@pytest.mark.parametrize("second_runs_first", [False, True], ids=["in-order", "second-first"])
 @pytest.mark.parametrize(
     "first_accepted",
     [False, True],
     ids=["first-refused-then-the-referral-cleared", "first-accepted"],
 )
-def test_an_ask_beside_another_reads_the_outcome_of_the_earlier_ask(first_accepted: bool) -> None:
-    """[ask, propose_plan, ask] in one response. The first ask is refused under the
-    pending entity referral (it offers no pick of it), then `propose_plan` clears the
-    referral. The second is the one question that reaches the user: judging the first
-    afresh against the cleared referral would find it acceptable and refuse the second,
-    and neither would be asked. An accepted first ask still refuses the second."""
+def test_an_ask_after_the_first_ask_of_a_response_is_refused(
+    first_accepted: bool, second_runs_first: bool
+) -> None:
+    """[ask, propose_plan, ask] in one response. The first ask is accepted, or refused under
+    the pending entity referral (it offers no pick of it). The second ask is refused either way and whichever of the two runs first:
+    the model's call list names the first, so the response puts at most one question to the
+    user and the model asks the second in its next response."""
     ctx: Any = _FakeToolContext()
     reading = _congo_both_ends(_CONGO_REQUIREMENT)
     save_referral(ctx.state, reading)
@@ -18185,18 +18263,26 @@ def test_an_ask_beside_another_reads_the_outcome_of_the_earlier_ask(first_accept
             ]
         )
     )
-    ctx.function_call_id = "first"
-    first = ask_user_question(cast(Any, ctx), **first_args)
+
+    def ask_first() -> dict[str, object]:
+        ctx.function_call_id = "first"
+        return ask_user_question(cast(Any, ctx), **first_args)
+
+    def ask_second() -> dict[str, object]:
+        ctx.function_call_id = "second"
+        return ask_user_question(cast(Any, ctx), message="Which years?")
+
+    if second_runs_first:
+        second = ask_second()
+        first = ask_first()
+    else:
+        first = ask_first()
+        second = ask_second()
+
     assert (first == ASK_ACCEPTED) is first_accepted
-    clear_referral(ctx.state)
-
-    ctx.function_call_id = "second"
-    second = ask_user_question(cast(Any, ctx), message="Which years?")
-
+    assert second["code"] == ProblemCode.INVALID_ARGUMENTS.value
     asked = load_pending_ask(ctx.state)
-    assert asked is not None
-    assert (second == ASK_ACCEPTED) is not first_accepted
-    assert asked.call_id == ("first" if first_accepted else "second")
+    assert (asked.call_id if asked else None) == ("first" if first_accepted else None)
 
 
 @pytest.mark.parametrize(("offered_for", "refused"), [("debt", False), ("debt_history", True)])

@@ -2443,9 +2443,9 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
             ),
             True,
         ),
-        # fastmcp's session-ended `RuntimeError` is read where it is caught
-        # (`compiler.surface`, `harness.mcp_client`), not by its text here.
-        (RuntimeError("Session task completed unexpectedly"), False),
+        # fastmcp's session-ended `RuntimeError`, unwrapped: a path that calls the
+        # client outside `compiler.surface` and `harness.mcp_client` raises it bare.
+        (RuntimeError("Session task completed unexpectedly"), True),
         (ToolSurfaceUnavailableError("could not call 'search'", retryable=True), True),
         (ToolSurfaceUnavailableError("no server named 'x' is covered", retryable=False), False),
         (
@@ -2480,6 +2480,7 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
             ),
             True,
         ),
+        (_raised_while_handling(TimeoutError("slow"), ssl.SSLCertVerificationError("c")), True),
         (anyio.BrokenResourceError(), True),
         (RuntimeError("Event loop is closed"), False),
         (
@@ -2548,7 +2549,7 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         "mcp-connection-closed",
         "mcp-server-error",
         "fastmcp-session-closed",
-        "fastmcp-session-ended-by-text",
+        "fastmcp-session-ended",
         "surface-unavailable-retryable",
         "surface-unavailable-not-retryable",
         "surface-unavailable-over-a-timeout",
@@ -2558,6 +2559,7 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         "httpx-connect-error-over-a-failed-certificate",
         "aiohttp-certificate-error",
         "httpx-connect-error-over-another-tls-error",
+        "timeout-raised-while-handling-a-failed-certificate",
         "anyio-broken-stream",
         "runtime-error",
         "group-of-link-faults",

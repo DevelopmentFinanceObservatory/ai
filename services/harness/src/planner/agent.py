@@ -778,7 +778,7 @@ class AdkCall:
         return tuple(_session_steps(self.tool_context.session.events))
 
 
-def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
+def _session_steps(events: Sequence[Event]) -> Iterator[Step]:
     """The steps of a session's `events`, in event order (`planner.call.Step`).
 
     The only reader of ADK events in the planner. A message the user typed
@@ -786,16 +786,16 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
     read, and no producer in the harness sends a user-typed event that also
     carries a function part. Every other event yields a `call` step for each
     ask carrying an id, an `answer` step for each response to one, paired
-    with the `args` of the nearest preceding call sharing its id, a
-    `refused` step for the response of a `PLANNER_ASK` call that never
-    reached the user, and a `response` step for each other tool's response.
+    with the `args` of the nearest preceding call sharing its id, and a
+    `response` step for each other tool's response.
 
     An ask is the planner's own (`PLANNER_ASK`) or one of the workflow's
     interrupts. The planner's call holds its question flat in `args`. A
-    refused one's response is its tool's refusal, or ADK's rejection of the
-    call, which carry no `result` and make a `refused` step in place of an
-    answer: no user said anything. An accepted one's tool
-    answers `ASK_ACCEPTED`, which says nothing the user did and is not read,
+    planner ask whose response is its tool's refusal, or ADK's rejection of
+    the call, never reached the user: it yields no step at all, so every
+    reader sees the session as if the ask had not been made. An accepted
+    one's tool answers `ASK_ACCEPTED`, which says nothing the user did and is
+    not read,
     and the graph's planner node pauses on it with a `RequestInput` under
     the call's own id, so the user's answer to that interrupt is the
     answer to the call, and the interrupt's own call repeats the question.
@@ -807,6 +807,7 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
     route sends, builds the answer with `FunctionResponse.id` set to that
     same `interrupt_id`.
     """
+    refused = _refused_asks(events)
     calls: dict[str, dict[str, Any]] = {}
     planner_asks: set[str] = set()
     for event in events:
@@ -819,6 +820,8 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
             call = part.function_call
             if call is not None and call.id is not None:
                 if call.name == PLANNER_ASK:
+                    if call.id in refused:
+                        continue
                     planner_asks.add(call.id)
                 elif call.name != REQUEST_INPUT_FUNCTION_CALL_NAME or call.id in planner_asks:
                     continue
@@ -829,14 +832,28 @@ def _session_steps(events: Iterable[Event]) -> Iterator[Step]:
             if response is None:
                 continue
             body = response.response or {}
-            if response.name == PLANNER_ASK and body.get("outcome") == Outcome.OK.value:
-                continue
             if response.name == PLANNER_ASK and "result" not in body:
-                yield Step("refused", response.id)
-            elif response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
+                continue
+            if response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
                 yield Step("answer", response.id, calls.get(response.id or ""), body)
             else:
                 yield Step("response", body=body, name=response.name)
+
+
+def _refused_asks(events: Iterable[Event]) -> frozenset[str]:
+    """The ids of the planner asks that never reached the user: their response
+    is neither `ASK_ACCEPTED` nor an answer (no `result`), so it is the tool's
+    refusal or ADK's rejection of the call."""
+    return frozenset(
+        response.id
+        for event in events
+        for part in (event.content.parts if event.content and event.content.parts else ())
+        if (response := part.function_response) is not None
+        and response.id is not None
+        and response.name == PLANNER_ASK
+        and "result" not in (body := response.response or {})
+        and body.get("outcome") != Outcome.OK.value
+    )
 
 
 def _user_message(event: Any) -> bool:
@@ -2028,8 +2045,8 @@ def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[s
 
 def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object] | None:
     """The refusal an ask with `args` earns on its arguments and the pending
-    referral, or `None` for one its tool accepts unless an earlier ask in the
-    same response is (`_ask_beside_ask`).
+    referral, or `None` for one its tool accepts unless it follows another ask
+    in the same response (`_ask_beside_ask`).
 
     A history copy's referral is read as the model wrote the plan
     (`translator.tool.authored_answer`), so its picks are the origin's.
@@ -2047,32 +2064,30 @@ def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object
 
 
 def _ask_beside_ask(tool_context: ToolContext) -> dict[str, object] | None:
-    """The refusal for an ask made after an accepted one in the same model response, or `None`.
+    """The refusal for an ask that is not the first ask of its model response, or `None`.
 
     The user answers one question at a time. The calls of one response run
     concurrently, and an accepted ask ends the run before the model is
     called again, so the only way two asks can wait together is two in one
-    response. The first that its tool accepts is the one the response puts to
-    the user, and it waits in the session state under its call id
-    (`PENDING_ASK_STATE_KEY`). An earlier ask the tool refused leaves a later
-    one free. The earlier asks' outcome is read off that record, since another
-    call of the response may have changed the state their checks read
-    (`propose_plan` clears the referral). `tool_context.session.events` holds
-    the call's own model response by the time its tool runs.
+    response. The first ask in the response's call list is the only one that
+    may reach the user; every later one is refused, whatever became of the
+    first. Deciding from the call list rather than from the earlier asks'
+    outcomes gives the same answer under any order the response's calls run
+    in. `tool_context.session.events` holds the call's own model response by
+    the time its tool runs.
     """
     own = tool_context.function_call_id
     for event in reversed(tool_context.session.events):
-        ids = [call.id for call in event.get_function_calls()]
-        if own not in ids:
+        asks = [call.id for call in event.get_function_calls() if call.name == PLANNER_ASK]
+        if own not in asks:
             continue
-        pending = load_pending_ask(tool_context.state)
-        if pending is None or pending.call_id not in ids[: ids.index(own)]:
+        if asks[0] == own:
             return None
         return problem(
             ProblemCode.INVALID_ARGUMENTS,
-            f"This response already calls `{PLANNER_ASK}`, and the user answers one "
-            "question at a time. Ask this one once that answer arrives, if it still "
-            "needs asking.",
+            f"This response calls `{PLANNER_ASK}` more than once, and the user answers one "
+            "question at a time. Ask this one in your next response, if it still needs "
+            "asking.",
             outcome=Outcome.INVALID_INPUT,
         )
     return None

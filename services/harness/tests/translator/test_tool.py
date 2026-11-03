@@ -155,7 +155,9 @@ GOOD_TRANSLATION: dict[str, Any] = {
 
 class _UnreadableSurface(FixtureSurface):
     async def list_tools(self) -> list[ToolSchema]:
-        raise ToolSurfaceUnavailableError("could not read the tool surface at 'data-mcp'")
+        raise ToolSurfaceUnavailableError(
+            "could not read the tool surface at 'data-mcp'", retryable=True
+        )
 
 
 class _CountingSurface(FixtureSurface):

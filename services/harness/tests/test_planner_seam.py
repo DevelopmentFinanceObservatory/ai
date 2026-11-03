@@ -1211,10 +1211,10 @@ async def test_a_terminal_refusal_beside_an_accepted_ask_ends_the_entry_on_the_r
     assert load_pending_ask(await harness.state()) is None
 
 
-async def test_an_ask_after_a_refused_ask_in_the_same_response_is_put_to_the_user() -> None:
+async def test_an_ask_after_a_refused_ask_in_the_same_response_is_refused_too() -> None:
     """The first ask of a response offers options it wrote itself, which its
-    tool refuses, so the second, valid, is the one the response puts to the
-    user."""
+    tool refuses. The second, valid, is refused as a second ask: the response
+    puts no question to the user, and the entry ends without a plan."""
     authored = {
         "message": "Constant or current dollars?",
         "options": [{"spec_id": "constant_2024_usd", "label": "Constant 2024 US dollars"}],
@@ -1225,17 +1225,18 @@ async def test_an_ask_after_a_refused_ask_in_the_same_response_is_put_to_the_use
     )
     harness = _SeamHarness()
 
-    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    result = await harness.run(seam, question="kenya debt", readings=[])
 
-    asked = load_pending_ask(await harness.state())
-    assert asked is not None and asked.args["message"] == "Which years?"
+    assert result is not None
+    assert result["refused"]["code"] == SeamCode.PLAN_NOT_READY
+    assert load_pending_ask(await harness.state()) is None
     answers = [
         (response.response or {}).get("code", (response.response or {}).get("status"))
         for event in await harness.events()
         for response in event.get_function_responses()
         if response.name == PLANNER_ASK
     ]
-    assert answers == [ProblemCode.INVALID_ARGUMENTS, "asked"]
+    assert answers == [ProblemCode.INVALID_ARGUMENTS, ProblemCode.INVALID_ARGUMENTS]
 
 
 async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
@@ -3974,7 +3975,7 @@ class _RecordingSearch(FixtureSurface):
     ) -> ToolCallResult:
         del on_progress
         if tool.name != "search":
-            raise ToolSurfaceUnavailableError(f"no canned answer for {tool.name!r}")
+            raise ToolSurfaceUnavailableError(f"no canned answer for {tool.name!r}", retryable=True)
         self.sent.append(arguments)
         return self._answers[min(len(self.sent), len(self._answers)) - 1]
 
@@ -5222,7 +5223,7 @@ class _DefinitionReads:
     ) -> ToolCallResult:
         del on_progress
         if tool.name != "resolve_definition":
-            raise ToolSurfaceUnavailableError(f"{tool.name} is not served here")
+            raise ToolSurfaceUnavailableError(f"{tool.name} is not served here", retryable=True)
         self.calls.append(arguments)
         return self._answer()
 
@@ -5248,7 +5249,7 @@ def _held_since_1995() -> ToolCallResult:
 
 
 def _unreachable() -> ToolCallResult:
-    raise ToolSurfaceUnavailableError("data-mcp did not answer")
+    raise ToolSurfaceUnavailableError("data-mcp did not answer", retryable=True)
 
 
 def _last_five_years_plan() -> dict[str, Any]:

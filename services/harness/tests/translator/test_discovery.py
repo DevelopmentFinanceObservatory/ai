@@ -1579,7 +1579,7 @@ class _UnreachableDataMcp:
         on_progress: ProgressCallback | None = None,
     ) -> ToolCallResult:
         del arguments, on_progress
-        raise ToolSurfaceUnavailableError(f"{tool.server} timed out")
+        raise ToolSurfaceUnavailableError(f"{tool.server} timed out", retryable=True)
 
 
 @pytest.mark.parametrize(

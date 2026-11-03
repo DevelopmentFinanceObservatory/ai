@@ -55,12 +55,12 @@ from common.period_note import period_note
 from common.refusal import refusal_code
 from common.telemetry import record_event
 from compiler.surface import (
-    TRANSIENT_MCP_CODES,
     ProgressCallback,
     ToolCallResult,
     ToolSchema,
     ToolSurface,
     ToolSurfaceUnavailableError,
+    retryable_call_failure,
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
@@ -70,7 +70,6 @@ from executor.run import current_step_id, transient_status
 from google.adk.events import Event
 from google.auth import exceptions as google_auth_errors
 from google.genai import errors as genai_errors
-from mcp import MCPError
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.agent import PROPOSE_PLAN
@@ -286,23 +285,19 @@ _POSTGRES_CONNECTION_ENDED = (
 
 
 def _failed_certificate_check(exc: BaseException) -> bool:
-    """Whether `exc`, or an exception in its cause or context chain, is a
+    """Whether `exc`, or an exception it was raised from (`__cause__`), is a
     certificate that failed verification. A transport wraps it, as httpx2's
     `ConnectError` and aiohttp's `ClientConnectorCertificateError` do, in an
     error that reads as a dropped connection; the same certificate fails the
-    next attempt too."""
+    next attempt too. An exception merely raised while another was handled is
+    its own fault, as `_transient_fault` reads it."""
     seen: set[int] = set()
-    pending: list[BaseException] = [exc]
-    while pending:
-        link = pending.pop()
-        if id(link) in seen:
-            continue
-        seen.add(id(link))
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
         if isinstance(link, ssl.SSLCertVerificationError):
             return True
-        pending.extend(
-            linked for linked in (link.__cause__, link.__context__) if linked is not None
-        )
+        seen.add(id(link))
+        link = link.__cause__
     return False
 
 
@@ -343,16 +338,17 @@ def _transient_link(exc: BaseException) -> bool:
     peer's reset reads as `ClientPayloadError`), or google-auth's while
     fetching a token (a `RefreshError` raised from one is read by its
     cause); an HTTP or model answer of 429 or 5xx after the client's
-    retries, httpx2's included (`executor.run.transient_status`); or an MCP
+    retries, httpx2's included (`executor.run.transient_status`); an MCP
     call whose connection closed or that timed out, fastmcp's session ending
-    under a call included (anyio's closed or
-    broken stream, under its "Server session was closed unexpectedly"); a
+    under a call included (`compiler.surface.retryable_call_failure`, which
+    reads these whichever path raised them, wrapped or not; anyio's closed or
+    broken stream, under its "Server session was closed unexpectedly"); or a
     `ToolSurfaceUnavailableError` its raise site marked `retryable`, which
-    covers a call cut off or never issued for lack of time and fastmcp's
-    session task ending (`compiler.surface.retryable_call_failure`). A TLS
+    covers a call cut off or never issued for lack of time. A TLS
     failure is transient except a certificate that failed verification
-    (`ssl.SSLCertVerificationError`), which a retry meets again; a wrapper
-    of one is refused by `_transient_fault`. Any other
+    (`ssl.SSLCertVerificationError`), which a retry meets again;
+    `_transient_fault` refuses it and any wrapper of one before this reads
+    the link. Any other
     `OSError`, such as `FileNotFoundError`, and any other aiohttp error,
     such as `InvalidURL`, is a fault in this code, and any other MCP error
     an answer the server or this client got wrong, which a later turn meets
@@ -366,14 +362,12 @@ def _transient_link(exc: BaseException) -> bool:
             | httpx2.HTTPStatusError(response=httpx2.Response(status_code=status))
         ):
             return transient_status(status)
-    if isinstance(exc, MCPError):
-        return exc.error.code in TRANSIENT_MCP_CODES
     if isinstance(exc, sa_exc.DBAPIError):
         return exc.connection_invalidated
     if isinstance(exc, ToolSurfaceUnavailableError):
         return exc.retryable
-    if isinstance(exc, ssl.SSLCertVerificationError):
-        return False
+    if retryable_call_failure(exc):
+        return True
     return isinstance(
         exc,
         (

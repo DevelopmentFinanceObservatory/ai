@@ -1246,7 +1246,7 @@ async def test_a_transport_failure_is_recorded_as_a_failed_activity(
             on_progress: ProgressCallback | None = None,
         ) -> Any:
             del tool, arguments
-            raise ToolSurfaceUnavailableError("data-mcp is unreachable")
+            raise ToolSurfaceUnavailableError("data-mcp is unreachable", retryable=True)
 
     surface = _RecordingSurface(_Unreachable())
     tool = ToolId(server="data-mcp", name="get_data")
