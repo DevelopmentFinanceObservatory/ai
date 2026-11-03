@@ -369,7 +369,7 @@ STOP_CAUSES: dict[RefusalKind, StopCause] = {
 }
 
 
-def _permanent_transport_stop(outcome: Refused) -> bool:
+def permanent_transport_stop(outcome: Refused) -> bool:
     """Whether `outcome` is a transport stop no later attempt can get past."""
     return outcome.refusal is RefusalKind.TRANSPORT_FAILED and not outcome.retryable
 
@@ -386,7 +386,7 @@ def stop_cause(outcome: Refused) -> StopCause:
     """
     failure = outcome.payload
     if failure is None:
-        if _permanent_transport_stop(outcome):
+        if permanent_transport_stop(outcome):
             return StopCause.HARNESS
         return STOP_CAUSES[outcome.refusal]
     if classify_refusal(failure) is Disposition.RETRY_LATER:
@@ -458,7 +458,7 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
         if (remedy := ISSUE_REMEDIES.get(failing[0].code)) is not None:
             failed["remedy"] = remedy
         return failed
-    if _permanent_transport_stop(outcome):
+    if permanent_transport_stop(outcome):
         return {
             "step_id": outcome.step_id,
             "tool": None,

@@ -38,7 +38,7 @@ from fastmcp import Client, Context, FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
 from mcp import MCPError
-from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, REQUEST_TIMEOUT
+from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, INVALID_REQUEST, REQUEST_TIMEOUT
 from planner.workflow import ToolId
 
 from ..unreachable_surface import UNREACHABLE_URL
@@ -382,15 +382,35 @@ async def test_a_non_timeout_failure_discards_the_held_client(
     assert _held(surface, "data-mcp") is not broken
 
 
+def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
+    outer.__cause__ = cause
+    return outer
+
+
 @pytest.mark.parametrize(
     ("raised", "retryable"),
     [
         (RuntimeError("Session task completed unexpectedly"), True),
-        (RuntimeError("transport closed"), False),
+        (RuntimeError("transport closed"), True),
         (MCPError(code=CONNECTION_CLOSED, message="Connection closed"), True),
         (MCPError(code=REQUEST_TIMEOUT, message="Timed out"), True),
-        (MCPError(code=INTERNAL_ERROR, message="Internal error"), False),
+        (MCPError(code=INTERNAL_ERROR, message="Server returned an error response"), True),
+        (MCPError(code=INVALID_REQUEST, message="Session terminated"), True),
         (TimeoutError(), True),
+        (ConnectionRefusedError(), True),
+        (ValueError("a bug"), True),
+        (httpx2.UnsupportedProtocol("Request URL has an unsupported protocol 'ftp://'"), False),
+        (httpx2.LocalProtocolError("Illegal header value"), False),
+        (httpx2.InvalidURL("Invalid non-printable ASCII character in URL"), False),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: certificate"),
+                _raised_from(
+                    httpx2.ConnectError("certificate"), ssl.SSLCertVerificationError("expired")
+                ),
+            ),
+            False,
+        ),
     ],
     ids=[
         "session-ended",
@@ -398,10 +418,17 @@ async def test_a_non_timeout_failure_discards_the_held_client(
         "mcp-connection-closed",
         "mcp-request-timeout",
         "mcp-server-error",
+        "mcp-session-terminated",
         "timeout",
+        "connection-refused",
+        "bug",
+        "unsupported-protocol",
+        "local-protocol-error",
+        "invalid-url",
+        "failed-certificate",
     ],
 )
-async def test_a_failed_call_is_marked_retryable_by_the_type_that_failed_it(
+async def test_a_failed_call_is_retryable_unless_a_permanent_fault_caused_it(
     monkeypatch: pytest.MonkeyPatch, raised: Exception, retryable: bool
 ) -> None:
     surface = McpSurface(sources={"data-mcp": _answering_server()})
@@ -417,11 +444,6 @@ async def test_a_failed_call_is_marked_retryable_by_the_type_that_failed_it(
         )
 
     assert excinfo.value.retryable is retryable
-
-
-def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
-    outer.__cause__ = cause
-    return outer
 
 
 @pytest.mark.parametrize(
@@ -449,6 +471,13 @@ def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
         (ExceptionGroup("tasks", [httpx2.ConnectError("down"), ValueError("bug")]), False),
         (ToolSurfaceUnavailableError("cut off", retryable=True), True),
         (ToolSurfaceUnavailableError("not covered", retryable=False), False),
+        (
+            _raised_from(
+                ToolSurfaceUnavailableError("not covered", retryable=False), TimeoutError()
+            ),
+            False,
+        ),
+        (httpx2.UnsupportedProtocol("unsupported protocol 'ftp://'"), False),
         (ValueError("a bug"), False),
     ],
     ids=[
@@ -460,6 +489,8 @@ def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
         "group-with-a-bug",
         "marked-retryable",
         "marked-final",
+        "marked-final-over-a-timeout",
+        "unsupported-protocol",
         "bug",
     ],
 )

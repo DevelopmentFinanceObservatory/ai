@@ -108,6 +108,7 @@ from planner.plan import (
     current_recorded_identity,
 )
 from planner.records import Period
+from planner.workflow import ToolId
 from submission import service as submission_service
 
 from . import drawn_cards
@@ -1339,6 +1340,56 @@ async def test_fetch_returns_a_refusal_when_get_data_does_not_complete(error: Ex
     assert found["spec_id"] == SPEC_LIFE
     assert found["code"] == code
     assert "frames" not in found
+
+
+class SurfaceExecutor(FakeExecutor):
+    """An executor whose `get_data` call goes to `surface`, as `McpExecutor`'s does."""
+
+    def __init__(self, surface: Any) -> None:
+        super().__init__()
+        self.surface = surface
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "get_data":
+            await self.surface.call_tool(tool=ToolId(server="data-mcp", name=tool), arguments=args)
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+class UncoveredServerSurface:
+    """A surface that covers no server, whose failure no retry changes."""
+
+    async def call_tool(self, *, tool: ToolId, arguments: Any, on_progress: Any = None):
+        raise ToolSurfaceUnavailableError("no server named 'data-mcp' is covered", retryable=False)
+
+
+@pytest.mark.parametrize(
+    ("surface", "code"),
+    [
+        (unreachable_surface(), "transient_unavailable"),
+        (UncoveredServerSurface(), "tool_not_configured"),
+    ],
+    ids=["server-down", "server-not-covered"],
+)
+async def test_fetch_answers_a_surface_failure_by_whether_a_retry_can_help(surface: Any, code: str):
+    tools, ctx = _tools(executor=SurfaceExecutor(surface))
+
+    found = await tools["fetch"](SPEC_LIFE, ctx)
+
+    assert (found["spec_id"], found["code"]) == (SPEC_LIFE, code)
+    assert "frames" not in found
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [unreachable_surface(), UncoveredServerSurface()],
+    ids=["server-down", "server-not-covered"],
+)
+async def test_the_kind_read_of_a_frame_names_nothing_when_the_surface_fails(surface: Any):
+    cells = await orchestrator_tools._read_member_cells(
+        {"ref": {"spec_id": SPEC_LIFE}}, SurfaceExecutor(surface)
+    )
+
+    assert cells is None
 
 
 def _role_open_block(spec_id: str, **identity: Any) -> dict[str, Any]:

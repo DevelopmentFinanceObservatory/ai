@@ -38,6 +38,7 @@ from executor.outcomes import (
     RefusalKind,
     Refused,
     failed_step,
+    permanent_transport_stop,
 )
 from executor.outcomes import RunOutcome as ExecutionOutcome
 from executor.run import (
@@ -153,8 +154,9 @@ def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> b
     """Whether no replan in this turn can get past `outcome` or any stop in its wave.
 
     The wave's other stops are `outcome.also_stopped`. A stop is a dead end when a tool
-    refused it in a way `classify_refusal` calls `Disposition.STOP`, or when its errors
-    are a moved family (`_family_moved`). A wave with any other stop replans.
+    refused it in a way `classify_refusal` calls `Disposition.STOP`, when its errors
+    are a moved family (`_family_moved`), or when the tool surface failed it for a fault no
+    later attempt gets past (`permanent_transport_stop`). A wave with any other stop replans.
     """
     return all(_stop_is_dead_end(stop) for stop in (outcome, *outcome.also_stopped))
 
@@ -163,6 +165,8 @@ def _stop_is_dead_end(stop: MethodChoiceNeeded | RediscoveryNeeded | Refused) ->
     """Whether one stop of a wave is a dead end (`_is_dead_end`)."""
     if not isinstance(stop, Refused):
         return False
+    if permanent_transport_stop(stop):
+        return True
     if stop.payload is not None:
         return classify_refusal(stop.payload) is Disposition.STOP
     return _family_moved(errors(list(stop.issues)))

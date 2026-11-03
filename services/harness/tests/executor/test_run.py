@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import ssl
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -56,6 +57,8 @@ from executor.run import (
     EVIDENCE_ALLOWANCE_S,
     MAX_ATTEMPTS_PER_STEP,
     RunAbandonedError,
+    StatisticsUnreachableError,
+    StatisticsUnusableError,
     _series_labels,
     current_step_deadline,
     default_fetch_series_stats,
@@ -1982,6 +1985,41 @@ async def test_default_fetch_series_stats_answers_none_for_an_old_record(
     stripped = strip_manifest(manifest(series_count=None, artifacts=[]))
 
     assert await default_fetch_series_stats(stripped) is None
+
+
+def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
+    outer.__cause__ = cause
+    return outer
+
+
+@pytest.mark.parametrize(
+    ("raised", "reachable_later"),
+    [
+        (httpx2.ReadTimeout("timed out"), True),
+        (_raised_from(httpx2.ConnectError("reset"), ConnectionResetError()), True),
+        (
+            _raised_from(
+                httpx2.ConnectError("certificate"), ssl.SSLCertVerificationError("expired")
+            ),
+            False,
+        ),
+        (httpx2.UnsupportedProtocol("unsupported protocol 'ftp://'"), False),
+    ],
+    ids=["timeout", "connection-reset", "failed-certificate", "unsupported-protocol"],
+)
+async def test_a_statistics_fetch_failure_is_unreachable_only_when_a_later_try_can_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    manifest: ManifestFactory,
+    raised: Exception,
+    reachable_later: bool,
+) -> None:
+    async def fails(**kwargs: Any) -> pa.Table:
+        raise raised
+
+    monkeypatch.setattr("executor.run.fetch_series_statistics_table", fails)
+
+    with pytest.raises(StatisticsUnreachableError if reachable_later else StatisticsUnusableError):
+        await default_fetch_series_stats(strip_manifest(manifest()))
 
 
 async def test_a_manifest_with_statistics_but_no_series_count_is_accepted(

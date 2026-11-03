@@ -116,7 +116,7 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     deliver_progress,
     mcp_progress_handler,
-    transient,
+    retryable_failure,
 )
 from data_mcp.mint_admission import (
     BACKGROUND_ADMISSION,
@@ -247,9 +247,10 @@ async def _call_tool(
     meta: Mapping[str, Any] | None = None,
 ) -> Any:
     """`client.call_tool`, raising `_McpTimeoutError` in place of a bare
-    `MCPError` when it is one, and a retryable `ToolSurfaceUnavailableError`
-    in place of the bare `RuntimeError` fastmcp raises when the MCP session
-    ends under the call or its connection fails. `raise_on_error=False` only suppresses a
+    `MCPError` when it is one, and a `ToolSurfaceUnavailableError` in place of
+    the bare `RuntimeError` fastmcp raises when the MCP session ends under the
+    call or its connection fails, retryable unless a permanent fault is in its
+    cause chain (`compiler.surface.retryable_failure`). `raise_on_error=False` only suppresses a
     tool-level error result; the per-tool deadline
     (`compiler.capabilities.call_timeouts()`, else `Settings.
     mcp_call_timeout_s`) elapsing still raises `MCPError`, with mcp's
@@ -270,14 +271,11 @@ async def _call_tool(
         raise
     except RuntimeError as exc:
         # fastmcp ends a call whose session task finished, or whose connection
-        # failed, with a bare `RuntimeError`; the surface marks one a later
-        # attempt may get past retryable (`compiler.surface.transient`), so
-        # this does too.
-        if transient(exc):
-            raise ToolSurfaceUnavailableError(
-                f"could not call {tool!r}: {exc}", retryable=True
-            ) from exc
-        raise
+        # failed, with a bare `RuntimeError`. The surface marks such a failure
+        # retryable by the same rule, so this does too.
+        raise ToolSurfaceUnavailableError(
+            f"could not call {tool!r}: {exc}", retryable=retryable_failure(exc)
+        ) from exc
 
 
 async def _call_held(

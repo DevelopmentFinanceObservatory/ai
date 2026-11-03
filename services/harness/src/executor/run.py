@@ -226,7 +226,7 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     UnhashableSchemaError,
     deliver_progress,
-    transient_status,
+    transient,
 )
 from data_mcp.artifact_resource import ArtifactRefusalError
 from data_mcp.deadline import CallDeadline
@@ -485,9 +485,7 @@ def _is_transient(exc: Exception) -> bool:
     """Whether a failed statistics fetch is one a later try can get past."""
     if isinstance(exc, ArtifactRefusalError):
         return exc.code in TRANSIENT_CODES
-    if isinstance(exc, httpx2.HTTPStatusError):
-        return transient_status(exc.response.status_code)
-    return isinstance(exc, (TimeoutError, httpx2.TransportError))
+    return transient(exc)
 
 
 # What `execute_approved_plan` hands each progress report to, with the id of

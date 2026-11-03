@@ -2452,7 +2452,7 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
             _raised_from(
                 ToolSurfaceUnavailableError("could not call", retryable=False), TimeoutError()
             ),
-            True,
+            False,
         ),
         (NoTimeLeftError("'search' was not called: the planner entry has no time left"), True),
         (ssl.SSLCertVerificationError("certificate verify failed"), False),
@@ -2552,7 +2552,7 @@ def _raised_while_handling(exc: BaseException, handled: BaseException) -> BaseEx
         "fastmcp-session-ended",
         "surface-unavailable-retryable",
         "surface-unavailable-not-retryable",
-        "surface-unavailable-over-a-timeout",
+        "surface-unavailable-final-over-a-timeout",
         "planner-entry-out-of-time",
         "tls-certificate-failed-verification",
         "tls-other-error",

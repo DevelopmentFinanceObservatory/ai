@@ -226,12 +226,13 @@ class ToolSurfaceUnavailableError(RuntimeError):
     another attempt: the tools are fine and the attempt simply did not
     complete.
 
-    `retryable` is `True` exactly when a later attempt can succeed: the
-    call was cut off or never issued for lack of time, or its cause is a
-    transient fault (`transient`). It is `False` for a failure no retry
-    changes, such as a server this surface does not cover, and for a cause
-    `transient` does not recognise. A raise site that wraps an exception it
-    did not classify itself sets it to `transient(cause)`.
+    `retryable` is `True` exactly when a later attempt can succeed, and an
+    explicit `False` is final. A raise site that wraps an exception it did not
+    classify itself sets it to `retryable_failure(cause)`: retryable unless
+    the cause chain holds a fault a retry meets again. A site that knows the
+    fault is permanent, such as a server this surface does not cover, sets it
+    `False`, and one whose call was cut off or never issued for lack of time
+    sets it `True`.
     """
 
     def __init__(self, message: str, *, retryable: bool) -> None:
@@ -282,21 +283,46 @@ def transient_status(status: int | None) -> bool:
     return status is not None and (status == httpx2.codes.TOO_MANY_REQUESTS or status >= 500)
 
 
-def _failed_certificate_check(exc: BaseException) -> bool:
-    """Whether `exc`, or an exception it was raised from (`__cause__`), is a
-    certificate that failed verification. A transport wraps it, as httpx2's
-    `ConnectError` and aiohttp's `ClientConnectorCertificateError` do, in an
-    error that reads as a dropped connection; the same certificate fails the
-    next attempt too. An exception merely raised while another was handled is
-    its own fault, as `transient` reads it."""
+# The faults a retry meets again: a certificate that failed verification, a
+# URL no client can send to (a scheme httpx2 does not speak, or a malformed
+# one), and a request httpx2 itself refused to write.
+_PERMANENT_FAULTS = (
+    ssl.SSLCertVerificationError,
+    httpx2.UnsupportedProtocol,
+    httpx2.LocalProtocolError,
+    httpx2.InvalidURL,
+)
+
+
+def permanent_fault(exc: BaseException) -> bool:
+    """Whether `exc`, an exception it was raised from (`__cause__`), or a
+    member of an exception group among them, is a fault the next attempt
+    meets again (`_PERMANENT_FAULTS`). A transport wraps one, as httpx2's
+    `ConnectError` and aiohttp's `ClientConnectorCertificateError` wrap a
+    failed certificate, in an error that reads as a dropped connection. An
+    exception merely raised while another was handled is its own fault."""
     seen: set[int] = set()
     link: BaseException | None = exc
     while link is not None and id(link) not in seen:
-        if isinstance(link, ssl.SSLCertVerificationError):
+        if isinstance(link, _PERMANENT_FAULTS):
+            return True
+        if isinstance(link, BaseExceptionGroup) and any(
+            permanent_fault(member) for member in link.exceptions
+        ):
             return True
         seen.add(id(link))
         link = link.__cause__
     return False
+
+
+def retryable_failure(exc: BaseException) -> bool:
+    """Whether a call that failed with `exc`, caught by a site that does not
+    classify it further, can succeed later. It can unless a known permanent
+    fault is in the cause chain (`permanent_fault`): an answer the server gave
+    in error, such as the `MCPError` the mcp client raises for a 5xx or a
+    terminated session, a refused connection, a failed name lookup, a timeout
+    and a closed connection all read as a fault a later attempt may not meet."""
+    return not permanent_fault(exc)
 
 
 def transient(exc: BaseException) -> bool:
@@ -308,13 +334,16 @@ def transient(exc: BaseException) -> bool:
     was handled is its own fault, such as a bug in an `except` block. An
     exception group, as anyio's task groups raise, is transient when every
     exception in it is, so one bug among dropped connections still reads as a
-    fault. A failed certificate check anywhere in the chain makes it not
-    transient (`_failed_certificate_check`), whatever wraps it."""
-    if _failed_certificate_check(exc):
+    fault. A permanent fault anywhere in the chain makes it not transient
+    (`permanent_fault`), whatever wraps it. A `ToolSurfaceUnavailableError`
+    states its own answer, `retryable`, which is final."""
+    if permanent_fault(exc):
         return False
     seen: set[int] = set()
     link: BaseException | None = exc
     while link is not None and id(link) not in seen:
+        if isinstance(link, ToolSurfaceUnavailableError):
+            return link.retryable
         if isinstance(link, BaseExceptionGroup):
             return all(transient(leaf) for leaf in link.exceptions)
         if _transient_link(link):
@@ -341,15 +370,14 @@ def _transient_link(exc: BaseException) -> bool:
     connection closed or that timed out (`TRANSIENT_MCP_CODES`), fastmcp's
     session ending under a call included (`_FASTMCP_SESSION_ENDED`; anyio's
     closed or broken stream, under its "Server session was closed
-    unexpectedly"); or a `ToolSurfaceUnavailableError` marked `retryable`,
-    which covers a call cut off or never issued for lack of time. A TLS
-    failure is transient except a certificate that failed verification
-    (`ssl.SSLCertVerificationError`), which a retry meets again; `transient`
-    refuses it and any wrapper of one before this reads the link. Any other
-    `OSError`, such as `FileNotFoundError`, and any other aiohttp error,
-    such as `InvalidURL`, is a fault in this code, and any other MCP error
-    an answer the server or this client got wrong, which a later attempt
-    meets again. Any other `DBAPIError` is read by the asyncpg error it was
+    unexpectedly"). A TLS failure is transient except a certificate that
+    failed verification (`ssl.SSLCertVerificationError`), and a transport
+    error that is a permanent fault (`permanent_fault`) is not transient
+    either; `transient` refuses these and any wrapper of one before this reads
+    the link. Any other `OSError`, such as `FileNotFoundError`, and any other
+    aiohttp error, such as `InvalidURL`, is a fault in this code, and any
+    other MCP error an answer the server or this client got wrong, which a
+    later attempt meets again. Any other `DBAPIError` is read by the asyncpg error it was
     raised from (`transient` walks `__cause__`), so a connection error under
     it is transient and a SQL error a fault."""
     match exc:
@@ -361,8 +389,6 @@ def _transient_link(exc: BaseException) -> bool:
             return transient_status(status)
     if isinstance(exc, sa_exc.DBAPIError):
         return exc.connection_invalidated
-    if isinstance(exc, ToolSurfaceUnavailableError):
-        return exc.retryable
     if isinstance(exc, MCPError):
         return exc.error.code in TRANSIENT_MCP_CODES
     if type(exc) is RuntimeError and exc.args == (_FASTMCP_SESSION_ENDED,):
@@ -616,7 +642,7 @@ class McpSurface:
                 await clients.discard(client)
             raise ToolSurfaceUnavailableError(
                 f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}",
-                retryable=transient(exc),
+                retryable=retryable_failure(exc),
             ) from exc
         except Exception as exc:
             logger.warning(
@@ -630,7 +656,7 @@ class McpSurface:
                 await clients.discard(client)
             raise ToolSurfaceUnavailableError(
                 f"could not call {tool.name!r} at {_source_label(source)!r}: {exc}",
-                retryable=transient(exc),
+                retryable=retryable_failure(exc),
             ) from exc
         finally:
             if client is not None:
@@ -665,7 +691,7 @@ class McpSurface:
         except Exception as exc:
             raise ToolSurfaceUnavailableError(
                 f"could not read the tool surface at {_source_label(source)!r}: {exc}",
-                retryable=transient(exc),
+                retryable=retryable_failure(exc),
             ) from exc
 
 
