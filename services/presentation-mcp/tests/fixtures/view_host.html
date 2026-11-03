@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>MCP Apps host</title>
+  </head>
+  <body>
+    <iframe
+      id="view"
+      sandbox="allow-scripts allow-same-origin"
+      style="width: 760px; height: 560px; border: 0"
+    ></iframe>
+    <script>
+      // A host that follows the 2026-01-26 MCP Apps lifecycle, driven by
+      // `window.CASE`, which the test sets before this page loads:
+      //   hostCapabilities  the `ui/initialize` reply's capabilities
+      //   toolName          the tool whose view this is
+      //   toolInput         the `tool-input` arguments, or null to send none
+      //   result            the `tool-result` params, or null to send none
+      //   cancelled         true to send `tool-cancelled` in place of a result
+      //   toolCallReplies   a reply per tool name for the view's `tools/call`
+      //                     requests, its `result` or `error` members merged
+      //                     into the JSON-RPC response; a request for any
+      //                     other tool gets no reply
+      //   resultOnToolCall  `tool-result` params sent when the view makes a
+      //                     `tools/call`, or null to send none
+      // Every message the view sends up lands in `window.up`.
+      const CASE = window.CASE;
+      const frame = document.getElementById("view");
+      window.up = [];
+
+      const send = (message) => frame.contentWindow.postMessage(message, "*");
+      const notify = (method, params) =>
+        send({ jsonrpc: "2.0", method, params });
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== frame.contentWindow) return;
+        const message = event.data;
+        window.up.push(message);
+        if (message.method === "ui/initialize") {
+          send({
+            jsonrpc: "2.0",
+            id: message.id,
+            result: {
+              protocolVersion: "2026-01-26",
+              hostInfo: { name: "test-host", version: "0.0.1" },
+              hostCapabilities: CASE.hostCapabilities,
+              hostContext: {
+                theme: "light",
+                displayMode: "inline",
+                availableDisplayModes: ["inline"],
+                containerDimensions: { maxHeight: 6000, width: 736 },
+                platform: "web",
+                locale: "en-GB",
+                toolInfo: {
+                  tool: {
+                    name: CASE.toolName,
+                    inputSchema: { type: "object" },
+                  },
+                },
+              },
+            },
+          });
+        } else if (message.method === "ui/notifications/initialized") {
+          if (CASE.toolInput)
+            notify("ui/notifications/tool-input", {
+              arguments: CASE.toolInput,
+            });
+          if (CASE.result) notify("ui/notifications/tool-result", CASE.result);
+          if (CASE.cancelled) notify("ui/notifications/tool-cancelled", {});
+        } else if (message.method === "tools/call") {
+          if (CASE.resultOnToolCall)
+            notify("ui/notifications/tool-result", CASE.resultOnToolCall);
+          const reply = CASE.toolCallReplies[message.params.name];
+          if (reply) send({ jsonrpc: "2.0", id: message.id, ...reply });
+        }
+      });
+
+      frame.src = "view.html";
+    </script>
+  </body>
+</html>

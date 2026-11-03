@@ -94,6 +94,11 @@ jobs:
       - name: Install workspace
         run: uv sync --frozen --all-packages
 
+      # presentation-mcp's browser tests (`-m browser`) drive the view page in
+      # headless Chromium, and fail without it.
+      - name: Install Chromium
+        run: uv run playwright install --with-deps --only-shell chromium
+
       - name: Test -- all packages
         run: uv run pytest
 
