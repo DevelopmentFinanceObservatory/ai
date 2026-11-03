@@ -59,3 +59,17 @@ async def test_i5_the_guidance_is_a_resource_a_prompt_and_in_the_answer() -> Non
     assert text == opened["guidance"] == recorded.server.guidance
     assert prompt.messages[0].content.text == text  # type: ignore[union-attr]
     assert "adk_request_input" not in text and "`record_user_answer`" in text
+
+
+@pytest.mark.parametrize("missing", ["asks", "brief"])
+async def test_i5_a_missing_argument_is_refused_with_its_shape(missing: str) -> None:
+    recorded = await recorded_server(TASK)
+    arguments = {key: value for key, value in opening(TASK).items() if key != missing}
+    async with Client(recorded.server.mcp) as client:
+        refused = await call(client, "start_plan", arguments)
+        opened = await call(client, "start_plan", opening(TASK))
+    assert refused["code"] == "invalid_arguments"
+    assert set(refused["expected"]) == {missing}
+    assert refused["expected"][missing]["type"] in ("array", "string")
+    # Control: the same call with every argument opens a session.
+    assert opened["outcome"] == "ok"

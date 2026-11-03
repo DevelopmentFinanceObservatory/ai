@@ -63,7 +63,7 @@ In `claude-haiku-series-gdp-ghana-v2`, the card's summary and step said "Gross d
 
 ## Refusal codes for dfo-spec-kit
 
-plan-mcp writes these codes of its own, each in the planner's refusal shape: `plan_session_unknown`, `search_failed`, `hand_off_refused`, `plan_version_not_ready`, `plan_version_superseded`, `run_failed`, `spec_not_held`, `spec_not_resolved` and `plan_not_approved`. It also answers the outcome `referred`, whose code is the translator's referral kind, and reuses the planner's `invalid_arguments` for a `record_user_answer` with no answer.
+plan-mcp writes these codes of its own, each in the planner's refusal shape: `plan_session_unknown`, `search_failed`, `hand_off_refused`, `plan_version_not_ready`, `plan_version_superseded`, `run_failed`, `spec_not_held`, `spec_not_resolved` and `plan_not_approved`. It also answers the outcome `referred`, whose code is the translator's referral kind, and reuses the planner's `invalid_arguments`, with `expected` naming each missing argument's schema, for a call to `start_plan`, `record_user_answer` or `run_plan` that leaves out a required argument (`test_i5_schema.py`).
 
 ## Versioning
 
@@ -92,7 +92,7 @@ Every tool is registered at FastMCP version 2 (`server.TOOLS_VERSION`). A later 
 - Durable runs, about 100 lines: a run that outlives the instance and is found again by session and version, as `prototype-background-execute/` does. A restart now loses an in-flight run, which runs again on the next `run_plan`.
 - The guidance as a skill and the card's base year, above.
 - A cap on reruns of `start_plan` and on `spec_ids` per session: each spec_id costs a registry read and a Search resubmit.
-- Row reads that need no shared frame bucket: `frame_rows` reads `spec_` frames from the materialisation store, which a separate plan-mcp process shares only when `FRAME_STORE_BUCKET` is set; derived frames are read from dfo-apis either way. Mounted on `/mcp`, plan-mcp shares the harness's store.
+- Reads that need no shared bucket: `frame_rows` reads `spec_` frames from the materialisation store, and `start_plan` reads a spec_id no `get_data` has registered from data-mcp's definition store. A separate plan-mcp process shares them only when `FRAME_STORE_BUCKET` and `DEFINITION_STORE_BUCKET` are set (`serve.install_shared_stores`); derived frames are read from dfo-apis either way. Mounted on `/mcp`, plan-mcp shares the harness's stores.
 
 ## Not covered
 

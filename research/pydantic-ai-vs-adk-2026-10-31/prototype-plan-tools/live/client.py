@@ -35,6 +35,7 @@ from typing import Any
 
 import simuser
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import PrepareTools
 from pydantic_ai.mcp import CallToolFunc, MCPToolset
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModel
@@ -154,7 +155,7 @@ async def run_task(
             toolset(name, run=run, counters=counters, model=model, elicitation=elicitation)
             for name in ("dfo", "plan")
         ],
-        prepare_tools=not_strict,
+        capabilities=[PrepareTools(not_strict)],
     )
     log.write(
         {
@@ -188,14 +189,14 @@ async def run_task(
                 log.write({"type": "turn", "user": message, "assistant": None, "ending": ending})
                 break
             history = result.all_messages()
-            total = total + result.usage()
+            total = total + result.usage
             turns.append(("Assistant", result.output))
             log.write(
                 {
                     "type": "turn",
                     "user": message,
                     "assistant": result.output,
-                    "usage": usage_dict(result.usage()),
+                    "usage": usage_dict(result.usage),
                 }
             )
             try:

@@ -28,7 +28,13 @@ from typing import Any
 from common.materialisation.factory import install_store_if_unset
 from data_mcp.client_holder import get_client
 from data_mcp.deadline import CallDeadline
-from data_mcp.definition_store import DefinitionStoreUnavailable, get_store
+from data_mcp.definition_store import (
+    CachingDefinitionStore,
+    DefinitionStoreUnavailable,
+    GCSDefinitionStore,
+    get_store,
+    set_store,
+)
 from data_mcp.errors import UpstreamError
 from data_mcp.settings import Settings as DataSettings
 from execution import dev_run_graph
@@ -109,11 +115,19 @@ def build(settings: Settings, *, sessions: Path | None = None) -> PlanMcp:
     return PlanMcp(service)
 
 
-def install_frame_store() -> None:
-    """The materialisation store data-mcp serves frames from, as its own lifespan
-    installs it: the shared bucket when one is configured, so this process reads
-    the harness's frames."""
+def install_shared_stores() -> None:
+    """The stores data-mcp's lifespan installs, on the buckets the harness uses when
+    they are configured: the definition store, so a spec_id a `search` minted and
+    no `get_data` has registered yet is held here too, and the materialisation
+    store, so this process reads the harness's frames."""
     data = DataSettings()
+    if data.definition_store_bucket is not None:
+        set_store(
+            CachingDefinitionStore(
+                GCSDefinitionStore(bucket_name=data.definition_store_bucket),
+                max_entries=data.definition_store_cache_max_entries,
+            )
+        )
     install_store_if_unset(
         bucket_name=data.frame_store_bucket,
         verify_content_version_on_read=data.frame_store_verify_content_version,
@@ -126,7 +140,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--sessions", type=Path, default=DEFAULT_SESSIONS)
     args = parser.parse_args()
-    install_frame_store()
+    install_shared_stores()
     build(Settings(), sessions=args.sessions).mcp.run(
         transport="http", host=args.host, port=args.port, path="/mcp"
     )

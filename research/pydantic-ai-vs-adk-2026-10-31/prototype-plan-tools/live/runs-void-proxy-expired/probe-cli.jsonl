@@ -1,0 +1,4 @@
+{"at": "2026-11-03T09:34:45.901118+00:00", "run": "probe-cli", "type": "start", "task": "series-gdp-ghana", "rep": 1, "client_model": "tester"}
+{"at": "2026-11-03T09:34:45.901291+00:00", "run": "probe-cli", "type": "say", "who": "User", "text": "What was Ghana's GDP, in constant 2015 US dollars, in each year from 2010 to 2022?"}
+{"at": "2026-11-03T09:34:47.497156+00:00", "run": "probe-cli", "type": "call", "client": "cli", "elicits": true, "server": "plan", "tool": "start_plan", "args": {"brief": "probe"}, "is_error": true, "seen": "Error calling tool 'start_plan': 'asks'", "structured": null, "elapsed_ms": 80}
+{"at": "2026-11-03T09:34:49.071089+00:00", "run": "probe-cli", "type": "end", "ending": "stopped", "tool_calls": 1}

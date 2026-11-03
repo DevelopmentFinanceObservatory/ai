@@ -1,8 +1,8 @@
 # Tester prompt for a Claude-side client
 
-Give a tester the prompt below with `<TASK>` and `<RUN>` filled in. Run names are `claude-<model>-<task>-r<rep>`, for example `claude-sonnet-series-gdp-ghana-r1`; a name already used is refused. The ten tasks are those in `tasks.py` (`SAMPLE`). Score afterwards with `score.py --runs 'claude-<model>-*'`. The tester's token use comes from the agent's own usage report, since the CLIs cannot see it.
+Give a tester the prompt below with `<TASK>` and `<RUN>` filled in. Run names are `claude-<model>-<task>-r<rep>`, for example `claude-sonnet-series-gdp-ghana-r1`; a name already used is refused. The ten tasks are those in `tasks.py` (`SAMPLE`). Score afterwards with `score.py --runs 'claude-<model>-*'`. The tester's token use comes from the agent's own usage report, since the CLIs cannot see it; `tester-usage.csv` holds it for every counted run.
 
-Sonnet ran without the sentence on saved output below; Haiku's counted runs (`claude-haiku-*-v2`) ran with it. Run testers one at a time or in parallel; each run's calls carry their own `x-dfo-caller`, so plan sessions stay apart.
+On the first version of the tools, Sonnet ran without the sentence on saved output below and Haiku's counted runs (`claude-haiku-*-v2`) ran with it. On the second, both ran this prompt as `claude-sonnet2-*` and `claude-haiku2-*`. Run testers one at a time or in parallel; each run's calls carry their own `x-dfo-caller`, so plan sessions stay apart.
 
 Against the second version of the plan tools, `dfo call` declares MCP elicitation, so plan-mcp asks the run's simulated user its questions and the plan card itself; the tester sees only the tool's answer. To measure a host without elicitation, fill `<ELICIT>` below with ` --no-elicit` and name the run `claude-<model>-<task>-noelicit-r<rep>`; otherwise leave it empty. `score.py` reports how each answer and approval was given.
 

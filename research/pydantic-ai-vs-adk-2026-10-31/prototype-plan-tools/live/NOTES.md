@@ -2,7 +2,7 @@
 
 Gemini 3.8 Flash on Pydantic AI, given only DFO's public `/mcp` and plan-mcp, landed an accepted plan in 20 of 20 conversations, in 1.6 proposals on average, and every accepted plan ran to `finished`. 15 of 20 landed plans are right by the planner-entry eval's own rules (kinds and years). DFO's planner, run through the planner-entry eval on the same 10 tasks three times each, accepted 29 of 30 entries, also in 1.6 proposals, and 24 of 30 are right. The client's conversations cost far more: a mean 539,000 input tokens (87% read from Gemini's cache) and 19,200 output and thinking tokens over 12.2 model requests, against 45,700 and 650 for a planner entry. The two are not like for like: the client's figure covers search, skills, planning, the run and the reply with its charts, where a planner entry stops at the first accepted plan.
 
-The results below are the first version of the tools. The second version (`../NOTES.md`) closes the gaps those runs found: `start_plan` takes the spec_ids the client's searches returned, `run_plan` returns rows and frame pairs the public tools read, strict-mode clients are not refused, the simulated user answers and approves through MCP elicitation, refusals name the shape they expect, and sessions persist in SQLite. The rig below drives the second version; it has not been rerun against it.
+The results below are the first version of the tools. The second version (`../NOTES.md`) closes the gaps those runs found: `start_plan` takes the spec_ids the client's searches returned, `run_plan` returns rows and frame pairs the public tools read, strict-mode clients are not refused, the simulated user answers and approves through MCP elicitation, refusals name the shape they expect, and sessions persist in SQLite. The rig below drives the second version, and every client ran again against it: `clients.md` compares the two versions and `results-v2.md` holds the second version's tables.
 
 ## Results
 
@@ -56,7 +56,7 @@ The smoke run (`runs/smoke-series-gdp-ghana.jsonl`, printed in `logs/smoke.txt`)
 ## The rig
 
 - `harness-server` on :8080 from this worktree, against dev's dfo-apis through `gcloud run services proxy` on :8083. It serves the public `/mcp` (`search`, `get_skill`, the data, analysis and presentation tools).
-- `serve_live.py` on :8091: plan-mcp from `serve.build`, behind the harness's bearer gate, appending each accepted plan to `runs/plans.jsonl`. Sessions persist in `plan-sessions.sqlite3` beside it (`--sessions`), so a restart keeps every open session. It installs the materialisation store data-mcp would (`serve.install_frame_store`), so `run_plan` reads a fetched frame's rows when `FRAME_STORE_BUCKET` names the bucket the harness writes to; derived frames are read from dfo-apis either way, and a frame it cannot read comes back with its pair and no rows.
+- `serve_live.py` on :8091: plan-mcp from `serve.build`, behind the harness's bearer gate, appending each accepted plan to `runs/plans.jsonl`. Sessions persist in `plan-sessions.sqlite3` beside it (`--sessions`), so a restart keeps every open session. It installs the stores data-mcp's lifespan would (`serve.install_shared_stores`). With `DEFINITION_STORE_BUCKET` naming the harness's bucket, `start_plan` holds a spec_id a client's `search` minted and no `get_data` has registered yet; without it such an id is refused `spec_not_held`, since dfo-apis' registry learns a definition only at its first fetch. With `FRAME_STORE_BUCKET` naming the harness's bucket, `run_plan` reads a fetched frame's rows; derived frames are read from dfo-apis either way, and a frame it cannot read comes back with its pair and no rows.
 - `dfo` (`dfo_cli.py`): one tool call per process on either server, printing a model's view (text blocks, and `structuredContent` only on an error result, as `~/.claude/dfo-ai-e2e/mcp` does), with the run's own `x-dfo-caller`, appended to `runs/<run>.jsonl`. It refuses a call past 40 tool calls or 12 proposals. Each call declares MCP elicitation, and its handler (`rig.simulated_user`) puts plan-mcp's question or plan card to the run's simulated user and logs the exchange as `say` lines with `via: elicitation`; `--no-elicit` makes the call as a host without elicitation. It now runs under `uv run` with Pydantic AI and the `.env` key, as `user` does, since the simulated user is a model call.
 - `users/<task>.json` (`make_users.py`): the simulated user's script for each task, derived from the task file alone. The user opens with `question`; what they mean is `brief` and `asks`; a decision the reference records as `resolved_by: user` is answered with its `chosen` option (only `sum-oda-oof-ethiopia` has one: "add them"); one the planner settled by default gets "no preference"; a plan is approved only if it answers every ask.
 - `simuser.py`: the user on `gemini-3.5-flash-lite`, holding the script. `reply` answers the conversation; `elicit` answers a form plan-mcp sends: a pick among the choices it lists, words of their own, or a card to approve or turn down by the same rule. A check before the first runs: shown a plan in current dollars that sums the years for `series-gdp-ghana`, it refused and named both faults; asked "add or show separately" for `sum-oda-oof-ethiopia`, it said "add them". `elicit` has not run against the live model.
@@ -67,9 +67,13 @@ The smoke run (`runs/smoke-series-gdp-ghana.jsonl`, printed in `logs/smoke.txt`)
 
 ## Starting the servers
 
-From `/Users/jorge/repos/dfo-ai-worktrees/pai-research`, with `R=research/pydantic-ai-vs-adk-2026-10-31/prototype-plan-tools`:
+From `/Users/jorge/repos/dfo-ai-worktrees/pai-research`, with `R=research/pydantic-ai-vs-adk-2026-10-31/prototype-plan-tools`. A local GCS emulator gives the harness and plan-mcp one definition store and one frame store, as one process would have; without it each process keeps its own in-memory stores (see `serve_live.py` below).
 
 ```
+docker run -d --rm --name pai-fake-gcs -p 4443:4443 fsouza/fake-gcs-server:latest -scheme http -port 4443 -public-host localhost:4443
+curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"pai-frames"}' 'http://localhost:4443/storage/v1/b?project=local'
+export STORAGE_EMULATOR_HOST=http://localhost:4443 FRAME_STORE_BUCKET=pai-frames DEFINITION_STORE_BUCKET=pai-frames GOOGLE_CLOUD_PROJECT=local
+
 perl -MPOSIX -e 'setsid; exec @ARGV' gcloud run services proxy dfo-dev-apis --region northamerica-northeast1 \
   --project dev-fin-observatory --port 8083 > $R/live/logs/apis-proxy.log 2>&1 < /dev/null &
 
@@ -83,7 +87,7 @@ cd $R && DFO_APIS_URL=http://localhost:8083 MCP_API_TOKEN=local-dev PYTHONPATH=.
   python live/serve_live.py --port 8091 > live/logs/plan-mcp.log 2>&1 < /dev/null &
 ```
 
-Stop them by port: `lsof -tiTCP:8080 -sTCP:LISTEN | xargs kill`, and the same for 8091 and 8083. Delete `live/plan-sessions.sqlite3` to start with no sessions.
+Stop them by port: `lsof -tiTCP:8080 -sTCP:LISTEN | xargs kill`, and the same for 8091 and 8083. Stop the emulator with `docker stop pai-fake-gcs`. Delete `live/plan-sessions.sqlite3` to start with no sessions.
 
 Then, from `$R/live`, a smoke run (public `search`, `start_plan` with the spec_ids it returned, the reference plan, `run_plan` approved on the client's word) and the two Pydantic AI batches, with and without elicitation:
 

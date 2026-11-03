@@ -30,7 +30,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Any, override
+from typing import Any, ClassVar, override
 
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_context, get_http_headers
@@ -51,7 +51,7 @@ from mcp.types import (
     TextContent,
     ToolAnnotations,
 )
-from outward import ASK_TOOL, drop_unset, guidance_text, lean, outward
+from outward import ASK_TOOL, drop_unset, expected_shape, guidance_text, lean, outward
 from plan_tools import (
     BY_CLIENT,
     BY_USER,
@@ -356,9 +356,25 @@ _SEARCHES = {
 }
 
 
+def _missing(arguments: Mapping[str, Any], schema: Mapping[str, Any]) -> dict[str, Any] | None:
+    """An `invalid_arguments` refusal naming each required argument not sent, with
+    its expected shape, or `None` when every one was sent."""
+    names = [name for name in schema.get("required", []) if name not in arguments]
+    if not names:
+        return None
+    shapes = dict(filter(None, (expected_shape(schema, [name]) for name in names)))
+    answer = refusal(ProblemCode.INVALID_ARGUMENTS.value, "send " + ", ".join(names))
+    answer["expected"] = shapes
+    return answer
+
+
 class _PlanTool(Tool):
     """A plan tool: listed lean (`outward.lean`) at `TOOLS_VERSION` and not strict,
     its arguments read against the full schema with unset values left out."""
+
+    # `propose_plan` leaves its required fields to the planner, whose `invalid_plan`
+    # names each missing field's shape already.
+    checks_required: ClassVar[bool] = True
 
     def __init__(
         self, server: PlanMcp, *, name: str, description: str, schema: dict[str, Any]
@@ -383,7 +399,10 @@ class _PlanTool(Tool):
 
     @override
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
-        answered = await self.answer(drop_unset(arguments, self._schema))
+        arguments = drop_unset(arguments, self._schema)
+        if self.checks_required and (missing := _missing(arguments, self._schema)):
+            return _result(missing)
+        answered = await self.answer(arguments)
         if isinstance(answered, ToolResult):
             return answered
         return _result(answered)
@@ -426,6 +445,8 @@ class _StartPlan(_PlanTool):
 
 class _ProposePlan(_PlanTool):
     """`propose_plan`: the served planner's declaration with `plan_session` added."""
+
+    checks_required: ClassVar[bool] = False
 
     def __init__(self, server: PlanMcp) -> None:
         declaration = _declaration(server.service.propose_tool)

@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 from pydantic_ai import Agent
 from tasks import load_user
 
@@ -76,12 +76,17 @@ false only to refuse to answer.
 """
 
 
-class ElicitedReply(BaseModel):
+# One reply shape per form, every answer field required: a default would let the
+# model leave `approve` out and turn an approval into a decline.
+class ApprovalReply(BaseModel):
     accept: bool
-    choice: str = ""
-    text: str = ""
-    approve: bool = False
-    comment: str = ""
+    approve: bool
+    comment: str
+
+
+class TextReply(BaseModel):
+    accept: bool
+    text: str
 
 
 def _choices(schema: Mapping[str, Any]) -> dict[str, str]:
@@ -95,25 +100,28 @@ async def elicit(
     """The form content the user sends for an elicitation of `message` under
     `schema`, or `None` when they decline it."""
     choices = _choices(schema)
-    approval = "approve" in (schema.get("properties") or {})
-    if approval:
-        form = "Fill `approve` (and `comment` with what to change when you do not approve)."
+    reply_type: type[BaseModel]
+    if "approve" in (schema.get("properties") or {}):
+        reply_type = ApprovalReply
+        form = "Set `approve`, and say in `comment` why, or what to change when you do not approve."
     elif choices:
-        form = "Fill `choice` with exactly one key: " + json.dumps(choices)
+        reply_type = create_model(
+            "ChoiceReply", accept=(bool, ...), choice=(Literal[tuple(choices)], ...)
+        )
+        form = "Set `choice` to exactly one key: " + json.dumps(choices)
     else:
+        reply_type = TextReply
         form = "Fill `text` with your answer."
     user = Agent(
         USER_MODEL,
         instructions=ELICIT_INSTRUCTION + "\nScript:\n" + json.dumps(load_user(task_id), indent=1),
-        output_type=ElicitedReply,
+        output_type=reply_type,
         model_settings={"max_retries": 3},
     )
     prompt = f"{transcript(turns)}\n\nThe form asks:\n{message}\n\n{form}"
-    answered = (await user.run(prompt)).output
-    if not answered.accept:
+    answered = (await user.run(prompt)).output.model_dump()
+    if not answered.pop("accept"):
         return None
-    if approval:
-        return {"approve": answered.approve, "comment": answered.comment}
-    if choices:
-        return {"value": answered.choice if answered.choice in choices else next(iter(choices))}
-    return {"value": answered.text}
+    if reply_type is ApprovalReply:
+        return answered
+    return {"value": answered.get("choice", answered.get("text"))}

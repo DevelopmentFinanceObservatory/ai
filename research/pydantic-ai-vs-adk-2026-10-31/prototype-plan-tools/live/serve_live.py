@@ -33,7 +33,7 @@ from fastmcp import FastMCP
 from harness.settings import Settings
 from plan_tools import PlanningService, PlanSession
 from planner.plan import load_plan
-from serve import DEFAULT_SESSIONS, build, install_frame_store
+from serve import DEFAULT_SESSIONS, build, install_shared_stores
 
 PLANS = Path(__file__).resolve().parent / "runs" / "plans.jsonl"
 
@@ -73,7 +73,7 @@ def main() -> None:
     # then takes the resolved policy.
     gate = {"token": settings.mcp_api_token, "disabled": settings.mcp_auth_disabled}
     apply_gate(FastMCP("auth-policy"), **gate)
-    install_frame_store()
+    install_shared_stores()
     plan = build(settings, sessions=args.sessions)
     record_accepted_plans(plan.service)
     apply_gate(plan.mcp, **gate)
