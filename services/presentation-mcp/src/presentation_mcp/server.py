@@ -336,9 +336,10 @@ def view_support(capabilities: ClientCapabilities | None) -> ViewSupport:
 def _write_token_text(write_token: str) -> str:
     """The content block carrying a create's write token on its last line."""
     return (
-        "Keep this write_token with the component_id. Revising the component needs "
-        "both, and the component_id alone lets anyone read it. Without the token, "
-        "create a new component.\n"
+        "A revise needs this write_token with the component_id. Use the token only "
+        "in later tool calls and leave it out of replies to the user, since anyone "
+        "who sees it can revise the component. Mention the component_id only when "
+        "the user asks for it. Without the token, create a new component.\n"
         f"{WRITE_TOKEN_KEY}: {write_token}"
     )
 
@@ -586,10 +587,12 @@ async def write_component(
     whatever the intent sends.
 
     The component_id a reply returns is the only way back to that component.
-    A create's reply also returns a write_token. Keep both: a revise needs
-    the token, and the component_id alone lets anyone read the component.
-    Without the token, create a new component; describe_component returns
-    the old one's intent to start from.
+    A create's reply also returns a write_token. A revise needs the token,
+    and the component_id alone lets anyone read the component. Use the token
+    only in later tool calls and leave it out of replies to the user, since
+    anyone who sees it can revise the component. Mention the component_id
+    only when the user asks for it. Without the token, create a new
+    component; describe_component returns the old one's intent to start from.
 
     intent's frame_ref is the spec_id and content_version pair a data tool's
     reply returned. A frame_ref whose spec_id starts with ops_ and whose

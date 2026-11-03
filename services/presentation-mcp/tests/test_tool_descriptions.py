@@ -64,6 +64,7 @@ def test_write_component_docstring_states_the_write_token_rule() -> None:
     doc = " ".join((write_component.__doc__ or "").split())
     assert "Passing component_id and write_token" in doc
     assert "the component_id alone lets anyone read the component" in doc
+    assert "leave it out of replies to the user" in doc
     assert "Without the token, create a new component" in doc
 
 
