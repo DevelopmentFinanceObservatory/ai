@@ -12,8 +12,10 @@ import asyncio
 import copy
 import logging
 import pickle
+import ssl
 from collections.abc import Awaitable, Callable
 
+import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import apply_gate
@@ -27,9 +29,9 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     UnhashableSchemaError,
     _auth_for,
-    retryable_call_failure,
     schema_hash,
     schema_hash_error,
+    transient,
 )
 from data_mcp.server import mcp as data_mcp
 from fastmcp import Client, Context, FastMCP
@@ -39,7 +41,7 @@ from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, REQUEST_TIMEOUT
 from planner.workflow import ToolId
 
-UNREACHABLE_URL = "http://127.0.0.1:9/mcp"
+from ..unreachable_surface import UNREACHABLE_URL
 
 
 def _held(surface: McpSurface, server: str, caller: str | None = None) -> Client | None:
@@ -210,8 +212,14 @@ def test_a_subclass_with_its_own_signature_rebuilds_as_itself() -> None:
 
 
 async def test_a_server_that_cannot_be_read_raises_naming_it() -> None:
-    with pytest.raises(ToolSurfaceUnavailableError, match=UNREACHABLE_URL):
+    with pytest.raises(ToolSurfaceUnavailableError, match=UNREACHABLE_URL) as excinfo:
         await McpSurface(sources={"data-mcp": UNREACHABLE_URL}).list_tools()
+
+    # fastmcp's `RuntimeError('Client failed to connect: ...')` over the
+    # transport's `ConnectError`: a later attempt may find the server up.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert isinstance(excinfo.value.__cause__.__cause__, httpx2.ConnectError)
+    assert excinfo.value.retryable is True
 
 
 async def test_one_unreadable_server_fails_the_whole_read() -> None:
@@ -411,8 +419,56 @@ async def test_a_failed_call_is_marked_retryable_by_the_type_that_failed_it(
     assert excinfo.value.retryable is retryable
 
 
+def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
+    outer.__cause__ = cause
+    return outer
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        (httpx2.ConnectError("All connection attempts failed"), True),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: All connection attempts failed"),
+                httpx2.ConnectError("All connection attempts failed"),
+            ),
+            True,
+        ),
+        (RuntimeError("Client failed to connect: bad request"), False),
+        (
+            _raised_from(
+                RuntimeError("Client failed to connect: certificate"),
+                _raised_from(
+                    httpx2.ConnectError("certificate"), ssl.SSLCertVerificationError("expired")
+                ),
+            ),
+            False,
+        ),
+        (ExceptionGroup("tasks", [httpx2.ConnectError("down"), TimeoutError()]), True),
+        (ExceptionGroup("tasks", [httpx2.ConnectError("down"), ValueError("bug")]), False),
+        (ToolSurfaceUnavailableError("cut off", retryable=True), True),
+        (ToolSurfaceUnavailableError("not covered", retryable=False), False),
+        (ValueError("a bug"), False),
+    ],
+    ids=[
+        "connect-error",
+        "fastmcp-connect-failure",
+        "other-runtime-error",
+        "failed-certificate",
+        "group-of-transient",
+        "group-with-a-bug",
+        "marked-retryable",
+        "marked-final",
+        "bug",
+    ],
+)
+def test_transient_reads_the_whole_cause_chain(raised: BaseException, expected: bool) -> None:
+    assert transient(raised) is expected
+
+
 async def test_the_error_fastmcp_raises_when_its_session_task_ends_is_retryable() -> None:
-    """The text `retryable_call_failure` matches is the one the installed
+    """The text `transient` matches is the one the installed
     fastmcp raises: a finished session task under a call, built here by
     replacing the task with one that completed without an exception."""
     async with Client(_answering_server()) as client:
@@ -423,7 +479,7 @@ async def test_the_error_fastmcp_raises_when_its_session_task_ends_is_retryable(
         with pytest.raises(RuntimeError) as excinfo:
             await client.call_tool("search", {"parts": []})
 
-    assert retryable_call_failure(excinfo.value) is True
+    assert transient(excinfo.value) is True
 
 
 async def test_a_failed_read_is_marked_retryable_by_the_type_that_failed_it(
@@ -648,8 +704,10 @@ async def test_call_tool_on_an_uncovered_server_raises_naming_the_covered_ones()
 async def test_call_tool_on_an_unreachable_server_raises_naming_the_tool() -> None:
     surface = McpSurface(sources={"data-mcp": UNREACHABLE_URL})
 
-    with pytest.raises(ToolSurfaceUnavailableError, match="could not call 'search'"):
+    with pytest.raises(ToolSurfaceUnavailableError, match="could not call 'search'") as excinfo:
         await surface.call_tool(tool=ToolId(server="data-mcp", name="search"), arguments={})
+
+    assert excinfo.value.retryable is True
 
 
 async def test_the_fixture_surface_answers_from_its_canned_responses() -> None:

@@ -106,6 +106,7 @@ from translator.discovery import (
 from translator.referral import ReferralKind
 
 from ..data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub
+from ..unreachable_surface import unreachable_surface
 from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
@@ -1644,6 +1645,14 @@ async def test_a_resolve_that_did_not_complete_is_retryable_as_its_raise_site_ma
         )
 
     assert raised.value.retryable is retryable
+    assert raised.value.refused is False
+
+
+async def test_a_resolve_against_a_server_that_is_down_is_retryable() -> None:
+    with pytest.raises(DefinitionNotResolvedError) as raised:
+        await resolve_definition(unreachable_surface(), spec_id=SPEC_KENYA, identity={"seed": "x"})
+
+    assert raised.value.retryable is True
     assert raised.value.refused is False
 
 

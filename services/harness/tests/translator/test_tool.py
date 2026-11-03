@@ -116,6 +116,7 @@ from translator.tool import (
 
 from ..described_nodes import stat_var_node
 from ..split_plan import SPEC_DEBT_HISTORY, split_draft
+from ..unreachable_surface import unreachable_surface
 from .conftest import FakeCall, _spec
 
 DraftFactory = Callable[..., Plan]
@@ -669,6 +670,21 @@ async def test_an_unreadable_surface_is_an_error_and_keeps_the_draft(
     )
 
     assert result["code"] == code
+    assert _stored(context).status == PlanStatus.DRAFT
+
+
+async def test_a_surface_that_is_down_is_an_error_the_planner_can_retry(
+    draft: DraftFactory, source: SourceFactory, context_holding: ContextHolding
+) -> None:
+    context = context_holding(draft())
+    _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
+    core = build_translator_core(surface=unreachable_surface())
+
+    result = await core.propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), state=context.state
+    )
+
+    assert result["code"] == "surface_unavailable"
     assert _stored(context).status == PlanStatus.DRAFT
 
 

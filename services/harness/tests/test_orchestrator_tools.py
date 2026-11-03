@@ -122,6 +122,7 @@ from .test_turn_records import (
     _served_identity,
     _top_donors,
 )
+from .unreachable_surface import unreachable_surface
 
 SPEC_AID = "spec_" + "a" * 32
 SPEC_LIFE = "spec_" + "b" * 32
@@ -4701,6 +4702,14 @@ async def test_a_skill_read_that_does_not_complete_is_a_retryable_error_for_the_
         "retry_mode": "retry_after_delay",
     }
     assert len(surface.calls) == 1
+
+
+async def test_a_skill_read_against_a_server_that_is_down_is_a_retryable_error_for_the_model():
+    tools, ctx = _tools(surface=unreachable_surface())
+
+    answered = await tools["get_skill"]("oda-measures", ctx)
+
+    assert _stated(answered) == ("transient_unavailable", "retry_after_delay")
 
 
 @pytest.mark.parametrize("tool", ["get_skill", "get_skill_file"])

@@ -81,6 +81,7 @@ from planner.plan import (
 )
 from planner.workflow import SelectedSource, ToolId
 
+from ..unreachable_surface import unreachable_surface
 from .conftest import RESULT_FRAME, SPEC_KENYA, SPEC_POPULATION, ScriptedSurface, ok, refusal
 
 PlanFactory = Callable[..., Plan]
@@ -341,6 +342,59 @@ async def test_a_transport_failure_its_raise_site_marked_final_is_not_retried(
     assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
     # One get_data call, then one `aggregate` call that is not asked again.
     assert len(surface.calls) == 2
+    assert (outcome.retryable, stop_cause(outcome)) == (False, StopCause.HARNESS)
+
+
+class _AggregatesLostToADownServer(ScriptedSurface):
+    """A scripted surface whose `aggregate` calls reach a server that is down."""
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name != "aggregate":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        self.calls.append((tool.name, dict(arguments)))
+        return await unreachable_surface().call_tool(
+            tool=ToolId(server="data-mcp", name=tool.name), arguments=arguments
+        )
+
+
+async def test_a_call_to_a_server_that_is_down_is_retried_to_the_cap_and_stops_transient(
+    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+) -> None:
+    surface = _AggregatesLostToADownServer(
+        schemas=real_schemas, responses={"get_data": [ok(manifest())]}
+    )
+    sleeps = _Sleeps()
+
+    outcome = await _run(approved_plan(), surface=surface, sleep=sleeps)
+
+    assert isinstance(outcome, Refused)
+    assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
+    assert len(surface.calls) == 1 + MAX_ATTEMPTS_PER_STEP
+    assert len(sleeps.delays) == MAX_ATTEMPTS_PER_STEP - 1
+    assert (outcome.retryable, stop_cause(outcome)) == (True, StopCause.TRANSIENT)
+
+
+async def test_a_surface_that_is_down_stops_the_run_transient_before_any_call(
+    approved_plan: PlanFactory, real_schemas: list[ToolSchema]
+) -> None:
+    class Down(ScriptedSurface):
+        async def list_tools(self) -> list[ToolSchema]:
+            return await unreachable_surface().list_tools()
+
+    surface = Down(schemas=real_schemas, responses={})
+
+    outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
+
+    assert isinstance(outcome, Refused)
+    assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
+    assert surface.calls == []
+    assert (outcome.retryable, stop_cause(outcome)) == (True, StopCause.TRANSIENT)
 
 
 async def test_a_transport_that_never_answers_stops_the_run_after_the_last_attempt(

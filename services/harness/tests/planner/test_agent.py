@@ -275,6 +275,7 @@ from ..session_events import response_event
 from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
 from ..test_turn_records import _switchable_scope
+from ..unreachable_surface import unreachable_surface
 
 # The `decision`, `requirement`, `derived_requirement` and `requirements`
 # fixtures, from conftest.py. Annotated structurally rather than imported: a
@@ -10856,6 +10857,27 @@ async def test_a_search_that_did_not_complete_is_asked_again_only_when_it_can_su
         assert [(pin.requirement_key, pin.status) for pin in searched_pins(state)] == [
             ("k", "refused")
         ]
+
+
+async def test_a_search_against_a_server_that_is_down_is_asked_again() -> None:
+    read = await planner_agent.pin_by_search(
+        unreachable_surface(),
+        submission_service.Unpinned(
+            requirement_id="r",
+            step_id="s",
+            requirement_key="k",
+            part={},
+            asked_roles=(),
+            open_roles=(),
+        ),
+    )
+    state: dict[str, Any] = {}
+    assert read is not None
+    refusal = read(state)
+
+    assert refusal is not None
+    assert refusal["code"] == ProblemCode.SURFACE_UNAVAILABLE.value
+    assert searched_pins(state) == ()
 
 
 def _another_part(block: dict[str, Any]) -> dict[str, Any]:

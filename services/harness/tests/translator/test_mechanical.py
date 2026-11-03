@@ -98,6 +98,7 @@ from translator.referral import (
 )
 from translator.tool import build_translate, build_translator_core
 
+from ..unreachable_surface import unreachable_surface
 from .conftest import FakeCall, _spec
 from .test_model_facing_tool_results import _ENVELOPE_KEYS, _flat_keys
 
@@ -866,6 +867,21 @@ async def test_a_surface_that_cannot_be_listed_refers_the_plan_as_its_error_says
     )
 
     assert (referral["kind"], referral["outcome"]) == (kind, outcome)
+
+
+async def test_a_surface_that_is_down_refers_the_plan_as_transient(
+    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+) -> None:
+    core = dataclasses.replace(
+        _compile_failure_core(core, []), list_tools=unreachable_surface().list_tools
+    )
+
+    referral = cast(
+        "dict[str, object]",
+        (await run_translate(context_holding(draft()).state, core=core))["referral"],
+    )
+
+    assert (referral["kind"], referral["outcome"]) == ("surface_unavailable", "transient")
 
 
 def _needs_repair(code: str) -> dict[str, object]:
