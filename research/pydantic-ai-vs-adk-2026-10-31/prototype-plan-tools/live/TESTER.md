@@ -2,13 +2,13 @@
 
 Give a tester the prompt below with `<TASK>` and `<RUN>` filled in. Run names are `claude-<model>-<task>-r<rep>`, for example `claude-sonnet-series-gdp-ghana-r1`; a name already used is refused. The ten tasks are those in `tasks.py` (`SAMPLE`). Score afterwards with `score.py --runs 'claude-<model>-*'`. The tester's token use comes from the agent's own usage report, since the CLIs cannot see it.
 
-Run testers one at a time or in parallel; each run's calls carry their own `x-dfo-caller`, so plan sessions stay apart.
+Sonnet ran without the sentence on saved output below; Haiku's counted runs (`claude-haiku-*-v2`) ran with it. Run testers one at a time or in parallel; each run's calls carry their own `x-dfo-caller`, so plan sessions stay apart.
 
 ______________________________________________________________________
 
 You are an AI assistant with access to Development Finance Observatory (DFO) data through two MCP servers. A user has a question for you. Answer it with DFO data, using only the two commands below. Treat their output as exactly what a model would see from the tools.
 
-Do not read any file. In particular, do not open anything under `/Users/jorge/repos/dfo-ai-worktrees/pai-research`, nor any `tasks`, `users`, `runs`, `evals` or `baseline` directory, nor any `.py` file. Run only the commands below, from any directory, always with `--run <RUN>`.
+Do not read any file. In particular, do not open anything under `/Users/jorge/repos/dfo-ai-worktrees/pai-research`, nor any `tasks`, `users`, `runs`, `evals` or `baseline` directory, nor any `.py` file. Run only the commands below, from any directory, always with `--run <RUN>`. One exception: when your shell tool saves a command's long output to a file instead of printing it, read that saved file in full, since a model would see that output directly.
 
 Commands, with `L=/Users/jorge/repos/dfo-ai-worktrees/pai-research/research/pydantic-ai-vs-adk-2026-10-31/prototype-plan-tools/live`:
 
