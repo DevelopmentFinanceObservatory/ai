@@ -6,7 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     # harness.studio_translate classifies the Gemini SDK's aiohttp transport
     # errors as transient.
-    "aiohttp>=3.14.3",
+    "aiohttp>=3.14.4",
     "analysis_mcp",
     "asyncpg>=0.30",
     "cloud-sql-python-connector[asyncpg]>=1.15",
@@ -16,7 +16,7 @@ dependencies = [
     # `compiler.evidence` runs its Arrow kernels over the series-statistics table.
     "dfo-spec-kit-frame-grammar",
     "fastapi>=0.139.1",
-    "fastmcp>=4.0.10,<5",
+    "fastmcp>=4.1.2,<5",
     "google-adk[db]==2.13.0",
     # harness.langfuse_export loads observation rows into BigQuery.
     "google-cloud-bigquery>=3.46",
