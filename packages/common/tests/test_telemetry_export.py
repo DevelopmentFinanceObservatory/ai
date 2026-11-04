@@ -114,7 +114,9 @@ def fake_langfuse(isolated_telemetry, monkeypatch: pytest.MonkeyPatch) -> Iterat
                 request = ExportTraceServiceRequest()
                 request.ParseFromString(body)
                 state.exports.append(request)
-                state.export_headers.append(dict(self.headers))
+                state.export_headers.append(
+                    {name.lower(): value for name, value in self.headers.items()}
+                )
                 self._reply(200)
             else:
                 self._reply(404)
@@ -577,7 +579,7 @@ def test_the_langfuse_export_carries_the_sdks_credentials_and_headers(
     _one_turn("tr_export0011")
 
     headers = fake_langfuse.export_headers[0]
-    assert headers["Authorization"] == "Basic " + base64.b64encode(b"pk-lf-test:sk-lf-test").decode(
+    assert headers["authorization"] == "Basic " + base64.b64encode(b"pk-lf-test:sk-lf-test").decode(
         "ascii"
     )
     assert headers["x-langfuse-public-key"] == "pk-lf-test"
@@ -626,8 +628,11 @@ def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
     inner = ours._exporter
     assert isinstance(inner, OTLPSpanExporter)
     assert inner._endpoint == sdk._endpoint
-    assert inner._headers == {**sdk._headers, "x-langfuse-ingestion-version": "4"}
-    assert inner._timeout == sdk._timeout
+    assert inner._client._headers == {
+        **sdk._client._headers,
+        "x-langfuse-ingestion-version": "4",
+    }
+    assert inner._client._timeout == sdk._client._timeout
 
 
 # --- one Langfuse session per conversation ------------------------------------

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Shared internals for dfo-ai services: settings base, logging, telemetry init."
 requires-python = ">=3.13"
 dependencies = [
-    "fastmcp>=4.0.10,<5",
+    "fastmcp>=4.1.2,<5",
     "pydantic-settings>=2.0",
     # The durable materialisation store's on-disk `Frame` shape
     # (`common.materialisation.frame_codec`): a `Frame` is written to and

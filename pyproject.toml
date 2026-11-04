@@ -7,6 +7,14 @@ dependencies = []
 
 [tool.uv]
 package = false
+# google-adk 2.13.0 caps opentelemetry-api and opentelemetry-sdk at <=1.44.
+# 1.45.1 fixes unbounded tracestate parsing, which fastmcp reaches through a
+# caller's `_meta.tracestate`. Remove this override once google-adk allows
+# >=1.45.1.
+override-dependencies = [
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+]
 
 [tool.uv.workspace]
 members = ["packages/*", "services/*"]

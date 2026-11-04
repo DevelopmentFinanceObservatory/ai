@@ -12,11 +12,11 @@ dependencies = [
     # analysis-mcp's own pair of entries for the same package.
     "dfo-spec-kit",
     "dfo-spec-kit-frame-grammar",
-    "fastmcp[apps]>=4.0.10,<5",
+    "fastmcp[apps]>=4.1.2,<5",
     # `chart_image` measures label widths from the vendored fonts' advance widths.
     "fonttools>=4.66.1",
     "httpx2>=2.13.0",
-    "opentelemetry-api>=1.42",
+    "opentelemetry-api>=1.45.1",
     # Prefab renders write_component and describe_component as an MCP App
     # (`presentation_mcp.app_view`). The package is pre-1.0 and breaks
     # between minors, so it is pinned exactly.
