@@ -15,7 +15,7 @@
         "body": {
           "component_id": "cmp_000000000000000000000001",
           "revision": 1,
-          "catalog_version": "2026.10.0",
+          "catalog_version": "2026.11.0",
           "composition_id": null,
           "composition_revision": null,
           "stored_intent": {
@@ -27,28 +27,14 @@
             "select": {
               "stat_var": "dcid:LiveRefreshGrants",
               "recipient": [
-                "country/KEN",
-                "country/GHA"
+                "country/GHA",
+                "country/KEN"
               ]
             }
           },
           "fact_summary": {
             "changed": [],
             "series": [
-              {
-                "id": "s_f9203fe8883952e2",
-                "label": "Kenya",
-                "coordinates": {
-                  "measurementMethod": "GrantEquivalent",
-                  "provenance": "OECD_DAC2A",
-                  "recipient": "country/KEN",
-                  "stat_var": "dcid:LiveRefreshGrants",
-                  "unit": "USD"
-                },
-                "point_count": 3,
-                "first_value": "200",
-                "last_value": "220"
-              },
               {
                 "id": "s_f41b8d658de8187b",
                 "label": "Ghana",
@@ -62,6 +48,20 @@
                 "point_count": 3,
                 "first_value": "100",
                 "last_value": "120"
+              },
+              {
+                "id": "s_f9203fe8883952e2",
+                "label": "Kenya",
+                "coordinates": {
+                  "measurementMethod": "GrantEquivalent",
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/KEN",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "USD"
+                },
+                "point_count": 3,
+                "first_value": "200",
+                "last_value": "220"
               }
             ],
             "series_cut": 0,
@@ -76,7 +76,7 @@
           },
           "resolved_payload": {
             "schema_version": 1,
-            "catalog_version": "2026.10.0",
+            "catalog_version": "2026.11.0",
             "component_id": "cmp_000000000000000000000001",
             "revision": 1,
             "provenance": {
@@ -87,25 +87,7 @@
                 }
               ],
               "execution_ref": null,
-              "sources": [
-                {
-                  "id": "src_oecd_dac2a_6ec092e3",
-                  "name": "OECD_DAC2A",
-                  "url": "",
-                  "licence": "Not stated",
-                  "retrieved": "<date>",
-                  "ref": "OECD_DAC2A"
-                }
-              ],
-              "freshness": {
-                "data_through": "2024",
-                "last_refreshed": null,
-                "next_expected": null,
-                "partial_period": false
-              },
-              "warnings": [],
               "generated_at": "<timestamp>",
-              "citation": "OECD_DAC2A (<year>), via the Development Finance Observatory",
               "refreshed_from": null
             },
             "component": {
@@ -116,30 +98,10 @@
               },
               "series": [
                 {
-                  "id": "s_f9203fe8883952e2",
-                  "label": "Kenya",
-                  "unit": "USD",
-                  "source_ref": "src_oecd_dac2a_6ec092e3",
-                  "points": [
-                    {
-                      "period": "2022",
-                      "value": 200
-                    },
-                    {
-                      "period": "2023",
-                      "value": 210
-                    },
-                    {
-                      "period": "2024",
-                      "value": 220
-                    }
-                  ]
-                },
-                {
                   "id": "s_f41b8d658de8187b",
                   "label": "Ghana",
                   "unit": "USD",
-                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "source_ref": "OECD_DAC2A",
                   "points": [
                     {
                       "period": "2022",
@@ -152,6 +114,26 @@
                     {
                       "period": "2024",
                       "value": 120
+                    }
+                  ]
+                },
+                {
+                  "id": "s_f9203fe8883952e2",
+                  "label": "Kenya",
+                  "unit": "USD",
+                  "source_ref": "OECD_DAC2A",
+                  "points": [
+                    {
+                      "period": "2022",
+                      "value": 200
+                    },
+                    {
+                      "period": "2023",
+                      "value": 210
+                    },
+                    {
+                      "period": "2024",
+                      "value": 220
                     }
                   ]
                 }
@@ -170,7 +152,131 @@
                   "max": null
                 }
               }
+            },
+            "description": {
+              "describes": {
+                "kind": "card_revision",
+                "component_id": "cmp_000000000000000000000001",
+                "revision": 1
+              },
+              "title": "spec_176b1b132147fff98b37810b759f6f90, 2022 to 2024",
+              "about": {
+                "measure": null,
+                "fixed": [],
+                "drawn": {
+                  "dimensions": [
+                    {
+                      "property": {
+                        "ref": "recipient",
+                        "label": "recipient"
+                      },
+                      "count": 2,
+                      "of": 4,
+                      "values": [
+                        {
+                          "ref": "country/GHA",
+                          "label": "Ghana"
+                        },
+                        {
+                          "ref": "country/KEN",
+                          "label": "Kenya"
+                        }
+                      ]
+                    }
+                  ],
+                  "series": 2,
+                  "period": {
+                    "start": "2022",
+                    "end": "2024",
+                    "grain": "year"
+                  }
+                },
+                "unit": {
+                  "ref": "USD",
+                  "label": "US dollars"
+                }
+              },
+              "sources": [
+                {
+                  "ref": "OECD_DAC2A",
+                  "label": "OECD_DAC2A",
+                  "publisher": null,
+                  "licence": null,
+                  "series": 2,
+                  "documentation": "/api/graph/documentation/OECD_DAC2A"
+                }
+              ],
+              "freshness": {
+                "latest_period": "2024",
+                "series_reaching_it": 2,
+                "estimated_values": null,
+                "provisional_values": null
+              },
+              "steps": [
+                {
+                  "id": "s1",
+                  "op": "select",
+                  "input": {
+                    "id": "spec_176b1b132147fff98b37810b759f6f90",
+                    "content_version": "cv_00000000000000000000000000000001",
+                    "label": "spec_176b1b132147fff98b37810b759f6f90"
+                  },
+                  "policy": "card_selection",
+                  "params": {
+                    "coordinates": {
+                      "measurementMethod": [
+                        "GrantEquivalent"
+                      ],
+                      "recipient": [
+                        "country/GHA",
+                        "country/KEN"
+                      ],
+                      "stat_var": [
+                        "LiveRefreshGrants"
+                      ]
+                    },
+                    "window": {
+                      "end": "2024",
+                      "start": "2022"
+                    }
+                  },
+                  "kept": {
+                    "series": 2
+                  },
+                  "text": "Drew 2 series of spec_176b1b132147fff98b37810b759f6f90, 2022 to 2024."
+                }
+              ],
+              "caveats": [],
+              "cite": {
+                "component_id": "cmp_000000000000000000000001",
+                "revision": 1,
+                "title": "spec_176b1b132147fff98b37810b759f6f90",
+                "text": "OECD_DAC2A (2026), via the Development Finance Observatory",
+                "id": "spec_176b1b132147fff98b37810b759f6f90",
+                "content_version": "cv_00000000000000000000000000000001",
+                "retrieved": "<date>",
+                "data": "/api/datasets/spec_176b1b132147fff98b37810b759f6f90/cv_00000000000000000000000000000001"
+              },
+              "gaps": [
+                "title",
+                "steps.source_pipeline",
+                "about.measure",
+                "sources.0.label",
+                "sources.0.publisher",
+                "sources.0.licence",
+                "freshness.estimated_values",
+                "freshness.provisional_values",
+                "cite.title"
+              ],
+              "built_from": {
+                "facts_schema": 3,
+                "vocabulary": "voc_00000000000000000000000000000001"
+              }
             }
+          },
+          "retention": {
+            "pinned": false,
+            "held_until": "<timestamp>"
           }
         }
       }
@@ -571,7 +677,7 @@
         "body": {
           "component_id": "cmp_000000000000000000000001",
           "revision": 1,
-          "catalog_version": "2026.10.0",
+          "catalog_version": "2026.11.0",
           "composition_id": null,
           "composition_revision": null,
           "stored_intent": {
@@ -583,28 +689,14 @@
             "select": {
               "stat_var": "dcid:LiveRefreshGrants",
               "recipient": [
-                "country/KEN",
-                "country/GHA"
+                "country/GHA",
+                "country/KEN"
               ]
             }
           },
           "fact_summary": {
             "changed": [],
             "series": [
-              {
-                "id": "s_f9203fe8883952e2",
-                "label": "Kenya",
-                "coordinates": {
-                  "measurementMethod": "GrantEquivalent",
-                  "provenance": "OECD_DAC2A",
-                  "recipient": "country/KEN",
-                  "stat_var": "dcid:LiveRefreshGrants",
-                  "unit": "USD"
-                },
-                "point_count": 4,
-                "first_value": "200",
-                "last_value": "230"
-              },
               {
                 "id": "s_f41b8d658de8187b",
                 "label": "Ghana",
@@ -618,6 +710,20 @@
                 "point_count": 4,
                 "first_value": "100",
                 "last_value": "130"
+              },
+              {
+                "id": "s_f9203fe8883952e2",
+                "label": "Kenya",
+                "coordinates": {
+                  "measurementMethod": "GrantEquivalent",
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/KEN",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "USD"
+                },
+                "point_count": 4,
+                "first_value": "200",
+                "last_value": "230"
               }
             ],
             "series_cut": 0,
@@ -632,7 +738,7 @@
           },
           "resolved_payload": {
             "schema_version": 1,
-            "catalog_version": "2026.10.0",
+            "catalog_version": "2026.11.0",
             "component_id": "cmp_000000000000000000000001",
             "revision": 1,
             "provenance": {
@@ -643,25 +749,7 @@
                 }
               ],
               "execution_ref": null,
-              "sources": [
-                {
-                  "id": "src_oecd_dac2a_6ec092e3",
-                  "name": "OECD_DAC2A",
-                  "url": "",
-                  "licence": "Not stated",
-                  "retrieved": "<date>",
-                  "ref": "OECD_DAC2A"
-                }
-              ],
-              "freshness": {
-                "data_through": "2025",
-                "last_refreshed": null,
-                "next_expected": null,
-                "partial_period": false
-              },
-              "warnings": [],
               "generated_at": "<timestamp>",
-              "citation": "OECD_DAC2A (<year>), via the Development Finance Observatory",
               "refreshed_from": 1
             },
             "component": {
@@ -672,34 +760,10 @@
               },
               "series": [
                 {
-                  "id": "s_f9203fe8883952e2",
-                  "label": "Kenya",
-                  "unit": "USD",
-                  "source_ref": "src_oecd_dac2a_6ec092e3",
-                  "points": [
-                    {
-                      "period": "2022",
-                      "value": 200
-                    },
-                    {
-                      "period": "2023",
-                      "value": 210
-                    },
-                    {
-                      "period": "2024",
-                      "value": 220
-                    },
-                    {
-                      "period": "2025",
-                      "value": 230
-                    }
-                  ]
-                },
-                {
                   "id": "s_f41b8d658de8187b",
                   "label": "Ghana",
                   "unit": "USD",
-                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "source_ref": "OECD_DAC2A",
                   "points": [
                     {
                       "period": "2022",
@@ -718,6 +782,30 @@
                       "value": 130
                     }
                   ]
+                },
+                {
+                  "id": "s_f9203fe8883952e2",
+                  "label": "Kenya",
+                  "unit": "USD",
+                  "source_ref": "OECD_DAC2A",
+                  "points": [
+                    {
+                      "period": "2022",
+                      "value": 200
+                    },
+                    {
+                      "period": "2023",
+                      "value": 210
+                    },
+                    {
+                      "period": "2024",
+                      "value": 220
+                    },
+                    {
+                      "period": "2025",
+                      "value": 230
+                    }
+                  ]
                 }
               ],
               "x_axis": {
@@ -734,7 +822,136 @@
                   "max": null
                 }
               }
+            },
+            "description": {
+              "describes": {
+                "kind": "card_revision",
+                "component_id": "cmp_000000000000000000000001",
+                "revision": 1
+              },
+              "title": "spec_176b1b132147fff98b37810b759f6f90, 2022 to 2025",
+              "about": {
+                "measure": null,
+                "fixed": [],
+                "drawn": {
+                  "dimensions": [
+                    {
+                      "property": {
+                        "ref": "recipient",
+                        "label": "recipient"
+                      },
+                      "count": 2,
+                      "of": 4,
+                      "values": [
+                        {
+                          "ref": "country/GHA",
+                          "label": "Ghana"
+                        },
+                        {
+                          "ref": "country/KEN",
+                          "label": "Kenya"
+                        }
+                      ]
+                    }
+                  ],
+                  "series": 2,
+                  "period": {
+                    "start": "2022",
+                    "end": "2025",
+                    "grain": "year"
+                  }
+                },
+                "unit": {
+                  "ref": "USD",
+                  "label": "US dollars"
+                }
+              },
+              "sources": [
+                {
+                  "ref": "OECD_DAC2A",
+                  "label": "OECD_DAC2A",
+                  "publisher": null,
+                  "licence": null,
+                  "series": 2,
+                  "documentation": "/api/graph/documentation/OECD_DAC2A"
+                }
+              ],
+              "freshness": {
+                "latest_period": "2025",
+                "series_reaching_it": 2,
+                "estimated_values": null,
+                "provisional_values": null
+              },
+              "steps": [
+                {
+                  "id": "s1",
+                  "op": "select",
+                  "input": {
+                    "id": "spec_176b1b132147fff98b37810b759f6f90",
+                    "content_version": "cv_00000000000000000000000000000002",
+                    "label": "spec_176b1b132147fff98b37810b759f6f90"
+                  },
+                  "policy": "card_selection",
+                  "params": {
+                    "coordinates": {
+                      "measurementMethod": [
+                        "GrantEquivalent"
+                      ],
+                      "recipient": [
+                        "country/GHA",
+                        "country/KEN"
+                      ],
+                      "stat_var": [
+                        "LiveRefreshGrants"
+                      ]
+                    },
+                    "window": {
+                      "end": "2025",
+                      "start": "2022"
+                    }
+                  },
+                  "kept": {
+                    "series": 2
+                  },
+                  "text": "Drew 2 series of spec_176b1b132147fff98b37810b759f6f90, 2022 to 2025."
+                }
+              ],
+              "caveats": [],
+              "cite": {
+                "component_id": "cmp_000000000000000000000001",
+                "revision": 1,
+                "title": "spec_176b1b132147fff98b37810b759f6f90",
+                "text": "OECD_DAC2A (2026), via the Development Finance Observatory",
+                "id": "spec_176b1b132147fff98b37810b759f6f90",
+                "content_version": "cv_00000000000000000000000000000002",
+                "retrieved": "<date>",
+                "data": "/api/datasets/spec_176b1b132147fff98b37810b759f6f90/cv_00000000000000000000000000000002"
+              },
+              "gaps": [
+                "title",
+                "steps.source_pipeline",
+                "about.measure",
+                "sources.0.label",
+                "sources.0.publisher",
+                "sources.0.licence",
+                "freshness.estimated_values",
+                "freshness.provisional_values",
+                "cite.title"
+              ],
+              "built_from": {
+                "facts_schema": 3,
+                "vocabulary": "voc_00000000000000000000000000000001"
+              },
+              "rendering": "live",
+              "frame": {
+                "id": "spec_176b1b132147fff98b37810b759f6f90",
+                "content_version": "cv_00000000000000000000000000000002"
+              }
             }
+          },
+          "retention": {
+            "pinned": false,
+            "held_until": "<timestamp>"
           }
         }
       }
@@ -787,7 +1004,7 @@
           "cache-control": "no-store",
           "content-disposition": "attachment; filename=\"dfo_grants_<date>_r1.csv\""
         },
-        "body_starts": "series,stat_var,stat_var_label,recipient,recipient_label,time_period,value,unit,measurementMethod,provenance,provenance_label,status\r\nKenya,dcid:LiveRefreshGrants,Grants,country/KEN,Kenya,2022,200.0,USD,GrantEquivalent,OECD_DAC2A,OECD_DAC2A"
+        "body_starts": "series,stat_var,stat_var_label,recipient,recipient_label,time_period,value,unit,measurementMethod,provenance,provenance_label,status\r\nGhana,dcid:LiveRefreshGrants,Grants,country/GHA,Ghana,2022,100.0,USD,GrantEquivalent,OECD_DAC2A,OECD_DAC2A"
       }
     },
     "render_data.bundle": {
@@ -904,7 +1121,7 @@
         "body": {
           "component_id": "cmp_000000000000000000000002",
           "revision": 1,
-          "catalog_version": "2026.10.0",
+          "catalog_version": "2026.11.0",
           "composition_id": null,
           "composition_revision": null,
           "stored_intent": {
@@ -990,7 +1207,7 @@
           },
           "resolved_payload": {
             "schema_version": 1,
-            "catalog_version": "2026.10.0",
+            "catalog_version": "2026.11.0",
             "component_id": "cmp_000000000000000000000002",
             "revision": 1,
             "provenance": {
@@ -1001,30 +1218,7 @@
                 }
               ],
               "execution_ref": "rpk_00000000000000000000000000000002",
-              "sources": [
-                {
-                  "id": "src_oecd_dac2a_6ec092e3",
-                  "name": "OECD_DAC2A",
-                  "url": "",
-                  "licence": "Not stated",
-                  "retrieved": "<date>",
-                  "ref": "OECD_DAC2A"
-                }
-              ],
-              "freshness": {
-                "data_through": null,
-                "last_refreshed": null,
-                "next_expected": null,
-                "partial_period": false
-              },
-              "warnings": [
-                {
-                  "kind": "coverage_gap",
-                  "detail": "1 series has no 2025 value: Uganda"
-                }
-              ],
               "generated_at": "<timestamp>",
-              "citation": "OECD_DAC2A (<year>), processed by the Development Finance Observatory",
               "refreshed_from": 1
             },
             "component": {
@@ -1038,7 +1232,7 @@
                   "id": "s_862dac2f0b3df0e3",
                   "label": "Ghana",
                   "unit": "Percent",
-                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "source_ref": "OECD_DAC2A",
                   "points": [
                     {
                       "period": "2024",
@@ -1054,7 +1248,7 @@
                   "id": "s_ba99b44bc36432d9",
                   "label": "Kenya",
                   "unit": "Percent",
-                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "source_ref": "OECD_DAC2A",
                   "points": [
                     {
                       "period": "2024",
@@ -1070,7 +1264,7 @@
                   "id": "s_56bf513a20ffc54d",
                   "label": "Tanzania",
                   "unit": "Percent",
-                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "source_ref": "OECD_DAC2A",
                   "points": [
                     {
                       "period": "2024",
@@ -1097,7 +1291,139 @@
                   "max": null
                 }
               }
+            },
+            "description": {
+              "describes": {
+                "kind": "card_revision",
+                "component_id": "cmp_000000000000000000000002",
+                "revision": 1
+              },
+              "title": "ops_00000000000000000000000000000002, 2024 to 2025",
+              "about": {
+                "drawn": {
+                  "dimensions": [],
+                  "series": 3,
+                  "period": {
+                    "start": "2024",
+                    "end": "2025",
+                    "grain": "year"
+                  }
+                },
+                "unit": {
+                  "ref": "Percent",
+                  "label": "Percent"
+                }
+              },
+              "sources": [
+                {
+                  "ref": "OECD_DAC2A",
+                  "label": "OECD_DAC2A",
+                  "publisher": null,
+                  "licence": null,
+                  "series": 3,
+                  "documentation": "/api/graph/documentation/OECD_DAC2A"
+                }
+              ],
+              "freshness": {
+                "latest_period": "2025",
+                "series_reaching_it": 3,
+                "estimated_values": null,
+                "provisional_values": null
+              },
+              "steps": [
+                {
+                  "id": "s1",
+                  "op": "select",
+                  "input": {
+                    "id": "ops_00000000000000000000000000000002",
+                    "content_version": "ocv_00000000000000000000000000000002",
+                    "label": "ops_00000000000000000000000000000002"
+                  },
+                  "policy": "card_selection",
+                  "params": {
+                    "coordinates": {
+                      "recipient": [
+                        "country/GHA",
+                        "country/KEN",
+                        "country/TZA"
+                      ],
+                      "stat_var": [
+                        "LiveRefreshGrants"
+                      ]
+                    },
+                    "window": {
+                      "end": "2025",
+                      "start": "2024"
+                    }
+                  },
+                  "kept": {
+                    "series": 3
+                  },
+                  "text": "Drew 3 series of ops_00000000000000000000000000000002, 2024 to 2025."
+                }
+              ],
+              "caveats": [
+                {
+                  "kind": "coverage_gap",
+                  "entities": [
+                    {
+                      "ref": "country/UGA",
+                      "label": "country/UGA"
+                    }
+                  ],
+                  "periods": [
+                    "2025"
+                  ],
+                  "step": "s1",
+                  "text": "Country/UGA left out of the selection in 2025."
+                }
+              ],
+              "cite": {
+                "component_id": "cmp_000000000000000000000002",
+                "revision": 1,
+                "title": "ops_00000000000000000000000000000002",
+                "text": "OECD_DAC2A (2026), processed by the Development Finance Observatory",
+                "id": "ops_00000000000000000000000000000002",
+                "content_version": "ocv_00000000000000000000000000000002",
+                "retrieved": "<date>",
+                "data": "/api/presentation/frames/ops_00000000000000000000000000000002/ocv_00000000000000000000000000000002",
+                "inputs": [
+                  {
+                    "id": null,
+                    "content_version": "cv_00000000000000000000000000000002",
+                    "label": "cv_00000000000000000000000000000002"
+                  }
+                ]
+              },
+              "gaps": [
+                "title",
+                "steps.version",
+                "about.unit.label",
+                "sources.0.label",
+                "sources.0.publisher",
+                "sources.0.licence",
+                "freshness.estimated_values",
+                "freshness.provisional_values",
+                "caveats",
+                "caveats.0.entities.0.label",
+                "cite.title",
+                "cite.inputs.0.id",
+                "cite.inputs.0.label"
+              ],
+              "built_from": {
+                "facts_schema": 3,
+                "vocabulary": "voc_00000000000000000000000000000001"
+              },
+              "rendering": "live",
+              "frame": {
+                "id": "ops_00000000000000000000000000000002",
+                "content_version": "ocv_00000000000000000000000000000002"
+              }
             }
+          },
+          "retention": {
+            "pinned": false,
+            "held_until": "<timestamp>"
           }
         }
       }

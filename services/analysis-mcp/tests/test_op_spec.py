@@ -79,6 +79,7 @@ def test_aggregate_unit_defaults_to_none() -> None:
 
 
 CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2020}
+DONOR_EUR = {**CONSTANT_EUR, "deflation_basis": "donor"}
 EUR_PER_PERSON = {"numerator": CONSTANT_EUR, "denominator": {"stat_var": "dcid:Count_Person"}}
 EUR_PER_PERSON_CELL = ComposedUnit(
     numerator=UnitRequest(currency="EUR", prices="constant", base_year=2020),
@@ -91,6 +92,10 @@ EUR_PER_PERSON_CELL = ComposedUnit(
     [
         ("dcid:USDollar", "dcid:USDollar"),
         (CONSTANT_EUR, UnitRequest(currency="EUR", prices="constant", base_year=2020)),
+        (
+            DONOR_EUR,
+            UnitRequest(currency="EUR", prices="constant", base_year=2020, deflation_basis="donor"),
+        ),
         ({"currency": "USD", "prices": "current"}, UnitRequest(currency="USD", prices="current")),
         (
             UnitRequest(currency="USD", prices="current"),
@@ -141,6 +146,9 @@ def test_a_converted_pin_dumps_as_its_request_object() -> None:
     assert current.model_dump(mode="json")["unit"] == {"currency": "USD", "prices": "current"}
     assert constant.model_dump(mode="json")["unit"] == CONSTANT_EUR
     assert OpSpecAdapter.validate_python(constant.model_dump(mode="json")) == constant
+    assert op_spec_hash_for(constant) != op_spec_hash_for(
+        AggregateOpSpec(frame_ref=SNAPSHOT_REF, aggregation="sum", unit=DONOR_EUR)
+    )
 
 
 def test_a_composed_pin_dumps_as_its_object_whatever_order_its_members_came_in() -> None:
@@ -183,6 +191,8 @@ def test_a_converted_pin_and_a_ref_pin_mint_different_op_spec_hashes() -> None:
         {"currency": "EUR", "prices": "constant"},
         {"currency": "USD", "prices": "current", "base_year": 2020},
         {"currency": "EUR", "prices": "constant", "base_year": True},
+        {"currency": "EUR", "prices": "constant", "base_year": 2020, "deflation_basis": "creditor"},
+        {"currency": "USD", "prices": "current", "deflation_basis": "donor"},
         {"currency": "USD", "prices": "current", "label": "dollars"},
         {"currency": {"role": "observationAbout"}, "prices": "current"},
         "u" * 201,

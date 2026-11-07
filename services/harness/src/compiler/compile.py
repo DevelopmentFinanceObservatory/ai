@@ -1373,9 +1373,13 @@ class _Build:
         """Report two sides whose frames declare their units differently.
 
         analysis-mcp pairs two slices only when their `unit` cells are equal
-        (`cross_frame_unit_mismatch`), and each side's cells are what its
-        source declares (`_frame_unit`): the request object for a definition
-        bound to a unit by request, the source's unit ref for any other.
+        (`cross_frame_unit_mismatch`), and each side's unit is read ahead as
+        its source declares it (`_frame_unit`): the request object for a
+        definition bound to a unit by request, the source's unit ref for any
+        other. A converted frame's cells add whose prices deflated a
+        constant-price amount (`deflation_basis`), which no request states, so
+        two sides bound to one request compile and analysis-mcp refuses them
+        at run time when their bases differ.
         A frame downstream of a `quotient_of` declares the composed pair of
         its two sides' units, and one holding a `share_of` result declares
         `PERCENT_UNIT` (`_side_unit`). A side whose unit cannot be known
@@ -2292,17 +2296,22 @@ class _Build:
         return args, bindings
 
     def _unit_pins(self, sides: Sequence[tuple[str, Side]]) -> dict[str, JsonValue]:
-        """Each side's unit parameter, pinned to the unit its fetched frame declares (`_frame_unit`).
+        """Each side's unit parameter, pinned to the unit ref its fetched frame declares (`_frame_unit`).
 
         A pin narrows a side to the rows in that unit, so a frame holding
-        several units is read in the one its source resolved. A side whose
-        source declares no unit, whose frame unit cannot be known ahead, or
-        whose frame is in a composed unit, is left unpinned.
+        several units is read in the one its source resolved, and only a unit
+        ref says that ahead. A side bound to a unit by request is left
+        unpinned. Its frame is converted to one unit, which its cells state
+        with whose prices deflated it (`deflation_basis`), a fact of the
+        conversion the request does not carry. So is a side whose source
+        declares no unit, whose frame unit cannot be known ahead, or whose
+        frame is in a composed unit. analysis-mcp pairs the units each side
+        resolves to either way (`cross_frame_unit_mismatch`).
         """
         pins: dict[str, JsonValue] = {}
         for parameter, side in sides:
             unit = self._side_unit(side.input)
-            if unit is not None and not isinstance(unit, _PerRowUnit | _ComposedUnit):
+            if isinstance(unit, str):
                 pins[parameter] = unit
         return pins
 
@@ -2957,11 +2966,13 @@ def _keyed_axes(
 
 
 def _frame_unit(source: SelectedSource) -> FrameUnit:
-    """The unit a frame fetched from `source` declares in its `unit` cells.
+    """The unit a frame fetched from `source` declares, as far as it is known ahead.
 
     A definition that binds its unit by request (`facets.unit.request` in its
-    identity) is converted on fetch, so its frame declares that request
-    object; one whose request names its currency by entity role resolves a
+    identity) is converted on fetch, so its frame denotes that request
+    object; its cells extend it at constant prices with whose prices deflated
+    the amount (`deflation_basis`), so it pins no side (`_unit_pins`). A
+    definition whose request names its currency by entity role resolves a
     currency per row, which no single pin covers, so it is
     `_PerRowUnit.PER_ROW`, as is a source whose unit varies per series
     (`unit_per_series`): analysis-mcp reads each side's unit from its own rows

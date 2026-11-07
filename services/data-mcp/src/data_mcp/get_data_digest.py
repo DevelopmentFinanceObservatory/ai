@@ -43,6 +43,8 @@ from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import WHOLE_SIDE_POPULATIONS
 from common.price_basis import price_basis_reading
+from dfo_frame_grammar import FrameError
+from dfo_frame_grammar.grammar import unit_request_from_json
 
 from data_mcp.frame_materialisation import MaterialisationOutcome
 from data_mcp.manifest import (
@@ -841,6 +843,8 @@ def _series_statistics_block(
     if isinstance(unit, str):
         reading = _unit_reading(unit)
         header_pieces.append(f"unit {unit} ({reading})" if reading else f"unit {unit}")
+    elif isinstance(unit, Mapping) and (converted := _converted_reading(unit)) is not None:
+        header_pieces.append(f"unit converted to {converted}")
     first = f"first {_format_magnitude(series.first.value)} ({series.first.period})"
     latest = f"latest {_format_magnitude(series.latest.value)} ({series.latest.period})"
     minimum = f"min {_format_magnitude(series.minimum.value)} ({series.minimum.period})"
@@ -913,6 +917,22 @@ def _unit_reading(unit: str) -> str | None:
             magnitude=None,
         )
     return None
+
+
+def _converted_reading(unit: Mapping[str, object]) -> str | None:
+    """A converted unit's price basis in words, with whose prices deflated it, such as
+    "constant 2024 prices, US dollars, donor prices". `None` for an object outside
+    the frame grammar's unit request."""
+    try:
+        request = unit_request_from_json(unit)
+    except FrameError:
+        return None
+    return price_basis_reading(
+        currency=request.currency,
+        prices=request.prices,
+        base_year=request.base_year,
+        deflation_basis=request.deflation_basis,
+    )
 
 
 def _price_basis_reading(

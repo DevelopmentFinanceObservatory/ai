@@ -303,7 +303,7 @@ async def compare(
             default=None,
             description=(
                 "Pins the left side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit ref, a converted unit's {currency, prices, base_year, deflation_basis} object, or a composed "
                 "unit's {numerator, denominator} object."
             ),
         ),
@@ -314,7 +314,7 @@ async def compare(
             default=None,
             description=(
                 "Pins the right side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit ref, a converted unit's {currency, prices, base_year, deflation_basis} object, or a composed "
                 "unit's {numerator, denominator} object."
             ),
         ),

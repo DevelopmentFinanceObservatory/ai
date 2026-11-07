@@ -70,6 +70,9 @@ class Refusal:
     # Seconds to wait before repeating the call unchanged, on a
     # `retry_after_delay` refusal that names a wait.
     retry_after_s: float | None = None
+    # The limit a `resource_exhausted` refusal names, such as `MAX_LINE_CHART_SERIES`,
+    # so a caller tells one limit from another without reading `detail`.
+    limit_name: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

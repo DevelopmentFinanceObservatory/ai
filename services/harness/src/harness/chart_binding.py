@@ -5,7 +5,6 @@ of one dimension's members that cuts a select over the series cap.
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -17,7 +16,6 @@ from dfo_frame_grammar.grammar import FACET_IDENTITY_COLUMNS, UNIT_COLUMN
 from dfo_frame_grammar.rolling import latest_anchor
 
 from harness.tool_contracts import HarnessCode, harness_refusal
-from harness.wire import RetryMode
 
 # The apis service's `MAX_SERIES_PER_COMPONENT`: the assembler refuses a component
 # whose selection's estimated series count (`_series_estimate`) exceeds this.
@@ -27,7 +25,9 @@ MAX_SERIES_PER_COMPONENT = 24
 MAX_TABLE_ROWS = 2_000
 # The catalogue grammar's `maxItems` on a `line_chart` select's one array
 # value (the release document's `intent_schemas_tolerant.line_chart`). The
-# platform refuses a longer list as `schema_invalid`.
+# platform refuses a longer list as `schema_invalid`, and a select resolving to
+# more than this many series as `resource_exhausted` (limit
+# `MAX_LINE_CHART_SERIES`).
 LINE_CHART_MAX_VALUES = 8
 # Charts one make_charts call may draw.
 MAX_CHARTS_PER_CALL = 8
@@ -74,6 +74,21 @@ def periods_covered(view: Mapping[str, Any]) -> int:
     return months * 31 + last[-1] - first[-1] + 1
 
 
+def unsplit_facets(view: Mapping[str, Any]) -> frozenset[str]:
+    """The facet columns (`_FACET_DIMENSIONS`) `view` marks `plural: false`.
+    apis computes `plural` over the series keys under the frame's
+    continuation (`frame_view.series_keys` in dfo-data-tools), so such a
+    facet splits no series. An estimate's method on the rows that continue
+    an observed series names that same series."""
+    return frozenset(
+        str(dim["name"])
+        for dim in view.get("dimensions") or []
+        if isinstance(dim, dict)
+        and dim.get("name") in _FACET_DIMENSIONS
+        and dim.get("plural") is False
+    )
+
+
 def chart_draws(*, type_: str, view: Mapping[str, Any]) -> int:
     """The most members of one dimension a `type_` chart of a frame with
     `view` draws: `LINE_CHART_MAX_VALUES` lines, `MAX_SERIES_PER_COMPONENT`
@@ -86,54 +101,28 @@ def chart_draws(*, type_: str, view: Mapping[str, Any]) -> int:
     return MAX_SERIES_PER_COMPONENT
 
 
-def _moving_period_repair(*, draws: int, plan_unspent: bool) -> str:
-    """What draws in place of a chart over the series cap whose period moves
-    with the latest data, which `make_charts` cuts to no largest members: a
-    list of at most `draws` members, the most the chart type draws
-    (`chart_draws`), or while the turn's plan call is `plan_unspent`, a
-    ranking with a limit through plan."""
-    repair = (
-        "This chart's period moves with the latest data, so its largest members are not "
-        f"chosen for it: list at most {draws} members in the select"
-    )
-    if plan_unspent:
-        return f"{repair}, or get the largest from a ranking with a limit through plan."
-    return f"{repair}."
-
-
 def select_binding_ok(
     *,
     type_: str,
     select: dict[str, Any],
     view: dict[str, Any],
-    latest_periods: bool = False,
-    plan_unspent: bool = False,
 ) -> dict[str, Any] | None:
-    """The binding shapes the platform certainly refuses (measured live
-    against a 7-series frame, and against the catalogue grammar's stated
-    per-type caps): a select binding a dimension the view does not
-    declare; a `stat_card` select that leaves a non-facet plural dimension
-    unpinned; for `line_chart` and `bar_chart`, a select that arrays more
-    than one dimension; a `line_chart` array longer than
-    `LINE_CHART_MAX_VALUES`; and for every other type, a select whose
-    `_series_estimate` exceeds `MAX_SERIES_PER_COMPONENT` (24), the cap
-    the apis service's assembler enforces although the catalogue grammar's
-    `maxItems` allows an array of 30. `table` may array more than one
-    dimension; the catalogue grammar restricts the single-array-dimension
-    rule to `line_chart` and `bar_chart`. A non-mapping `select`
-    (a model that emitted a JSON array or scalar for select_json)
-    is a rejection reason here rather than an `AttributeError` on
-    `.items()`. Returns `None` when the binding is fine, else
-    the harness refusal that says why it is not: `series_limit_exceeded`
-    for a select over the series cap and `select_invalid` for every other
-    shape, each with the reason as its `message`. A chart whose period moves
-    with the latest data, one on a view marked `rolling` or one counting
-    `latest_periods` back, is told what draws in place of a cut
-    (`_moving_period_repair`), with a plan only while the turn's plan call is
-    `plan_unspent`. The rejection is caught here,
-    before a `write_component` round trip. The refusal of a select binding an
-    undeclared dimension lists every dimension name the view declares, in the
-    view's order, as `fix.dimensions`."""
+    """The binding shapes the platform certainly refuses for their shape
+    (measured live against a 7-series frame, and against the catalogue
+    grammar): a select binding a dimension the view does not declare; a
+    `stat_card` select that leaves a non-facet plural dimension unpinned; and
+    for `line_chart` and `bar_chart`, a select that arrays more than one
+    dimension. `table` may array more than one dimension; the catalogue
+    grammar restricts the single-array-dimension rule to `line_chart` and
+    `bar_chart`. A non-mapping `select` (a model that emitted a JSON array or
+    scalar for select_json) is a rejection reason here rather than an
+    `AttributeError` on `.items()`. Returns `None` when the binding is fine,
+    else the harness refusal `select_invalid`, with the reason as its
+    `message`. The rejection is caught here, before a `write_component`
+    round trip. The refusal of a select binding an undeclared dimension lists
+    every dimension name the view declares, in the view's order, as
+    `fix.dimensions`. A select over the series a chart draws is the
+    platform's to judge (`over_series_limit`)."""
     if not isinstance(select, dict):
         return _select_invalid(f"{type_} select is not a JSON object: {select!r}")
     declared = _declared_dimensions(view)
@@ -148,50 +137,25 @@ def select_binding_ok(
     if type_ == "stat_card":
         reason = _stat_card_binding_reason(select=select, view=view, array_dims=array_dims)
         return _select_invalid(reason) if reason is not None else None
-    array_issue = _chart_array_refusal(type_=type_, select=select, array_dims=array_dims)
-    if array_issue is not None:
-        return array_issue
-    return _series_refusal(
-        type_=type_,
-        select=select,
-        declared=declared,
-        moving_repair=(
-            _moving_period_repair(
-                draws=chart_draws(type_=type_, view=view), plan_unspent=plan_unspent
-            )
-            if latest_periods or view.get("rolling")
-            else None
-        ),
-    )
+    if type_ in ("line_chart", "bar_chart") and len(array_dims) > 1:
+        return _select_invalid(
+            f"{type_} select carries array values for more than one dimension: {array_dims}"
+        )
+    return None
 
 
-def _series_refusal(
-    *, type_: str, select: dict[str, Any], declared: dict[str, int], moving_repair: str | None
-) -> dict[str, Any] | None:
-    """The refusal of a select whose `_series_estimate` exceeds
-    `MAX_SERIES_PER_COMPONENT`; None for a select within it. Where two or
-    more dimensions multiply, the message goes on to name the selects that
-    draw (`_one_dimension_per_chart`) and the refusal is `correct_and_retry`.
-    `moving_repair` is what draws instead on a chart whose period moves with
-    the latest data, where no dimension over the cap is cut to its largest
-    members (`_moving_period_repair`); that message says it. Where one
-    dimension is over the cap, `make_charts` adds what to change, with the
-    count the chart type draws."""
-    series = _series_estimate(select=select, declared=declared)
-    if series <= MAX_SERIES_PER_COMPONENT:
-        return None
-    over = (
-        f"{type_} select expands to an estimated {series} series, "
-        f"over the platform's maximum of {MAX_SERIES_PER_COMPONENT}"
-    )
-    multiplying = _multiplying_dimensions(select=select, declared=declared)
-    if len(multiplying) < 2:
-        return harness_refusal(code=HarnessCode.SERIES_LIMIT_EXCEEDED, message=over)
-    return harness_refusal(
-        code=HarnessCode.SERIES_LIMIT_EXCEEDED,
-        message=f"{over}: {_one_dimension_per_chart(multiplying, moving_repair=moving_repair)}",
-        retry_mode=RetryMode.CORRECT_AND_RETRY,
-    )
+def over_series_limit(*, type_: str, select: dict[str, Any], view: dict[str, Any]) -> bool:
+    """Whether dfo-apis certainly refuses a `type_` select for the series it
+    lists or is estimated at, which `make_charts` cuts before a write: a
+    `line_chart` array longer than `LINE_CHART_MAX_VALUES` (the catalogue's
+    `maxItems`, refused `schema_invalid`), or a `_series_estimate` past
+    `MAX_SERIES_PER_COMPONENT` (`_check_series_estimate` in dfo-data-tools'
+    `assembler/resolve.py`)."""
+    lists = [len(value) for value in select.values() if isinstance(value, list)]
+    if type_ == "line_chart" and any(length > LINE_CHART_MAX_VALUES for length in lists):
+        return True
+    declared = _declared_dimensions(view)
+    return _series_estimate(select=select, declared=declared) > MAX_SERIES_PER_COMPONENT
 
 
 def every_series_selects(*, type_: str, view: dict[str, Any]) -> list[dict[str, Any]]:
@@ -201,7 +165,8 @@ def every_series_selects(*, type_: str, view: dict[str, Any]) -> list[dict[str, 
     before one of several. The view lists a dimension's values up to a cap,
     so only a dimension whose listed values number its `total_count` (1 where
     the view states none) is bound, and only a select `select_binding_ok`
-    passes is kept.
+    passes is kept. A select over the series the chart draws is cut by
+    `make_charts` or judged by the platform.
 
     The view counts a dimension's values without its empty cells, and a row
     with no value on the bound dimension is not named, so a select here names
@@ -284,50 +249,6 @@ def _multiplying_dimensions(*, select: dict[str, Any], declared: dict[str, int])
     )
 
 
-def _one_dimension_per_chart(multiplying: dict[str, int], *, moving_repair: str | None) -> str:
-    """What `make_charts` accepts in place of a select on which the two or
-    more `multiplying` dimensions (fewest values first) pass the series cap:
-    each chart binds all but one of them to a single value. The dimension
-    with the most values is the one left to list, so the charts that cover
-    the whole select number the product of the others' counts, and the
-    sentence says whether that many fit one call. A listed dimension over the
-    cap is cut to its largest members, except on a chart whose period moves
-    with the latest data, which is told `moving_repair`."""
-    *bound, (_, most) = multiplying.items()
-    named = _and_list([f"{name} ({count} values)" for name, count in multiplying.items()])
-    repair = (
-        f"{named} multiply. Bind all but one of them to a single value in each chart, "
-        "so each chart lists one dimension's members."
-    )
-    if most > MAX_SERIES_PER_COMPONENT and moving_repair is not None:
-        repair += f" {moving_repair}"
-    elif most > MAX_SERIES_PER_COMPONENT:
-        repair += (
-            " A chart whose one listed dimension is over the maximum draws its largest "
-            "members and says so."
-        )
-    charts = math.prod(count for _, count in bound)
-    each = (
-        f"each {bound[0][0]} value"
-        if len(bound) == 1
-        else f"each combination of {_and_list([name for name, _ in bound])} values"
-    )
-    if charts <= MAX_CHARTS_PER_CALL:
-        return f"{repair} A chart for {each} is {charts} charts, which fits one make_charts call."
-    return (
-        f"{repair} A chart for {each} is {charts} charts, more than the "
-        f"{MAX_CHARTS_PER_CALL} one make_charts call draws: draw the charts for the values "
-        "the question names, or ask the user which to show."
-    )
-
-
-def _and_list(items: list[str]) -> str:
-    """`items` as an English list: "a and b", "a, b, and c"."""
-    if len(items) <= 2:
-        return " and ".join(items)
-    return f"{', '.join(items[:-1])}, and {items[-1]}"
-
-
 @dataclass(frozen=True)
 class TopMembers:
     """The `members` of one dimension with the largest values at `period`,
@@ -371,7 +292,7 @@ def top_members(
 
     Returns:
         None when there is nothing to rank honestly: no matching rows, rows
-        that differ on any other coordinate (`differing_coordinates`), a
+        that differ on any other coordinate, a
         member with two rows for one period, or no member to compare. A row
         with no member names nothing a select can list.
 
@@ -413,23 +334,6 @@ def top_members(
         unvalued=[member for member in observed if member not in values],
         other_kinds=len(by_member) - len(compared),
     )
-
-
-def differing_coordinates(
-    *,
-    rows: Sequence[Mapping[str, Any]],
-    select: dict[str, Any],
-    dimension: str,
-    view: dict[str, Any],
-) -> list[str]:
-    """The dimensions `view` declares other than `dimension`, in name order,
-    that the `rows` matching `select` differ on: a unit, a source, a method
-    or a measure. Rows that differ on one are not one ranking, and a select
-    can bind it to one value. A column the view does not declare is left
-    out, since `select_binding_ok` refuses a select that binds one."""
-    declared = _declared_dimensions(view)
-    matching = _matching_rows(rows=rows, select=select, dimension=dimension)
-    return [name for name in _differing(matching, dimension=dimension) if name in declared]
 
 
 def _matching_rows(
@@ -501,31 +405,6 @@ def comparable_members(cells: Mapping[str, str], *, dimension: str) -> frozenset
         return frozenset()
     level = max(sorted(counts), key=counts.__getitem__)
     return frozenset(member for member, member_levels in levels.items() if level in member_levels)
-
-
-def _chart_array_refusal(
-    *, type_: str, select: dict[str, Any], array_dims: list[str]
-) -> dict[str, Any] | None:
-    """The refusal of a `line_chart` or `bar_chart` select that arrays more
-    than one dimension, or of a `line_chart` array longer than
-    `LINE_CHART_MAX_VALUES`; None for any other select."""
-    if type_ not in ("line_chart", "bar_chart"):
-        return None
-    if len(array_dims) > 1:
-        return _select_invalid(
-            f"{type_} select carries array values for more than one dimension: {array_dims}"
-        )
-    listed = [len(select[name]) for name in array_dims]
-    if type_ == "line_chart" and listed and listed[0] > LINE_CHART_MAX_VALUES:
-        return harness_refusal(
-            code=HarnessCode.SERIES_LIMIT_EXCEEDED,
-            message=(
-                f"line_chart select lists {listed[0]} values on {array_dims[0]!r}, more than "
-                f"the {LINE_CHART_MAX_VALUES} one line_chart draws: list at most "
-                f"{LINE_CHART_MAX_VALUES}, or show them all as a bar_chart or a table"
-            ),
-        )
-    return None
 
 
 def _select_invalid(message: str, *, fix: Mapping[str, Any] | None = None) -> dict[str, Any]:

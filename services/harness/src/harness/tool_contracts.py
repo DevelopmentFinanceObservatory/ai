@@ -64,16 +64,8 @@ class ResolverError(RuntimeError):
 class HarnessCode(StrEnum):
     """The `code` of a failure the harness mints itself."""
 
-    # `harness.chart_binding`: a chart select that draws more series than the
-    # cap, and one that is malformed.
-    SERIES_LIMIT_EXCEEDED = "series_limit_exceeded"
+    # `harness.chart_binding`: a chart select that is malformed.
     SELECT_INVALID = "select_invalid"
-    # A chart cut to its largest series finds no period that at least half of
-    # its comparable members hold.
-    NO_SHARED_PERIOD = "no_shared_period"
-    # The kind of a frame's members, which a chart cut ranks by, could not be
-    # read.
-    MEMBER_KIND_UNREAD = "member_kind_unread"
     # `harness.rolling_cards`: what a card whose period moves can meet before
     # it is written.
     TITLE_QUOTES_ROLLING_PERIOD = "title_quotes_rolling_period"
@@ -153,7 +145,6 @@ _RETRY_MODES: Mapping[HarnessCode, RetryMode] = {
     HarnessCode.TITLE_NAMES_PERIOD: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.FIELD_CREATE_ONLY: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.STATE_NOT_SAVED: RetryMode.RETRY_AFTER_DELAY,
-    HarnessCode.MEMBER_KIND_UNREAD: RetryMode.RETRY_AFTER_DELAY,
     HarnessCode.FRAME_UNKNOWN: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.CARD_NOT_FOUND: RetryMode.CORRECT_AND_RETRY,
 }

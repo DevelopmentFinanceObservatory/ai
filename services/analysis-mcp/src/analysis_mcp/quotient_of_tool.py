@@ -385,7 +385,7 @@ async def quotient_of(
             default=None,
             description=(
                 "Pins the numerator's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit ref, a converted unit's {currency, prices, base_year, deflation_basis} object, or a composed "
                 "unit's {numerator, denominator} object."
             ),
         ),
@@ -396,7 +396,7 @@ async def quotient_of(
             default=None,
             description=(
                 "Pins the denominator's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit ref, a converted unit's {currency, prices, base_year, deflation_basis} object, or a composed "
                 "unit's {numerator, denominator} object."
             ),
         ),

@@ -379,5 +379,43 @@ def _record() -> None:
     _FIXTURE_PATH.write_text("".join(lines))
 
 
+def test_a_converted_unit_keeps_its_deflation_basis_on_the_wire() -> None:
+    """Donor and recipient prices in one currency and base year are two units on the
+    wire; a unit with no basis writes none."""
+    units = [
+        {"currency": "NGN", "prices": "constant", "base_year": 2024, "deflation_basis": basis}
+        for basis in ("donor", "recipient")
+    ] + [{"currency": "NGN", "prices": "constant", "base_year": 2024}]
+    frame = Frame.build(
+        role_keys=[],
+        rows=[
+            {
+                "stat_var": "dcid:StatVarA",
+                "time_period": "2020",
+                "value": 1.0,
+                "unit": unit,
+                "measurementMethod": None,
+                "provenance": None,
+            }
+            for unit in units
+        ],
+    )
+
+    body = json.loads(
+        publish_body(
+            frame,
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            input_content_versions=_INPUT_CONTENT_VERSIONS,
+        )
+    )
+
+    assert sorted(row["unit"].get("deflation_basis", "") for row in body["rows"]) == [
+        "",
+        "donor",
+        "recipient",
+    ]
+
+
 if __name__ == "__main__":
     _record()

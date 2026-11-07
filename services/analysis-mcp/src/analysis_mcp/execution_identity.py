@@ -19,7 +19,7 @@ from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
 # The engine's own version, hand-set as a literal.
-ENGINE_VERSION = "0.9.0"
+ENGINE_VERSION = "0.9.1"
 
 # The reduction policy's version -- separate from `ENGINE_VERSION` because a
 # reduction policy (e.g. "skip nulls, use fsum") can change independently of

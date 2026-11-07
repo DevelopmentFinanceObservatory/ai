@@ -234,7 +234,9 @@ def _refusal_result(
     `_meta` is `refusal_meta` of the code, beside `detail`, `advice` and
     `values`. These are the refusal's detail, display-text fix and mapping fix
     as the assembler gave them, which the harness reads, so a Studio retry merges
-    `values` alone and no `pointer` into its arguments.
+    `values` alone and no `pointer` into its arguments. A `resource_exhausted`
+    refusal that names its limit adds `limit_name` there, and not to `values`,
+    which a retry would merge into the call's arguments.
     """
     advice = refusal.fix if isinstance(refusal.fix, str) else None
     values = dict(refusal.fix) if isinstance(refusal.fix, Mapping) else None
@@ -253,6 +255,8 @@ def _refusal_result(
         envelope["retry_after_s"] = refusal.retry_after_s
     meta = refusal_meta(code=refusal.error)
     meta[REFUSAL_META_KEY] |= {"detail": refusal.detail, "advice": advice, "values": values}
+    if refusal.limit_name is not None:
+        meta[REFUSAL_META_KEY]["limit_name"] = refusal.limit_name
     return ToolResult(
         content=refusal_text(
             message=message,

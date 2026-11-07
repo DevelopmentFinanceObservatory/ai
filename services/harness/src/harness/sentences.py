@@ -722,7 +722,6 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             HarnessCode.ROLLING_REPLAY_PENDING,
             HarnessCode.STATE_NOT_SAVED,
             HarnessCode.WRITE_UNCONFIRMED,
-            HarnessCode.MEMBER_KIND_UNREAD,
             HarnessCode.STORE_UNAVAILABLE,
             HarnessCode.DATASET_VERSIONS_UNAVAILABLE,
             ExecutorCode.PUBLICATION_UNFINISHED,
@@ -738,7 +737,6 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "frame_too_large",
             "resource_exhausted",
             "payload_too_large",
-            HarnessCode.SERIES_LIMIT_EXCEEDED,
         }
     ),
     FailureClass.EMPTY: frozenset(
@@ -776,7 +774,6 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET,
             ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN,
             HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW,
-            HarnessCode.NO_SHARED_PERIOD,
             ProblemCode.RUN_WOULD_STOP,
             ProblemCode.PRICES_UNSERVED,
         }
@@ -1030,14 +1027,6 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     HarnessCode.DEADLINE_EXCEEDED: FailureText(
         "Fetching the data took longer than one request allows",
         "so ask about fewer places or a shorter period",
-    ),
-    HarnessCode.SERIES_LIMIT_EXCEEDED: FailureText(
-        "That chart would draw more series than one chart can hold",
-        "so ask for fewer of them",
-    ),
-    HarnessCode.NO_SHARED_PERIOD: FailureText(
-        "No one period is held by at least half of these series",
-        "so name the period you want",
     ),
     HarnessCode.FIELD_CREATE_ONLY: FailureText(
         "That part of a card is set when the card is made", "so ask for a new card instead"

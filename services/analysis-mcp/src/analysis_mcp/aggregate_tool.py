@@ -202,7 +202,7 @@ async def aggregate(
             default=None,
             description=(
                 "Pins the unit to aggregate over, when the input frame carries more than "
-                "one: a unit ref, a converted unit as its {currency, prices, base_year} "
+                "one: a unit ref, a converted unit as its {currency, prices, base_year, deflation_basis} "
                 "object, or a composed unit as its {numerator, denominator} object. "
                 "Retry with one of a unit_heterogeneous refusal's fix.units values."
             ),
