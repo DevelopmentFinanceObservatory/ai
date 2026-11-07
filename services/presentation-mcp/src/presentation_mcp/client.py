@@ -572,6 +572,13 @@ def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
     return parsed
 
 
+def _limit_name(problem: Mapping[str, Any]) -> str | None:
+    """The limit a problem names, read from its `limit_name` member, which dfo-apis
+    writes on a `resource_exhausted` refusal. `None` for a body without it."""
+    limit = problem.get("limit_name")
+    return limit if isinstance(limit, str) and limit else None
+
+
 def _cause_code(problem: Mapping[str, Any]) -> str | None:
     """The `cause.code` of the problem document `problem`, `None` without one."""
     cause = problem.get("cause")
@@ -1238,7 +1245,7 @@ class PlatformAssembler:
             return Refusal(
                 error="transient_unavailable", retry=RetryMode.RETRY_AFTER_DELAY, detail=detail
             )
-        retry = RetryMode.DO_NOT_RETRY if not exc.retryable else self._retry_mode_for(exc.code)
+        retry = self._occurrence_retry_mode(exc)
         if exc.code == WRITE_REFUSED:
             detail, fix = _WRITE_REFUSED_DETAIL, _WRITE_REFUSED_FIX
         else:
@@ -1250,7 +1257,26 @@ class PlatformAssembler:
                 exc.status,
                 exc.trace_id,
             )
-        return Refusal(error=exc.code, retry=retry, detail=detail, fix=fix, pointer=exc.pointer)
+        return Refusal(
+            error=exc.code,
+            retry=retry,
+            detail=detail,
+            fix=fix,
+            pointer=exc.pointer,
+            limit_name=exc.limit_name,
+        )
+
+    def _occurrence_retry_mode(self, exc: PlatformError) -> RetryMode:
+        """The retry mode the problem states (`retry_mode`), when it states a known one.
+        A platform that states none answers by `retryable`, giving `DO_NOT_RETRY` when
+        false and otherwise the code's mode from the cached `release()` table
+        (`_retry_mode_for`)."""
+        stated = self._parse_retry_mode(exc.retry_mode)
+        if stated is not None:
+            return stated
+        if not exc.retryable or exc.code is None:
+            return RetryMode.DO_NOT_RETRY
+        return self._retry_mode_for(exc.code)
 
     def _retry_mode_for(self, code: str) -> RetryMode:
         """The retry mode for a retryable `code`, from the cached `release()` table.
@@ -1687,6 +1713,10 @@ class PlatformAssembler:
             truncated=bool(problem.get("truncated", False)),
             trace_id=problem.get("trace_id"),
             cause_code=_cause_code(problem),
+            limit_name=_limit_name(problem),
+            retry_mode=problem.get("retry_mode")
+            if isinstance(problem.get("retry_mode"), str)
+            else None,
         )
 
     def _should_retry(self, error: PlatformError) -> bool:

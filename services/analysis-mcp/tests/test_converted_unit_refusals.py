@@ -37,6 +37,25 @@ from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart, UnitCell, UnitR
 USD = "dcid:USDollar"
 USD_REQUEST = UnitRequest(currency="USD", prices="current")
 EUR_REQUEST = UnitRequest(currency="EUR", prices="constant", base_year=2020)
+NGN_DONOR = UnitRequest(currency="NGN", prices="constant", base_year=2024, deflation_basis="donor")
+NGN_RECIPIENT = UnitRequest(
+    currency="NGN", prices="constant", base_year=2024, deflation_basis="recipient"
+)
+# The same two units as converted cells naming the recipe of each dataset.
+NGN_DONOR_DAC = UnitRequest(
+    currency="NGN",
+    prices="constant",
+    base_year=2024,
+    recipe="ConversionRecipeDAC",
+    deflation_basis="donor",
+)
+NGN_RECIPIENT_IDS = UnitRequest(
+    currency="NGN",
+    prices="constant",
+    base_year=2024,
+    recipe="ConversionRecipeIDS",
+    deflation_basis="recipient",
+)
 
 USD_REQUEST_CANDIDATE = {
     "id": {"currency": "USD", "prices": "current"},
@@ -208,6 +227,12 @@ CONVERTED_RETRY = (
     "with the new frame_refs."
 )
 
+DEFLATED_RETRY = (
+    "The two sides were deflated by different parties' prices, so their constant-price "
+    "amounts measure different things. Call get_data for both sides in current prices, "
+    "then retry with the new frame_refs."
+)
+
 COMPOSED_RETRY = (
     "A unit of the form 'X per Y' is the unit quotient_of gives one frame divided by "
     "another, and no unit pin or get_data binding changes it. Retry with two sides whose "
@@ -237,6 +262,20 @@ MISMATCHES = {
         f"'{USD_REQUEST_LABEL}'",
         f"'{EUR_REQUEST_LABEL}'",
         CONVERTED_RETRY,
+    ),
+    "deflated_apart": (
+        NGN_DONOR,
+        NGN_RECIPIENT,
+        "'converted to constant 2024 prices, NGN, donor prices'",
+        "'converted to constant 2024 prices, NGN, recipient prices'",
+        DEFLATED_RETRY,
+    ),
+    "deflated_apart_across_recipes": (
+        NGN_DONOR_DAC,
+        NGN_RECIPIENT_IDS,
+        "'converted to constant 2024 prices, NGN, donor prices'",
+        "'converted to constant 2024 prices, NGN, recipient prices'",
+        DEFLATED_RETRY,
     ),
     "two_composed": (
         USD_PER_PERSON,

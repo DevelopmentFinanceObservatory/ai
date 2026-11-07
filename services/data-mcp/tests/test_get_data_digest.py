@@ -781,6 +781,44 @@ def test_deployments_own_constant_price_ref_reads_the_base_year() -> None:
     assert "unit ConstantEUR_2023 (constant 2023 prices, euros)" in digest
 
 
+@pytest.mark.parametrize(
+    ("unit", "reading"),
+    [
+        (
+            {
+                "currency": "USD",
+                "prices": "constant",
+                "base_year": 2024,
+                "deflation_basis": "donor",
+            },
+            "unit converted to constant 2024 prices, US dollars, donor prices",
+        ),
+        (
+            {"currency": "EUR", "prices": "current"},
+            "unit converted to current prices, euros",
+        ),
+    ],
+    ids=["constant-donor-prices", "current"],
+)
+def test_a_converted_unit_reads_its_price_basis_and_whose_prices_deflated_it(
+    unit: dict[str, object], reading: str
+) -> None:
+    # The statistics facet dfo-apis writes for a converted series: the unit
+    # cell's JSON object (`unit_cell_to_json`).
+    digest = _digest(statistics=[_series(facet={"unit": unit})])
+
+    assert reading in digest
+
+
+def test_a_unit_object_outside_the_frame_grammar_adds_no_unit_line() -> None:
+    # A `{ref, label}` block is not a converted unit, so the header names none.
+    digest = _digest(
+        statistics=[_series(facet={"unit": {"ref": "dcid:USDollar", "label": "US dollars"}})]
+    )
+
+    assert " · unit " not in digest
+
+
 def test_an_unrecognised_unit_code_renders_unchanged_with_no_reading() -> None:
     digest = _digest(statistics=[_series(facet={"unit": "SDG_PER_1000_POP"})])
 

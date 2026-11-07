@@ -24,7 +24,7 @@ from analysis_mcp.join_tool import join
 from analysis_mcp.quotient_of_tool import quotient_of
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.share_of_tool import share_of
-from analysis_mcp.steps import NEW_VARIABLE_OPS, build_step
+from analysis_mcp.steps import NEW_VARIABLE_OPS, SimpleUnit, build_step, step_unit
 from analysis_mcp.sum_of_tool import sum_of
 from common.materialisation import (
     FrameRef,
@@ -35,6 +35,7 @@ from common.materialisation import (
 )
 from common.steps import assemble_steps
 from dfo_frame_grammar import Frame
+from dfo_frame_grammar.grammar import UnitRequest
 from fastmcp.tools import ToolResult
 from pydantic import ValidationError
 
@@ -875,6 +876,38 @@ def test_the_new_variable_operations_are_the_kit_s() -> None:
 
     operations = json.loads((schema_dir() / "operations.json").read_text())["operations"]
     assert {entry["op"] for entry in operations if entry["new_variable"]} == NEW_VARIABLE_OPS
+
+
+@pytest.mark.parametrize(
+    ("unit", "recorded"),
+    [
+        (
+            UnitRequest(currency="NGN", prices="constant", base_year=2024, deflation_basis="donor"),
+            {
+                "currency": "NGN",
+                "prices": "constant",
+                "base_year": 2024,
+                "deflation_basis": "donor",
+            },
+        ),
+        (
+            UnitRequest(currency="NGN", prices="constant", base_year=2024),
+            {"currency": "NGN", "prices": "constant", "base_year": 2024},
+        ),
+        (
+            UnitRequest(currency="NGN", prices="current"),
+            {"currency": "NGN", "prices": "current"},
+        ),
+    ],
+    ids=["donor-basis", "no-basis", "current"],
+)
+def test_a_converted_unit_step_records_its_deflation_basis_when_it_has_one(
+    unit: UnitRequest, recorded: dict[str, Any]
+) -> None:
+    step = step_unit(unit)
+
+    assert isinstance(step, SimpleUnit)
+    assert step.model_dump(mode="json", exclude_unset=True) == recorded
 
 
 _PROVIDER = "financingProvider"

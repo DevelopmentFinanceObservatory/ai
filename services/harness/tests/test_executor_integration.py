@@ -42,7 +42,7 @@ from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, KIND_COLUMNS, f
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from executor.completion import ResultPublisher
-from executor.outcomes import Accepted
+from executor.outcomes import Accepted, MethodChoiceNeeded
 from executor.run import execute_approved_plan
 from harness.derived_frames import derived_recipe
 from harness.graph.answer import answer_frames, link_evidence_to_terminal_frames
@@ -67,6 +67,7 @@ from planner.operations import (
     RetrieveOperation,
     ShareOfOperation,
     Side,
+    SumOfOperation,
     Translation,
 )
 from planner.plan import (
@@ -84,6 +85,8 @@ from planner.plan import (
     RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
+    SumOfRequirement,
+    Unit,
 )
 from planner.records import (
     DenominatorScope,
@@ -2866,3 +2869,199 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
         enrichment_stamp=_WHOLE_TOTALS_STAMP,
     ).model_dump(mode="json")
     assert summed_table.column("value").to_pylist() == pytest.approx([4_578_400_000.0])
+
+
+# Kenya's aid received (DAC2a and CRS) and debt service paid (IDS), each bound by
+# request to constant 2024 US dollars, and the unit cell dfo-apis' `materialise.
+# convert._apply_conversion` writes for each: the DAC2a and CRS recipes deflate by
+# donor prices and the IDS recipe by recipient prices. The texts are `materialise.
+# formats._cell_text` of those cells, as a frame-layout Parquet artifact carries them.
+DAC2A_SPEC = "spec_" + "d" * 32
+CRS_SPEC = "spec_" + "c" * 32
+IDS_SPEC = "spec_" + "1" * 32
+USD_CONSTANT_2024 = {"currency": "USD", "prices": "constant", "base_year": 2024}
+_DONOR_TEXT = '{"base_year":2024,"currency":"USD","deflation_basis":"donor","prices":"constant"}'
+_RECIPIENT_TEXT = (
+    '{"base_year":2024,"currency":"USD","deflation_basis":"recipient","prices":"constant"}'
+)
+_CONVERTED: dict[str, tuple[str, dict[str, Any], str]] = {
+    DAC2A_SPEC: ("AidReceived", USD_CONSTANT_2024 | {"deflation_basis": "donor"}, _DONOR_TEXT),
+    CRS_SPEC: ("AidDisbursed", USD_CONSTANT_2024 | {"deflation_basis": "donor"}, _DONOR_TEXT),
+    IDS_SPEC: (
+        "DebtServicePaid",
+        USD_CONSTANT_2024 | {"deflation_basis": "recipient"},
+        _RECIPIENT_TEXT,
+    ),
+}
+
+
+def _converted_identity(spec_id: str) -> dict[str, Any]:
+    """The identity dfo-apis sends for a definition bound by request: the request
+    states a currency, prices and a base year, and no deflation basis."""
+    return IDENTITY | {
+        "shape": {"id": _CONVERTED[spec_id][0], "kind": "stat_var"},
+        "facets": {"unit": {"state": "value", "request": USD_CONSTANT_2024}},
+    }
+
+
+def _converted_parquet_bytes(spec_id: str) -> bytes:
+    stat_var, _, unit_text = _CONVERTED[spec_id]
+    table = pa.table(
+        {
+            "stat_var": pa.array([f"dcid:{stat_var}"] * len(YEARS), type=pa.string()),
+            "recipient": pa.array(["country/KEN"] * len(YEARS), type=pa.string()),
+            "time_period": pa.array(YEARS, type=pa.string()),
+            "value": pa.array([float(100 + i) for i in range(len(YEARS))], type=pa.float64()),
+            "unit": pa.array([unit_text] * len(YEARS), type=pa.string()),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+def _converted_mint_response(spec_id: str) -> dict[str, Any]:
+    stat_var, cell, _ = _CONVERTED[spec_id]
+    parquet = _converted_parquet_bytes(spec_id)
+    response = _mint_response()
+    response["definition"] = {
+        "schema_version": 1,
+        "spec_id": spec_id,
+        "identity": _converted_identity(spec_id),
+    }
+    response["content_version"] = version_of(parquet)
+    response["trace"]["resolved_stat_vars"] = [{"ref": f"dcid:{stat_var}", "roles": ["recipient"]}]
+    response["artifacts"][0] |= {
+        "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
+        "bytes": len(parquet),
+    }
+    (statistics,) = response["statistics"]
+    response["statistics"] = [
+        statistics | {"stat_var": f"dcid:{stat_var}", "facet": {"unit": cell}}
+    ]
+    return response
+
+
+def _converted_sum_plan(
+    decision: Callable[..., Decision], schemas: dict[str, Any], *, right_spec: str
+) -> Plan:
+    """Kenya's aid received (DAC2a) plus the series `right_spec` serves, each in
+    constant 2024 US dollars."""
+    unit = Unit(currency="USD", prices="constant", base_year=2024)
+    sources = {
+        requirement_id: SelectedSource(
+            spec_id=spec_id,
+            sentence=f"{_CONVERTED[spec_id][0]} for Kenya, 2015 to 2024",
+            has_data=True,
+            served_count=1,
+            shape_member_digest=member_digest([_CONVERTED[spec_id][0]]),
+            entities=(KENYA_RECIPIENT,),
+            unit_ref="CurrencyUSD",
+            unit_label="US dollars",
+            coverage_window=Period(start=2015, end=2024),
+            identity=_converted_identity(spec_id),
+        )
+        for requirement_id, spec_id in (("aid", DAC2A_SPEC), ("other", right_spec))
+    }
+    requirements = [
+        DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2015, end=2024),
+            unit=unit,
+        )
+        for requirement_id, measure in (("aid", "aid received"), ("other", "the other series"))
+    ]
+    draft = Plan(
+        question="What did Kenya receive in aid and pay in debt service together each year?",
+        decisions=[decision()],
+        evidence_requirements=[
+            *requirements,
+            SumOfRequirement(
+                id="total",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="aid"),
+                right=RequirementSide(input_id="other"),
+            ),
+        ],
+        status=PlanStatus.DRAFT,
+    )
+    translation = Translation(
+        operations=[
+            RetrieveOperation(id="aid_frame", requirement_id="aid", spec_id=DAC2A_SPEC),
+            RetrieveOperation(id="other_frame", requirement_id="other", spec_id=right_spec),
+            SumOfOperation(
+                id="total",
+                requirement_id="total",
+                left=Side(input="aid_frame"),
+                right=Side(input="other_frame"),
+            ),
+        ],
+        terminal=["total"],
+    )
+    compiled = compile_plan(
+        plan=draft, translation=translation, schemas=schemas, discovered=sources
+    )
+    assert compiled.workflow is not None, compiled.issues
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
+
+
+@pytest.mark.parametrize("right_spec", [CRS_SPEC, IDS_SPEC], ids=["donor-donor", "donor-recipient"])
+async def test_a_sum_of_converted_frames_pairs_one_deflation_basis_and_refuses_two(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    decision: Callable[..., Decision],
+    _stats_registry: _StatsRegistry,
+    publisher: ResultPublisher,
+    right_spec: str,
+) -> None:
+    """Two series converted to constant 2024 US dollars compile as one unit: the
+    requests are equal and the compiler pins neither side. DAC2a and CRS, both
+    deflated by donor prices, are summed. DAC2a against IDS, deflated by recipient
+    prices, is refused (`cross_frame_unit_mismatch`), naming each unit with its
+    basis. The runner's replies are recorded from dfo-apis' own runner."""
+
+    async def fake_fetch(*, subject_id: str, **_kwargs: Any) -> bytes:
+        return _converted_parquet_bytes(subject_id)
+
+    serve_canonical_frames(monkeypatch, fake_fetch)
+
+    def mint_handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path != "/api/datasets":
+            raise AssertionError(f"unexpected call to {request.url.path}")
+        spec_id = json.loads(request.content)["input"]["spec_id"]
+        response = _register_statistics(_stats_registry, _converted_mint_response(spec_id))
+        return httpx2.Response(200, json=response)
+
+    client_holder.set_client(data_mcp_client(mint_handler))
+    app = create_app(settings=Settings(mcp_api_token="test-token"))
+
+    async with running_lifespan(app):
+        surface = _flow_surface(app, mounted_mcp_transport)
+        schemas = {schema.name: schema for schema in await surface.list_tools()}
+        approved = _converted_sum_plan(decision, schemas, right_spec=right_spec)
+        assert approved.workflow is not None
+        (total,) = [step for step in approved.workflow.steps if step.id == "total"]
+        _, outcome = await execute_approved_plan(approved, surface=surface, publisher=publisher)
+
+    assert "left_unit" not in total.args
+    assert "right_unit" not in total.args
+    if right_spec == CRS_SPEC:
+        assert isinstance(outcome, Accepted), outcome
+        assert [step.step_id for step in outcome.steps] == ["aid_frame", "other_frame", "total"]
+        return
+    # The refusal names the units the planner can choose between, so it goes
+    # back to the planner with the user.
+    assert isinstance(outcome, MethodChoiceNeeded), outcome
+    assert outcome.step_id == "total"
+    assert [step.step_id for step in outcome.completed] == ["aid_frame", "other_frame"]
+    assert outcome.refusal.code == "cross_frame_unit_mismatch"
+    assert outcome.refusal.fix == {
+        "left": _CONVERTED[DAC2A_SPEC][1],
+        "right": _CONVERTED[IDS_SPEC][1],
+    }

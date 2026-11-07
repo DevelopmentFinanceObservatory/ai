@@ -2701,6 +2701,28 @@ def test_a_pointer_reaches_the_envelope_and_stays_out_of_what_a_retry_merges() -
     assert result.meta[REFUSAL_META_KEY]["values"] == {"recipient": "country/KEN"}
 
 
+def test_a_limit_name_reaches_the_meta_and_stays_out_of_what_a_retry_merges() -> None:
+    refusal = Refusal(
+        error="resource_exhausted",
+        retry=RetryMode.CORRECT_AND_RETRY,
+        detail=(
+            "the selection resolves to 20 series, and a line chart draws at most 8; "
+            "financingProvider (20 values) is the series dimension; bind it to at most 8 "
+            "values, or draw the same select as a table, which draws all 20 series"
+        ),
+        pointer="/select",
+        limit_name="MAX_LINE_CHART_SERIES",
+    )
+
+    result = server._refusal_result(refusal, tool="write_component")
+
+    assert result.structured_content is not None
+    assert result.structured_content["fix"] == {"pointer": "/select"}
+    assert result.meta is not None
+    assert result.meta[REFUSAL_META_KEY]["limit_name"] == "MAX_LINE_CHART_SERIES"
+    assert result.meta[REFUSAL_META_KEY]["values"] is None
+
+
 @pytest.mark.parametrize("sample", list(_REFUSAL_SAMPLES))
 async def test_a_presentation_fix_names_only_arguments_and_values_its_tool_accepts(
     sample: str, monkeypatch: pytest.MonkeyPatch

@@ -2181,12 +2181,53 @@ async def test_a_platform_refusal_without_a_usable_trace_id_logs_nothing(
     assert [r for r in caplog.records if r.name == "presentation_mcp.client"] == []
 
 
-async def test_retryable_false_forces_do_not_retry_even_when_the_table_says_otherwise() -> None:
-    release_body = {"retry_modes": {"not_found": "correct_and_retry"}}
+@pytest.mark.parametrize(
+    ("problem", "retry"),
+    [
+        # The body states the mode for this occurrence, whatever `retryable` and the table say.
+        pytest.param(
+            {"code": "resource_exhausted", "retryable": False, "retry_mode": "correct_and_retry"},
+            RetryMode.CORRECT_AND_RETRY,
+            id="stated-correct-and-retry",
+        ),
+        pytest.param(
+            {"code": "not_found", "retryable": False, "retry_mode": "do_not_retry"},
+            RetryMode.DO_NOT_RETRY,
+            id="stated-do-not-retry",
+        ),
+        # A platform that states no mode: `retryable` false is do_not_retry, whatever the
+        # table says.
+        pytest.param(
+            {"code": "not_found", "retryable": False},
+            RetryMode.DO_NOT_RETRY,
+            id="unstated-not-retryable",
+        ),
+        # ... and `retryable` true takes the table's mode.
+        pytest.param(
+            {"code": "frame_unavailable", "retryable": True},
+            RetryMode.REFRESH_THEN_RETRY,
+            id="unstated-retryable",
+        ),
+        # A mode this client does not know falls back the same way.
+        pytest.param(
+            {"code": "not_found", "retryable": False, "retry_mode": "retry_someday"},
+            RetryMode.DO_NOT_RETRY,
+            id="unknown-stated-mode",
+        ),
+    ],
+)
+async def test_a_refusal_takes_the_problems_retry_mode_else_retryable_and_the_table(
+    problem: dict[str, object], retry: RetryMode
+) -> None:
+    release_body = {
+        "retry_modes": {"not_found": "correct_and_retry", "frame_unavailable": "refresh_then_retry"}
+    }
+    code = str(problem.pop("code"))
+    retryable = bool(problem.pop("retryable"))
     responses = iter(
         [
             httpx2.Response(200, json=release_body),
-            httpx2.Response(404, content=_problem_body(code="not_found", retryable=False)),
+            httpx2.Response(404, content=_problem_body(code=code, retryable=retryable, **problem)),
         ]
     )
 
@@ -2198,7 +2239,7 @@ async def test_retryable_false_forces_do_not_retry_even_when_the_table_says_othe
         reply = await assembler.get_component(component_id="cmp_1")
 
     assert isinstance(reply, Refusal)
-    assert reply.retry == RetryMode.DO_NOT_RETRY
+    assert reply.retry == retry
 
 
 async def test_unknown_code_falls_back_to_retry_after_delay() -> None:
@@ -2349,6 +2390,52 @@ async def test_pointer_passes_through_unrepaired() -> None:
 
     assert isinstance(reply, Refusal)
     assert reply.pointer == "/select/recipient"
+
+
+# The body dfo-apis' components door answers for a table of 20 series over 240
+# months, read from its `POST /api/presentation/components` (spec-kit 45e8bc1).
+_TABLE_ROWS_PROBLEM = {
+    "title": "Resource Exhausted",
+    "status": 400,
+    "detail": (
+        "selection resolves to 20 series x 240 periods = 4800 rows, over the maximum of 2000; "
+        "bind the select to at most 8 series over these periods, or narrow the window to at "
+        "most 100 periods"
+    ),
+    "pointer": "/select",
+    "limit_name": "MAX_TABLE_ROWS",
+    "retry_mode": "correct_and_retry",
+    "trace_id": "e066941a9a9342559b035104fadaa3ba",
+    "capability_version": "pres_690dba17a75b1f97",
+}
+
+
+@pytest.mark.parametrize(
+    ("code", "extra", "limit_name", "retry"),
+    [
+        (
+            "resource_exhausted",
+            {"limit_name": "MAX_LINE_CHART_SERIES"},
+            "MAX_LINE_CHART_SERIES",
+            RetryMode.DO_NOT_RETRY,
+        ),
+        ("resource_exhausted", _TABLE_ROWS_PROBLEM, "MAX_TABLE_ROWS", RetryMode.CORRECT_AND_RETRY),
+        ("schema_invalid", {"pointer": "/select"}, None, RetryMode.DO_NOT_RETRY),
+    ],
+    # The first body comes from a platform that states no retry_mode.
+    ids=["line-chart-series-no-stated-mode", "dfo-apis-table-rows", "another-code"],
+)
+async def test_a_create_refused_for_a_limit_carries_the_limit_its_body_names(
+    code: str, extra: dict[str, object], limit_name: str | None, retry: RetryMode
+) -> None:
+    problem = _problem_body(code=code, retryable=False, **extra)
+    _requests, handler = _counting_handler(httpx2.Response(400, content=problem))
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.create_component(intent=INTENT, caller=Caller.EXTERNAL)
+
+    assert isinstance(reply, Refusal)
+    assert (reply.limit_name, reply.retry) == (limit_name, retry)
 
 
 # --- local refusal: malformed route segments ---------------------------------

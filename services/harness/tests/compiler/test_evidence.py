@@ -14,6 +14,7 @@ from compiler.evidence import (
     RetrievalEvidence,
     SeriesEvidence,
     Severity,
+    StatedUnit,
     check_evidence,
     entity_matches,
     errors,
@@ -1263,6 +1264,43 @@ def test_discovery_and_the_manifest_read_a_price_basis_alike(
     at_approval = refusals(evidence_from_source(discovered))
     assert at_approval == refusals(retrieved)
     assert at_approval == ([refused_by] if refused_by is not None else [])
+
+
+# A DAC2a amount converted to constant 2024 US dollars, as dfo-apis'
+# `materialise.convert` writes its unit cell: the request's currency, prices and
+# base year, and the donor prices its recipe deflated it by.
+_DONOR_CONVERTED = {
+    "currency": "USD",
+    "prices": "constant",
+    "base_year": 2024,
+    "deflation_basis": "donor",
+}
+
+
+def test_a_frame_converted_at_donor_prices_meets_the_request_it_was_approved_for(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    # The definition's request states no basis and the converted frame states
+    # one, so the plan approved on the request is accepted once retrieved.
+    constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2024))
+    request = {"currency": "USD", "prices": "constant", "base_year": 2024}
+    identity = {
+        "stat_var": "DebtServicePaid",
+        "facets": {"unit": {"state": "value", "request": request}},
+    }
+    discovered = source(unit_ref="CurrencyUSD", unit_label="US Dollar", identity=identity)
+    retrieved = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(_stat("DebtServicePaid", facet={"unit": _DONOR_CONVERTED})),
+    )
+
+    assert retrieved.stated_unit == StatedUnit.model_validate(_DONOR_CONVERTED)
+    for evidence in (evidence_from_source(discovered), retrieved):
+        assert not [
+            issue
+            for issue in errors(check_evidence(constant, evidence))
+            if issue.code.value.startswith("unit")
+        ]
 
 
 def test_an_entity_is_found_through_the_ref_the_approved_source_resolved(

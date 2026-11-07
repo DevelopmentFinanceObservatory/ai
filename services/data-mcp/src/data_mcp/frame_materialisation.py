@@ -1233,7 +1233,11 @@ def _check_unit_requests(column: pa.ChunkedArray) -> None:
             )
 
 
-_UNIT_TYPE = canonical_frame_schema((UNIT_COLUMN,)).field(UNIT_COLUMN).type
+# The recipe layout, whose converted-unit struct also holds `recipe` and
+# `deflation_basis`. Arrow drops a struct key its type lacks, so decoding into the
+# default layout would lose a cell's deflation basis. `build_frame_from_arrow`
+# conforms the column back to the default layout when no cell carries either member.
+_UNIT_TYPE = canonical_frame_schema((UNIT_COLUMN,), recipe=True).field(UNIT_COLUMN).type
 
 
 def _tagged_unit_from_text(text: object, *, composed: bool) -> object:
