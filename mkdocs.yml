@@ -1,8 +1,8 @@
-site_name: MCP server
+site_name: AI assistants (MCP)
 docs_dir: docs/guide
 extra:
   dfo:
     path: mcp
 nav:
-  - Connect: connect.md
+  - Connect your assistant: connect.md
   - What you can ask: what-you-can-ask.md

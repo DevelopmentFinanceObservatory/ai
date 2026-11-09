@@ -4,7 +4,7 @@ description: How a question to the DFO MCP server becomes a cited answer, and th
 
 # How the MCP server answers questions
 
-Once the DFO is connected to your AI assistant (see [Connect](connect.md)), you can ask it questions about development finance in plain language, such as "What is health spending per person in Kenya?" or "How much health aid did Nigeria receive between 2020 and 2024?" The DFO covers countries, subregions, and continents. It can look up a figure or trend, compare places, rank them, or calculate per-person amounts, and every answer names the dataset it came from. You'll get the best results by naming the place, years, and unit you want. The DFO can't handle very large requests in one go. If you ask for something it can't do, or for years it doesn't have data for, the assistant will tell you and suggest an alternative.
+Once the DFO is connected to your AI assistant (see [Connect your assistant](connect.md)), you can ask it questions about development finance in plain language, such as "What is health spending per person in Kenya?" or "How much health aid did Nigeria receive between 2020 and 2024?" The DFO covers countries, subregions, and continents. It can look up a figure or trend, compare places, rank them, or calculate per-person amounts, and every answer names the dataset it came from. You'll get the best results by naming the place, years, and unit you want. The DFO can't handle very large requests in one go. If you ask for something it can't do, or for years it doesn't have data for, the assistant will tell you and suggest an alternative.
 
 ## For developers
 
@@ -114,5 +114,5 @@ A single `search` call takes up to six parts, one per measured variable, and `de
 
 ## Next
 
-- [Connect](connect.md) shows how to add the server to Claude, ChatGPT, Gemini, Claude Code, Codex, or Gemini CLI.
+- [Connect your assistant](connect.md) shows how to add the server to Claude, ChatGPT, Gemini, Claude Code, Codex, or Gemini CLI.
 - The Tools reference lists every argument, error code and retry mode. <!-- TODO: link when the generated Tools reference is published. -->
