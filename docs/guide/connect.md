@@ -51,8 +51,6 @@ Custom apps require a personal Google account, a US user aged 18 or over, Englis
 
 ::tab{label="Le Chat (Mistral)"}
 
-<!-- TODO: verify end to end in Le Chat. The server answers initialize with a chat.mistral.ai Origin header but has no CORS preflight, which matters only if Le Chat calls MCP servers from the browser. -->
-
 1. In [Le Chat](https://chat.mistral.ai), open **Intelligence**, then **Connectors**.
 1. Select **Add Connector**, then the **Custom MCP Connector** tab.
 1. Enter **DFO** as the connector name and paste the server address as the **Server URL**.
