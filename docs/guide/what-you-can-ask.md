@@ -114,5 +114,5 @@ A single `search` call takes up to six parts, one per measured variable, and `de
 
 ## Next
 
-- [Connect your assistant](connect.md) shows how to add the server to Claude, ChatGPT, Gemini, Claude Code, Codex, or Gemini CLI.
+- [Connect your assistant](connect.md) shows how to add the server to Claude, ChatGPT, Gemini, Le Chat, Claude Code, Codex, or Gemini CLI.
 - The Tools reference lists every argument, error code and retry mode. <!-- TODO: link when the generated Tools reference is published. -->
