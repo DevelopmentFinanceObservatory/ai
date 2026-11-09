@@ -1,10 +1,10 @@
 ---
-description: Connect the DFO to Claude, ChatGPT, or Gemini so your assistant can look up development finance data. Developers can also connect Claude Code, Codex, or Gemini CLI.
+description: Connect the DFO to Claude, ChatGPT, Gemini, or Le Chat so your assistant can look up development finance data. Developers can also connect Claude Code, Codex, or Gemini CLI.
 ---
 
 # Connect your AI assistant
 
-You can connect the DFO to an AI assistant such as Claude, ChatGPT, or Gemini. Once it's connected, you can ask the assistant questions about development finance. It looks up the answer in DFO data and tells you which source the numbers come from. Setup takes a few minutes and doesn't need a DFO account.
+You can connect the DFO to an AI assistant such as Claude, ChatGPT, Gemini, or Mistral's Le Chat. Once it's connected, you can ask the assistant questions about development finance. It looks up the answer in DFO data and tells you which source the numbers come from. Setup takes a few minutes and doesn't need a DFO account.
 
 The connection uses MCP (Model Context Protocol), a standard way for AI assistants to use outside tools. You only need one thing, the DFO's server address:
 
@@ -48,6 +48,17 @@ To use it, type **@** in the message box and select the DFO. Your organisation's
 1. Paste the server address and select **Next**.
 
 Custom apps require a personal Google account, a US user aged 18 or over, English as your language, and Keep Activity turned on. You add the app on the web, and it then works on mobile too.
+
+On [Gemini Enterprise](https://support.google.com/g/answer/17106276), a team administrator adds the DFO as a custom MCP server with no authentication, and the team can then use it.
+
+::tab{label="Le Chat (Mistral)"}
+
+1. In [Le Chat](https://chat.mistral.ai), open **Intelligence**, then **Connectors**.
+1. Select **Add Connector**, then the **Custom MCP Connector** tab.
+1. Enter **DFO** as the connector name and paste the server address as the **Server URL**.
+1. Select **Connect**. Le Chat detects that the server needs no sign-in.
+
+Only an administrator can add connectors. On Free, Pro, and Student plans, the account owner is the administrator. To use the DFO, turn the connector on in the chat's tools.
 
 :::
 
