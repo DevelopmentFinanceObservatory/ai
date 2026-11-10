@@ -191,9 +191,10 @@ PLANNER_DECLARATIONS_TOTAL_CEILING = 42_000
 # the planner writes a plan from. The margin is 1.1%.
 PROPOSE_PLAN_DECLARATION_CEILING = 37_700
 
-# The smaller planner declarations at once: `ask_user_question`,
-# `get_skill_file`, `get_skill` and `reject_plan`, measured 4,031 together.
-MINOR_DECLARATIONS_TOTAL_CEILING = 5_070
+# The smaller planner declarations at once: `ask_user_question`, `get_skill` and
+# `reject_plan`, measured 2,994 together. The margin is 25.9%, the margin the
+# ceiling had over its earlier measure of 4,031 (5,070).
+MINOR_DECLARATIONS_TOTAL_CEILING = 3_770
 
 # The planner's `contents` history on its largest captured generation, less
 # the skill text `SKILL_PAGE_CEILING` and the brief `RECORDED_BRIEF_CEILING`

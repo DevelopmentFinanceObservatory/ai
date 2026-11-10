@@ -4,9 +4,9 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 153450,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 152509,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -17,12 +17,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -49,9 +45,9 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 187063,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 186122,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -62,12 +58,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -104,9 +96,9 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 188429,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 187488,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -117,12 +109,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -169,9 +157,9 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 71579,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 70638,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -182,12 +170,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -214,9 +198,9 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 105192,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 104251,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -227,12 +211,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -269,9 +249,9 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 107099,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 106158,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -282,12 +262,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",

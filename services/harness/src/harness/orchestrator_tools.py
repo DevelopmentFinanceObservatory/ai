@@ -101,7 +101,7 @@ from planner.plan import (
     scope_unread,
     with_blocks,
 )
-from planner.skills import GET_SKILL, GET_SKILL_FILE
+from planner.skills import GET_SKILL
 from planner.workflow import ToolId
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 from submission.prices_choice import measure_key
@@ -205,6 +205,9 @@ _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets
 # Skills a search result names, as shown to the model, as data-mcp's search
 # digest shows them; the rest are counted.
 _SKILLS_SHOWN = 5
+# The orchestrator reads a skill's files through data-mcp's `get_skill_file`; the
+# planner's one skill tool is `get_skill` (`planner.skills`).
+GET_SKILL_FILE = ToolId(server="data-mcp", name="get_skill_file")
 
 TOOL_NAMES = (
     "search",

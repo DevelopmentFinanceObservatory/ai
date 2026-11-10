@@ -30,7 +30,7 @@ def build_planner(
     `translator.tool.build_translate` attached to `propose_plan`, adapted by
     `harness.planner_seam.PlannerSeam`. `surface` is the tool surface the
     translation discovers on, the compiler checks against, and the planner's
-    `get_skill` and `get_skill_file` call through. Pass the one
+    `get_skill` calls through. Pass the one
     `harness.server.create_app` already built for the `execute` node, so the
     two compile against one set of schemas, read once. `prefix_cache` is the
     process's shared prompt-prefix cache, passed on to the planner's model.

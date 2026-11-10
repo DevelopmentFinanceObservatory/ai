@@ -128,7 +128,12 @@ from planner.plan import (
 )
 from planner.records import Severity
 from planner.settings import AgentSettings
-from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key, skills_read
+from planner.skills import (
+    SKILLS_READ_STATE_KEY,
+    name_get_skill_in_call_lines,
+    skill_page_key,
+    skills_read,
+)
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
@@ -2139,7 +2144,9 @@ def _readings_ledger(
 
 def _skills_section(pages: Sequence[Mapping[str, Any]]) -> str:
     """The skill pages read on earlier calls for this plan, each under the
-    call that read it and in full, or nothing when there are none."""
+    call that read it and in full, or nothing when there are none. A page's
+    printed call lines name `get_skill`, the planner's one skill tool, however
+    it was stored (`planner.skills.name_get_skill_in_call_lines`)."""
     if not pages:
         return ""
     rendered = []
@@ -2148,9 +2155,9 @@ def _skills_section(pages: Sequence[Mapping[str, Any]]) -> str:
             call = f"get_skill({page['skill_id']!r})"
         else:
             call = (
-                f"get_skill_file({page['skill_id']!r}, {page['path']!r}, offset={page['offset']})"
+                f"get_skill({page['skill_id']!r}, path={page['path']!r}, offset={page['offset']})"
             )
-        rendered.append(f"\n{call}:\n{page['text']}\n")
+        rendered.append(f"\n{call}:\n{name_get_skill_in_call_lines(page['text'])}\n")
     return _SKILLS_CONTEXT + "".join(rendered)
 
 

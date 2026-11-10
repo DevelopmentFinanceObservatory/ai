@@ -17,8 +17,8 @@ an ADK tool confirmation this agent would have to carry across its own
 nested `Runner`.
 
 Built with a tool surface, the planner also carries `planner.skills`'
-`get_skill` and `get_skill_file`, and its instruction carries `_SKILLS`, the
-paragraph naming them. Built without one, it carries neither, so the
+`get_skill`, and its instruction carries `_SKILLS`, the paragraph naming it.
+Built without one, it carries neither, so the
 standalone eval agents run without a live server.
 
 The planner settles methodology and states what evidence an answer rests on,
@@ -432,14 +432,14 @@ _VERSIONING_FIXED = (
     "and stop there.\n\n"
 )
 
-# How to read skills, when the skill tools are built. Held apart because the
-# planner is also built without them, and an instruction naming a tool the
+# How to read skills, when the skill tool is built. Held apart because the
+# planner is also built without it, and an instruction naming a tool the
 # agent lacks sends the model at one ADK raises on.
 _SKILLS = (
     'The search readings close with a "Skills named" line listing, by id, '
     "the skills that apply to them. When a skill bears on the question, "
     "call `get_skill` with its id before you draft, and let what it says "
-    "shape your decisions. Read a file it links with `get_skill_file`. A "
+    "shape your decisions. Read a file it links with `get_skill` and its `path`. A "
     "question about DFO itself (what it covers, where its data comes "
     "from, how it works) starts with `get_skill`, though no search result "
     "names that skill. When a skill tool refuses, "
@@ -574,7 +574,7 @@ def planner_instruction(
     """The planner's instruction, for the agent it is actually part of.
 
     `has_translator` and `has_skills` each name something the agent carries:
-    a translator `propose_plan` runs, or the skill tools. An instruction
+    a translator `propose_plan` runs, or the skill tool. An instruction
     describing a translation the agent does not run, or naming a tool it
     lacks, sends the model after something that is not there.
 
@@ -2460,10 +2460,10 @@ def create_planner_agent(
             planner is the standalone agent its own eval set scores --
             which is also what keeps that set from needing a live tool
             surface.
-        surface: The tool surface `get_skill` and `get_skill_file` call
+        surface: The tool surface `get_skill` calls
             data-mcp through, and `propose_plan` reads a pinned dataset's
-            first year through. Omitted, the planner has neither skill tool,
-            its instruction does not name them, and `propose_plan` reads
+            first year through. Omitted, the planner has no skill tool,
+            its instruction does not name it, and `propose_plan` reads
             nothing.
         question_fixed: Whether the question this planner drafts for is fixed
             for the entry it is called in. `harness.planner_seam` sets

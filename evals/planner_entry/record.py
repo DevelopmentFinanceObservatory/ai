@@ -124,8 +124,8 @@ def _result(result: Any) -> dict[str, Any]:
 
 async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
     """Each skill, and every page of `SKILL.md` and of each file it lists, by the key
-    `entry.RecordedSurface` looks it up under. The arguments are the ones
-    `planner.skills.build_skill_tools` sends."""
+    `entry.RecordedSurface` looks it up under: `get_skill` for a skill's first page,
+    `get_skill_file` for a file, which it maps the planner's `get_skill` calls onto."""
     results: dict[str, dict[str, Any]] = {}
     for skill_id in dict.fromkeys(skill_ids):
         arguments: dict[str, Any] = {"skill_id": skill_id}
