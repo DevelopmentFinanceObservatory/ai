@@ -90,7 +90,7 @@ Returns a `ToolResult` with the following items.
 
 ### get_skill
 
-The `get_skill` tool loads one skill a `search` result named, by id, or with `path` one of its files. It reads apis' Skills API (`GET /api/skills/{skill_id}`) through `data_mcp.skills_client`. With `path` it answers as `get_skill_file` does, through the same `get_skill_file_tool.read_skill_file`, and every call its text names is a `get_skill` call.
+The `get_skill` tool loads one skill a `search` result named, by id, or with `path` one of its files. It reads apis' Skills API (`GET /api/skills/{skill_id}`) through `data_mcp.skills_client`. With `path` it reads one file of the skill verbatim, from `GET /api/skills/{skill_id}/resources/{path}`, through `read_skill_file`. Every call a page names is a `get_skill` call.
 
 #### Parameters
 
@@ -106,31 +106,12 @@ Returns a `ToolResult` with the following items.
 - Without `path`, text content with the first page of the skill's `SKILL.md` verbatim, front matter included, then its other files with their sizes and the `get_skill` call that reads one. A `SKILL.md` past 32,000 characters stops at a line break, with a closing line naming the `get_skill` call, with `path` `SKILL.md`, that reads the rest.
 - One `resource_link` block per file after `SKILL.md`, at `skill://{skill_id}/{path}`.
 - Structured content holding the skill's SEP-2640 entry: `uri` (`skill://{skill_id}/SKILL.md`), `frontmatter`, and `resources` as the full manifest of `uri`, `digest` and `size`.
-- With `path`, the `get_skill_file` result below.
-
-### get_skill_file
-
-The `get_skill_file` tool reads one file of a skill verbatim, from `GET /api/skills/{skill_id}/resources/{path}`. `get_skill` with `path` reads the same way.
-
-The harness calls it on data-mcp's own mount. The combined server at `/mcp/` leaves it out of its list and answers a call to it with `tool_not_found` and a `fix` naming `get_skill`.
-
-#### Parameters
-
-- `skill_id`: The skill's id, as for `get_skill`.
-- `path`: The file's bundle-relative path exactly as `get_skill` lists it, such as `references/core-oda.md`. `SKILL.md` is accepted.
-- `offset`: Where the page starts, in characters of the decoded text. Defaults to 0.
-- `digest`: The file digest a previous page's closing line names. Required when `offset` is past 0.
-
-#### Return format
-
-Returns a `ToolResult` with the following items.
-
-- Text content with one page of the file. A page holds at most 32,000 characters from `offset` and ends at the last line break in its second half, or at 32,000 characters when there is none. A page that stops short of the end closes with a line naming the exact next call, with its `offset` and `digest="sha256:…"`. The digest sits in the text because the combined server strips structured content.
-- Structured content `{uri, path, size, digest, offset, next_offset}`, with `next_offset` null on the last page.
+- With `path`, text content with one page of the file, and no `resource_link` blocks. A page holds at most 32,000 characters from `offset` and ends at the last line break in its second half, or at 32,000 characters when there is none. A page that stops short of the end closes with a line naming the exact next call, with its `offset` and `digest="sha256:…"`. The digest sits in the text because the combined server strips structured content.
+- With `path`, structured content `{uri, path, size, digest, offset, next_offset}`, with `next_offset` null on the last page.
 
 ### Skill refusals
 
-Both skill tools refuse with the same codes.
+`get_skill` refuses with these codes.
 
 - `skill_not_found`: no skill has the id. The fix is an id a search result named.
 - `skill_resource_not_found`: the skill has no file at `path`. The fix is `get_skill`, which lists the files.

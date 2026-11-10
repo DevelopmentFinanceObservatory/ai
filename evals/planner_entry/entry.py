@@ -50,10 +50,10 @@ from typing import Any, cast
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
 from data_mcp import resolution
 from data_mcp.errors import UpstreamError
-from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.graph_wire import NodesResponse
 from data_mcp.node_lookup import NodeOutcome
 from data_mcp.search_tool import SearchContext
+from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.adk import Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
@@ -92,7 +92,6 @@ from planner.plan import (
     load_plan,
     unstated_period_reductions,
 )
-from planner.skills import name_get_skill_in_call_lines
 from planner.tool_results import ProblemCode
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from submission.service import first_year_reads
@@ -577,13 +576,13 @@ class RecordedSurface:
     """The planner's `ToolSurface`, answering calls from a recording.
 
     The planner reaches data-mcp for `get_skill` and for a pinned dataset's first year.
-    A recording files a skill's first page under `get_skill` and each file's pages
-    under `get_skill_file`, as data-mcp's own tools answer. The planner's one
-    `get_skill` is looked up under whichever of the two its `path` selects, and the
-    call lines in the text name `get_skill`, as data-mcp's `names_get_skill` makes
-    them. A call the recording lacks is answered as an unreachable server is
-    (`ToolSurfaceUnavailableError`), which the planner's tool turns into a sentence
-    saying the call did not complete, and is listed in `misses`.
+    A recording files a skill's first page under the key `get_skill` and each file's
+    pages under the key `get_skill_file`, with the call's arguments after it
+    (`surface_key`). A `get_skill` call is looked up under whichever of the two its
+    `path` selects, and the call lines a recorded page prints, which name
+    `get_skill_file`, are rewritten to name `get_skill`. A call the recording lacks is answered as an
+    unreachable server is (`ToolSurfaceUnavailableError`), which the planner's tool
+    turns into a sentence saying the call did not complete, and is listed in `misses`.
     """
 
     def __init__(self, results: Mapping[str, Mapping[str, Any]]) -> None:
@@ -602,8 +601,7 @@ class RecordedSurface:
     ) -> ToolCallResult:
         del on_progress
         name, arguments = tool.name, dict(arguments)
-        names_get_skill = arguments.pop(NAMES_GET_SKILL, False)
-        if names_get_skill and "path" in arguments:
+        if name == "get_skill" and "path" in arguments:
             name = "get_skill_file"
             arguments.setdefault("offset", 0)
         key = surface_key(name, arguments)
@@ -613,7 +611,7 @@ class RecordedSurface:
                 f"the recording holds no answer for {key}", retryable=False
             )
         result = ToolCallResult.model_validate(self._results[key])
-        if names_get_skill:
+        if tool.name == "get_skill":
             result = result.model_copy(update={"text": name_get_skill_in_call_lines(result.text)})
         return result
 

@@ -87,6 +87,7 @@ from harness.wire import (
 )
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
+from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import COMBINATION_OPTIONS, _session_steps
 from planner.plan import (
     PLAN_STATE_KEY,
@@ -1732,6 +1733,104 @@ def test_a_planner_call_other_than_a_proposing_one_adds_no_line() -> None:
 
     assert translator.translate(_planner_call("reject_plan")) == []
     assert translator.translate(_planner_call("get_skill", skill_id="oda-measures")) == []
+
+
+def _orchestrator_call(call_id: str, name: str, **args: Any) -> Event:
+    return Event(
+        author=ORCHESTRATOR_AGENT_NAME,
+        content=types.Content(
+            role="model",
+            parts=[types.Part(function_call=types.FunctionCall(id=call_id, name=name, args=args))],
+        ),
+    )
+
+
+def _orchestrator_answer(call_id: str, name: str, response: dict[str, Any]) -> Event:
+    return Event(
+        author=ORCHESTRATOR_AGENT_NAME,
+        content=types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=call_id, name=name, response=response
+                    )
+                )
+            ],
+        ),
+    )
+
+
+_FIRST_PAGE = {"skill_id": "oda-measures"}
+_FILE = {"skill_id": "oda-measures", "path": "references/grant.md"}
+_NULL_PATH = {"skill_id": "oda-measures", "path": None}
+_SKILL_REFUSED = {
+    "error": "no such file",
+    "code": "skill_resource_not_found",
+    "retry_mode": "correct_and_retry",
+}
+
+
+def _skill_read(translator: _Translator, call_id: str, args: dict[str, Any], answer: Any) -> list:
+    """The frames a `get_skill` call and its answer make."""
+    frames = translator.translate(_orchestrator_call(call_id, "get_skill", **args))
+    return [*frames, *translator.translate(_orchestrator_answer(call_id, "get_skill", answer))]
+
+
+def _failed_lines(frames: list[Any]) -> list[Any]:
+    return [f for f in frames if getattr(f, "status", None) == StepStatus.FAILED]
+
+
+@pytest.mark.parametrize("args", [_FIRST_PAGE, _FILE], ids=["first-page", "file"])
+def test_a_skill_read_that_succeeds_shows_no_line(args: dict[str, Any]) -> None:
+    translator = _translator()
+
+    frames = _skill_read(translator, "c1", args, {"skill": "text"})
+
+    assert [f for f in frames if hasattr(f, "step_id")] == []
+    assert _failed_lines(translator.finish()) == []
+
+
+def test_a_skill_file_read_that_fails_for_good_shows_a_failed_line() -> None:
+    translator = _translator()
+    answer = {"error": "down", "code": "tool_not_configured", "retry_mode": "do_not_retry"}
+
+    frames = _skill_read(translator, "c1", _FILE, answer)
+
+    (failed,) = _failed_lines(frames)
+    assert failed.tool == "get_skill"
+
+
+@pytest.mark.parametrize(
+    ("refused", "later", "settled"),
+    [
+        (_FILE, _FILE, True),
+        (_FIRST_PAGE, _FIRST_PAGE, True),
+        (_FILE, _FIRST_PAGE, False),
+        (_FIRST_PAGE, _FILE, False),
+        (_FILE, _NULL_PATH, False),
+        (_NULL_PATH, _FIRST_PAGE, True),
+    ],
+    ids=[
+        "file-then-file",
+        "page-then-page",
+        "file-then-page",
+        "page-then-file",
+        "file-then-null-path",
+        "null-path-then-page",
+    ],
+)
+def test_a_refused_skill_read_is_settled_only_by_a_read_of_its_own_kind(
+    refused: dict[str, Any], later: dict[str, Any], settled: bool
+) -> None:
+    """A file read and a first-page read were two tools, and a later success of one
+    did not settle the other's refusal."""
+    translator = _translator()
+    frames = _skill_read(translator, "c1", refused, _SKILL_REFUSED)
+    frames += _skill_read(translator, "c2", later, {"skill": "text"})
+    frames += translator.finish()
+
+    assert bool(_failed_lines(frames)) is not settled
 
 
 def test_a_replan_shows_revising_the_plan() -> None:

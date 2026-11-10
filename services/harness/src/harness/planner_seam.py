@@ -61,6 +61,7 @@ from typing import Any, NamedTuple, cast
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
+from data_mcp.skills_client import name_get_skill_in_call_lines
 from executor.classify import RECOVERABLE_SPEC_CODES, internal_fault
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
@@ -130,7 +131,6 @@ from planner.records import Severity
 from planner.settings import AgentSettings
 from planner.skills import (
     SKILLS_READ_STATE_KEY,
-    name_get_skill_in_call_lines,
     skill_page_key,
     skills_read,
 )
@@ -2146,7 +2146,7 @@ def _skills_section(pages: Sequence[Mapping[str, Any]]) -> str:
     """The skill pages read on earlier calls for this plan, each under the
     call that read it and in full, or nothing when there are none. A page's
     printed call lines name `get_skill`, the planner's one skill tool, however
-    it was stored (`planner.skills.name_get_skill_in_call_lines`)."""
+    it was stored (`data_mcp.skills_client.name_get_skill_in_call_lines`)."""
     if not pages:
         return ""
     rendered = []

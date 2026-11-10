@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
+from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.google_llm import Gemini
@@ -335,6 +336,28 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
         )
 
 
+def name_get_skill_in_history(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
+    """Render the call lines of a skill page the turn's events already hold as
+    `get_skill` calls.
+
+    A turn paused on an `ask_user` or an approval and resumed after a deploy
+    replays its own earlier `get_skill` and `get_skill_file` answers, whose
+    printed `get_skill_file(` call lines name a tool the agent no longer holds
+    (`data_mcp.skills_client.name_get_skill_in_call_lines`).
+    """
+    del callback_context
+    for content in llm_request.contents:
+        for part in content.parts or ():
+            response = part.function_response
+            if response is None or not isinstance(response.response, dict):
+                continue
+            text = response.response.get("skill")
+            if isinstance(text, str) and (renamed := name_get_skill_in_call_lines(text)) != text:
+                part.function_response = response.model_copy(
+                    update={"response": {**response.response, "skill": renamed}}
+                )
+
+
 def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], None]:
     """A before-model callback that takes out of the system instruction the
     line ADK appends to a chat-mode agent's
@@ -431,7 +454,11 @@ def create_orchestrator_agent(
         # single_turn node run reads only the events on its own node path,
         # which leaves out every hand-back (`harness.graph.orchestrate`).
         mode="chat",
-        before_model_callback=[_without_adk_identity(AGENT_NAME), prepend_digests],
+        before_model_callback=[
+            _without_adk_identity(AGENT_NAME),
+            name_get_skill_in_history,
+            prepend_digests,
+        ],
         # Thought summaries are requested for the traces. The studio stream
         # does not carry them. A stream cut off mid-response resumes from a
         # continuation token, one extra hop instead of a full retry.

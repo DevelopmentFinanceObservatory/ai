@@ -3462,14 +3462,15 @@ def _repeating_proposal_script(rounds: int) -> list[Any]:
 
 
 class _SkillPagesSurface(FixtureSurface):
-    """A surface answering the planner's one `get_skill` as data-mcp does: from the
-    `get_skill` response, or from the `get_skill_file` one when the call gives a `path`."""
+    """A surface answering the planner's one `get_skill` from the `get_skill` response, or
+    from the `get_skill_path` one when the call gives a `path`, so a test scripts a
+    skill's first page and its files apart."""
 
     async def call_tool(
         self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
     ) -> ToolCallResult:
         if tool.name == "get_skill" and "path" in arguments:
-            tool = ToolId(server=tool.server, name="get_skill_file")
+            tool = ToolId(server=tool.server, name="get_skill_path")
         return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
@@ -3710,7 +3711,7 @@ def _skill_seam() -> PlannerSeam:
     return _translator_seam(
         responses={
             "get_skill": ToolCallResult(is_error=False, text=_SKILL_PAGE),
-            "get_skill_file": ToolCallResult(is_error=False, text="# Methods"),
+            "get_skill_path": ToolCallResult(is_error=False, text="# Methods"),
         }
     )
 
@@ -3797,7 +3798,7 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
     seam = _translator_seam(
         responses={
             "get_skill": ToolCallResult(is_error=False, text=first),
-            "get_skill_file": ToolCallResult(is_error=False, text=second),
+            "get_skill_path": ToolCallResult(is_error=False, text=second),
         }
     )
     seam._agent.model = ScriptedPlannerLlm(

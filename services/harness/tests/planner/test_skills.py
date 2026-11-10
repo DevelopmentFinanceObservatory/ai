@@ -21,7 +21,6 @@ from compiler.surface import (
     ToolCallResult,
     ToolSurfaceUnavailableError,
 )
-from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from google.adk.tools.function_tool import FunctionTool
 from planner.agent import create_planner_agent
 from planner.skills import SKILLS_READ_STATE_KEY, build_skill_tools, skill_page_key
@@ -123,7 +122,7 @@ async def test_get_skill_calls_data_mcps_get_skill_and_returns_its_text() -> Non
     assert surface.calls == [
         (
             ToolId(server="data-mcp", name="get_skill"),
-            {"skill_id": "oda-concepts", NAMES_GET_SKILL: True},
+            {"skill_id": "oda-concepts"},
         )
     ]
     assert answer == _SKILL_TEXT
@@ -139,7 +138,7 @@ async def test_get_skill_with_a_path_reads_that_file_and_leaves_unset_paging_out
     assert surface.calls == [
         (
             ToolId(server="data-mcp", name="get_skill"),
-            {"skill_id": "oda-concepts", "path": "references/core-oda.md", NAMES_GET_SKILL: True},
+            {"skill_id": "oda-concepts", "path": "references/core-oda.md"},
         )
     ]
     assert answer == "# Core ODA\n"
@@ -157,7 +156,6 @@ async def test_get_skill_passes_a_continuations_offset_and_digest() -> None:
         "path": "SKILL.md",
         "offset": 31844,
         "digest": "sha256:" + "a" * 64,
-        NAMES_GET_SKILL: True,
     }
 
 

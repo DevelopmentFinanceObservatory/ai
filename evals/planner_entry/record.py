@@ -125,7 +125,8 @@ def _result(result: Any) -> dict[str, Any]:
 async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
     """Each skill, and every page of `SKILL.md` and of each file it lists, by the key
     `entry.RecordedSurface` looks it up under: `get_skill` for a skill's first page,
-    `get_skill_file` for a file, which it maps the planner's `get_skill` calls onto."""
+    `get_skill_file` for a file, which it maps the planner's `get_skill` calls with a
+    `path` onto. Both are read with data-mcp's `get_skill`."""
     results: dict[str, dict[str, Any]] = {}
     for skill_id in dict.fromkeys(skill_ids):
         arguments: dict[str, Any] = {"skill_id": skill_id}
@@ -144,9 +145,7 @@ async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dic
         for path in dict.fromkeys(paths):
             page: dict[str, Any] | None = {"skill_id": skill_id, "path": path, "offset": 0}
             while page is not None:
-                answer = _result(
-                    await client.call_tool("get_skill_file", page, raise_on_error=False)
-                )
+                answer = _result(await client.call_tool("get_skill", page, raise_on_error=False))
                 results[surface_key("get_skill_file", page)] = answer
                 content = answer["structured_content"] or {}
                 following = content.get("next_offset")

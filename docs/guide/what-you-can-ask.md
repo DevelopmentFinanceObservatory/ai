@@ -77,7 +77,7 @@ To get one figure per entity, such as aid per head for each of several recipient
 
 ## Skills
 
-A `search` result can name skills that apply to it, each with an id and a one-line description, beneath the part blocks: "Skills for these results; get_skill loads one by id:". `get_skill(skill_id)` loads one as a SKILL.md document, front matter followed by its body, cut past 32,000 characters with a line giving the full length. An id no skill carries refuses `skill_not_found`.
+A `search` result can name skills that apply to it, each with an id and a one-line description, beneath the part blocks: "Skills for these results; get_skill loads one by id:". `get_skill(skill_id)` loads one as a SKILL.md document, front matter followed by its body, then lists the skill's other files. With `path`, `get_skill` reads one of those files, and text past 32,000 characters comes in pages, each closing with the call that reads on. An id no skill carries refuses `skill_not_found`.
 
 ## Limits and refusals
 
