@@ -53,8 +53,8 @@ async def read_dfo_faq(surface: ToolSurface | None) -> str | DfoFaqUnavailable:
 
     A deployment with no surface, no Skills API or no dfo-faq answers
     `CANNOT_DESCRIBE_DFO`. Any other refusal, or a call that never
-    completed, answers `DFO_FAQ_NOT_READ`, as the planner's skill tools
-    answer a call that did not complete with a sentence and carry on.
+    completed, answers `DFO_FAQ_NOT_READ`, as the planner's skill tool
+    answers a call that did not complete with a sentence and carry on.
     """
     if surface is None:
         return DfoFaqUnavailable(CANNOT_DESCRIBE_DFO)

@@ -19,8 +19,8 @@ each of the task's payloads makes. `run_entry` replays them through production c
   the planner with production's instruction, tools and callbacks, each request
   under the `TurnBudget` a served request gets (`harness.turn_budget`).
 
-Two edges are replaced. The planner's `get_skill` and `get_skill_file` read the
-recording through `RecordedSurface`. The seam's translate step is the eval's own,
+Two edges are replaced. The planner's `get_skill` reads the recording through
+`RecordedSurface`. The seam's translate step is the eval's own,
 which ends the entry once a plan is recorded (`PlanRecorded`), so a run measures the
 draft up to its first accepted plan. Given `TranslationCalls`, it first runs
 production's translation on that plan (`translator.tool.build_translate`), its calls
@@ -38,6 +38,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import re
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -50,6 +51,7 @@ from typing import Any, cast
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
 from data_mcp import resolution
 from data_mcp.errors import UpstreamError
+from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.graph_wire import NodesResponse
 from data_mcp.node_lookup import NodeOutcome
 from data_mcp.search_tool import SearchContext
@@ -571,13 +573,21 @@ def surface_key(tool: str, arguments: Mapping[str, object]) -> str:
     return f"{tool} {json.dumps(arguments, sort_keys=True, separators=(',', ':'))}"
 
 
+# The tool name in a call line a page prints, `get_skill_file(skill_id=...`.
+_CALL_LINE_TOOL = re.compile(r"\bget_skill_file(?=\(skill_id=)")
+
+
 class RecordedSurface:
     """The planner's `ToolSurface`, answering calls from a recording.
 
-    The planner reaches data-mcp for `get_skill` and `get_skill_file`, and for a pinned
-    dataset's first year. A call the recording lacks is answered as an unreachable
-    server is (`ToolSurfaceUnavailableError`), which the planner's tools turn into a
-    sentence saying the call did not complete, and is listed in `misses`.
+    The planner reaches data-mcp for `get_skill` and for a pinned dataset's first year.
+    A recording files a skill's first page under `get_skill` and each file's pages
+    under `get_skill_file`, as data-mcp's own tools answer. The planner's one
+    `get_skill` is looked up under whichever of the two its `path` selects, and the
+    call lines in the text name `get_skill`, as data-mcp's `names_get_skill` makes
+    them. A call the recording lacks is answered as an unreachable server is
+    (`ToolSurfaceUnavailableError`), which the planner's tool turns into a sentence
+    saying the call did not complete, and is listed in `misses`.
     """
 
     def __init__(self, results: Mapping[str, Mapping[str, Any]]) -> None:
@@ -595,13 +605,23 @@ class RecordedSurface:
         on_progress: Any = None,
     ) -> ToolCallResult:
         del on_progress
-        key = surface_key(tool.name, arguments)
+        name, arguments = tool.name, dict(arguments)
+        names_get_skill = arguments.pop(NAMES_GET_SKILL, False)
+        if names_get_skill and "path" in arguments:
+            name = "get_skill_file"
+            arguments.setdefault("offset", 0)
+        key = surface_key(name, arguments)
         if key not in self._results:
             self.misses.append(key)
             raise ToolSurfaceUnavailableError(
                 f"the recording holds no answer for {key}", retryable=False
             )
-        return ToolCallResult.model_validate(self._results[key])
+        result = ToolCallResult.model_validate(self._results[key])
+        if names_get_skill:
+            result = result.model_copy(
+                update={"text": _CALL_LINE_TOOL.sub("get_skill", result.text)}
+            )
+        return result
 
 
 # --- The orchestrator's hand-off -----------------------------------------------------

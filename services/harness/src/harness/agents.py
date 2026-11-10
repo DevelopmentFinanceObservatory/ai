@@ -78,7 +78,7 @@ def create_planner_with_translator(
         agent_settings: The model the planner runs on. Defaults to reading
             the environment, the same way the deployed service does.
         surface: The tool surface translation discovers on and compiles
-            against, and the planner's `get_skill` and `get_skill_file` call
+            against, and the planner's `get_skill` calls
             data-mcp through. Tests pin one here so the planner builds without
             a reachable MCP server.
         question_fixed: Passed straight through to `create_planner_agent`.

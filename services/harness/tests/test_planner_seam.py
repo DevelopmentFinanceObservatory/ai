@@ -3459,6 +3459,18 @@ def _repeating_proposal_script(rounds: int) -> list[Any]:
     return [_propose_again_step() for _ in range(2 * rounds)]
 
 
+class _SkillPagesSurface(FixtureSurface):
+    """A surface answering the planner's one `get_skill` as data-mcp does: from the
+    `get_skill` response, or from the `get_skill_file` one when the call gives a `path`."""
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
+    ) -> ToolCallResult:
+        if tool.name == "get_skill" and "path" in arguments:
+            tool = ToolId(server=tool.server, name="get_skill_file")
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
 def _translator_seam(
     *,
     responses: dict[str, ToolCallResult],
@@ -3466,7 +3478,7 @@ def _translator_seam(
 ) -> PlannerSeam:
     return PlannerSeam(
         settings=Settings(),
-        surface=FixtureSurface(schemas=[], responses=responses),
+        surface=_SkillPagesSurface(schemas=[], responses=responses),
         agent_settings=agent_settings,
     )
 
@@ -3692,7 +3704,7 @@ def _skills_named(brief: str) -> str:
 
 
 def _skill_seam() -> PlannerSeam:
-    """A seam whose `get_skill` and `get_skill_file` answer one page each."""
+    """A seam whose `get_skill` answers one page for a skill and one for a file."""
     return _translator_seam(
         responses={
             "get_skill": ToolCallResult(is_error=False, text=_SKILL_PAGE),
@@ -3738,7 +3750,7 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
     seam._agent.model = ScriptedPlannerLlm(
         script=[
             [("get_skill", {"skill_id": "dfo-faq"})],
-            [("get_skill_file", {"skill_id": "dfo-faq", "path": "methods.md"})],
+            [("get_skill", {"skill_id": "dfo-faq", "path": "methods.md"})],
             "stop",
             "stop",
         ]
@@ -3754,7 +3766,7 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
         for event in await harness.events()
         if event.actions and event.actions.state_delta
     ]
-    # The earliest delta holding the second page is its `get_skill_file` event.
+    # The earliest delta holding the second page is its file-read event.
     read_second = next(delta for delta in deltas if second in delta)
     assert first not in read_second
     assert sum(delta.count(first) for delta in deltas) == 1
@@ -3780,7 +3792,7 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
         script=[
             [("get_skill", {"skill_id": "dfo-faq"})],
             "stop",
-            [("get_skill_file", {"skill_id": "dfo-faq", "path": "methods.md"})],
+            [("get_skill", {"skill_id": "dfo-faq", "path": "methods.md"})],
             [ask],
             "stop",
             "stop",
@@ -3809,11 +3821,11 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
     resumed = llm.captured_requests[resuming]
     brief = _brief_follows_the_question(resumed)
     assert brief.count(_SKILL_PAGE) == 1 and brief.count("# Methods") == 1
-    assert "get_skill_file('dfo-faq', 'methods.md', offset=0):\n# Methods\n" in brief
+    assert "get_skill('dfo-faq', path='methods.md', offset=0):\n# Methods\n" in brief
     assert _call_and_response_names(resumed) == []
     later = _brief_follows_the_question(llm.captured_requests[replanning])
     assert f"get_skill('dfo-faq'):\n{_SKILL_PAGE}\n" in later
-    assert "get_skill_file('dfo-faq', 'methods.md', offset=0):\n# Methods\n" in later
+    assert "get_skill('dfo-faq', path='methods.md', offset=0):\n# Methods\n" in later
 
 
 # An `unsupported` `search` answer: translation refers the plan back as

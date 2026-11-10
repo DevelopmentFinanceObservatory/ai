@@ -44,18 +44,18 @@ and why that set needs no reachable tool surface.
 
 `create_planner_agent` takes a `surface`, the harness's
 `compiler.surface.ToolSurface`. Given one, the planner also carries
-`get_skill` and `get_skill_file` from `planner.skills`, each calling data-mcp's
-tool of the same name through that surface, and its instruction gains the
-paragraph that names them. `harness.agents.create_planner_with_translator`
+`get_skill` from `planner.skills`, which calls data-mcp's `get_skill` through that
+surface (a skill's first page, or one file with `path`), and its instruction
+gains the paragraph that names it. `harness.agents.create_planner_with_translator`
 passes the same surface translation discovers on. Without a surface, as the
-standalone eval agents build it, the planner has neither tool and the
+standalone eval agents build it, the planner has no skill tool and the
 instruction says nothing about skills.
 
 The planner loads a skill when its description bears on the question. A
 question about DFO itself starts with `get_skill`, whose `skill_id`
-description names the one skill no search result carries, `dfo-faq`. Both tools answer with data-mcp's text, a refusal
-included, so a deployment with no Skills API answers `capability_unavailable`
-and the planner drafts without the skill.
+description names the one skill no search result carries, `dfo-faq`. The tool
+answers with data-mcp's text, a refusal included, so a deployment with no Skills
+API answers `capability_unavailable` and the planner drafts without the skill.
 
 ## Typed results
 

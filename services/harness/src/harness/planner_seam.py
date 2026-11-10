@@ -2148,7 +2148,7 @@ def _skills_section(pages: Sequence[Mapping[str, Any]]) -> str:
             call = f"get_skill({page['skill_id']!r})"
         else:
             call = (
-                f"get_skill_file({page['skill_id']!r}, {page['path']!r}, offset={page['offset']})"
+                f"get_skill({page['skill_id']!r}, path={page['path']!r}, offset={page['offset']})"
             )
         rendered.append(f"\n{call}:\n{page['text']}\n")
     return _SKILLS_CONTEXT + "".join(rendered)

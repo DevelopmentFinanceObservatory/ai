@@ -1,10 +1,12 @@
-"""The planner's two skill tools, `get_skill` and `get_skill_file`.
+"""The planner's skill tool, `get_skill`.
 
-Each is an ADK function tool over data-mcp's tool of the same name, called
-through the harness's `compiler.surface.ToolSurface`, so the planner and an
-outside model load the same text by the same names. A tool answers with
-data-mcp's text as it came back, a refusal's included: an unknown id refuses
-`skill_not_found`, and a deployment with no Skills API refuses
+It is an ADK function tool over data-mcp's `get_skill`, called through the
+harness's `compiler.surface.ToolSurface`, in the shape the public MCP surface
+offers: the skill's first page, or one file of it when `path` is given, with
+`offset` and `digest` to read on. Every call sends `NAMES_GET_SKILL`, so each
+page names `get_skill` and nothing the model reads names a tool it lacks. A call
+answers with data-mcp's text as it came back, a refusal's included: an unknown id
+refuses `skill_not_found`, and a deployment with no Skills API refuses
 `capability_unavailable`, which the planner reads and drafts on without the
 skill. A call that does not complete answers with one sentence saying so.
 
@@ -17,17 +19,18 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Annotated, Any
 
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
+from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
+from pydantic import Field
 
 from planner.plan import SessionState
 from planner.workflow import ToolId
 
 GET_SKILL = ToolId(server="data-mcp", name="get_skill")
-GET_SKILL_FILE = ToolId(server="data-mcp", name="get_skill_file")
 # The skill a question about DFO itself is answered from. The planner's
 # instruction names it, and the orchestrator's `explain_dfo` loads it
 # (`harness.dfo_faq`).
@@ -35,7 +38,7 @@ DFO_FAQ_SKILL_ID = "dfo-faq"
 
 # Every skill page the planner read without an error, in the order it read
 # them, each once: `{"skill_id", "path", "offset"}`, `path` `None` for a
-# `get_skill` read. Each page's text sits under its own key (`skill_page_key`),
+# skill's first page. Each page's text sits under its own key (`skill_page_key`),
 # so every read writes its own text once and this list stays small.
 # `harness.planner_seam` clears it on a plan's first draft.
 SKILLS_READ_STATE_KEY = "planner:skills_read"
@@ -55,31 +58,25 @@ def skill_page_key(page: Mapping[str, Any]) -> str:
 
 async def _call(
     surface: ToolSurface,
-    tool: ToolId,
     arguments: Mapping[str, object],
     *,
     tool_context: ToolContext,
-    path: str | None,
 ) -> str:
-    """data-mcp's text for one call, or a sentence saying the call did not complete.
+    """data-mcp's text for one `get_skill` call, or a sentence saying it did not complete.
 
     An answer without an error is recorded under `SKILLS_READ_STATE_KEY`,
     with its text under `skill_page_key`, unless that page is already there.
     """
     try:
-        result = await surface.call_tool(tool=tool, arguments=arguments)
+        result = await surface.call_tool(tool=GET_SKILL, arguments=arguments)
     except ToolSurfaceUnavailableError as exc:
-        logger.warning(
-            "planner %s(%s) did not complete; drafting without it: %s",
-            tool.name,
-            dict(arguments),
-            exc,
-        )
-        return f"{tool.name} could not reach data-mcp just now. Draft the plan without this skill."
+        sent = {name: value for name, value in arguments.items() if name != NAMES_GET_SKILL}
+        logger.warning("planner get_skill(%s) did not complete; drafting without it: %s", sent, exc)
+        return "get_skill could not reach data-mcp just now. Draft the plan without this skill."
     if not result.is_error:
         page = {
             "skill_id": arguments["skill_id"],
-            "path": path,
+            "path": arguments.get("path"),
             "offset": arguments.get("offset", 0),
         }
         recorded = skills_read(tool_context.state)
@@ -89,56 +86,42 @@ async def _call(
     return result.text
 
 
-# `get_skill`'s description, as the planner's model reads it.
-_GET_SKILL_DOC = """Load one skill: its SKILL.md verbatim, then the files it links.
-
-        A skill carries the definitions, caveats and methods an answer in its
-        domain needs. Loading one returns instructions and does not finish the
-        task: carry on drafting the plan once you have read them. An id no
-        skill carries refuses `skill_not_found`.
-
-        Args:
-            skill_id: An id the search readings' `Skills named` line lists, or
-                `{dfo_faq}` for a question about DFO itself.
-        """
+# Keep the description to one sentence saying what the call returns: a longer one
+# makes Gemini reason at length before some calls (`tests/planner/test_skills.py`
+# bounds its length). ADK sends a docstring's `Args:` block inside the description,
+# so the argument text sits in the parameters' `Field` descriptions.
+_GET_SKILL_DOC = (
+    "Returns the SKILL.md of the skill with the given id and the list of its files, "
+    "or one file of the skill, verbatim, when `path` is given."
+)
 
 
 def build_skill_tools(surface: ToolSurface) -> list[FunctionTool]:
-    """Build `get_skill` and `get_skill_file`, each calling data-mcp through `surface`."""
+    """Build `get_skill`, which calls data-mcp through `surface`."""
 
-    async def get_skill(skill_id: str, tool_context: ToolContext) -> str:
-        return await _call(
-            surface, GET_SKILL, {"skill_id": skill_id}, tool_context=tool_context, path=None
-        )
-
-    # Set here so the declaration names the skill id from its one constant.
-    get_skill.__doc__ = _GET_SKILL_DOC.format(dfo_faq=DFO_FAQ_SKILL_ID)
-
-    async def get_skill_file(
-        skill_id: str,
-        path: str,
+    async def get_skill(
+        skill_id: Annotated[
+            str, Field(description=f"A skill id, or `{DFO_FAQ_SKILL_ID}` for DFO itself.")
+        ],
         tool_context: ToolContext,
-        offset: int = 0,
-        digest: str | None = None,
+        path: Annotated[
+            str | None, Field(description="A file's path exactly as the list gives it.")
+        ] = None,
+        offset: Annotated[
+            int, Field(description="Where a page starts: 0, or the offset a closing line names.")
+        ] = 0,
+        digest: Annotated[
+            str | None, Field(description="The digest a closing line names, on a continuation.")
+        ] = None,
     ) -> str:
-        """Read one file of a skill `get_skill` loaded, verbatim.
-
-        Pass the path exactly as `get_skill` lists it; SKILL.md is accepted
-        too. A file refused as not found is not retried under a guessed path:
-        call `get_skill` for the list of files. A page that stops short of the
-        end closes with a line naming the exact next call, with its `offset`
-        and `digest`; make that call to read on.
-
-        Args:
-            skill_id: The skill's id.
-            path: The file's path exactly as `get_skill` lists it.
-            offset: Where the page starts, in characters: 0, or the offset a
-                closing line names.
-            digest: The digest a page's closing line names, on a continuation.
-        """
-        arguments: dict[str, object] = {"skill_id": skill_id, "path": path, "offset": offset}
+        arguments: dict[str, object] = {"skill_id": skill_id, NAMES_GET_SKILL: True}
+        if path is not None:
+            arguments["path"] = path
+        if offset:
+            arguments["offset"] = offset
         if digest is not None:
             arguments["digest"] = digest
-        return await _call(surface, GET_SKILL_FILE, arguments, tool_context=tool_context, path=path)
+        return await _call(surface, arguments, tool_context=tool_context)
 
-    return [FunctionTool(get_skill), FunctionTool(get_skill_file)]
+    get_skill.__doc__ = _GET_SKILL_DOC
+    return [FunctionTool(get_skill)]

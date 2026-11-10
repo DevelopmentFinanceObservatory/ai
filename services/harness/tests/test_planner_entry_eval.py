@@ -32,11 +32,14 @@ from typing import Any, get_args
 
 import pytest
 from compiler.surface import ToolSurfaceUnavailableError
+from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
 from planner.agent import PENDING_ASK_STATE_KEY
 from planner.plan import EvidenceRequirement
+from planner.skills import GET_SKILL
+from planner.workflow import ToolId
 from pydantic import ValidationError
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
@@ -1213,3 +1216,67 @@ def test_langfuse_refuses_what_it_cannot_vouch_for(
 ) -> None:
     with pytest.raises(SystemExit, match=refusal):
         act(_FakeLangfuse(), _run_directory(tmp_path), monkeypatch)
+
+
+_CALL_LINE = (
+    'Read the rest with get_skill_file(skill_id="oda", path="SKILL.md", offset=9, digest="d").'
+)
+
+
+def _recorded_surface() -> Any:
+    def answer(text: str) -> dict[str, Any]:
+        return {"is_error": False, "text": text, "structured_content": None}
+
+    return entry.RecordedSurface(
+        {
+            entry.surface_key("get_skill", {"skill_id": "oda"}): answer(f"Page.\n{_CALL_LINE}"),
+            entry.surface_key("get_skill_file", {"skill_id": "oda", "path": "a.md", "offset": 0}): (
+                answer("File a. Mentions get_skill_file in prose.")
+            ),
+            entry.surface_key(
+                "get_skill_file",
+                {"skill_id": "oda", "path": "a.md", "offset": 9, "digest": "d"},
+            ): answer("File a, page two."),
+            entry.surface_key("describe", {"x": 1}): answer("get_skill_file stays."),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "text"),
+    [
+        ({"skill_id": "oda"}, _CALL_LINE.replace("get_skill_file", "get_skill")),
+        (
+            {"skill_id": "oda", "path": "a.md"},
+            "File a. Mentions get_skill_file in prose.",
+        ),
+        ({"skill_id": "oda", "path": "a.md", "offset": 9, "digest": "d"}, "File a, page two."),
+    ],
+    ids=["first-page", "file", "file-continuation"],
+)
+async def test_the_recorded_surface_answers_the_planners_one_skill_tool(
+    arguments: dict[str, Any], text: str
+) -> None:
+    """The switch is left out of the recording's key, `path` picks the file entry, and only
+    a page's printed call line is renamed."""
+    surface = _recorded_surface()
+
+    result = await surface.call_tool(tool=GET_SKILL, arguments={**arguments, NAMES_GET_SKILL: True})
+
+    assert result.text.endswith(text)
+    assert surface.misses == []
+
+
+async def test_the_recorded_surface_passes_other_calls_through_and_misses_what_it_lacks() -> None:
+    surface = _recorded_surface()
+
+    passed = await surface.call_tool(
+        tool=ToolId(server="data-mcp", name="describe"), arguments={"x": 1}
+    )
+    with pytest.raises(ToolSurfaceUnavailableError):
+        await surface.call_tool(
+            tool=GET_SKILL, arguments={"skill_id": "nope", NAMES_GET_SKILL: True}
+        )
+
+    assert passed.text == "get_skill_file stays."
+    assert surface.misses == [entry.surface_key("get_skill", {"skill_id": "nope"})]
