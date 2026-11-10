@@ -18,6 +18,7 @@ what an earlier run read (`harness.planner_seam`) instead of reading it again.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Annotated, Any
 
@@ -49,6 +50,21 @@ logger = logging.getLogger(__name__)
 def skills_read(state: SessionState) -> list[dict[str, Any]]:
     """Every skill page `state` records as read (`SKILLS_READ_STATE_KEY`), in read order."""
     return list(state.get(SKILLS_READ_STATE_KEY) or ())
+
+
+# The tool name in a call line a page prints, `get_skill_file(skill_id=...`.
+_FILE_CALL_LINE = re.compile(r"\bget_skill_file(?=\(skill_id=)")
+
+
+def name_get_skill_in_call_lines(text: str) -> str:
+    """`text` with each printed `get_skill_file(skill_id=...` call line naming `get_skill`.
+
+    The planner holds one tool, `get_skill`, which takes the same arguments. A page
+    stored before that, and a recording made from data-mcp's own two-tool shape,
+    print the other name. Prose that mentions `get_skill_file` stays as written.
+    Delete this once no stored turn predates the single tool.
+    """
+    return _FILE_CALL_LINE.sub("get_skill", text)
 
 
 def skill_page_key(page: Mapping[str, Any]) -> str:

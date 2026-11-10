@@ -38,7 +38,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-import re
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -93,6 +92,7 @@ from planner.plan import (
     load_plan,
     unstated_period_reductions,
 )
+from planner.skills import name_get_skill_in_call_lines
 from planner.tool_results import ProblemCode
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from submission.service import first_year_reads
@@ -573,10 +573,6 @@ def surface_key(tool: str, arguments: Mapping[str, object]) -> str:
     return f"{tool} {json.dumps(arguments, sort_keys=True, separators=(',', ':'))}"
 
 
-# The tool name in a call line a page prints, `get_skill_file(skill_id=...`.
-_CALL_LINE_TOOL = re.compile(r"\bget_skill_file(?=\(skill_id=)")
-
-
 class RecordedSurface:
     """The planner's `ToolSurface`, answering calls from a recording.
 
@@ -618,9 +614,7 @@ class RecordedSurface:
             )
         result = ToolCallResult.model_validate(self._results[key])
         if names_get_skill:
-            result = result.model_copy(
-                update={"text": _CALL_LINE_TOOL.sub("get_skill", result.text)}
-            )
+            result = result.model_copy(update={"text": name_get_skill_in_call_lines(result.text)})
         return result
 
 

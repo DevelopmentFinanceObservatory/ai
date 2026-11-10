@@ -74,6 +74,7 @@ from harness.planner_seam import (
     _pinnable_candidates,
     _plan_context,
     _RunTracker,
+    _skills_section,
 )
 from harness.scripted import use_compiled_proposals
 from harness.sentences import (
@@ -152,6 +153,7 @@ from planner.settings import (
     AgentSettings,
     drop_thought_parts,
 )
+from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
 from planner.tool_results import ProblemCode, ok
 from planner.workflow import (
     EvidenceBinding,
@@ -3734,6 +3736,57 @@ async def test_a_first_draft_carries_no_skill_an_earlier_plan_read() -> None:
     draft = _brief_follows_the_question(llm.captured_requests[drafting])
     assert _skills_named(draft) == "dfo-faq"
     assert _SKILL_PAGE not in draft
+
+
+_OLD_FIRST_PAGE = (
+    "# DFO FAQ\nSee get_skill_file in prose.\n\nFiles in this skill; read one with "
+    'get_skill_file(skill_id="dfo-faq", path=\u2026):\n- methods.md (5.5 KB)'
+)
+_OLD_FILE_PAGE = (
+    "# Methods\n\nThis page ends at character 31,844 of 40,000. Read the rest with "
+    'get_skill_file(skill_id="dfo-faq", path="methods.md", offset=31844, digest="sha256:a").'
+)
+
+
+async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_skill() -> None:
+    """Pages stored before the planner held one skill tool print `get_skill_file(`
+    call lines; the brief names `get_skill` in each, and leaves prose alone."""
+    pages = [
+        {"skill_id": "dfo-faq", "path": None, "offset": 0},
+        {"skill_id": "dfo-faq", "path": "methods.md", "offset": 0},
+    ]
+    state = {
+        SKILLS_READ_STATE_KEY: pages,
+        skill_page_key(pages[0]): _OLD_FIRST_PAGE,
+        skill_page_key(pages[1]): _OLD_FILE_PAGE,
+    }
+    seam = _skill_seam()
+    llm = ScriptedPlannerLlm(script=["stop"])
+    seam._agent.model = llm
+    harness = _SeamHarness(state)
+
+    await harness.run(
+        seam,
+        question="kenya debt",
+        readings=_skill_readings("dfo-faq"),
+        amendment="only since 2015",
+    )
+
+    brief = _brief_follows_the_question(llm.captured_requests[0])
+    assert 'get_skill(skill_id="dfo-faq", path=\u2026)' in brief
+    assert (
+        'get_skill(skill_id="dfo-faq", path="methods.md", offset=31844, digest="sha256:a")' in brief
+    )
+    assert "See get_skill_file in prose." in brief
+    assert "get_skill_file(skill_id=" not in brief
+
+
+async def test_a_page_stored_in_the_current_form_is_shown_as_stored() -> None:
+    page = {"skill_id": "dfo-faq", "path": None, "offset": 0}
+    text = 'Read the rest with get_skill(skill_id="dfo-faq", path="a.md", offset=9, digest="d").'
+    section = _skills_section([{**page, "text": text}])
+
+    assert f"\n{text}\n" in section
 
 
 async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> None:
