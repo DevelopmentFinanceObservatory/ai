@@ -53,7 +53,6 @@ from google.adk.features._feature_registry import temporary_feature_override
 from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
-from google.adk.tools.function_tool import FunctionTool
 from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_event,
     create_request_input_response,
@@ -76,15 +75,14 @@ from planner import tools as planner_tools
 from planner.agent import (
     BRIEF_STATE_KEY,
     AdkCall,
-    ask_user_question,
-    build_planner_tools,
+    SpecTool,
     create_planner_agent,
     end_run_when_ready,
     planner_instruction,
     prepend_brief,
 )
 from planner.call import CallSession, elected_spec_ids, prices_chosen
-from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, PlanTool, compact_schema
+from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, compact_schema
 from planner.operations import (
     AggregateOperation,
     RetrieveOperation,
@@ -198,7 +196,9 @@ from planner.records import (
     StatVarReading,
 )
 from planner.source_reads import read_full_history, with_source_reads
+from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode, problem
+from planner.tool_spec import REQUIRED, Parameter, ToolSpec
 from planner.tools import (
     ASK_ACCEPTED,
     PENDING_ASK_STATE_KEY,
@@ -498,15 +498,15 @@ def _show(
 
 def _tools_by_name(
     *, translate: Translate | None = None, question_fixed: bool = False
-) -> dict[str, FunctionTool]:
+) -> dict[str, SpecTool]:
     return {
-        tool.name: tool
-        for tool in build_planner_tools(translate=translate, question_fixed=question_fixed)
+        spec.name: SpecTool(spec)
+        for spec in planner_tool_specs(translate=translate, question_fixed=question_fixed)
     }
 
 
 async def _propose_translated(
-    tools: dict[str, FunctionTool],
+    tools: dict[str, SpecTool],
     ctx: object,
     decision: Decision,
     requirements: Sequence[EvidenceRequirement],
@@ -519,7 +519,7 @@ async def _propose_translated(
 
 
 def _propose(
-    tools: dict[str, FunctionTool],
+    tools: dict[str, SpecTool],
     ctx: object,
     decision: Decision,
     requirements: Sequence[EvidenceRequirement],
@@ -1434,7 +1434,7 @@ def test_propose_plan_counts_the_rounds_a_question_has_been_through(
 
 
 def _propose_up_to_the_cap(
-    tools: dict[str, FunctionTool],
+    tools: dict[str, SpecTool],
     ctx: object,
     decision: Decision,
     requirements: RequirementPair,
@@ -1531,7 +1531,7 @@ def test_a_fresh_entry_into_the_planner_starts_its_rounds_afresh(
 
 
 def _restart(
-    tools: dict[str, FunctionTool],
+    tools: dict[str, SpecTool],
     ctx: object,
     decision: Decision,
     requirements: RequirementPair,
@@ -2632,7 +2632,7 @@ async def test_the_planner_model_retries_a_503_before_the_turn_sees_it(
     assert attempts == 3
 
 
-def _arguments(tools: dict[str, FunctionTool], name: str = "propose_plan") -> dict[str, Any]:
+def _arguments(tools: dict[str, SpecTool], name: str = "propose_plan") -> dict[str, Any]:
     declaration = planner_tool_declaration(tools[name])
     assert declaration is not None
     schema = declaration.parameters_json_schema
@@ -2825,7 +2825,7 @@ def _hand_back(ctx: _FakeToolContext, kind: ReferralKind, requirement_id: str) -
 
 def _recorded_after_a_handed_back_plan(
     decision: DecisionFactory, requirements: RequirementPair, kind: ReferralKind
-) -> tuple[dict[str, FunctionTool], _FakeToolContext, str]:
+) -> tuple[dict[str, SpecTool], _FakeToolContext, str]:
     """A recorded plan, and a referral of `kind` on its dataset requirement."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
@@ -3012,7 +3012,7 @@ def test_an_answer_given_before_the_referral_does_not_settle_it(
 
 def _unsupported_ask_handed_back(
     decision: DecisionFactory, requirements: RequirementPair
-) -> tuple[dict[str, FunctionTool], _FakeToolContext]:
+) -> tuple[dict[str, SpecTool], _FakeToolContext]:
     tools, ctx, _requirement_id = _recorded_after_a_handed_back_plan(
         decision, requirements, ReferralKind.UNSUPPORTED_ASK
     )
@@ -3913,11 +3913,11 @@ def test_an_accepted_ask_records_lists_its_call_does_not_share() -> None:
     lists: a later write to it changes neither the tool's defaults nor the
     next ask's record."""
     first = _FakeToolContext()
-    ask_user_question(cast(Any, first), message="Which years?")
+    call_planner_tool(_tools_by_name()[PLANNER_ASK], tool_context=first, message="Which years?")
     first.state[PENDING_ASK_STATE_KEY]["args"]["candidates"].append({"spec_id": "s", "label": "l"})
 
     second = _FakeToolContext()
-    ask_user_question(cast(Any, second), message="Which years?")
+    call_planner_tool(_tools_by_name()[PLANNER_ASK], tool_context=second, message="Which years?")
 
     assert second.state[PENDING_ASK_STATE_KEY]["args"]["candidates"] == []
 
@@ -3926,9 +3926,11 @@ def test_the_ask_tool_is_not_long_running() -> None:
     """ADK marks a long-running call an interrupt before its tool runs, so a
     refused ask would leave the run paused. The graph's planner node pauses
     on an accepted ask instead."""
-    tool = _tools_by_name()[PLANNER_ASK]
+    tool = next(
+        tool for tool in create_planner_agent(model_name="m").tools if tool.name == PLANNER_ASK
+    )
 
-    assert isinstance(tool, FunctionTool)
+    assert isinstance(tool, SpecTool)
     assert tool.is_long_running is False
 
 
@@ -4144,7 +4146,7 @@ def aid_on_record() -> Iterator[None]:
 
 
 def _propose_pinned(
-    tools: dict[str, FunctionTool],
+    tools: dict[str, SpecTool],
     ctx: object,
     decision: Decision,
     requirements: Sequence[EvidenceRequirement],
@@ -12193,7 +12195,7 @@ def gdp_on_record() -> Iterator[None]:
 
 
 def _propose_gdp(
-    tools: dict[str, FunctionTool],
+    tools: dict[str, SpecTool],
     ctx: _FakeToolContext,
     decision: Decision,
     requirements: RequirementPair,
@@ -12918,7 +12920,7 @@ def _prices_ask_events(
 
 
 def _propose_one(
-    tools: dict[str, FunctionTool],
+    tools: dict[str, SpecTool],
     ctx: _FakeToolContext,
     decision: Decision,
     requirements: Sequence[Any],
@@ -14607,28 +14609,49 @@ def test_propose_plan_still_accepts_an_explicit_null_its_declaration_omits(
 
 
 def test_a_plan_tool_refuses_an_argument_it_does_not_describe() -> None:
-    def tool(first: str, second: int = 0) -> None:
-        """A tool."""
-        del first, second
+    tool = ToolSpec(
+        name="tool",
+        description="A tool.",
+        parameters=(Parameter("first", str, REQUIRED, "The first."), Parameter("second", int, 0)),
+        body=lambda call, end_run, arguments: None,
+        compact=True,
+    )
 
     with pytest.raises(ValueError, match="describe each argument exactly once"):
-        planner_tool_declaration(PlanTool(tool, arguments={"first": "The first."}))
+        planner_tool_declaration(tool)
 
 
-def test_a_plan_tool_refuses_to_reach_the_model_without_its_argument_descriptions() -> None:
-    """With ADK's JSON schema declarations off, the descriptions have nowhere to go.
+async def _requested_propose_plan_declaration() -> dict[str, Any]:
+    """The `propose_plan` declaration a planner's request carries, as JSON."""
+    agent = create_planner_agent(model_name="gemini-test")
+    request = LlmRequest()
+    for tool in agent.tools:
+        assert isinstance(tool, SpecTool)
+        await tool.process_llm_request(tool_context=cast(Any, None), llm_request=request)
+    (holder,) = request.config.tools or []
+    (declaration,) = [
+        declaration
+        for declaration in holder.function_declarations or []
+        if declaration.name == "propose_plan"
+    ]
+    return declaration.model_dump(mode="json", exclude_none=True)
 
-    Building the planner then raises, and so does a declaration built after
-    the feature is turned off, so the planner never runs without the patch
-    and version rules its arguments carry.
-    """
-    built = _tools_by_name()["propose_plan"]
+
+async def test_propose_plan_reaches_the_model_described_whatever_adks_json_schema_flag() -> None:
+    """ADK's `JSON_SCHEMA_FOR_FUNC_DECL` decides how ADK itself declares a
+    function. The planner's declarations are built without it, so with the
+    flag off the request still carries `propose_plan` with every argument
+    described, byte for byte as with it on, and the planner never runs
+    without the patch and version rules its arguments carry."""
+    described = await _requested_propose_plan_declaration()
 
     with temporary_feature_override(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, False):
-        with pytest.raises(RuntimeError, match="JSON_SCHEMA_FOR_FUNC_DECL"):
-            create_planner_agent(model_name="gemini-test")
-        with pytest.raises(RuntimeError, match="JSON_SCHEMA_FOR_FUNC_DECL"):
-            planner_tool_declaration(built)
+        flag_off = await _requested_propose_plan_declaration()
+
+    properties = flag_off["parameters_json_schema"]["properties"]
+    assert properties
+    assert all(argument.get("description") for argument in properties.values())
+    assert json.dumps(flag_off) == json.dumps(described)
 
 
 # --- Rejecting and submitting ----------------------------------------------------------
@@ -14911,7 +14934,7 @@ async def test_an_accepted_proposal_answers_with_the_translation_and_no_translat
         return {"outcome": Outcome.OK.value}
 
     agent = create_planner_agent(model_name="gemini-flash-latest", translate=translate)
-    tools = {tool.name: tool for tool in agent.tools if isinstance(tool, FunctionTool)}
+    tools = {tool.name: tool for tool in agent.tools if isinstance(tool, SpecTool)}
     ctx = _FakeToolContext()
 
     accepted = await _propose_translated(tools, ctx, decision(), requirements)
@@ -17872,8 +17895,8 @@ class _DefinitionReads:
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
-def _tools_reading(surface: ToolSurface) -> dict[str, FunctionTool]:
-    return {tool.name: tool for tool in build_planner_tools(surface=surface)}
+def _tools_reading(surface: ToolSurface) -> dict[str, SpecTool]:
+    return {spec.name: SpecTool(spec) for spec in planner_tool_specs(surface=surface)}
 
 
 @pytest.fixture(params=["searched", "discovered"])
@@ -18682,11 +18705,13 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
 
     def ask_first() -> dict[str, object]:
         ctx.function_call_id = "first"
-        return ask_user_question(cast(Any, ctx), **first_args)
+        return call_planner_tool(_tools_by_name()[PLANNER_ASK], tool_context=ctx, **first_args)
 
     def ask_second() -> dict[str, object]:
         ctx.function_call_id = "second"
-        return ask_user_question(cast(Any, ctx), message="Which years?")
+        return call_planner_tool(
+            _tools_by_name()[PLANNER_ASK], tool_context=ctx, message="Which years?"
+        )
 
     if second_runs_first:
         second = ask_second()
@@ -18709,7 +18734,9 @@ def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its
         _model_response(SimpleNamespace(id="call-1", name=PLANNER_ASK, args={"message": "Which?"}))
     )
 
-    _assert_asked(ask_user_question(cast(Any, ctx), message="Which?"), ctx)
+    _assert_asked(
+        call_planner_tool(_tools_by_name()[PLANNER_ASK], tool_context=ctx, message="Which?"), ctx
+    )
 
 
 def test_an_ask_after_an_accepted_ask_nobody_answered_is_the_first_of_its_own_response() -> None:
@@ -18729,7 +18756,9 @@ def test_an_ask_after_an_accepted_ask_nobody_answered_is_the_first_of_its_own_re
     )
     ctx.function_call_id = "ask-2"
 
-    _assert_asked(ask_user_question(cast(Any, ctx), message="Which?"), ctx)
+    _assert_asked(
+        call_planner_tool(_tools_by_name()[PLANNER_ASK], tool_context=ctx, message="Which?"), ctx
+    )
 
 
 def test_an_ask_with_no_call_id_is_in_no_response_and_is_not_refused_beside_another() -> None:

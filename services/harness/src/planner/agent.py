@@ -1,16 +1,17 @@
-"""The planner agent: the planner's ADK tools and `create_planner_agent`.
+"""The planner agent: `create_planner_agent` and the ADK tool that serves a planner tool.
 
-The tools' bodies live in `planner.tools` (`ask_user`, `propose`, `reject`) and
-`planner.skills` (`read_skill_page`), over a `planner.call.PlannerCall` and no
-framework. Here `AdkCall` is the `PlannerCall` an ADK tool call is, and each
-tool is a thin function carrying the signature and docstring ADK declares to the
-model. A `propose_plan` whose translation compiles declares the plan ready for
-the user's answer in code (`planner.tools.declare_ready`), and
-`end_run_when_ready` ends the ADK run on it (`skip_summarization`) with no
-model call after. Declaring a plan ready approves nothing: whatever runs this
-agent withholds execution until that answer arrives, which for the served path
-is the harness's own graph, keyed on the plan's revision rather than on an ADK
-tool confirmation this agent would have to carry across its own nested `Runner`.
+Each planner tool is a `planner.tool_spec.ToolSpec` (`planner.specs`), whose
+body runs `planner.tools`' or `planner.skills`' code over a
+`planner.call.PlannerCall` and no framework. Here `SpecTool` serves a spec to
+ADK, and `AdkCall` is the `PlannerCall` an ADK tool call is. A `propose_plan`
+whose translation compiles declares the plan ready for the user's answer in
+code (`planner.tools.declare_ready`), and the run ends on it
+(`skip_summarization`) with no model call after; `end_run_when_ready` does the
+same for an answer the harness builds itself. Declaring a plan ready approves
+nothing: whatever runs this agent withholds execution until that answer
+arrives, which for the served path is the harness's own graph, keyed on the
+plan's revision rather than on an ADK tool confirmation this agent would have
+to carry across its own nested `Runner`.
 
 Built with a tool surface, the planner also carries `planner.skills`'
 `get_skill`, and its instruction carries `_SKILLS`, the paragraph naming it.
@@ -29,7 +30,7 @@ requires a plan that has been through that step. The checks a proposal passes
 before it is recorded are `submission.service`'s, which `propose_plan` runs
 over its call's session (`planner.call.CallSession` over `AdkCall`).
 
-Every tool below answers with `planner.tool_results`' typed shape -- `ok`,
+Every planner tool answers with `planner.tool_results`' typed shape -- `ok`,
 `problem`, with a stable `code` and, where the next step is known, an
 `action` -- rather than an unstructured `{"error": ...}` a caller has to
 parse. When translation cannot carry a plan out, `propose_plan`'s
@@ -40,15 +41,15 @@ straight off that answer, with nothing here to fetch it back a second time.
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 from collections.abc import (
-    Callable,
     Iterable,
     Iterator,
     Sequence,
 )
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Any, override
 
 from compiler.surface import ToolSurface
 from google.adk.agents import LlmAgent
@@ -57,43 +58,22 @@ from google.adk.events import Event
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
-from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
 from orchestrator.agent import _retrying
-from pydantic import Field
-from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
-from submission.service import Proposal
 from translator.tool import Translate
 
 from planner.call import (
     ResponseCall,
     Step,
 )
-from planner.declaration import PlanTool
-from planner.plan import (
-    MAX_PLAN_DECISIONS,
-    MAX_PLAN_REQUIREMENTS,
-    AnswerMode,
-    AskAnswer,
-    DecisionDraft,
-    Decline,
-    EvidenceRequirement,
-    SessionState,
-)
+from planner.plan import SessionState
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
-from planner.skills import DFO_FAQ_SKILL_ID, read_skill_page
+from planner.specs import planner_tool_specs, skill_tool_spec
 from planner.tool_results import Outcome
-from planner.tools import (
-    EndRun,
-    ask_user,
-    propose,
-    propose_and_translate,
-    propose_with_reads,
-    ready_and_end,
-    reject,
-)
+from planner.tool_spec import ToolSpec, function_declaration, run_tool
+from planner.tools import EndRun, ready_and_end
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
@@ -101,9 +81,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AGENT_NAME = "dfo_planner"
-
-# The tool the planner proposes a plan through.
-PROPOSE_PLAN = PROPOSE_PLAN_PROPOSER.call
 
 _PLANNING = (
     "You are the Planner Agent for the Development Finance Observatory. "
@@ -703,323 +680,57 @@ def _user_message(event: Any) -> bool:
     )
 
 
-# What each `propose_plan` argument means, as the model reads it on the
-# argument itself (`planner.declaration.PlanTool`). `question` and
-# `starts_new_plan` read differently under `question_fixed`, the way
-# `submission.service._resolve_intent` enforces them; `_FIXED_ARGUMENTS`
-# replaces those two.
-_PROPOSE_PLAN_ARGUMENTS = {
-    "question": (
-        "The question this plan answers. Required on a first draft and with "
-        "`starts_new_plan`, which starts at version 1 under it. A patch that "
-        "states one records it; one that omits it keeps the recorded question."
-    ),
-    "answer_mode": (
-        "What kind of answer the requirements add up to. `series` answers a "
-        "question that asks to see a level or a trend: a lone dataset "
-        "requirement, unread by anything else, is itself the answer, its frame "
-        "carrying one series per entity for a chart to draw. `computed` answers "
-        "a question that asks for a figure the series does not state on its "
-        "own (a difference, growth, share, quotient, rank or total), so every "
-        "dataset requirement has to feed a calculation, since one left unread "
-        "would leave the plan without the figure the question asked for. "
-        "Either way, `answered` may name a dataset requirement a calculation "
-        "reads. "
-        "Required on a first draft and with `starts_new_plan`. A patch that "
-        "states one switches the plan's mode and re-validates its requirements "
-        "under it; one that omits it keeps the recorded mode."
-    ),
-    "decisions": (
-        "The decisions this call adds or replaces, keyed by `slot`: a slot the "
-        "plan already states replaces that decision, and a new one adds it. A "
-        f"first draft states every decision the plan makes, at most "
-        f"{MAX_PLAN_DECISIONS}. Every decision is cited by at least one "
-        "requirement."
-    ),
-    "evidence_requirements": (
-        "The requirements this call adds or replaces, keyed by `id`, unique "
-        "within the plan and tagged by `kind`: an id the plan already states "
-        "replaces that requirement whole, so restate every field it keeps, "
-        "its entities' roles included, and a new id adds one. A derived "
-        "requirement names the requirement it reads in `input_id`. Each cites "
-        "in `decision_ids` the decisions that fixed its fields, and none when "
-        "the question or your instruction states them outright. A plan states "
-        f"at most {MAX_PLAN_REQUIREMENTS} requirements."
-    ),
-    "removed_decisions": (
-        "The `slot` of each decision this call deletes. Leaving a decision out of a patch keeps it."
-    ),
-    "removed_evidence_requirements": (
-        "The `id` of each requirement this call deletes. Leaving a requirement "
-        "out of a patch keeps it."
-    ),
-    "declined": (
-        "Each part of the question no operation computes, one per `code` and "
-        "`ask_ref`. An `unsupported` answer earns a decline, with that "
-        "answer's code: one `propose_plan` answered, itself or in its `translation`, "
-        "or a run-time refusal the plan is replanned from that names the code. A "
-        "`requirement_unmeetable` translation whose `reason` says it earns a "
-        "decline earns that code too, which the plan may make or leave out. "
-        "`breakdown_not_kept` is earned when an `ask_role_dropped` problem names "
-        "the ask and the source its answer pins cannot hold that party open. A "
-        "first plan may also decline as `no_operation_covers` an ask no "
-        "requirement kind or chain of them states."
-    ),
-    "answered": (
-        "When the brief lists asks, the requirements that answer each one, "
-        "keyed by `ask`. Every ask is answered here or declined in `declined` "
-        "with its number as `ask_ref`, exactly once, or both when the plan "
-        "computes part of it, unless `removed_asks` names it."
-    ),
-    "removed_asks": (
-        "The number of each ask the user's amendment removes from the plan. Leave it out "
-        "of `answered` and `declined`, and narrow or remove what answered it. Only the "
-        "user's amendment removes an ask, and only a later one restores it, by answering it."
-    ),
-    "across_years": (
-        "The `id` of each step that combines its years, an `aggregate` whose `group_by` "
-        "leaves out `period` or a `rank` with a `reduction` and `per_period` false, because "
-        "the user's own words ask for one figure or one ranking over them: a change to the "
-        "plan the user asks for, or, when no asks are listed, the question itself. A step "
-        "named once keeps that standing in later patches while its kind and `reduction` "
-        "stay, and loses it when an `aggregate`'s `group_by` gains `period` or a `rank` "
-        "sets `per_period`. Leave it empty for a step that answers an ask marked "
-        "(across years)."
-    ),
-    "amends_version": (
-        "The `version` this call patches, as the last `propose_plan` call "
-        'answered it and as the brief\'s own "version N" line states it. '
-        "Required once a plan is recorded, unless `starts_new_plan` is set: "
-        "a call stating neither is refused, and `question` never stands in "
-        "for the choice."
-    ),
-    "starts_new_plan": (
-        "True begins a plan of its own, at version 1, for a different question "
-        "while a plan is recorded."
-    ),
-}
+class SpecTool(BaseTool):
+    """A `planner.tool_spec.ToolSpec` served to an ADK `LlmAgent`.
 
-_FIXED_ARGUMENTS = {
-    "question": (
-        "The question this plan answers. Required on a first draft. This "
-        "turn's question is fixed, so a patch either omits it or restates it "
-        "unchanged: it has to match the one already recorded."
-    ),
-    "starts_new_plan": (
-        "True says the user's reply asks a different question from the one "
-        "fixed for this turn. Refused, recording nothing: the harness ends the "
-        "turn and tells the user to send that question as its own message."
-    ),
-}
-
-
-def ask_user_question(
-    tool_context: ToolContext,
-    message: str,
-    candidates: list[dict[str, str]] = [],  # noqa: B006
-    options: list[dict[str, str]] = [],  # noqa: B006
-    recommended_spec_id: str | None = None,
-    rationale: str | None = None,
-) -> dict[str, object]:
-    """Ask the user a question a referral or a refusal leaves to them, ending your turn.
-
-    The user's answer arrives with your next brief, after the question it
-    answers, naming the candidate or option they picked, or in their own
-    words if they answered outside them. The choices offered come from the
-    referral's candidates, or from the `options` a refusal's action carries;
-    with neither, the question says what cannot be done and asks what to
-    change.
-
-    Args:
-        message: The question to show the user, naming what is
-            ambiguous and, briefly, what each candidate is, in plain
-            words: never a requirement id, spec_id or code.
-        candidates: The referral's own candidates, each
-            `{"spec_id": ..., "label": ...}` -- `label` is the
-            candidate's own `sentence`, not invented text. Omit it for
-            a referral that carries none.
-        options: The `options` a refusal's action carries, unchanged.
-            Omit it otherwise.
-        recommended_spec_id: The candidate you favour, when you favour
-            one -- must name one of `candidates`.
-        rationale: Why you favour it, for the user to read, when
-            `recommended_spec_id` is given.
-    """
-    # `= []` defaults keep the declaration's arrays flat, as `propose_plan`'s do.
-    return ask_user(
-        AdkCall(tool_context),
-        _end_run(tool_context),
-        message=message,
-        candidates=candidates,
-        options=options,
-        recommended_spec_id=recommended_spec_id,
-        rationale=rationale,
-    )
-
-
-# Keep the description to one sentence saying what the call returns: a longer one
-# makes Gemini reason at length before some calls (`tests/planner/test_skills.py`
-# bounds its length). ADK sends a docstring's `Args:` block inside the description,
-# so the argument text sits in the parameters' `Field` descriptions.
-_GET_SKILL_DOC = (
-    "Returns the SKILL.md of the skill with the given id and the list of its files, "
-    "or one file of the skill, verbatim, when `path` is given."
-)
-
-
-def build_skill_tools(surface: ToolSurface) -> list[FunctionTool]:
-    """Build `get_skill`, which calls data-mcp through `surface`."""
-
-    async def get_skill(
-        skill_id: Annotated[
-            str, Field(description=f"A skill id, or `{DFO_FAQ_SKILL_ID}` for DFO itself.")
-        ],
-        tool_context: ToolContext,
-        path: Annotated[
-            str | None, Field(description="A file's path exactly as the list gives it.")
-        ] = None,
-        offset: Annotated[
-            int, Field(description="Where a page starts: 0, or the offset a closing line names.")
-        ] = 0,
-        digest: Annotated[
-            str | None, Field(description="The digest a closing line names, on a continuation.")
-        ] = None,
-    ) -> str:
-        arguments: dict[str, object] = {"skill_id": skill_id}
-        if path is not None:
-            arguments["path"] = path
-        if offset:
-            arguments["offset"] = offset
-        if digest is not None:
-            arguments["digest"] = digest
-        return await read_skill_page(surface, arguments, call=AdkCall(tool_context))
-
-    get_skill.__doc__ = _GET_SKILL_DOC
-    return [FunctionTool(get_skill)]
-
-
-def build_planner_tools(
-    *,
-    translate: Translate | None = None,
-    question_fixed: bool = False,
-    reads_user_words: bool = True,
-    surface: ToolSurface | None = None,
-) -> list[BaseTool]:
-    """Build the planner's tool set.
-
-    `translate` is the translation (`translator.tool.build_translate`) a
-    `propose_plan` that records a plan runs on it, answering with the verdict
-    under `translation` alongside its own `ok`. Given, `propose_plan` is a
-    coroutine function, and a translation that compiles declares the plan
-    ready (`end_run_when_ready`). Omitted, `propose_plan` records the plan and
-    stops, and nothing declares a plan ready.
-
-    `surface` is the tool surface `propose_plan` reads a pinned dataset's
-    first year through, when a start that follows the newest data needs one
-    no answer on record states (`read_full_history`). Given, `propose_plan`
-    is a coroutine function. Omitted, it reads nothing and refuses such a
-    plan `first_year_unknown`.
-
-    `question_fixed` closes over into `propose_plan`, which passes it straight
-    to `submission.service.submit` on every call, and selects `_FIXED_ARGUMENTS`'
-    descriptions of `question` and `starts_new_plan`, so those two arguments
-    describe the mode this tool set actually enforces.
-
-    `reads_user_words` closes over into `propose_plan` the same way, for
-    `submission.service.admit`. It says whether the planner reads the
-    user's own words in every entry, so `propose_plan`'s `across_years` may
-    name a step in any of them.
+    The model is shown `function_declaration(spec)`, and a call runs the
+    spec's body over the call's `AdkCall` (`run_tool`), ending the run through
+    `skip_summarization`. Both go through `BaseTool`'s public methods:
+    `process_llm_request` adds the declaration to the request's one
+    `types.Tool` of function declarations, creating it when the request has
+    none, and registers the tool under its name.
     """
 
-    # `= []` rather than `None`. ADK builds this tool's declaration from the
-    # signature, and an optional list declared `list[X] | None` reaches the
-    # model as `anyOf: [array, null]`, which is not the flat array a patch is
-    # written into. Nothing mutates these defaults.
-    def propose_plan(
-        tool_context: ToolContext,
-        question: str | None = None,
-        answer_mode: AnswerMode | None = None,
-        decisions: list[DecisionDraft] = [],  # noqa: B006
-        evidence_requirements: list[EvidenceRequirement] = [],  # noqa: B006
-        removed_decisions: list[str] = [],  # noqa: B006
-        removed_evidence_requirements: list[str] = [],  # noqa: B006
-        declined: list[Decline] = [],  # noqa: B006
-        answered: list[AskAnswer] = [],  # noqa: B006
-        removed_asks: list[int] = [],  # noqa: B006
-        across_years: list[str] = [],  # noqa: B006
-        amends_version: int | None = None,
-        starts_new_plan: bool = False,
-    ) -> dict[str, object]:
-        """Record a plan, or patch the one already recorded.
+    def __init__(self, spec: ToolSpec) -> None:
+        super().__init__(name=spec.name, description=spec.description)
+        self.spec = spec
 
-        Returns `ok` with `status` `"draft"`; the new `version`, which a
-        patch passes as `amends_version`; the `previous_version` it amended,
-        `None` on a first draft; and the `question` as stored.
-        """
-        return propose(
-            AdkCall(tool_context),
-            Proposal(
-                question=question,
-                answer_mode=answer_mode,
-                decisions=decisions,
-                evidence_requirements=evidence_requirements,
-                removed_decisions=removed_decisions,
-                removed_evidence_requirements=removed_evidence_requirements,
-                declined=declined,
-                answered=answered,
-                removed_asks=removed_asks,
-                across_years=across_years,
-                amends_version=amends_version,
-                starts_new_plan=starts_new_plan,
+    @functools.cached_property
+    def declaration(self) -> types.FunctionDeclaration:
+        """The declaration the model is shown for the spec, built once."""
+        return function_declaration(self.spec)
+
+    @override
+    async def process_llm_request(
+        self, *, tool_context: ToolContext, llm_request: LlmRequest
+    ) -> None:
+        del tool_context
+        declaration = self.declaration.model_copy(deep=True)
+        config = llm_request.config
+        if config.tools is None:
+            config.tools = []
+        holder = next(
+            (
+                tool
+                for tool in config.tools
+                if isinstance(tool, types.Tool) and tool.function_declarations
             ),
-            question_fixed=question_fixed,
-            reads_user_words=reads_user_words,
+            None,
         )
+        if holder is None or holder.function_declarations is None:
+            config.tools.append(types.Tool(function_declarations=[declaration]))
+        else:
+            holder.function_declarations.append(declaration)
+        llm_request.tools_dict[self.name] = self
 
-    def reject_plan(tool_context: ToolContext) -> dict[str, object]:
-        """Record that the user rejected the current plan.
+    def invoke(self, args: dict[str, Any], tool_context: ToolContext) -> object:
+        """The spec's answer to a call with `args`, an awaitable when its body is async."""
+        return run_tool(self.spec, args, call=AdkCall(tool_context), end_run=_end_run(tool_context))
 
-        Nothing in the plan may run afterwards. Call `propose_plan` again if
-        the user wants a revision rather than an outright stop.
-        """
-        return reject(AdkCall(tool_context))
-
-    @functools.wraps(propose_plan)
-    async def propose_plan_reading(**arguments: Any) -> dict[str, object]:
-        """`propose_plan`, making each source read it refuses for want of (`propose_with_reads`)."""
-        assert surface is not None
-        return await propose_with_reads(
-            AdkCall(arguments["tool_context"]),
-            lambda: propose_plan(**arguments),
-            surface=surface,
-        )
-
-    @functools.wraps(propose_plan)
-    async def propose_plan_translating(**arguments: Any) -> dict[str, object]:
-        """`propose_plan`, translating the plan it records (`propose_and_translate`)."""
-        assert translate is not None
-        return await propose_and_translate(
-            AdkCall(arguments["tool_context"]),
-            _end_run(arguments["tool_context"]),
-            arguments=arguments,
-            draft=lambda: propose_plan(**arguments),
-            translate=translate,
-            surface=surface,
-        )
-
-    proposing: Callable[..., Any] = propose_plan
-    if translate is not None:
-        proposing = propose_plan_translating
-    elif surface is not None:
-        proposing = propose_plan_reading
-    arguments = (
-        _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS if question_fixed else _PROPOSE_PLAN_ARGUMENTS
-    )
-    return [
-        FunctionTool(ask_user_question),
-        PlanTool(proposing, arguments=arguments),
-        FunctionTool(reject_plan),
-    ]
+    @override
+    async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        answer = self.invoke(args, tool_context)
+        return await answer if inspect.isawaitable(answer) else answer
 
 
 # The brief for the planner's current run, which `prepend_brief` shows the model.
@@ -1105,13 +816,16 @@ def create_planner_agent(
             question_fixed=question_fixed,
         ),
         tools=[
-            *(build_skill_tools(surface) if surface is not None else []),
-            *build_planner_tools(
-                translate=translate,
-                question_fixed=question_fixed,
-                reads_user_words=reads_user_words,
-                surface=surface,
-            ),
+            SpecTool(spec)
+            for spec in [
+                *([skill_tool_spec(surface)] if surface is not None else []),
+                *planner_tool_specs(
+                    translate=translate,
+                    question_fixed=question_fixed,
+                    reads_user_words=reads_user_words,
+                    surface=surface,
+                ),
+            ]
         ],
         # Run as a workflow node (`harness.planner_seam.PlannerSeam._propose`'s
         # `ctx.run_node`), ADK runs an agent with no explicit `mode` as

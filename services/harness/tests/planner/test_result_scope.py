@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 from google.adk.events import EventActions
 from harness.plan_display import answer_scopes, step_rows
-from planner.agent import build_planner_tools
 from planner.plan import (
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -50,6 +49,7 @@ from planner.records import (
     Reduction,
 )
 from planner.shapes import one_figure_remedy, pooling_remedy
+from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode
 
 from ..decision_drafts import drafts
@@ -219,7 +219,7 @@ def test_a_result_per_donor_rests_on_a_decision_stating_it(
     if asks is not None:
         ctx.state[ASKS_STATE_KEY] = asks
     requirements = _requirements(variant)
-    tools = {tool.name: tool for tool in build_planner_tools()}
+    tools = {tool.name: tool for tool in planner_tool_specs()}
 
     result = call_planner_tool(
         tools["propose_plan"],
@@ -260,7 +260,7 @@ def test_a_result_per_donor_is_offered_the_donors_pooled_per_year(
     ctx.state[ASKS_STATE_KEY] = [ASK]
     ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = [0] if across_years else []
     requirements = _requirements("per-donor-unstated")
-    tools = {tool.name: tool for tool in build_planner_tools()}
+    tools = {tool.name: tool for tool in planner_tool_specs()}
 
     result = call_planner_tool(
         tools["propose_plan"],
@@ -281,7 +281,7 @@ def test_one_refusal_names_every_result_kept_per_donor(
     decision: Callable[..., Decision],
 ) -> None:
     ctx = _context()
-    tools = {tool.name: tool for tool in build_planner_tools()}
+    tools = {tool.name: tool for tool in planner_tool_specs()}
     change = _growth("aid").model_copy(update={"id": "change"})
 
     result = call_planner_tool(

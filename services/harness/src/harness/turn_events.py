@@ -18,7 +18,7 @@ from google.genai import types
 REQUEST_INPUT_FUNCTION_CALL_NAME = request_input.name
 
 # The planner's own ask, the tool it calls to put a question to the user
-# (`planner.agent.ask_user_question`). The tool answers every call at once,
+# (`ask_user_question`, `planner.specs`). The tool answers every call at once,
 # refusing or accepting it. The graph's planner node pauses on an accepted
 # ask with a `RequestInput` under the call's id, which ADK records under
 # `REQUEST_INPUT_FUNCTION_CALL_NAME`, so the user's answer carries that id.

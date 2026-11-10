@@ -32,7 +32,6 @@ from google.genai import types
 from harness.decision_pick import decision_pick
 from harness.plan_display import decision_option_id
 from harness.studio_state import _turn_identities
-from planner.agent import build_planner_tools
 from planner.plan import (
     ASKS_STATE_KEY,
     DECISION_PICK_STATE_KEY,
@@ -54,6 +53,7 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.records import GroupBy, RankAmong, RankDirection, Reduction
+from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode
 from translator.mechanical import build_translation
 
@@ -191,7 +191,7 @@ def _context() -> Any:
 
 
 def _propose_plan(ctx: Any, **arguments: Any) -> dict[str, Any]:
-    tools = {tool.name: tool for tool in build_planner_tools(reads_user_words=False)}
+    tools = {tool.name: tool for tool in planner_tool_specs(reads_user_words=False)}
     return call_planner_tool(tools["propose_plan"], **arguments, tool_context=ctx)
 
 

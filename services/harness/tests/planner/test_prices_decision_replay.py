@@ -33,7 +33,6 @@ from harness.graph.state import (
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.tool_contracts import resolver_digest
 from planner import source_reads as planner_source_reads
-from planner.agent import build_planner_tools
 from planner.plan import (
     ALIGNED_PINS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -54,6 +53,7 @@ from planner.plan import (
     save_pin_sources,
     scope_unread,
 )
+from planner.specs import planner_tool_specs
 from planner.workflow import ToolId
 from translator.discovery import (
     DiscoveryLog,
@@ -238,8 +238,7 @@ def after_hand_back(
     translation's search answered, the recorded one by default (`_handed_back`).
     `search` answers the re-pins' calls, the recorded answers by default."""
     tools = {
-        tool.name: tool
-        for tool in build_planner_tools(surface=RecordedSearch(RECORDED["resolves"]))
+        tool.name: tool for tool in planner_tool_specs(surface=RecordedSearch(RECORDED["resolves"]))
     }
     ctx = _FakeToolContext()
     _turn_so_far(ctx)
@@ -254,7 +253,7 @@ def after_hand_back(
         ctx.session.events = [*ctx.session.events, response_event("propose_plan", answer)]
     _handed_back(ctx, held=held, envelope=envelope or RECORDED["translator"])
     if search is not None:
-        tools = {tool.name: tool for tool in build_planner_tools(surface=search)}
+        tools = {tool.name: tool for tool in planner_tool_specs(surface=search)}
     return tools, ctx
 
 
@@ -620,7 +619,7 @@ def test_a_candidate_with_no_search_to_read_it_asks_for_another_pin() -> None:
     so proposing the same plan again would be refused again. The refusal
     asks for the share's input pinned otherwise."""
     _, ctx = after_hand_back(envelope=as_candidates())
-    (propose,) = [tool for tool in build_planner_tools() if tool.name == "propose_plan"]
+    (propose,) = [tool for tool in planner_tool_specs() if tool.name == "propose_plan"]
 
     answer = call_planner_tool(propose, **_re_pin(), tool_context=ctx)
 
@@ -639,8 +638,7 @@ def test_a_citation_of_the_users_prices_on_a_requirement_not_reading_the_part_is
     nothing, and code owns it as it owns the decision, so the draft is
     recorded without it, whether the draft restates the decision or not."""
     tools = {
-        tool.name: tool
-        for tool in build_planner_tools(surface=RecordedSearch(RECORDED["resolves"]))
+        tool.name: tool for tool in planner_tool_specs(surface=RecordedSearch(RECORDED["resolves"]))
     }
     ctx = _FakeToolContext()
     _turn_so_far(ctx)

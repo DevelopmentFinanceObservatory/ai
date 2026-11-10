@@ -64,10 +64,10 @@ from executor.run import current_step_id
 from google.adk.events import Event
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
-from planner.agent import PROPOSE_PLAN
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan
+from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError

@@ -4,8 +4,8 @@
 and `reject` are what the planner's `ask_user_question`, `propose_plan` and
 `reject_plan` do. Each reads its call's session state and steps through the
 `PlannerCall` it is given, and a tool that ends the planner's run does so
-through an `EndRun` the framework supplies. `planner.agent` wraps them as
-ADK function tools, which carry the declarations the model reads.
+through an `EndRun` the framework supplies. `planner.specs` declares them as
+the tools the model reads.
 
 A `propose_plan` whose translation compiles declares the plan ready for the
 user's answer in code (`declare_ready`), with no model call. It runs

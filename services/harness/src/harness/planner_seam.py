@@ -70,7 +70,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
-from planner.agent import BRIEF_STATE_KEY, PROPOSE_PLAN, AdkCall, end_run_when_ready
+from planner.agent import BRIEF_STATE_KEY, AdkCall, end_run_when_ready
 from planner.call import CallSession
 from planner.operations import OperationKind
 from planner.plan import (
@@ -125,6 +125,7 @@ from planner.skills import (
     skills_read,
 )
 from planner.source_reads import with_source_reads
+from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import (
     PENDING_ASK_STATE_KEY,
@@ -1177,7 +1178,7 @@ class PlannerSeam:
         user when the last referral names sources to choose from.
 
         The question is the same `PLANNER_ASK` call the planner's model
-        makes (`planner.agent.ask_user_question`), built here from the
+        makes (`ask_user_question`, `planner.specs`), built here from the
         referral's candidates (`_pinnable_candidates`), since no model call is
         left to compose it, and its tool accepts it as any other, ending the
         run on it. `populate_client_function_call_id` gives the call an id,
@@ -2021,7 +2022,7 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
 
 def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]]:
     """The `spec_id`-bearing candidates a referral names, shaped as
-    `planner.agent.ask_user_question`'s own `candidates` argument
+    `ask_user_question`'s own `candidates` argument (`planner.specs`)
     (`{"spec_id": ..., "label": ...}`, `label` the candidate's `sentence`).
 
     A `no_data` referral's candidates (`translator.discovery.compact_source
@@ -2067,7 +2068,7 @@ def _clarifying_question_args(
     candidates: list[dict[str, str]], *, lead: str, question: str = _WHICH_MEANT
 ) -> dict[str, Any]:
     """The `PLANNER_ASK` call args that put a referral's pinnable
-    candidates to the user: the shape `planner.agent.ask_user_question` declares, built
+    candidates to the user: the shape `ask_user_question` declares (`planner.specs`), built
     here from the candidates with no model call composing it. `lead` says why
     the user is asked and `question` what they are asked. It recommends no
     candidate, since nothing has weighed them. The message reaches the user, so

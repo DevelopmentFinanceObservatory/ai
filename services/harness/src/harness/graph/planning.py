@@ -114,7 +114,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         `APPROVED`, not something a fresh approval interrupt could act on).
         A seam that raises fails the turn. A seam that answers `"asked"`,
         for a planner run that ended on a question for the user
-        (`planner.agent.ask_user_question`), pauses the entry on that
+        (`ask_user_question`, `planner.specs`), pauses the entry on that
         question; the resume reruns this node and the seam with the answer.
         On the `"refused"` route `plan_done` lists the asks an earlier run
         of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).

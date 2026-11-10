@@ -18,9 +18,9 @@ from data_mcp import resolution
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.function_tool import FunctionTool
 from harness.agents import build_tool_surface, create_planner_with_translator
 from harness.settings import Settings
+from planner.agent import SpecTool
 from planner.settings import AgentSettings
 from translator import discovery
 
@@ -101,7 +101,7 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
         responses={"get_skill": ToolCallResult(is_error=False, text="# DFO FAQ\n")},
     )
     agent = create_planner_with_translator(settings=Settings(), surface=surface)
-    tools = {tool.name: tool for tool in agent.tools if isinstance(tool, FunctionTool)}
+    tools = {tool.name: tool for tool in agent.tools if isinstance(tool, SpecTool)}
 
     answer = await call_planner_tool(
         tools["get_skill"], skill_id="dfo-faq", tool_context=SimpleNamespace(state={})

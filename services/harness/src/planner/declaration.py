@@ -1,11 +1,9 @@
 """The declaration `propose_plan` reaches the model with.
 
-ADK builds a function tool's declaration from its signature: pydantic's
-`model_json_schema()` of the arguments, with the whole docstring as the
-tool's description and no description on any argument. `PlanTool` keeps that
-schema, gives each argument its own description, and rewrites the result with
-`compact_schema`, so the patch rules and limits a model writes a call from sit
-on the argument they govern.
+`planner.tool_spec.function_declaration` builds a compact tool's schema as
+pydantic's `model_json_schema()` of its parameters, gives each argument its
+own description, and rewrites the result with `compact_schema`, so the patch
+rules and limits a model writes a call from sit on the argument they govern.
 
 `compact_schema` removes what tells a model nothing its key does not, and
 applies to every definition the plan's models reach, so a field added later
@@ -39,12 +37,9 @@ before.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import Any, override
+from collections.abc import Mapping
+from typing import Any
 
-from google.adk.features import FeatureName, is_feature_enabled
-from google.adk.tools.function_tool import FunctionTool
-from google.genai import types
 from pydantic import TypeAdapter
 
 from planner.records import Identifier
@@ -62,12 +57,6 @@ FIELD_DESCRIBED_ENUMS = frozenset({"StatVarReading", "RankAmong", "DenominatorSc
 _IDENTIFIER_DEF = "Identifier"
 _DECISION_IDS_DEF = "DecisionIds"
 _IDENTIFIER_SCHEMA: dict[str, Any] = TypeAdapter(Identifier).json_schema()
-
-# Why a `PlanTool` refuses to build without a JSON schema to describe.
-_NO_JSON_SCHEMA = (
-    "{name} carries its argument descriptions on a JSON schema, which ADK builds only "
-    "with its JSON_SCHEMA_FOR_FUNC_DECL feature enabled; enable it"
-)
 
 # Keys whose value maps names to schemas, so a name there is never a keyword.
 _NAMED_SCHEMAS = frozenset({"properties", "$defs"})
@@ -231,42 +220,3 @@ def compact_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
     """`schema` compacted, with `Identifier` and `decision_ids` stated once under `$defs`
     and no `$ref` beside another key."""
     return _inline_ref_siblings(_factored(_compact(dict(schema))))
-
-
-class PlanTool(FunctionTool):
-    """A function tool whose declaration is compacted and describes each argument.
-
-    `arguments` maps every argument the model sees to its description; an
-    argument without one, or a description naming no argument, raises when
-    the declaration is built, so the two cannot drift apart.
-
-    The descriptions ride on the JSON schema ADK builds only with its
-    `JSON_SCHEMA_FOR_FUNC_DECL` feature on. With it off the declaration would
-    reach the model with no argument described, so construction raises, as
-    does building a declaration that has no JSON schema.
-    """
-
-    def __init__(self, func: Callable[..., Any], *, arguments: Mapping[str, str]) -> None:
-        super().__init__(func)
-        if not is_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL):
-            raise RuntimeError(_NO_JSON_SCHEMA.format(name=self.name))
-        self._arguments = dict(arguments)
-
-    @override
-    def _get_declaration(self) -> types.FunctionDeclaration | None:
-        declaration = super()._get_declaration()
-        if declaration is None or declaration.parameters_json_schema is None:
-            raise RuntimeError(_NO_JSON_SCHEMA.format(name=self.name))
-        schema = declaration.parameters_json_schema
-        properties: dict[str, Any] = schema["properties"]
-        if set(properties) != set(self._arguments):
-            raise ValueError(
-                f"{self.name} declares {sorted(properties)} and describes "
-                f"{sorted(self._arguments)}; describe each argument exactly once"
-            )
-        described = {
-            name: {**argument, "description": self._arguments[name]}
-            for name, argument in properties.items()
-        }
-        declaration.parameters_json_schema = compact_schema(schema | {"properties": described})
-        return declaration

@@ -3,8 +3,8 @@
 It is data-mcp's `get_skill`, called through the harness's
 `compiler.surface.ToolSurface` (`read_skill_page`) in the shape the public MCP
 surface offers: the skill's first page, or one file of it when `path` is given,
-with `offset` and `digest` to read on. `planner.agent.build_skill_tools` wraps it
-as an ADK function tool. A call answers with data-mcp's text as it came back, a
+with `offset` and `digest` to read on. `planner.specs.skill_tool_spec` declares it
+as the planner's `get_skill` tool. A call answers with data-mcp's text as it came back, a
 refusal's included: an unknown id refuses `skill_not_found`, and a deployment
 with no Skills API refuses `capability_unavailable`, which the planner reads and
 drafts on without the skill. A call that does not complete answers with one
