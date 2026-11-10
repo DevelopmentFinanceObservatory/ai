@@ -1,6 +1,6 @@
 """Tests for the planner agent: plan-lifecycle tools and agent construction.
 
-Most tool functions are exercised directly (`FunctionTool.func`) against a fake
+Most tool functions are exercised directly (through `call_planner_tool`) against a fake
 tool context, rather than through a full ADK `Runner` -- what belongs to this
 package is the business logic each tool function runs once ADK decides to call
 it. `_FakeToolContext` carries no `tool_confirmation`: `declare_ready` and
@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import functools
 import gc
 import inspect
 import json
@@ -275,6 +276,7 @@ from ..basis_alignment import (
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool, planner_tool_declaration
 from ..session_events import response_event
 from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
@@ -535,12 +537,13 @@ def _propose(
     call passes nothing. `answer_mode` defaults to `computed`, since
     `requirements` is the read pair every caller passes unless it overrides
     it. A test about a call that states its intent wrongly, or not at all,
-    calls `tools["propose_plan"].func` directly.
+    calls `propose_plan` through `call_planner_tool`.
     """
     recorded = load_plan(ctx.state)  # type: ignore[attr-defined]
     if amends_version is None and recorded is not None and not starts_new_plan:
         amends_version = recorded.version
-    return tools["propose_plan"].func(
+    return call_planner_tool(
+        tools["propose_plan"],
         question=question,
         answer_mode=answer_mode,
         decisions=drafts([decision]),
@@ -772,7 +775,7 @@ def test_a_rejected_plan_is_never_declared_ready(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
     _translate(ctx)
-    tools["reject_plan"].func(tool_context=ctx)
+    call_planner_tool(tools["reject_plan"], tool_context=ctx)
 
     result = _declare(ctx)
 
@@ -969,7 +972,7 @@ async def test_no_planner_tool_writes_pending_approval(
 
     rejected_ctx = _FakeToolContext()
     _propose(tools, rejected_ctx, decision(), requirements)
-    tools["reject_plan"].func(tool_context=rejected_ctx)
+    call_planner_tool(tools["reject_plan"], tool_context=rejected_ctx)
     rejected = load_plan(rejected_ctx.state)
 
     assert proposed is not None and proposed.status == PlanStatus.DRAFT
@@ -1229,7 +1232,8 @@ def test_an_amendment_records_the_question_it_states(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
 
-    unstated = tools["propose_plan"].func(
+    unstated = call_planner_tool(
+        tools["propose_plan"],
         question="Kenya's debt service, 2000 to 2023",
         decisions=drafts([decision(rationale="Reconsidered.")]),
         tool_context=ctx,
@@ -1260,8 +1264,11 @@ def test_an_amendment_that_states_no_question_keeps_the_recorded_one(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
 
-    amended = tools["propose_plan"].func(
-        decisions=drafts([decision(rationale="Reconsidered.")]), amends_version=1, tool_context=ctx
+    amended = call_planner_tool(
+        tools["propose_plan"],
+        decisions=drafts([decision(rationale="Reconsidered.")]),
+        amends_version=1,
+        tool_context=ctx,
     )
 
     assert amended["outcome"] == Outcome.OK.value, amended
@@ -1280,8 +1287,11 @@ def test_an_amendment_that_states_no_answer_mode_keeps_the_recorded_one(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, answer_mode=AnswerMode.SERIES)
 
-    amended = tools["propose_plan"].func(
-        decisions=drafts([decision(rationale="Reconsidered.")]), amends_version=1, tool_context=ctx
+    amended = call_planner_tool(
+        tools["propose_plan"],
+        decisions=drafts([decision(rationale="Reconsidered.")]),
+        amends_version=1,
+        tool_context=ctx,
     )
 
     assert amended["outcome"] == Outcome.OK.value, amended
@@ -1296,8 +1306,11 @@ def test_a_first_draft_without_a_question_is_refused_and_records_nothing(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    refused = tools["propose_plan"].func(
-        decisions=drafts([decision()]), evidence_requirements=list(requirements), tool_context=ctx
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        decisions=drafts([decision()]),
+        evidence_requirements=list(requirements),
+        tool_context=ctx,
     )
 
     assert refused["code"] == ProblemCode.INVALID_PLAN.value
@@ -1320,7 +1333,8 @@ def test_an_entity_role_outside_the_party_words_is_refused_and_records_nothing(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
@@ -1343,7 +1357,8 @@ def test_a_restart_without_a_question_is_refused_and_leaves_the_plan_alone(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         decisions=drafts([decision()]),
         evidence_requirements=list(requirements),
         starts_new_plan=True,
@@ -1364,7 +1379,8 @@ def test_a_first_draft_without_an_answer_mode_is_refused_and_records_nothing(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision()]),
         evidence_requirements=list(requirements),
@@ -1384,7 +1400,8 @@ def test_a_restart_without_an_answer_mode_is_refused_and_leaves_the_plan_alone(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision()]),
         evidence_requirements=list(requirements),
@@ -1903,7 +1920,8 @@ def test_propose_plan_reads_the_dataset_of_every_pin_it_sums(
         held_as=held_as,
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question=plan.question,
         answer_mode=plan.answer_mode,
         decisions=drafts(plan.decisions),
@@ -2350,7 +2368,8 @@ def test_propose_plan_refuses_a_patch_summing_two_datasets_on_a_users_source_pic
     ]
     elected = pinning_decision(SPEC_GHANA_AID, slot="aid_source")
     debt_source = next(d for d in summed.decisions if d.slot == "debt_source")
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question=summed.question,
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([elected, debt_source]),
@@ -2360,7 +2379,8 @@ def test_propose_plan_refuses_a_patch_summing_two_datasets_on_a_users_source_pic
     assert first["outcome"] == Outcome.OK.value, first
     summing = summed.requirement("net_flows").model_copy(update={"decision_ids": ("aid_source",)})
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         answer_mode=AnswerMode.COMPUTED,
         decisions=[],
         evidence_requirements=[summing],
@@ -2421,7 +2441,8 @@ def test_question_fixed_leaves_starts_new_plan_alone_on_a_first_draft(
     tools = _tools_by_name(question_fixed=True)
     ctx = _FakeToolContext()
 
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -2462,7 +2483,8 @@ def test_question_fixed_accepts_an_amendment_that_omits_the_question(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
 
-    patched = tools["propose_plan"].func(
+    patched = call_planner_tool(
+        tools["propose_plan"],
         decisions=drafts([decision(chosen="total debt stock", resolved_by=ResolvedBy.USER)]),
         evidence_requirements=[],
         amends_version=1,
@@ -2611,7 +2633,7 @@ async def test_the_planner_model_retries_a_503_before_the_turn_sees_it(
 
 
 def _arguments(tools: dict[str, FunctionTool], name: str = "propose_plan") -> dict[str, Any]:
-    declaration = tools[name]._get_declaration()
+    declaration = planner_tool_declaration(tools[name])
     assert declaration is not None
     schema = declaration.parameters_json_schema
     assert schema is not None
@@ -2641,7 +2663,8 @@ def test_a_proposal_that_fails_validation_spends_no_round(
     for _ in range(MAX_PLAN_ROUNDS - 1):
         _propose(tools, ctx, decision(), requirements)
 
-    invalid = tools["propose_plan"].func(
+    invalid = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision()]),
         removed_evidence_requirements=[r.id for r in requirements],
@@ -2705,7 +2728,7 @@ def test_propose_plan_after_rejection_revives_the_plan(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
-    tools["reject_plan"].func(tool_context=ctx)
+    call_planner_tool(tools["reject_plan"], tool_context=ctx)
 
     revived = _propose(
         tools, ctx, decision(chosen="total debt stock", resolved_by=ResolvedBy.USER), requirements
@@ -3182,7 +3205,8 @@ def test_propose_plan_rejects_a_decision_whose_chosen_is_not_in_options(
         "rationale": "Standard measure for near-term dependence.",
     }
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([bad_decision]),
         evidence_requirements=[requirement()],
@@ -3210,7 +3234,8 @@ def test_propose_plan_rejects_a_malformed_requirement(decision: DecisionFactory)
         "entities": [{"name": "Kenya"}],
     }
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision()]),
         evidence_requirements=[bad_requirement],
@@ -3248,7 +3273,8 @@ def test_propose_plan_accepts_a_mixed_list_of_dataset_and_derived_dicts(
         "group_by": ["period"],
     }
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -3289,7 +3315,8 @@ def test_propose_plan_rejects_an_uncited_decision(
         slot="time_grain", options=["annual totals", "quarterly totals"], chosen="annual totals"
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision(), uncited]),
@@ -3367,7 +3394,8 @@ def test_propose_plan_needs_at_least_one_requirement(decision: DecisionFactory) 
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -3396,7 +3424,8 @@ def test_a_call_with_a_plan_recorded_must_state_which_it_is(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="Kenya's dependence on lending from China",
         decisions=drafts([decision(chosen="total debt stock")]),
         evidence_requirements=list(requirements),
@@ -3421,7 +3450,8 @@ def test_an_amendment_naming_the_wrong_version_is_refused(
     _propose(tools, ctx, decision(), requirements)
     _propose(tools, ctx, decision(chosen="total debt stock"), requirements)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision(rationale="Reconsidered.")]),
         amends_version=1,
@@ -3444,7 +3474,8 @@ def test_a_call_with_no_plan_recorded_needs_no_statement_of_intent(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -3466,7 +3497,8 @@ def test_starts_new_plan_begins_a_plan_of_its_own(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="What was Kenya's total ODA in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(
@@ -3509,7 +3541,8 @@ def test_an_amendment_stating_both_reads_as_the_amendment(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision(rationale="Reconsidered.")]),
         amends_version=1,
@@ -3538,7 +3571,8 @@ def test_propose_plan_patched_by_slot_carries_the_rest_forward(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    patched = tools["propose_plan"].func(
+    patched = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision(chosen="total debt stock", resolved_by=ResolvedBy.USER)]),
         amends_version=1,
@@ -3568,7 +3602,8 @@ def test_propose_plan_patched_adds_a_decision_the_plan_does_not_state(
         chosen="annual totals",
     )
 
-    patched = tools["propose_plan"].func(
+    patched = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([added]),
         evidence_requirements=[
@@ -3610,7 +3645,8 @@ def test_propose_plan_patched_removes_only_what_it_names(
         decision(),
         (requirement(), derived_requirement()),
     )
-    tools["propose_plan"].func(  # version 1 -> 2: adds the second chain
+    call_planner_tool(
+        tools["propose_plan"],  # version 1 -> 2: adds the second chain
         question="q",
         decisions=drafts([second]),
         evidence_requirements=[
@@ -3621,7 +3657,8 @@ def test_propose_plan_patched_removes_only_what_it_names(
         tool_context=ctx,
     )
 
-    patched = tools["propose_plan"].func(
+    patched = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         removed_evidence_requirements=["aid", "aid_total"],
         removed_decisions=["aid_measure"],
@@ -3643,7 +3680,8 @@ def test_propose_plan_refuses_a_removal_naming_no_requirement(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         removed_evidence_requirements=["no_such_requirement"],
         amends_version=1,
@@ -3667,7 +3705,8 @@ def test_a_patch_that_leaves_a_decision_uncited_is_an_invalid_plan(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision(slot="window")]),
         amends_version=1,
@@ -3692,7 +3731,8 @@ def test_a_patch_removing_a_requirement_another_still_reads_is_an_invalid_plan(
     _propose(tools, ctx, decision(), requirements)
     dataset, _derived = requirements
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         removed_evidence_requirements=[dataset.id],
         amends_version=1,
@@ -3758,7 +3798,8 @@ def test_a_plan_at_the_decision_cap_records() -> None:
     ctx = _FakeToolContext()
     decisions, requirements = _plan_at_the_cap(MAX_PLAN_DECISIONS)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(decisions),
@@ -3781,7 +3822,8 @@ def test_a_plan_one_requirement_past_the_cap_records_nothing() -> None:
     decisions, requirements = _plan_at_the_cap(MAX_PLAN_DECISIONS)
     over = [*requirements, requirements[-1].model_copy(update={"id": "one_too_many"})]
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts(decisions),
         evidence_requirements=over,
@@ -3800,7 +3842,8 @@ def test_an_oversized_plan_is_refused_naming_the_field() -> None:
     decisions, requirements = _plan_at_the_cap(MAX_PLAN_DECISIONS)
     decisions = [*decisions, decisions[-1].model_copy(update={"slot": "one_too_many"})]
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts(decisions),
         evidence_requirements=requirements,
@@ -3824,7 +3867,8 @@ def test_a_field_name_the_model_supplies_reaches_the_refusal_cut_short(
     long_key = "K" * 20_000
     dataset = requirement().model_dump(mode="json") | {long_key: 1}
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([decision()]),
         evidence_requirements=[dataset],
@@ -3855,7 +3899,7 @@ def test_propose_plan_rejects_a_null_list(
     }
     args[missing] = None
 
-    result = tools["propose_plan"].func(question="q", tool_context=ctx, **args)
+    result = call_planner_tool(tools["propose_plan"], question="q", tool_context=ctx, **args)
 
     assert result["code"] == ProblemCode.INVALID_PLAN.value
     assert PLAN_STATE_KEY not in ctx.state
@@ -3891,7 +3935,7 @@ def test_the_ask_tool_is_not_long_running() -> None:
 def test_asking_the_user_needs_no_candidates() -> None:
     """A referral that carries no candidates (`unsupported_ask`, `requirement_unmeetable`)
     is put to the user with a message alone."""
-    declaration = _tools_by_name()[PLANNER_ASK]._get_declaration()
+    declaration = planner_tool_declaration(_tools_by_name()[PLANNER_ASK])
 
     assert declaration is not None
     schema = declaration.parameters_json_schema
@@ -3968,7 +4012,8 @@ def test_propose_plan_accepts_a_user_election_ask_user_actually_chose(
         fixes=DecisionFixes(source_spec_id=SPEC),
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([elected]),
@@ -4106,7 +4151,8 @@ def _propose_pinned(
     *,
     amends_version: int | None = None,
 ) -> dict[str, object]:
-    return tools["propose_plan"].func(
+    return call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision]),
@@ -4252,7 +4298,8 @@ def test_a_verbatim_pin_of_a_settled_source_records_as_written(
     dataset, derived = requirements
     pinned = dataset.model_copy(update={"source_spec_id": SPEC})
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4414,7 +4461,8 @@ def test_a_pin_of_an_aid_measure_states_how_the_flow_is_counted(
     ctx.session.events = list(events)
     dataset, derived = requirements
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4472,7 +4520,8 @@ def test_a_measure_the_question_named_is_the_users_decision(
     _show_block(ctx, block)
     dataset, derived = requirements
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4506,7 +4555,8 @@ def test_a_pick_after_the_plan_pinned_the_measure_makes_its_decision_the_users(
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
     pinned = [dataset.model_copy(update={"source_spec_id": _GROSS}), derived]
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4516,8 +4566,11 @@ def test_a_pick_after_the_plan_pinned_the_measure_makes_its_decision_the_users(
     assert first["outcome"] == Outcome.OK.value, first
     ctx.session.events = _measure_ask_events(_GROSS)
 
-    second = tools["propose_plan"].func(
-        evidence_requirements=pinned, amends_version=first["version"], tool_context=ctx
+    second = call_planner_tool(
+        tools["propose_plan"],
+        evidence_requirements=pinned,
+        amends_version=first["version"],
+        tool_context=ctx,
     )
 
     assert second["outcome"] == Outcome.OK.value, second
@@ -4549,7 +4602,8 @@ def test_a_re_pin_to_another_measure_is_the_planners_even_after_an_amendment(
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4561,7 +4615,8 @@ def test_a_re_pin_to_another_measure_is_the_planners_even_after_an_amendment(
         ctx.session.events = _amendment_events("make it a bar chart")
     re_pinned = dataset.model_copy(update={"source_spec_id": _NET})
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[re_pinned, derived],
         amends_version=first["version"],
         tool_context=ctx,
@@ -4629,7 +4684,8 @@ async def test_an_amendment_re_pins_an_aid_requirement_to_the_measure_offered_be
         identities = {}
     token = current_recorded_identity.set(identities.get)
     try:
-        first = tools["propose_plan"].func(
+        first = call_planner_tool(
+            tools["propose_plan"],
             question="q",
             answer_mode=AnswerMode.SERIES,
             decisions=drafts([decision()]),
@@ -4637,7 +4693,8 @@ async def test_an_amendment_re_pins_an_aid_requirement_to_the_measure_offered_be
             tool_context=ctx,
         )
         assert first["outcome"] == Outcome.OK.value, first
-        second = tools["propose_plan"].func(
+        second = call_planner_tool(
+            tools["propose_plan"],
             evidence_requirements=[dataset.model_copy(update={"source_spec_id": _NET})],
             amends_version=first["version"],
             tool_context=ctx,
@@ -4712,7 +4769,8 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
 
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4725,7 +4783,8 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
     copied = _over_period(_FRANCE_KENYA, dataset.period)
     synthesized = next(d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == copied)
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4790,7 +4849,8 @@ def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
     _show_block(ctx, _scoped_gross(basis_alternative=basis_alternative))
     dataset, derived = requirements
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4839,7 +4899,8 @@ def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_
     _show_block(ctx, _scoped_gross())
     dataset, derived = requirements
     pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -4850,7 +4911,8 @@ def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_
     copied = _over_period(_FRANCE_KENYA, dataset.period)
     scope_slots = tuple(scope_choice_slot(copied, axis) for axis in ("sector", "region"))
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[
             pinned.model_copy(update={"decision_ids": ("measure", *scope_slots)}),
         ],
@@ -4877,7 +4939,8 @@ def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
     own = [decision(slot=f"d{index}") for index in range(MAX_PLAN_DECISIONS - 2)]
     cited = tuple(d.slot for d in own)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(own),
@@ -4923,7 +4986,8 @@ def test_a_repin_at_the_decision_cap_states_the_new_pins_scope_decision(
         entities=[Entity(name="United States", role="donor")],
         source_spec_id=TOTAL,
     )
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts(own),
@@ -4935,7 +4999,8 @@ def test_a_repin_at_the_decision_cap_states_the_new_pins_scope_decision(
     assert plan is not None
     assert len(plan.decisions) == MAX_PLAN_DECISIONS
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[total.model_copy(update={"source_spec_id": TOTAL_GROSS})],
         amends_version=first["version"],
         tool_context=ctx,
@@ -4967,7 +5032,8 @@ def test_a_windowed_pin_takes_its_scope_decisions_to_the_copy(
     )
     token = current_recorded_identity.set(_turn_identities({_GROSS: block}, ()).get)
     try:
-        result = tools["propose_plan"].func(
+        result = call_planner_tool(
+            tools["propose_plan"],
             question="q",
             answer_mode=AnswerMode.SERIES,
             decisions=drafts([decision()]),
@@ -5151,7 +5217,10 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"), total_block)
 
     result = await _share_of_health(
-        _tools_reading(surface)["propose_plan"].func, ctx, decision(), source="OECD DAC1"
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+        source="OECD DAC1",
     )
 
     if named_set is not None and "group_id" in named_set:
@@ -5207,7 +5276,7 @@ async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_b
 
     # A restatement pinning the total as it was shown takes the compiled pin again.
     again = await _share_of_health(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         amends_version=plan.version,
@@ -5237,7 +5306,9 @@ def test_a_basis_the_planner_compiled_in_an_earlier_turn_is_not_read_as_the_user
         total,
     )
 
-    result = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+    result = _share_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]), ctx, decision()
+    )
 
     if compiled:
         assert result["code"] == ProblemCode.BASES_UNALIGNED.value, result
@@ -5263,7 +5334,9 @@ def test_a_basis_the_user_stated_on_one_input_is_the_one_every_input_takes(
         basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance=provenance),
     )
 
-    refused = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+    refused = _share_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]), ctx, decision()
+    )
 
     assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
     assert refused["detail"] == {
@@ -5292,7 +5365,9 @@ def test_a_share_whose_inputs_the_user_stated_on_different_bases_keeps_both(
         basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit"),
     )
 
-    result = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+    result = _share_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]), ctx, decision()
+    )
 
     assert result["outcome"] == Outcome.OK.value, result
     plan = load_plan(ctx.state)
@@ -5478,7 +5553,11 @@ async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refus
         ),
     )
 
-    refused = await _share_of_health(_tools_reading(surface)["propose_plan"].func, ctx, decision())
+    refused = await _share_of_health(
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+    )
 
     assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
     assert refused["detail"] == {
@@ -5613,7 +5692,9 @@ def test_a_calculation_counts_its_inputs_on_one_provider_scope(
         ),
     )
 
-    refused = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
+    refused = calculation(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]), ctx, decision()
+    )
 
     assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
     assert [
@@ -5653,7 +5734,9 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
         provider_block(TOTAL, narrow=False, active="provider:inclusive", provenance="explicit"),
     )
 
-    result = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
+    result = calculation(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]), ctx, decision()
+    )
 
     assert result.get("outcome") == code or result.get("code") == code, result
     if code == Outcome.OK.value:
@@ -5730,7 +5813,12 @@ def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_
         ),
     )
 
-    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=True)
+    result = _sum_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
+        ctx,
+        decision(),
+        accept=True,
+    )
 
     assert result.get("outcome") == code or result.get("code") == code, result
     if code == ProblemCode.OPERATION_UNSUPPORTED.value:
@@ -5826,7 +5914,12 @@ def test_a_sum_on_one_provider_scope_is_refused_where_its_reporters_count_one_mo
                 donor.update(multilateral=marked)
     _show_blocks(ctx, health, total)
 
-    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
+    result = _sum_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
+        ctx,
+        decision(),
+        accept=accept,
+    )
 
     assert result.get("outcome") == code or result.get("code") == code, result
     if code == Outcome.OK.value:
@@ -5879,7 +5972,12 @@ def test_a_donor_search_states_no_graph_type_for_reads_as_a_country_by_its_ref(
                 donor.update(multilateral=True)
     _show_blocks(ctx, *blocks)
 
-    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=True)
+    result = _sum_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
+        ctx,
+        decision(),
+        accept=True,
+    )
 
     assert result.get("outcome") == code or result.get("code") == code, result
     if code == Outcome.OK.value:
@@ -5983,7 +6081,12 @@ def test_a_sum_on_one_provider_scope_counts_no_flow_twice_over_apart_slots(
         _by_instrument(other, loans, added=added),
     )
 
-    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
+    result = _sum_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
+        ctx,
+        decision(),
+        accept=accept,
+    )
 
     if donors is None or apart:
         assert result.get("outcome") == Outcome.OK.value, result
@@ -6057,7 +6160,12 @@ def test_a_sum_on_one_provider_scope_counts_one_donor_population_by_the_same_str
         }
     _show_blocks(ctx, kenya, africa)
 
-    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
+    result = _sum_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
+        ctx,
+        decision(),
+        accept=accept,
+    )
 
     assert result.get("outcome") == code or result.get("code") == code, result
     if code == Outcome.OK.value:
@@ -6119,7 +6227,9 @@ def test_a_sum_over_different_stated_provider_scopes_is_refused_only_where_donor
         ),
     )
 
-    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+    result = _sum_of_health(
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]), ctx, decision()
+    )
 
     assert result.get("outcome") == code or result.get("code") == code, result
 
@@ -6163,7 +6273,8 @@ async def test_an_input_moving_on_basis_and_provider_scope_is_compiled_once_on_b
             denominator=RequirementSide(input_id=total_id),
         )
 
-    result = await _tools_reading(surface)["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(surface)["propose_plan"],
         question="What share of US aid, and of US ODA, goes to health?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -6220,7 +6331,11 @@ async def test_a_total_compiled_on_the_bilateral_scope_is_pinned_with_the_planne
         provider_block(TOTAL, narrow=False, active="provider:inclusive"),
     )
 
-    result = await _sum_of_health(_tools_reading(surface)["propose_plan"].func, ctx, decision())
+    result = await _sum_of_health(
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+    )
 
     assert result["outcome"] == Outcome.OK.value, result
     (call,) = surface.calls
@@ -6258,7 +6373,10 @@ async def test_a_basis_search_read_in_the_planners_words_is_never_the_users(
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
 
     result = await _share_of_health(
-        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+        total=None,
     )
 
     assert result["outcome"] == Outcome.OK.value, result
@@ -6299,7 +6417,10 @@ async def test_no_pin_check_runs_on_a_pin_a_pending_read_will_move(
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
 
     result = await _share_of_health(
-        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+        total=None,
     )
 
     assert result["outcome"] == Outcome.OK.value, result
@@ -6317,7 +6438,7 @@ async def test_an_unanswered_referral_is_refused_before_a_search_for_an_unpinned
     surface = BasisCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
-    propose = _tools_reading(surface)["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"])
     recorded = await _share_of_health(propose, ctx, decision(), total=None)
     assert recorded["outcome"] == Outcome.OK.value, recorded
     _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, "total")
@@ -6353,7 +6474,10 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
 
     refused = await _share_of_health(
-        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+        total=None,
     )
 
     assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
@@ -6437,7 +6561,7 @@ async def test_a_share_whose_unpinned_input_search_settles_on_a_refused_spec_is_
         )
     )
     refused = TOTAL_GROSS if compiled else TOTAL
-    propose = _tools_reading(surface)["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"])
     ctx = _FakeToolContext()
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
     if searched_first:
@@ -6500,7 +6624,10 @@ async def test_a_refused_search_for_an_unpinned_input_is_held_only_when_it_settl
     _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
 
     refused = await _share_of_health(
-        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+        total=None,
     )
 
     assert refused["code"] == code.value, refused
@@ -6633,7 +6760,12 @@ async def test_a_search_for_an_unpinned_input_takes_only_the_time_the_entry_has_
     try:
         async with asyncio.timeout(2.0):
             refused = await _share_of_health(
-                _tools_reading(_SilentSurface())["propose_plan"].func, ctx, decision(), total=None
+                functools.partial(
+                    call_planner_tool, _tools_reading(_SilentSurface())["propose_plan"]
+                ),
+                ctx,
+                decision(),
+                total=None,
             )
     finally:
         current_discovery_time_left.reset(token)
@@ -6694,7 +6826,8 @@ def test_nested_calculations_put_every_input_they_reach_on_one_basis(
             source_spec_id=pin,
         )
 
-    refused = _tools_by_name()["propose_plan"].func(
+    refused = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="What share of US aid goes to health?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -6744,7 +6877,8 @@ def test_a_decision_over_a_pins_flow_count_is_refused(
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision(fixes=_MEASURE_FIXED)]),
@@ -6791,7 +6925,8 @@ def test_a_decision_on_a_measure_no_pin_decides_is_recorded(
         _show(ctx, _GROSS)
     dataset, derived = requirements
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision(fixes=fixes)]),
@@ -6834,7 +6969,8 @@ def test_an_amendment_restating_a_measure_beside_no_second_flow_decision_is_reco
             fixes=_MEASURE_FIXED,
             resolved_by=ResolvedBy.USER if user else ResolvedBy.PLANNER_DEFAULT,
         )
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([first_decision]),
@@ -6854,7 +6990,8 @@ def test_an_amendment_restating_a_measure_beside_no_second_flow_decision_is_reco
         _show_block(ctx, _FRANCE_KENYA)
         restated = first_decision
 
-    amended = tools["propose_plan"].func(
+    amended = call_planner_tool(
+        tools["propose_plan"],
         decisions=drafts([restated.model_copy(update={"fixes": _MEASURE_FIXED})]),
         amends_version=recorded.version,
         tool_context=ctx,
@@ -6882,7 +7019,8 @@ def test_an_amendment_removing_a_windowed_pins_decision_by_its_recorded_slot_is_
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
     pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -6896,7 +7034,8 @@ def test_an_amendment_removing_a_windowed_pins_decision_by_its_recorded_slot_is_
     assert copy_slot != search_pin_slot(_GROSS)
     assert copy_slot in {d.slot for d in recorded.decisions}
 
-    amended = tools["propose_plan"].func(
+    amended = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[dataset],
         removed_decisions=[copy_slot if named_by == "copy" else search_pin_slot(_GROSS)],
         amends_version=recorded.version,
@@ -6920,7 +7059,8 @@ def test_a_stored_decision_over_a_pins_flow_count_loads_and_stands_through_an_am
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
     pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -6945,7 +7085,8 @@ def test_a_stored_decision_over_a_pins_flow_count_loads_and_stands_through_an_am
     assert loaded is not None
     assert _measure_fixes(loaded) == _MEASURE_FIXED
 
-    amended = tools["propose_plan"].func(
+    amended = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[derived.model_copy(update={"reduction": Reduction.MEAN})],
         amends_version=loaded.version,
         tool_context=ctx,
@@ -6988,7 +7129,8 @@ def test_a_re_pin_to_a_source_found_in_place_of_a_stale_pin_needs_no_decision(
     )
     re_pinned = dataset.model_copy(update={"source_spec_id": POPULATION_SPEC})
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[re_pinned, derived],
         amends_version=first.version,
         tool_context=ctx,
@@ -7036,7 +7178,8 @@ def test_a_re_pin_to_a_source_a_referral_offered_states_how_the_flow_is_counted(
     )
     ctx.session.events.extend(events)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
         amends_version=first.version,
         tool_context=ctx,
@@ -7304,7 +7447,7 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     part_pin = us_2023_block(part)["spec_id"]
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part=part,
@@ -7384,7 +7527,7 @@ async def test_a_wholes_caveat_names_the_calculation_that_reads_it_through_a_sum
     _show_blocks(ctx, us_2023_block("health"), us_2023_block("dac1_total_gross"))
 
     result = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -7417,7 +7560,9 @@ async def test_a_declared_whole_offers_no_row_on_the_axis_it_leaves_open(
     row no more."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"))
-    propose = _tools_reading(WholeCompiles(opened=True))["propose_plan"].func
+    propose = functools.partial(
+        call_planner_tool, _tools_reading(WholeCompiles(opened=True))["propose_plan"]
+    )
 
     result = await _us_2023(propose, ctx, decision(), part="health", whole=None, declared=True)
     whole_of = load_plan(ctx.state).requirement(_WHOLE).whole_of  # type: ignore[union-attr]
@@ -7454,7 +7599,9 @@ async def test_a_plain_requirement_on_a_declared_wholes_pin_keeps_its_rows(
     whole still cites none."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"))
-    propose = _tools_reading(WholeCompiles(opened=True))["propose_plan"].func
+    propose = functools.partial(
+        call_planner_tool, _tools_reading(WholeCompiles(opened=True))["propose_plan"]
+    )
     result = await _us_2023(propose, ctx, decision(), part="health", whole=None, declared=True)
     assert result["outcome"] == Outcome.OK.value, result
     pin = dict(_pins(ctx))[_WHOLE]
@@ -7540,7 +7687,9 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     united_states = Entity(name="United States", role="donor")
 
     result = await _us_2023(
-        _tools_reading(cast(Any, overlapping))["propose_plan"].func,
+        functools.partial(
+            call_planner_tool, _tools_reading(cast(Any, overlapping))["propose_plan"]
+        ),
         ctx,
         decision(),
         part="health",
@@ -7602,7 +7751,7 @@ async def test_a_plan_its_own_rules_refuse_makes_no_read_it_would_wait_on(
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"))
     uncited = decision(slot="denominator_source", description="Which total?")
-    propose = _tools_reading(surface)["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"])
 
     async def with_uncited(**arguments: Any) -> Any:
         return await propose(
@@ -7674,7 +7823,7 @@ async def test_a_declared_whole_read_by_another_calculation_is_refused_for_a_pla
     reader = _whole_reader(kind)
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -7759,7 +7908,7 @@ async def test_a_declared_whole_follows_its_part_when_another_calculation_realig
     )
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -7816,7 +7965,7 @@ async def test_a_quotient_over_a_declared_whole_divides_by_the_parts_own_total(
     _show_blocks(ctx, us_2023_block("health"), us_2023_block("dac1_total_gross"))
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -7859,7 +8008,7 @@ async def test_wholes_declaring_one_part_and_axis_share_one_compile(
     )
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -7891,7 +8040,7 @@ async def test_a_declared_whole_drops_the_source_the_planner_wrote(
     _show_blocks(ctx, us_2023_block("health_inclusive"))
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health_inclusive",
@@ -7965,7 +8114,7 @@ async def test_a_declared_whole_replaces_the_planners_decision_on_its_source(
         rationale="The search results identified DAC1 total aid as the measure for total aid.",
         fixes=DecisionFixes(measure="US total ODA"),
     )
-    propose = _tools_reading(surface)["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"])
 
     result = await _us_2023(
         propose,
@@ -8035,7 +8184,7 @@ async def test_a_declared_whole_keeps_a_planners_decision_on_what_it_does_not_re
     )
 
     result = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8069,7 +8218,7 @@ async def test_a_restated_decision_a_carried_requirement_cites_stays_beside_a_wh
         rationale="The search results identified DAC1 total aid as the measure for total aid.",
     )
     first = await _us_2023(
-        tools["propose_plan"].func,
+        functools.partial(call_planner_tool, tools["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8082,7 +8231,8 @@ async def test_a_restated_decision_a_carried_requirement_cites_stays_beside_a_wh
     assert plan is not None
     whole = plan.requirement(_WHOLE)
 
-    second = await tools["propose_plan"].func(
+    second = await call_planner_tool(
+        tools["propose_plan"],
         decisions=drafts([source_choice]),
         evidence_requirements=[
             whole.model_copy(update={"decision_ids": (*whole.decision_ids, source_choice.slot)})
@@ -8121,7 +8271,11 @@ async def test_a_share_declaring_no_whole_is_never_rewritten(
     _show_blocks(ctx, *([_stated_provider(block) for block in blocks] if stated else blocks))
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func, ctx, decision(), part=part, whole=whole
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
+        ctx,
+        decision(),
+        part=part,
+        whole=whole,
     )
 
     assert result["outcome"] == Outcome.OK.value, result
@@ -8157,7 +8311,7 @@ async def test_a_calculation_over_a_total_counting_other_providers_is_served_onl
     _show_blocks(ctx, _search_labelled("health"), _search_labelled("no_bilateral"))
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8210,7 +8364,7 @@ async def test_a_providers_unaligned_refusal_is_repaired_or_declined(
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), total_without_bilateral())
-    propose = _tools_reading(surface)["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"])
 
     refused = await _us_2023(propose, ctx, decision(), part="health", whole="no_bilateral")
     assert refused["code"] == ProblemCode.PROVIDERS_UNALIGNED.value, refused
@@ -8263,7 +8417,7 @@ async def test_a_plan_at_the_decision_cap_still_carries_its_caveats(
     own = [decision(slot=f"d{index}") for index in range(MAX_PLAN_DECISIONS - 1)]
 
     result = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8299,7 +8453,7 @@ async def test_a_caveat_survives_a_revision_restating_its_slot(
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), _us_block(whole))
     first = await _us_2023(
-        tools["propose_plan"].func,
+        functools.partial(call_planner_tool, tools["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8312,7 +8466,8 @@ async def test_a_caveat_survives_a_revision_restating_its_slot(
     assert plan is not None
     (noted,) = [d for d in plan.decisions if d.caveat == caveat]
 
-    second = await tools["propose_plan"].func(
+    second = await call_planner_tool(
+        tools["propose_plan"],
         decisions=drafts(
             [noted.model_copy(update={"rationale": "Planner rewording.", "caveat": None})]
         ),
@@ -8389,7 +8544,7 @@ async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inp
     _show_blocks(ctx, _search_labelled("health"), _search_labelled(whole))
 
     result = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8422,7 +8577,7 @@ async def test_a_provider_difference_names_inputs_of_one_concept_as_the_card_doe
     _show_blocks(ctx, *blocks)
 
     result = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="whole",
@@ -8464,7 +8619,8 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
         period=Period(start=2023, end=2023),
         source_spec_id=us_2023_block("health")["spec_id"],
     )
-    first = await tools["propose_plan"].func(
+    first = await call_planner_tool(
+        tools["propose_plan"],
         question="How much US aid went to health in 2023?",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
@@ -8497,7 +8653,8 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
     save_plan(ctx.state, shown)
     inclusive = "health_inclusive"
 
-    second = await tools["propose_plan"].func(
+    second = await call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[
             health.model_copy(
                 update={"id": inclusive, "source_spec_id": us_2023_block(inclusive)["spec_id"]}
@@ -8566,7 +8723,8 @@ async def test_a_provider_difference_names_namesake_inputs_by_the_scope_each_cou
         accept_provider_difference=True,
     )
 
-    result = await _tools_reading(WholeCompiles())["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(WholeCompiles())["propose_plan"],
         question="How does US ODA with imputed multilateral flows compare with bilateral?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -8648,7 +8806,8 @@ async def test_a_basis_difference_names_namesake_inputs_by_the_basis_each_is_cou
         for requirement_id, block in blocks.items()
     ]
 
-    result = await _tools_reading(BasisCompiles())["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(BasisCompiles())["propose_plan"],
         question="How does US net ODA compare with US ODA in grant equivalents?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -8729,7 +8888,7 @@ async def test_a_carried_share_restates_its_provider_difference_when_an_input_is
     ctx = _FakeToolContext()
     _show_blocks(ctx, block("health"), block("health_inclusive"), block(whole))
     first = await _us_2023(
-        tools["propose_plan"].func,
+        functools.partial(call_planner_tool, tools["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8742,7 +8901,8 @@ async def test_a_carried_share_restates_its_provider_difference_when_an_input_is
     part = plan.requirement(_PART)
     assert isinstance(part, DatasetRequirement)
 
-    second = await tools["propose_plan"].func(
+    second = await call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[
             part.model_copy(update={"source_spec_id": us_2023_block("health_inclusive")["spec_id"]})
         ],
@@ -8933,7 +9093,7 @@ def test_a_share_over_the_dac1_total_moves_it_to_bilateral_oda(decision: Decisio
     _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
 
     refused = _us_2023(
-        _tools_by_name()["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_by_name()["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8957,7 +9117,7 @@ async def test_a_comparison_with_a_total_stating_no_provider_scope_keeps_both_da
     _show_blocks(ctx, us_2023_block("health"), us_2023_block("dac1_total_gross"))
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -8995,7 +9155,7 @@ async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_ca
     )
 
     result = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -9056,7 +9216,7 @@ async def test_a_declared_whole_that_cannot_be_counted_from_its_part_is_refused_
     _show_blocks(ctx, us_2023_block(part), us_2023_block("dac1_total_gross"))
 
     refused = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part=part,
@@ -9160,7 +9320,7 @@ async def test_a_declared_whole_names_why_its_part_could_not_be_read(
     save_pin_sources(ctx.state, {**pin_sources(ctx.state), pin: source})
 
     refused = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(surface)["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -9236,7 +9396,8 @@ def test_a_whole_of_naming_no_part_it_can_be_counted_from_is_an_invalid_plan(
         whole_of=whole_of,
     )
 
-    refused = _tools_by_name()["propose_plan"].func(
+    refused = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="What share of US aid went to health in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -9432,7 +9593,8 @@ async def _share_over_every(
         named.append(Entity(name=recipient, role="recipient"))
     side = "giving" if axis == "donor" else "receiving"
     period = Period(start=year, end=year)
-    return await _tools_reading(cast(ToolSurface, surface))["propose_plan"].func(
+    return await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
         question="What share of the aid came from the United States in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -10571,7 +10733,8 @@ async def test_a_sum_with_a_multilaterals_outflows_is_refused_where_the_other_co
     _show_blocks(ctx, *blocks.values())
     period = Period(start=2019, end=2019)
 
-    result = await _tools_reading(WholeCompiles())["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(WholeCompiles())["propose_plan"],
         question="How much did these two give in 2019, together?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -10722,7 +10885,8 @@ def test_a_sum_of_provider_rows_searched_in_words_keeps_each_row(
     ctx = _FakeToolContext()
     _show_blocks(ctx, *blocks.values())
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="How much US bilateral plus multilateral ODA was there in 2019?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -10948,7 +11112,8 @@ def test_provider_rows_of_two_parts_read_in_words_keep_their_own(
     ctx = _FakeToolContext()
     _show_blocks(ctx, *blocks.values())
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="How much US bilateral ODA plus France's multilateral ODA was there in 2019?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -11171,7 +11336,8 @@ def test_two_sides_never_read_one_series(
     ctx = _FakeToolContext()
     _show_blocks(ctx, *blocks.values())
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="What share of US ODA goes to multilaterals?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -11266,7 +11432,8 @@ def test_a_total_compiled_onto_another_parts_series_keeps_its_own(
         warnings=(),
     )
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="What share of US ODA went to multilateral organisations?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -11397,7 +11564,8 @@ def test_a_share_of_one_series_over_itself_is_refused(
     ctx = _FakeToolContext()
     _show_blocks(ctx, *{block["spec_id"]: block for block in blocks.values()}.values())
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="What share of US ODA went to multilateral organisations?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(
@@ -11603,7 +11771,8 @@ def test_sides_read_one_series_only_through_one_derivation(
             source_spec_id=pin,
         )
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question=question,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -11826,7 +11995,8 @@ def test_one_part_over_other_years_or_entities_is_aligned(
         **both_reads,
     }
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question=question,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -11917,7 +12087,8 @@ def test_leaves_with_no_choice_read_one_series_only_in_one_frame(
             right=RequirementSide(input_id=right),
         )
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question=question,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -11980,7 +12151,8 @@ def test_sides_on_one_series_before_alignment_move_together(decision: DecisionFa
             source_spec_id=pin,
         )
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="How does US ODA compare with itself, and as a share of France's gross ODA?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -12032,7 +12204,8 @@ def _propose_gdp(
     """Propose `requirements` with the dataset requirement pinning `_GDP_ALL` over `period`."""
     dataset, derived = requirements
     pinned = dataset.model_copy(update={"source_spec_id": _GDP_ALL["spec_id"], "period": period})
-    return tools["propose_plan"].func(
+    return call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision]),
@@ -12220,7 +12393,8 @@ def test_a_decision_naming_its_fields_records_the_plan_its_values_would(
     cited = [dataset.model_copy(update={"decision_ids": ("measure", "window")}), derived]
     ctx = _FakeToolContext()
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[*drafts([decision()]), _period_decision(fixes=["period", "unit"])],
@@ -12272,7 +12446,8 @@ def test_a_field_its_requirements_do_not_settle_is_left_off_the_decision(
     dataset, derived = requirements
     ctx = _FakeToolContext()
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=[*drafts([decision()]), _period_decision(fixes=fixes)],
@@ -12302,7 +12477,8 @@ def test_a_decision_naming_the_pin_is_refused_as_invalid_data(
     dataset, derived = requirements
     ctx = _FakeToolContext()
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[*drafts([decision()]), _period_decision(fixes=["source_spec_id"])],
@@ -12322,7 +12498,8 @@ def test_requirements_that_are_no_list_are_an_invalid_plan(
     as any malformed draft, and the turn goes on."""
     ctx = _FakeToolContext()
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -12346,7 +12523,8 @@ def test_an_amendment_moving_a_value_a_planner_decision_fixes_drops_it_and_rebui
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     drafted = _period_decision(fixes=["period"])
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[*drafts([decision()]), drafted],
@@ -12355,7 +12533,8 @@ def test_an_amendment_moving_a_value_a_planner_decision_fixes_drops_it_and_rebui
     )
     assert first["outcome"] == Outcome.OK.value
 
-    carried = tools["propose_plan"].func(
+    carried = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[moved],
         amends_version=first["version"],
         tool_context=ctx,
@@ -12365,7 +12544,8 @@ def test_an_amendment_moving_a_value_a_planner_decision_fixes_drops_it_and_rebui
     assert pruned is not None
     assert [d.slot for d in pruned.decisions] == ["measure"]
     assert pruned.requirement(dataset.id).decision_ids == ("measure",)
-    restated = tools["propose_plan"].func(
+    restated = call_planner_tool(
+        tools["propose_plan"],
         decisions=[drafted],
         evidence_requirements=[moved],
         amends_version=carried["version"],
@@ -12482,7 +12662,8 @@ def test_a_user_decision_stands_until_the_user_speaks_again(
     }
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[*drafts([decision()]), _period_decision(fixes=["period"], resolved_by="user")],
@@ -12492,8 +12673,8 @@ def test_a_user_decision_stands_until_the_user_speaks_again(
     assert first["outcome"] == Outcome.OK.value
     _recorded(ctx, first)
 
-    refused = tools["propose_plan"].func(
-        **patches[route], amends_version=first["version"], tool_context=ctx
+    refused = call_planner_tool(
+        tools["propose_plan"], **patches[route], amends_version=first["version"], tool_context=ctx
     )
 
     assert refused["outcome"] == Outcome.REFUSED.value, refused
@@ -12505,8 +12686,8 @@ def test_a_user_decision_stands_until_the_user_speaks_again(
     assert kept.version == first["version"]
 
     ctx.session.events = [*ctx.session.events, *_amendment_events("cover 2010 to 2024")]
-    landed = tools["propose_plan"].func(
-        **patches[route], amends_version=first["version"], tool_context=ctx
+    landed = call_planner_tool(
+        tools["propose_plan"], **patches[route], amends_version=first["version"], tool_context=ctx
     )
     assert landed["outcome"] == Outcome.OK.value, landed
 
@@ -12522,7 +12703,8 @@ def test_a_user_decision_restated_and_left_uncited_is_refused_as_dropped(
     user_window = _period_decision(fixes=["period"], resolved_by="user")
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[*drafts([decision()]), user_window],
@@ -12532,7 +12714,8 @@ def test_a_user_decision_restated_and_left_uncited_is_refused_as_dropped(
     assert first["outcome"] == Outcome.OK.value
     _recorded(ctx, first)
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         decisions=[user_window],
         evidence_requirements=[cited.model_copy(update={"decision_ids": ("measure",)})],
         amends_version=first["version"],
@@ -12575,7 +12758,8 @@ def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping
     }
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[*drafts([decision()]), grouping],
@@ -12589,7 +12773,8 @@ def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping
     assert made.fixes == DecisionFixes(group_by=())
     _recorded(ctx, first)
 
-    regrouped = tools["propose_plan"].func(
+    regrouped = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[one_figure.model_copy(update={"group_by": (GroupBy.ENTITY,)})],
         amends_version=first["version"],
         tool_context=ctx,
@@ -12634,7 +12819,8 @@ def test_what_counts_as_the_user_speaking_after_the_plan_was_recorded(
     cited = dataset.model_copy(update={"decision_ids": ("measure", "window")})
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[*drafts([decision()]), _period_decision(fixes=["period"], resolved_by="user")],
@@ -12646,7 +12832,8 @@ def test_what_counts_as_the_user_speaking_after_the_plan_was_recorded(
         _recorded(ctx, first)
     ctx.session.events = [*ctx.session.events, *after(first["version"])]
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[cited.model_copy(update={"period": _MOVED})],
         amends_version=first["version"],
         tool_context=ctx,
@@ -12739,7 +12926,8 @@ def _propose_one(
     answer_mode: AnswerMode = AnswerMode.COMPUTED,
 ) -> dict[str, Any]:
     """A first draft stating `requirements`."""
-    return tools["propose_plan"].func(
+    return call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=answer_mode,
         decisions=drafts([decision]),
@@ -13291,7 +13479,7 @@ async def test_a_part_alignment_moves_is_held_to_the_user_s_prices(
     ]
 
     result = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -13760,7 +13948,8 @@ def test_a_user_decision_the_user_s_answer_supersedes_goes_with_it(
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
     ctx.session.events = _measure_ask_events(_GROSS)
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -13771,7 +13960,8 @@ def test_a_user_decision_the_user_s_answer_supersedes_goes_with_it(
     _recorded(ctx, first)
     ctx.session.events = [*ctx.session.events, *_measure_ask_events(_NET)]
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[dataset.model_copy(update={"source_spec_id": _NET}), derived],
         amends_version=first["version"],
         tool_context=ctx,
@@ -13798,7 +13988,8 @@ def test_an_amendment_at_approval_may_re_pin_a_measure_the_user_picked(
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
     ctx.session.events = _measure_ask_events(_GROSS)
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -13810,7 +14001,8 @@ def test_an_amendment_at_approval_may_re_pin_a_measure_the_user_picked(
     if amended:
         ctx.session.events = [*ctx.session.events, *_amendment_events("use net disbursements")]
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[dataset.model_copy(update={"source_spec_id": _NET}), derived],
         amends_version=first["version"],
         tool_context=ctx,
@@ -13835,7 +14027,8 @@ def test_the_user_may_drop_the_series_their_decision_fixed(
     stock = requirement(id="debt_stock", measure="external debt stock")
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=[*drafts([decision()]), _period_decision(fixes=["period"], resolved_by="user")],
@@ -13847,8 +14040,11 @@ def test_the_user_may_drop_the_series_their_decision_fixed(
     if answered:
         ctx.session.events = [*ctx.session.events, *_amendment_events("drop debt service")]
 
-    second = tools["propose_plan"].func(
-        removed_evidence_requirements=[debt.id], amends_version=first["version"], tool_context=ctx
+    second = call_planner_tool(
+        tools["propose_plan"],
+        removed_evidence_requirements=[debt.id],
+        amends_version=first["version"],
+        tool_context=ctx,
     )
 
     if not answered:
@@ -13890,7 +14086,8 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     moved = flows.model_copy(update={"period": Period(start=2023, end=2023)})
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[scope],
@@ -13899,8 +14096,11 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     )
     assert first["outcome"] == Outcome.OK.value, first
 
-    refused = tools["propose_plan"].func(
-        evidence_requirements=[moved], amends_version=first["version"], tool_context=ctx
+    refused = call_planner_tool(
+        tools["propose_plan"],
+        evidence_requirements=[moved],
+        amends_version=first["version"],
+        tool_context=ctx,
     )
 
     assert refused["code"] == ProblemCode.SHARED_DECISION_CONTRADICTED.value, refused
@@ -13916,7 +14116,8 @@ def test_a_patch_moving_a_shared_planner_decision_s_value_is_refused_until_resta
     kept = load_plan(ctx.state)
     assert kept is not None
     assert kept.version == first["version"]
-    restated = tools["propose_plan"].func(
+    restated = call_planner_tool(
+        tools["propose_plan"],
         decisions=[{**scope, "chosen": "2023 among all"}],
         evidence_requirements=[moved],
         amends_version=first["version"],
@@ -13952,7 +14153,8 @@ def test_the_card_after_an_amendment_shows_no_decision_the_plan_contradicts(
     }
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[
@@ -13981,7 +14183,8 @@ def test_the_card_after_an_amendment_shows_no_decision_the_plan_contradicts(
         assert [(d.id, d.chosen, wire[d.resolved_by]) for d in frame.decisions] == card
         return card
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[cited.model_copy(update={"period": Period(start=2010, end=2024)})],
         amends_version=first["version"],
         tool_context=ctx,
@@ -13993,7 +14196,8 @@ def test_the_card_after_an_amendment_shows_no_decision_the_plan_contradicts(
         ("currency", "current US dollars", ResolvedBy.PLANNER_DEFAULT),
     ]
 
-    repriced = tools["propose_plan"].func(
+    repriced = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[
             cited.model_copy(
                 update={"unit": Unit(currency="USD", prices="constant", base_year=2020)}
@@ -14028,7 +14232,8 @@ def test_an_amendment_unpinning_a_settled_pin_drops_the_decision_written_for_it(
     )
     assert first["outcome"] == Outcome.OK.value
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[dataset],
         amends_version=first["version"],
         tool_context=ctx,
@@ -14057,7 +14262,8 @@ def test_a_pin_no_search_settled_on_records_as_written(
     dataset, derived = requirements
     pinned = dataset.model_copy(update={"source_spec_id": SPEC})
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -14097,7 +14303,8 @@ def test_propose_plan_accepts_a_user_election_from_the_graphs_clarify_interrupt(
         fixes=DecisionFixes(source_spec_id=SPEC),
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([elected]),
@@ -14164,7 +14371,7 @@ def test_propose_plans_declaration_describes_every_requirement_kind() -> None:
     # the `kind` discriminator (Gemini reads `oneOf` as `anyOf`).
     tools = _tools_by_name()
 
-    declaration = tools["propose_plan"]._get_declaration()
+    declaration = planner_tool_declaration(tools["propose_plan"])
 
     assert declaration is not None
     schema = declaration.parameters_json_schema
@@ -14215,7 +14422,7 @@ def test_propose_plans_declaration_describes_every_field() -> None:
     # on the `evidence_requirements` argument.
     tools = _tools_by_name()
 
-    declaration = tools["propose_plan"]._get_declaration()
+    declaration = planner_tool_declaration(tools["propose_plan"])
 
     assert declaration is not None
     schema = declaration.parameters_json_schema
@@ -14233,7 +14440,7 @@ def test_propose_plans_declaration_describes_every_field() -> None:
 def test_a_decline_no_answer_earns_says_how_it_is_earned() -> None:
     # An `ask_role_dropped` problem earns `breakdown_not_kept`, and no `unsupported`
     # answer does, so both places a model reads what earns a decline say so.
-    declaration = _tools_by_name()["propose_plan"]._get_declaration()
+    declaration = planner_tool_declaration(_tools_by_name()["propose_plan"])
     assert declaration is not None and declaration.parameters_json_schema is not None
     declined = declaration.parameters_json_schema["properties"]["declined"]["description"]
     code = Decline.model_json_schema()["properties"]["code"]["description"]
@@ -14261,7 +14468,7 @@ def test_propose_plans_declaration_states_nothing_its_keys_and_required_do_not()
     # A title repeats the key it sits under, and a `null` branch or a `null`
     # or `[]` default says what absence from `required` already says.
     schema = _arguments(_tools_by_name())
-    declaration = _tools_by_name()["propose_plan"]._get_declaration()
+    declaration = planner_tool_declaration(_tools_by_name()["propose_plan"])
     assert declaration is not None
     nodes = _schema_nodes(declaration.parameters_json_schema)
 
@@ -14280,7 +14487,7 @@ def test_propose_plans_declaration_states_identifiers_and_decision_ids_once() ->
     # fields name a requirement or a decision. Each refers to one definition,
     # except a field with a description of its own, which holds a copy of
     # `Identifier` because Gemini reads nothing beside a `$ref`.
-    declaration = _tools_by_name()["propose_plan"]._get_declaration()
+    declaration = planner_tool_declaration(_tools_by_name()["propose_plan"])
     assert declaration is not None
     schema = declaration.parameters_json_schema
     assert schema is not None
@@ -14311,7 +14518,7 @@ def test_propose_plans_declaration_states_identifiers_and_decision_ids_once() ->
 def test_an_enum_the_field_describes_carries_no_description_of_its_own() -> None:
     # The field using each such enum names every value, so the model reads
     # each value's meaning once, where it writes it.
-    declaration = _tools_by_name()["propose_plan"]._get_declaration()
+    declaration = planner_tool_declaration(_tools_by_name()["propose_plan"])
     assert declaration is not None
     schema = declaration.parameters_json_schema
     assert schema is not None
@@ -14386,7 +14593,8 @@ def test_propose_plan_still_accepts_an_explicit_null_its_declaration_omits(
     )
     dataset |= {"unit": None, "source": None, "stat_vars": None}
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         tool_context=ctx,
         question="q",
         answer_mode=AnswerMode.COMPUTED,
@@ -14404,7 +14612,7 @@ def test_a_plan_tool_refuses_an_argument_it_does_not_describe() -> None:
         del first, second
 
     with pytest.raises(ValueError, match="describe each argument exactly once"):
-        PlanTool(tool, arguments={"first": "The first."})._get_declaration()
+        planner_tool_declaration(PlanTool(tool, arguments={"first": "The first."}))
 
 
 def test_a_plan_tool_refuses_to_reach_the_model_without_its_argument_descriptions() -> None:
@@ -14420,7 +14628,7 @@ def test_a_plan_tool_refuses_to_reach_the_model_without_its_argument_description
         with pytest.raises(RuntimeError, match="JSON_SCHEMA_FOR_FUNC_DECL"):
             create_planner_agent(model_name="gemini-test")
         with pytest.raises(RuntimeError, match="JSON_SCHEMA_FOR_FUNC_DECL"):
-            built._get_declaration()
+            planner_tool_declaration(built)
 
 
 # --- Rejecting and submitting ----------------------------------------------------------
@@ -14429,7 +14637,7 @@ def test_a_plan_tool_refuses_to_reach_the_model_without_its_argument_description
 def test_reject_plan_without_a_plan_returns_a_problem() -> None:
     tools = _tools_by_name()
 
-    result = tools["reject_plan"].func(tool_context=_FakeToolContext())
+    result = call_planner_tool(tools["reject_plan"], tool_context=_FakeToolContext())
 
     assert result["code"] == ProblemCode.PLAN_MISSING.value
     assert result["outcome"] == Outcome.STATE_MISSING.value
@@ -14442,7 +14650,7 @@ def test_reject_plan_marks_current_plan_rejected(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    result = tools["reject_plan"].func(tool_context=ctx)
+    result = call_planner_tool(tools["reject_plan"], tool_context=ctx)
 
     assert result["outcome"] == Outcome.OK.value
     assert result["status"] == PlanStatus.REJECTED.value
@@ -14522,7 +14730,7 @@ def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable
         "the ask says what cannot be done and asks what to change"
     )
     assert grounded in instruction
-    declaration = _tools_by_name()[PLANNER_ASK]._get_declaration()
+    declaration = planner_tool_declaration(_tools_by_name()[PLANNER_ASK])
     assert declaration is not None
     schema = declaration.parameters_json_schema
     assert schema is not None
@@ -14788,7 +14996,7 @@ async def test_a_bare_reproposal_after_a_transient_verdict_spends_no_round(
 
     retried = await cast(
         "Awaitable[dict[str, object]]",
-        tools["propose_plan"].func(amends_version=1, tool_context=ctx, **restated),
+        call_planner_tool(tools["propose_plan"], amends_version=1, tool_context=ctx, **restated),
     )
 
     assert (retried["outcome"], retried["version"]) == (Outcome.OK.value, version)
@@ -14805,7 +15013,8 @@ def test_an_amendment_past_the_plan_size_limit_is_an_invalid_plan_that_costs_no_
     base = Plan.model_validate(plan_record(MAX_PLAN_RECORD_CHARS - 1))
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question=base.question,
         answer_mode=base.answer_mode,
         decisions=drafts(list(base.decisions)),
@@ -14816,7 +15025,8 @@ def test_an_amendment_past_the_plan_size_limit_is_an_invalid_plan_that_costs_no_
     rounds = load_plan_rounds(ctx.state)
 
     longer = base.decisions[0].model_copy(update={"rationale": "r" * 10})
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question=base.question,
         decisions=drafts([longer]),
         amends_version=1,
@@ -14852,7 +15062,8 @@ def test_a_refused_field_is_named_without_repeating_its_value(
     ctx = _FakeToolContext()
     oversized = decision().model_dump(mode="json") | {"description": "d" * 300_000}
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts([oversized]),
         evidence_requirements=list(requirements),
@@ -14874,7 +15085,8 @@ def test_a_refused_question_is_named_without_repeating_it(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q" * 300_000,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -14900,7 +15112,8 @@ def test_a_refusal_reports_the_first_failing_fields_and_counts_the_rest(
         for index in range(MAX_PLAN_DECISIONS)
     ]
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         decisions=drafts(failing),
         evidence_requirements=list(requirements),
@@ -14930,7 +15143,8 @@ def test_a_removal_list_past_the_plan_cap_is_refused_naming_the_argument(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         amends_version=1,
         tool_context=ctx,
@@ -14952,7 +15166,8 @@ def test_a_removal_that_cannot_be_an_identifier_is_refused_without_repeating_it(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
-    refused = tools["propose_plan"].func(
+    refused = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         amends_version=1,
         tool_context=ctx,
@@ -15036,7 +15251,8 @@ def test_a_plan_after_an_unsupported_answer_has_to_decline_the_ask(
         else []
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
@@ -15092,7 +15308,8 @@ def test_a_translate_unsupported_answer_has_to_be_declined_too(
         else []
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -15203,7 +15420,8 @@ def test_an_optional_decline_may_be_made_and_need_not_be(
         else []
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]) if after != "declined-alone" else [],
@@ -15246,7 +15464,8 @@ def test_a_decline_is_carried_through_an_amendment(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     record_unsupported(ctx.state, _COMBINED_DECLINE.code)
-    tools["propose_plan"].func(
+    call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
@@ -15259,7 +15478,8 @@ def test_a_decline_is_carried_through_an_amendment(
 
     clear_unsupported(ctx.state)
 
-    amended = tools["propose_plan"].func(
+    amended = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision(rationale="Reconsidered.")]),
@@ -15376,7 +15596,8 @@ def test_a_plan_accounts_for_each_ask_once(
     for decline in declined:
         record_unsupported(ctx.state, decline.code)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
@@ -15513,7 +15734,8 @@ def _propose_for_creditors(
         )
         requirements.append(stock)
         answered.append(AskAnswer(ask=1, outputs=(stock.id,)))
-    return _tools_by_name()["propose_plan"].func(
+    return call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="general government debt service by creditor for 2031",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts(
@@ -15541,7 +15763,8 @@ def test_a_share_whose_whole_names_its_own_donor_is_refused_until_the_whole_span
 
     def propose(whole: DatasetRequirement) -> dict[str, Any]:
         period = Period(start=2015, end=2024)
-        return _tools_by_name()["propose_plan"].func(
+        return call_planner_tool(
+            _tools_by_name()["propose_plan"],
             question="What share of ODA to Kenya came from the United States each year?",
             answer_mode=AnswerMode.COMPUTED,
             decisions=drafts([decision()]),
@@ -15716,7 +15939,8 @@ def test_a_share_compares_its_whole_to_its_part_by_ref_where_the_pins_resolve_on
         reduction=Reduction.SUM,
         group_by=(GroupBy.PERIOD,),
     )
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="What share of ODA to Kenya came from the donors each year?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -15791,7 +16015,8 @@ def test_a_pooled_share_counts_the_members_its_whole_resolves_its_group_to(
             source_spec_id=pin,
         )
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="What share of G7 ODA to Kenya came from each G7 donor each year?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(
@@ -15843,7 +16068,8 @@ def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(
     assert recorded.ask_breakdowns == (AskBreakdown(ask=0, by=("creditor",)),)
     assert recorded.asks_across_years == (0,)
 
-    amended = _tools_by_name()["propose_plan"].func(
+    amended = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         answered=list(recorded.answered),
         amends_version=1,
         tool_context=ctx,
@@ -16094,7 +16320,8 @@ def test_a_decline_of_two_parties_stands_when_each_pin_holds_one_of_them(
     )
 
     def propose(declined: list[Decline]) -> dict[str, Any]:
-        return _tools_by_name()["propose_plan"].func(
+        return call_planner_tool(
+            _tools_by_name()["propose_plan"],
             question="general government debt service by creditor and debtor for 2031",
             answer_mode=AnswerMode.SERIES,
             decisions=drafts(
@@ -16198,7 +16425,8 @@ def test_an_answer_keeps_a_party_whose_members_it_names(
         (_EAC_SPEC, {"origin": 97}, ("creditor",)), asks=[_EAC_ASK], by=("debtor", "creditor")
     )
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="External debt service in 2022 for each East African Community country by creditor",
         answer_mode=AnswerMode.SERIES,
         answered=[{"ask": 0, "outputs": [output]}],
@@ -16340,7 +16568,8 @@ def test_a_breakdown_decline_counts_every_party_the_root_can_keep_on_its_pin(
     dataset = {**_EAC_REQUIREMENT, **requirement, "decision_ids": ["measure"]}
     fixes = DecisionFixes(among=RankAmong.POPULATION, across=tuple(dataset["across"]) or None)
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="External debt service in 2022 for each East African Community country by creditor",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision(fixes=fixes)]),
@@ -16374,7 +16603,8 @@ def test_an_open_party_its_ask_does_not_list_still_needs_its_scope_stated(
     """A party an ask totals across (`over`) reaches the plan in no breakdown, as here."""
     ctx = _creditor_context((_EAC_SPEC, {"origin": 97}, ("creditor",)), asks=[_EAC_ASK], by=by)
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="External debt service in 2022 for each East African Community country by creditor",
         answer_mode=AnswerMode.SERIES,
         answered=[{"ask": 0, "outputs": ["req_debt_service"]}],
@@ -16452,7 +16682,8 @@ def test_a_breakdown_decline_is_refused_on_a_copied_pin_an_amendment_carries(
     }
     ctx.state[ASK_BREAKDOWNS_STATE_KEY] = breakdowns
 
-    amended = _tools_by_name()["propose_plan"].func(
+    amended = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         answered=[AskAnswer(ask=0, outputs=("debt_service",))],
         declined=[_BY_CREDITOR],
         amends_version=1,
@@ -16482,7 +16713,8 @@ def test_a_carried_breakdown_decline_is_checked_against_the_amended_answers_pin(
     )
     assert recorded["outcome"] == Outcome.OK.value, recorded
 
-    amended = _tools_by_name()["propose_plan"].func(
+    amended = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         evidence_requirements=_creditor_requirements(["recipient"], ranked=False, pin=repinned),
         amends_version=1,
         tool_context=ctx,
@@ -16507,7 +16739,8 @@ def test_an_amendment_that_answers_a_declined_ask_replaces_the_decline(
     ctx = _FakeToolContext()
     ctx.state[ASKS_STATE_KEY] = _ASKS
     record_unsupported(ctx.state, _ASK_DECLINE.code)
-    tools["propose_plan"].func(
+    call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
@@ -16518,7 +16751,8 @@ def test_an_amendment_that_answers_a_declined_ask_replaces_the_decline(
     )
     clear_unsupported(ctx.state)
 
-    amended = tools["propose_plan"].func(
+    amended = call_planner_tool(
+        tools["propose_plan"],
         answered=[AskAnswer(ask=1, outputs=("multilateral",))],
         amends_version=1,
         tool_context=ctx,
@@ -16557,7 +16791,8 @@ def test_an_amendment_under_other_asks_accounts_for_them_from_scratch(
     ctx = _FakeToolContext()
     ctx.state[ASKS_STATE_KEY] = _ASKS
     record_unsupported(ctx.state, _ASK_DECLINE.code)
-    tools["propose_plan"].func(
+    call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts([decision()]),
@@ -16569,7 +16804,8 @@ def test_an_amendment_under_other_asks_accounts_for_them_from_scratch(
     ctx.state[ASKS_STATE_KEY] = asks
     clear_unsupported(ctx.state)
 
-    amended = tools["propose_plan"].func(
+    amended = call_planner_tool(
+        tools["propose_plan"],
         answered=answered,
         removed_evidence_requirements=["bilateral"],
         amends_version=1,
@@ -16686,7 +16922,8 @@ def test_a_period_rolling_from_its_start_is_pinned_from_the_first_year_the_datas
         period_end_open=True,
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         evidence_requirements=[
@@ -16750,7 +16987,8 @@ def test_a_start_that_follows_the_newest_data_is_refused_without_a_whole_history
         period_end_open=True,
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         evidence_requirements=[
@@ -16788,7 +17026,8 @@ def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_ope
         decision_ids=["measure"] if pin else [], source_spec_id=pin, period_end_open=end_open
     )
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=(
@@ -16836,7 +17075,8 @@ def test_a_period_rolling_open_over_a_pin_with_no_identity_on_record(
     save_pin_sources(ctx.state, {pin: PinSource(block=block, settled=True, warnings=warnings)})
     dataset = requirement(source_spec_id=pin, period_end_open=True)
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT)]),
@@ -16874,7 +17114,8 @@ def test_an_unpinned_period_rolling_at_its_end_is_recorded_for_the_translator_to
     ctx = _FakeToolContext()
     dataset = requirement(decision_ids=[], period_end_open=True)
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         evidence_requirements=[
@@ -17009,7 +17250,8 @@ def _propose_split(
     _show_block(ctx, _FRANCE_KENYA)
     ctx.state[ASKS_STATE_KEY] = list(asks)
     ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = list(across_years)
-    return _tools_by_name()["propose_plan"].func(
+    return call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=answer_mode,
         decisions=drafts(decisions) if amends_version is None else [],
@@ -17187,7 +17429,8 @@ def test_a_patch_naming_a_copy_s_id_names_a_requirement_of_its_own() -> None:
     first = _propose_split(
         ctx, [_aid_to_kenya(), _top_donor()], asks=_SERIES_AND_TOP, answered=answered
     )
-    removed = _tools_by_name()["propose_plan"].func(
+    removed = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=[],
@@ -17668,7 +17911,7 @@ async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     held. A dataset only discovery found, such as a referral's candidate, is on
     record in its log and read the same way."""
     reads = _DefinitionReads()
-    propose = _tools_reading(reads)["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_reading(reads)["propose_plan"])
     ctx = _FakeToolContext()
     if aid_held == "discovered":
         _discover_aid(ctx)
@@ -17739,7 +17982,8 @@ async def test_first_year_reads_name_each_read_propose_plan_can_still_make(
     )
 
     before = first_year_reads(ctx.state)
-    proposed = await _tools_reading(reads)["propose_plan"].func(
+    proposed = await call_planner_tool(
+        _tools_reading(reads)["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts(
@@ -17781,7 +18025,7 @@ async def test_a_first_year_read_gives_up_at_its_deadline() -> None:
 
 def test_propose_plan_declares_the_same_arguments_with_and_without_a_surface() -> None:
     declared = [
-        tools["propose_plan"]._get_declaration().model_dump(mode="json")
+        planner_tool_declaration(tools["propose_plan"]).model_dump(mode="json")
         for tools in (_tools_by_name(), _tools_reading(_DefinitionReads()))
     ]
 
@@ -17828,7 +18072,8 @@ def test_amendment_keeps_measure_choice_from_the_compiled_family(
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -17884,7 +18129,8 @@ def test_amendment_keeps_measure_choice_from_the_compiled_family(
     save_plan(ctx.state, Plan.model_validate(compiled.model_dump(mode="json")))
     save_log(ctx.state, DiscoveryLog(sources={dataset.id: {reminted: source}}))
 
-    second = tools["propose_plan"].func(
+    second = call_planner_tool(
+        tools["propose_plan"],
         evidence_requirements=[dataset.model_copy(update={"source_spec_id": sibling}), derived],
         amends_version=first["version"],
         tool_context=ctx,
@@ -18764,7 +19010,7 @@ async def test_a_double_count_refusal_names_the_wider_figure_by_its_label(
     )
 
     refused = await _us_2023(
-        _tools_reading(WholeCompiles())["propose_plan"].func,
+        functools.partial(call_planner_tool, _tools_reading(WholeCompiles())["propose_plan"]),
         ctx,
         decision(),
         part="health",
@@ -18923,7 +19169,8 @@ async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
             accept_provider_difference=accept,
         )
 
-    result = await _tools_reading(surface)["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(surface)["propose_plan"],
         question="Was a bigger share of US aid spent on health or on education in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -18988,7 +19235,8 @@ def test_comparing_two_quotients_counts_their_numerators_on_one_basis(
             denominator=RequirementSide(input_id="population"),
         )
 
-    refused = _tools_by_name()["propose_plan"].func(
+    refused = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="Did the US or the UK give more ODA per person in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -19103,7 +19351,8 @@ def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_the
     right = inclusive()
     _show_blocks(ctx, left, right)
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="US bilateral health aid plus US inclusive aid in 2023?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -19202,7 +19451,7 @@ def _three_country_plan(
     requirement over the three."""
     ctx = _FakeToolContext()
     ctx.state[ASKS_STATE_KEY] = [f"ODA to {country.title()}" for country in _COUNTRIES]
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     if shared:
         requirements = [requirement(id="all", entities=_country_entities(*_COUNTRIES))]
         outputs = ["all"] * len(_COUNTRIES)

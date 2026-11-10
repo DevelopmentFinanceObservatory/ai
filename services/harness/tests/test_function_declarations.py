@@ -22,6 +22,7 @@ from planner.agent import create_planner_agent
 from planner.declaration import _referred
 
 from .orchestrator_fakes import no_executor, no_resolver
+from .planner_tools import planner_tool_declaration
 
 # Every LLM agent the harness builds, by the builder that builds it: the
 # planner as the server builds it, the planner its own eval set scores, and the
@@ -60,7 +61,7 @@ def _refs_beside_other_keys(node: Any, path: str) -> list[str]:
 def test_no_declaration_puts_a_key_beside_a_ref(agent_name: str) -> None:
     agent = _AGENTS[agent_name]()
     tools = [tool for tool in agent.tools if isinstance(tool, BaseTool)]
-    declarations = [tool._get_declaration() for tool in tools]
+    declarations = [planner_tool_declaration(tool) for tool in tools]
 
     assert len(tools) == len(agent.tools)
     assert all(declarations)

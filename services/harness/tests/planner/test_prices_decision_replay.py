@@ -65,6 +65,7 @@ from translator.discovery import (
 )
 from translator.referral import Referral, ReferralKind, save_referral
 
+from ..planner_tools import call_planner_tool
 from ..session_events import response_event
 from .test_agent import _clarify_answer_event, _clarify_ask_event, _FakeToolContext, _option
 
@@ -261,7 +262,7 @@ def _propose(
     tools: dict[str, Any], ctx: _FakeToolContext, arguments: Mapping[str, Any]
 ) -> dict[str, Any]:
     """The answer of one `propose_plan` call stating `arguments`."""
-    return asyncio.run(tools["propose_plan"].func(**arguments, tool_context=ctx))
+    return asyncio.run(call_planner_tool(tools["propose_plan"], **arguments, tool_context=ctx))
 
 
 _PRICES_SLOT = f"user_prices_{PART}"
@@ -621,7 +622,7 @@ def test_a_candidate_with_no_search_to_read_it_asks_for_another_pin() -> None:
     _, ctx = after_hand_back(envelope=as_candidates())
     (propose,) = [tool for tool in build_planner_tools() if tool.name == "propose_plan"]
 
-    answer = propose.func(**_re_pin(), tool_context=ctx)
+    answer = call_planner_tool(propose, **_re_pin(), tool_context=ctx)
 
     assert (answer["outcome"], answer["code"]) == ("refused", "scope_unread"), answer
     assert answer["action"]["needs"] == ["evidence_requirements"]

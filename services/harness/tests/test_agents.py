@@ -24,6 +24,8 @@ from harness.settings import Settings
 from planner.settings import AgentSettings
 from translator import discovery
 
+from .planner_tools import call_planner_tool
+
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,8 +103,8 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
     agent = create_planner_with_translator(settings=Settings(), surface=surface)
     tools = {tool.name: tool for tool in agent.tools if isinstance(tool, FunctionTool)}
 
-    answer = await tools["get_skill"].func(
-        skill_id="dfo-faq", tool_context=SimpleNamespace(state={})
+    answer = await call_planner_tool(
+        tools["get_skill"], skill_id="dfo-faq", tool_context=SimpleNamespace(state={})
     )
 
     assert answer == "# DFO FAQ\n"

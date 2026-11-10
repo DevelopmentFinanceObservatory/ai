@@ -53,6 +53,7 @@ from planner.shapes import one_figure_remedy, pooling_remedy
 from planner.tool_results import Outcome, ProblemCode
 
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool
 from ..test_plan_display import _retrieve_then_aggregate_plan
 
 ASK = "how total aid to Ghana changed between 2015 and 2022"
@@ -220,7 +221,8 @@ def test_a_result_per_donor_rests_on_a_decision_stating_it(
     requirements = _requirements(variant)
     tools = {tool.name: tool for tool in build_planner_tools()}
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question=ASK,
         answer_mode=mode,
         decisions=drafts(_decisions(variant, decision)),
@@ -260,7 +262,8 @@ def test_a_result_per_donor_is_offered_the_donors_pooled_per_year(
     requirements = _requirements("per-donor-unstated")
     tools = {tool.name: tool for tool in build_planner_tools()}
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question=ASK,
         answer_mode=COMPUTED,
         decisions=drafts(_decisions("per-donor-unstated", decision)),
@@ -281,7 +284,8 @@ def test_one_refusal_names_every_result_kept_per_donor(
     tools = {tool.name: tool for tool in build_planner_tools()}
     change = _growth("aid").model_copy(update={"id": "change"})
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         question=ASK,
         answer_mode=COMPUTED,
         decisions=drafts([decision()]),

@@ -26,6 +26,8 @@ from planner.agent import build_skill_tools, create_planner_agent
 from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
 from planner.workflow import ToolId
 
+from ..planner_tools import call_planner_tool, planner_tool_declaration
+
 
 class _RecordingSurface:
     """A `ToolSurface` that records each call and answers with one fixed result."""
@@ -55,7 +57,7 @@ def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> d
     """Each tool's function, called with a tool context over `state`."""
     tool_context = SimpleNamespace(state={} if state is None else state)
     return {
-        tool.name: functools.partial(tool.func, tool_context=tool_context)
+        tool.name: functools.partial(call_planner_tool, tool, tool_context=tool_context)
         for tool in build_skill_tools(surface)
     }
 
@@ -67,7 +69,7 @@ def _get_skill_declaration(agent: Any) -> Any:
     get_skill = next(
         tool for tool in agent.tools if isinstance(tool, FunctionTool) and tool.name == "get_skill"
     )
-    declaration = get_skill._get_declaration()
+    declaration = planner_tool_declaration(get_skill)
     assert declaration is not None
     return declaration
 

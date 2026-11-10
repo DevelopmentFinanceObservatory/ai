@@ -101,6 +101,7 @@ from pydantic import ValidationError
 from submission.service import OneYear, _window_pins
 
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool
 
 ASK = "the donors that give the most aid to Kenya"
 OTHER_ASK = "how aid to Kenya has moved"
@@ -250,7 +251,8 @@ def _propose(
     """
     tools = {tool.name: tool for tool in build_planner_tools(reads_user_words=reads_user_words)}
     recorded = load_plan(ctx.state)
-    return tools["propose_plan"].func(
+    return call_planner_tool(
+        tools["propose_plan"],
         question=ASK,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(decisions),
