@@ -4666,19 +4666,16 @@ async def test_get_skill_loads_a_skill_through_the_tool_surface():
     assert loaded == {"skill": "---\nname: ODA\n---\nAid is..."}
 
 
-async def test_get_skill_file_reads_on_with_the_offset_and_digest_a_page_named():
+async def test_get_skill_reads_a_file_and_on_with_the_offset_and_digest_a_page_named():
     surface = FakeSurface(ToolCallResult(is_error=False, text="the rest"))
     tools, ctx = _tools(surface=surface)
 
-    read = await tools["get_skill_file"](
-        "oda-measures", "SKILL.md", ctx, offset=32000, digest="sha256:" + "0" * 64
+    read = await tools["get_skill"](
+        "oda-measures", ctx, path="SKILL.md", offset=32000, digest="sha256:" + "0" * 64
     )
-    first = await tools["get_skill_file"]("oda-measures", "references/grant.md", ctx)
+    first = await tools["get_skill"]("oda-measures", ctx, path="references/grant.md")
 
-    assert (surface.calls[0][0].server, surface.calls[0][0].name) == (
-        "data-mcp",
-        "get_skill_file",
-    )
+    assert {(tool.server, tool.name) for tool, _ in surface.calls} == {("data-mcp", "get_skill")}
     assert [arguments for _, arguments in surface.calls] == [
         {
             "skill_id": "oda-measures",
@@ -4686,9 +4683,33 @@ async def test_get_skill_file_reads_on_with_the_offset_and_digest_a_page_named()
             "offset": 32000,
             "digest": "sha256:" + "0" * 64,
         },
-        {"skill_id": "oda-measures", "path": "references/grant.md", "offset": 0},
+        {"skill_id": "oda-measures", "path": "references/grant.md"},
     ]
     assert read == first == {"skill": "the rest"}
+
+
+@pytest.mark.parametrize(
+    ("path", "budget", "kind"),
+    [(None, "get_skill", "first page"), ("SKILL.md", "get_skill_file", "file")],
+    ids=["first-pages", "files"],
+)
+async def test_first_page_reads_and_file_reads_each_spend_their_own_limit(
+    path: str | None, budget: str, kind: str
+):
+    surface = FakeSurface(ToolCallResult(is_error=False, text="page"))
+    tools, ctx = _tools(surface=surface)
+    other = None if path else "SKILL.md"
+
+    for _ in range(BUDGETS[budget]):
+        assert await tools["get_skill"]("oda-measures", ctx, path=path) == {"skill": "page"}
+    spent = await tools["get_skill"]("oda-measures", ctx, path=path)
+    still_open = await tools["get_skill"]("oda-measures", ctx, path=other)
+
+    assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
+    assert spent["error"].startswith("get_skill reading a ") and kind in spent["error"]
+    assert "get_skill_file" not in spent["error"]
+    assert still_open == {"skill": "page"}
+    assert len(surface.calls) == BUDGETS[budget] + 1
 
 
 async def test_get_skill_reports_a_refusal_and_its_absence():
@@ -4731,23 +4752,14 @@ class UnreachableSurface(FakeSurface):
         )
 
 
-@pytest.mark.parametrize(
-    ("tool", "arguments"),
-    [
-        ("get_skill", ("oda-measures",)),
-        ("get_skill_file", ("oda-measures", "references/grant.md")),
-    ],
-)
-async def test_a_skill_read_that_does_not_complete_is_a_retryable_error_for_the_model(
-    tool: str, arguments: tuple[str, ...]
-):
+async def test_a_skill_read_that_does_not_complete_is_a_retryable_error_for_the_model():
     surface = UnreachableSurface(ToolCallResult(is_error=False, text=""))
     tools, ctx = _tools(surface=surface)
 
-    answered = await tools[tool](*arguments, ctx)
+    answered = await tools["get_skill"]("oda-measures", ctx)
 
     assert answered == {
-        "error": f"{tool} could not reach data-mcp just now. Call it again, or answer "
+        "error": "get_skill could not reach data-mcp just now. Call it again, or answer "
         "without this skill.",
         "code": "transient_unavailable",
         "retry_mode": "retry_after_delay",
@@ -4763,13 +4775,11 @@ async def test_a_skill_read_against_a_server_that_is_down_is_a_retryable_error_f
     assert _stated(answered) == ("transient_unavailable", "retry_after_delay")
 
 
-@pytest.mark.parametrize("tool", ["get_skill", "get_skill_file"])
-async def test_a_skill_read_that_cannot_complete_on_a_retry_is_not_offered_one(tool: str):
+async def test_a_skill_read_that_cannot_complete_on_a_retry_is_not_offered_one():
     surface = UnreachableSurface(ToolCallResult(is_error=False, text=""), retryable=False)
     tools, ctx = _tools(surface=surface)
-    arguments = ("oda-measures",) if tool == "get_skill" else ("oda-measures", "a.md")
 
-    answered = await tools[tool](*arguments, ctx)
+    answered = await tools["get_skill"]("oda-measures", ctx)
 
     assert _stated(answered) == ("tool_not_configured", "do_not_retry")
     assert "Call it again" not in answered["error"]

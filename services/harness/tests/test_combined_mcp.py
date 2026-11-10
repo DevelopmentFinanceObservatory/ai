@@ -68,7 +68,6 @@ from data_mcp.definition_store import (
     set_store,
 )
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
-from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.mint_ledger import MintLedger
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.settings import Settings as DataMcpSettings
@@ -311,8 +310,7 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     assert {"search", "get_data", "aggregate", *PRESENTATION_TOOLS} <= _described(
         combined_tools
     ).keys()
-    # `get_data` is listed without `place_types`, `get_skill` without `names_get_skill`,
-    # every verb, `write_component` and
+    # `get_data` is listed without `place_types`, every verb, `write_component` and
     # `describe_frame` without `rebuild_lost_frames`, every verb without
     # `rolling_follows_tree`, and `growth`, `rank` and `filter` without the
     # harness's rolling arguments
@@ -321,7 +319,7 @@ async def test_the_combined_server_lists_what_the_direct_mounts_list(
     combined_described, direct_described = _described(combined_tools), _described(direct_tools)
     assert [
         name for name in combined_described if combined_described[name] != direct_described[name]
-    ] == ["get_data", "get_skill", *PUBLIC_VERBS, "write_component", "describe_frame"]
+    ] == ["get_data", *PUBLIC_VERBS, "write_component", "describe_frame"]
     assert any(tool.output_schema is not None for tool in direct_tools)
     assert [tool.output_schema for tool in combined_tools] == [None] * len(combined_tools)
     assert combined_templates == direct_templates
@@ -1102,7 +1100,7 @@ async def test_a_public_get_data_always_asks_for_the_type_columns(sent: dict[str
         await client.call_tool("aggregate", {"frame_ref": UNHELD_FRAME, "aggregation": "sum"})
 
     assert forwarded.arguments == [
-        {"skill_id": "oda", NAMES_GET_SKILL: True},
+        {"skill_id": "oda"},
         {**arguments, "place_types": True},
         {
             "frame_ref": UNHELD_FRAME,

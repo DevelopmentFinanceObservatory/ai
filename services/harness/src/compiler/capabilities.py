@@ -319,7 +319,6 @@ _SKILL_TOOL_REASON = (
 
 EXCLUDED_TOOLS: tuple[ExcludedTool, ...] = (
     ExcludedTool(tool=_data("get_skill"), reason=_SKILL_TOOL_REASON),
-    ExcludedTool(tool=_data("get_skill_file"), reason=_SKILL_TOOL_REASON),
     ExcludedTool(
         tool=_data("sources"),
         reason=(

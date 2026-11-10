@@ -3,8 +3,8 @@
 `search` asks data-mcp's `search` once for every part of a question;
 `fetch` retrieves one dataset and describes its frames; `make_charts`
 draws on the canvas through the graph's own presentation checks;
-`get_skill` loads a skill a search result named and `get_skill_file`
-reads on through it; `recall` returns an earlier turn's plan record,
+`get_skill` loads a skill a search result named, and a file it links
+with `path`; `recall` returns an earlier turn's plan record,
 readings or a canvas component in full; `explain_dfo` reads dfo-faq, DFO's
 own description of itself, beside the live counts of what DFO holds
 (`harness.dfo_faq`). `ask_user` and `plan` record one pending action for
@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
-from typing import Any, Literal, Protocol, get_args, get_type_hints
+from typing import Annotated, Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
 import pyarrow as pa
@@ -102,7 +102,6 @@ from planner.plan import (
     with_blocks,
 )
 from planner.skills import GET_SKILL
-from planner.workflow import ToolId
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 from submission.prices_choice import measure_key
 from translator.discovery import (
@@ -205,9 +204,6 @@ _SCOPE_REPLACES = {"entities": "entities", "window": "requested_window", "facets
 # Skills a search result names, as shown to the model, as data-mcp's search
 # digest shows them; the rest are counted.
 _SKILLS_SHOWN = 5
-# The orchestrator reads a skill's files through data-mcp's `get_skill_file`; the
-# planner's one skill tool is `get_skill` (`planner.skills`).
-GET_SKILL_FILE = ToolId(server="data-mcp", name="get_skill_file")
 
 TOOL_NAMES = (
     "search",
@@ -216,7 +212,6 @@ TOOL_NAMES = (
     "ask_user",
     "plan",
     "get_skill",
-    "get_skill_file",
     "explain_dfo",
     "recall",
     "remove_cards",
@@ -1113,13 +1108,16 @@ def _figures_unread() -> dict[str, Any]:
     }
 
 
-def _spend(tool_context: ToolContext, tool: str) -> dict[str, Any] | None:
-    """Count one call of `tool`; the failed answer when its budget is spent."""
+def _spend(
+    tool_context: ToolContext, tool: str, *, named: str | None = None
+) -> dict[str, Any] | None:
+    """Count one call under the budget `tool`; the failed answer when it is
+    spent. The answer names the call as `named`, which defaults to `tool`."""
     used = _used(tool_context, tool)
     if used >= _budgets(tool_context)[tool]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
-            f"{tool} has been called {used} time(s) this turn, its limit. {_ANSWER_NOW}",
+            f"{named or tool} has been called {used} time(s) this turn, its limit. {_ANSWER_NOW}",
         )
     count_call(tool_context.state, tool)
     return None
@@ -2607,17 +2605,20 @@ def build_orchestrator_tools(
             ),
         )
 
-    async def read_skill(
-        tool: ToolId, arguments: dict[str, Any], tool_context: ToolContext
-    ) -> dict[str, Any]:
-        """data-mcp's skill text for one call, or the refusal's message.
+    async def read_skill(arguments: dict[str, Any], tool_context: ToolContext) -> dict[str, Any]:
+        """data-mcp's `get_skill` text for one call, or the refusal's message.
 
         A call that does not complete, `compiler.surface`'s per-tool timeout or
         an unreachable data-mcp, is an error the model may retry, as
         `planner.skills` answers the planner, so the turn goes on. One its
         raise site marked not `retryable` answers as a server with no skills.
         """
-        spent = _spend(tool_context, tool.name)
+        reads_file = "path" in arguments
+        spent = _spend(
+            tool_context,
+            "get_skill_file" if reads_file else "get_skill",
+            named="get_skill reading a file" if reads_file else "get_skill reading a first page",
+        )
         if spent:
             return spent
         if surface is None:
@@ -2625,10 +2626,10 @@ def build_orchestrator_tools(
                 HarnessCode.TOOL_NOT_CONFIGURED, "skills are not available on this server"
             )
         try:
-            result = await surface.call_tool(tool=tool, arguments=arguments)
+            result = await surface.call_tool(tool=GET_SKILL, arguments=arguments)
         except ToolSurfaceUnavailableError as exc:
             logger.warning(
-                "orchestrator %s(%s) did not complete: %s", tool.name, dict(arguments), exc
+                "orchestrator %s(%s) did not complete: %s", GET_SKILL.name, dict(arguments), exc
             )
             if not exc.retryable:
                 return _failed(
@@ -2636,7 +2637,7 @@ def build_orchestrator_tools(
                 )
             return _failed(
                 HarnessCode.TRANSIENT_UNAVAILABLE,
-                f"{tool.name} could not reach data-mcp just now. Call it again, or answer "
+                f"{GET_SKILL.name} could not reach data-mcp just now. Call it again, or answer "
                 "without this skill.",
                 retry_mode=RetryMode.RETRY_AFTER_DELAY,
             )
@@ -2647,31 +2648,35 @@ def build_orchestrator_tools(
             )
         return {"skill": result.text}
 
-    async def get_skill(skill_id: str, tool_context: ToolContext) -> dict[str, Any]:
+    async def get_skill(
+        skill_id: Annotated[str, Field(description="The id of a skill a search result named.")],
+        tool_context: ToolContext,
+        path: Annotated[
+            str | None,
+            Field(
+                description="A file's path exactly as the list gives it, or SKILL.md. A file "
+                "refused as not found is not retried under a guessed path."
+            ),
+        ] = None,
+        offset: Annotated[
+            int, Field(description="Where a page starts: 0, or the offset a closing line names.")
+        ] = 0,
+        digest: Annotated[
+            str | None, Field(description="The digest a closing line names, on a continuation.")
+        ] = None,
+    ) -> dict[str, Any]:
         """Load a skill a search result named: the definitions, caveats and
         methods an answer in its domain rests on. Returns the first page of
-        the skill's text, then the files it links. A page that stops short
-        closes with the get_skill_file call that reads on."""
-        return await read_skill(GET_SKILL, {"skill_id": skill_id}, tool_context)
-
-    async def get_skill_file(
-        skill_id: str,
-        path: str,
-        tool_context: ToolContext,
-        offset: int = 0,
-        digest: str | None = None,
-    ) -> dict[str, Any]:
-        """Read one file of a skill get_skill loaded, or the next page of one.
-
-        `path` is a file exactly as get_skill lists it, or SKILL.md. A page
-        that stops short of the end closes with a line naming the next call,
-        with its `offset` and `digest`; make that call to read on. A file
-        refused as not found is not retried under a guessed path.
-        """
-        arguments: dict[str, Any] = {"skill_id": skill_id, "path": path, "offset": offset}
+        the skill's text and the files it links, or with `path` one of those
+        files, a page at a time."""
+        arguments: dict[str, Any] = {"skill_id": skill_id}
+        if path is not None:
+            arguments["path"] = path
+        if offset:
+            arguments["offset"] = offset
         if digest is not None:
             arguments["digest"] = digest
-        return await read_skill(GET_SKILL_FILE, arguments, tool_context)
+        return await read_skill(arguments, tool_context)
 
     async def explain_dfo() -> dict[str, Any]:
         """What the Development Finance Observatory is and what this assistant
@@ -2801,7 +2806,6 @@ def build_orchestrator_tools(
                 ask_user,
                 plan,
                 get_skill,
-                get_skill_file,
                 explain_dfo,
                 recall,
                 remove_cards_tool,

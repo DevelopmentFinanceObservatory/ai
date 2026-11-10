@@ -32,7 +32,6 @@ from typing import Any, get_args
 
 import pytest
 from compiler.surface import ToolSurfaceUnavailableError
-from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
@@ -1257,11 +1256,10 @@ def _recorded_surface() -> Any:
 async def test_the_recorded_surface_answers_the_planners_one_skill_tool(
     arguments: dict[str, Any], text: str
 ) -> None:
-    """The switch is left out of the recording's key, `path` picks the file entry, and only
-    a page's printed call line is renamed."""
+    """`path` picks the file entry, and only a page's printed call line is renamed."""
     surface = _recorded_surface()
 
-    result = await surface.call_tool(tool=GET_SKILL, arguments={**arguments, NAMES_GET_SKILL: True})
+    result = await surface.call_tool(tool=GET_SKILL, arguments=arguments)
 
     assert result.text.endswith(text)
     assert surface.misses == []
@@ -1274,9 +1272,7 @@ async def test_the_recorded_surface_passes_other_calls_through_and_misses_what_i
         tool=ToolId(server="data-mcp", name="describe"), arguments={"x": 1}
     )
     with pytest.raises(ToolSurfaceUnavailableError):
-        await surface.call_tool(
-            tool=GET_SKILL, arguments={"skill_id": "nope", NAMES_GET_SKILL: True}
-        )
+        await surface.call_tool(tool=GET_SKILL, arguments={"skill_id": "nope"})
 
     assert passed.text == "get_skill_file stays."
     assert surface.misses == [entry.surface_key("get_skill", {"skill_id": "nope"})]

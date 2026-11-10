@@ -1358,19 +1358,20 @@ class _Translator:
         # The failed steps a later try can still recover, by `_retry_key`:
         # each one's wire step id, label and tool.
         self._failed: dict[tuple[str, str], list[_FailedStep]] = {}
-        # Failed steps whose refusal asked for a corrected call, by tool, each
-        # with the number of calls made before it: a later call of the tool
-        # that completes corrects them.
-        self._uncorrected: dict[str, list[tuple[int, _FailedStep]]] = {}
+        # Failed steps whose refusal asked for a corrected call, by
+        # `_correction_key`, each with the number of calls made before it: a
+        # later call under the same key that completes corrects them.
+        self._uncorrected: dict[_CorrectionKey, list[tuple[int, _FailedStep]]] = {}
         # Failed `make_charts` steps whose refused charts each asked for a
         # corrected chart, each with the number of calls made before it and
         # the `_chart_key` of those charts: a later call that completes and
         # asks for every one of them again corrects it.
         self._unredrawn: list[tuple[int, frozenset[_ChartKey], _FailedStep]] = []
-        # Quiet calls refused as ones to correct, by tool, each with the
-        # number of calls made before it and its failure sentence: shown at
-        # the segment's end unless a later call of the tool completes.
-        self._held: dict[str, list[tuple[int, str]]] = {}
+        # Quiet calls refused as ones to correct, by `_correction_key`, each
+        # with the number of calls made before it and its failure sentence:
+        # shown at the segment's end unless a later call under the key
+        # completes.
+        self._held: dict[_CorrectionKey, list[tuple[int, str]]] = {}
         # The number of agent tool calls made so far, and each open call's
         # place among them, by call id.
         self._calls = 0
@@ -2030,24 +2031,29 @@ class _Translator:
         )
 
     def _failed_step(
-        self, key: tuple[str, str], frame: ActivityStep, *, correctable: bool = False
+        self,
+        key: tuple[str, str],
+        frame: ActivityStep,
+        *,
+        correction: _CorrectionKey | None = None,
     ) -> ActivityStep:
         """`frame`, a failed step, kept under `key` for a later try to
-        recover, or under its tool for any later call of it when its refusal
-        asked the model to correct the call (`correctable`)."""
+        recover, or under `correction` for any later call under the same
+        `_correction_key` when its refusal asked the model to correct the
+        call."""
         step = (frame.step_id, frame.label, frame.tool)
-        if correctable and frame.tool:
-            self._uncorrected.setdefault(frame.tool, []).append((self._calls, step))
+        if correction is not None:
+            self._uncorrected.setdefault(correction, []).append((self._calls, step))
         else:
             self._failed.setdefault(key, []).append(step)
         return frame
 
-    def _corrected(self, tool: str, order: int) -> list[_FailedStep]:
-        """The shown steps awaiting correction under `tool` that a completed
-        call, the `order`th made, corrects (`_take_corrected`), and the held
-        refusals it corrects dropped."""
-        _take_corrected(self._held, tool, order)
-        return _take_corrected(self._uncorrected, tool, order)
+    def _corrected(self, correction: _CorrectionKey, order: int) -> list[_FailedStep]:
+        """The shown steps awaiting correction under `correction` that a
+        completed call, the `order`th made, corrects (`_take_corrected`), and
+        the held refusals it corrects dropped."""
+        _take_corrected(self._held, correction, order)
+        return _take_corrected(self._uncorrected, correction, order)
 
     def _redrawn(self, args: Mapping[str, Any], order: int) -> list[_FailedStep]:
         """The failed `make_charts` steps that a completed call of it, the
@@ -2193,7 +2199,9 @@ class _Translator:
             if quiet is not None:
                 name, args = quiet
                 if failed and _asks_correction(answer):
-                    self._held.setdefault(name, []).append((self._calls, _answer_failure(answer)))
+                    self._held.setdefault(_correction_key(name, args), []).append(
+                        (self._calls, _answer_failure(answer))
+                    )
                 elif failed:
                     frames.append(
                         self._failed_step(
@@ -2208,7 +2216,7 @@ class _Translator:
                         )
                     )
                 else:
-                    corrected = self._corrected(name, order)
+                    corrected = self._corrected(_correction_key(name, args), order)
                     frames.extend(self._recover(_retry_key(name, args), corrected=corrected))
                 continue
             opened = self._open_calls.get(response.id or "")
@@ -2234,11 +2242,16 @@ class _Translator:
                 self._unredrawn.append((self._calls, to_correct, (step_id, label, response.name)))
                 frames.append(frame)
             elif status is StepStatus.FAILED:
-                frames.append(self._failed_step(key, frame, correctable=_asks_correction(answer)))
+                correction = _correction_key(response.name or "", args)
+                frames.append(
+                    self._failed_step(
+                        key, frame, correction=correction if _asks_correction(answer) else None
+                    )
+                )
             else:
                 frames.append(frame)
                 if status is StepStatus.COMPLETE:
-                    corrected = self._corrected(response.name or "", order)
+                    corrected = self._corrected(_correction_key(response.name or "", args), order)
                     if charted:
                         corrected += self._redrawn(args, order)
                     frames.extend(self._recover(key, corrected=corrected))
@@ -2437,7 +2450,7 @@ class _Translator:
             self._step(
                 None, _tool_call_label(tool, {}), StepStatus.FAILED, tool=tool, detail=detail
             )
-            for tool, held in self._held.items()
+            for (tool, _), held in self._held.items()
             for _, detail in held
         )
         self._held.clear()
@@ -2520,14 +2533,26 @@ _PLAN_MADE = ("plan", "made")
 type _FailedStep = tuple[str, str, str | None]
 
 
-def _take_corrected[T](queue: dict[str, list[tuple[int, T]]], tool: str, order: int) -> list[T]:
-    """The entries `queue` holds under `tool` that a completed call, the
+type _CorrectionKey = tuple[str, bool]
+
+
+def _correction_key(name: str, args: Mapping[str, Any]) -> _CorrectionKey:
+    """What a later completed call must share with a refused one to correct it:
+    the tool, and for `get_skill` whether the call reads a file, given a `path`,
+    or a skill's first page."""
+    return (name, name == "get_skill" and "path" in args)
+
+
+def _take_corrected[T](
+    queue: dict[_CorrectionKey, list[tuple[int, T]]], key: _CorrectionKey, order: int
+) -> list[T]:
+    """The entries `queue` holds under `key` that a completed call, the
     `order`th made, corrects, taken out of it: those refused before it was
     made. A call made beside a refused one, in the same batch, corrects
     nothing."""
-    queued = queue.pop(tool, [])
+    queued = queue.pop(key, [])
     if kept := [entry for entry in queued if entry[0] >= order]:
-        queue[tool] = kept
+        queue[key] = kept
     return [entry for before, entry in queued if before < order]
 
 
@@ -2541,8 +2566,8 @@ def _retry_key(name: str, args: Mapping[str, Any]) -> tuple[str, str]:
 
 
 # Agent tools whose calls show only when they fail.
-_QUIET_CALLS = frozenset({"plan", "get_skill", "get_skill_file"})
-_SKILL_READS = frozenset({"get_skill", "get_skill_file"})
+_QUIET_CALLS = frozenset({"plan", "get_skill"})
+_SKILL_READS = frozenset({"get_skill"})
 # The tools whose results the agent's next model call reads under a status
 # line, latest stage first: a batch that mixes them is named by the first.
 _READING_STAGES = ("make_charts", "fetch", "search", "recall")
@@ -2559,7 +2584,7 @@ _WORKING_OUT_NEXT_STEP = "Working out the next step"
 # and checks its data, a skill read goes through the surface, `make_charts`
 # reads back a card on the canvas), shown only when they fail.
 _UNSHOWN_RECORDED_TOOLS = frozenset(
-    {"get_data", "describe_frame", "describe_component", "get_skill", "get_skill_file"}
+    {"get_data", "describe_frame", "describe_component", "get_skill"}
 )
 
 _ORCHESTRATOR_TOOL_LABELS = {
@@ -2571,7 +2596,6 @@ _ORCHESTRATOR_TOOL_LABELS = {
     "recall": "Looking back at an earlier turn",
     "remove_cards": "Removing cards from the canvas",
     "get_skill": "Reading background notes",
-    "get_skill_file": "Reading background notes",
 }
 
 

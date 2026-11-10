@@ -3,12 +3,11 @@
 It is an ADK function tool over data-mcp's `get_skill`, called through the
 harness's `compiler.surface.ToolSurface`, in the shape the public MCP surface
 offers: the skill's first page, or one file of it when `path` is given, with
-`offset` and `digest` to read on. Every call sends `NAMES_GET_SKILL`, so each
-page names `get_skill` and nothing the model reads names a tool it lacks. A call
-answers with data-mcp's text as it came back, a refusal's included: an unknown id
-refuses `skill_not_found`, and a deployment with no Skills API refuses
-`capability_unavailable`, which the planner reads and drafts on without the
-skill. A call that does not complete answers with one sentence saying so.
+`offset` and `digest` to read on. A call answers with data-mcp's text as it came
+back, a refusal's included: an unknown id refuses `skill_not_found`, and a
+deployment with no Skills API refuses `capability_unavailable`, which the planner
+reads and drafts on without the skill. A call that does not complete answers with
+one sentence saying so.
 
 Each answer data-mcp serves without an error is also recorded in session
 state (`SKILLS_READ_STATE_KEY`), so a later run of the same plan can be shown
@@ -18,12 +17,10 @@ what an earlier run read (`harness.planner_seam`) instead of reading it again.
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Mapping
 from typing import Annotated, Any
 
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
-from data_mcp.get_skill_tool import NAMES_GET_SKILL
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from pydantic import Field
@@ -52,21 +49,6 @@ def skills_read(state: SessionState) -> list[dict[str, Any]]:
     return list(state.get(SKILLS_READ_STATE_KEY) or ())
 
 
-# The tool name in a call line a page prints, `get_skill_file(skill_id=...`.
-_FILE_CALL_LINE = re.compile(r"\bget_skill_file(?=\(skill_id=)")
-
-
-def name_get_skill_in_call_lines(text: str) -> str:
-    """`text` with each printed `get_skill_file(skill_id=...` call line naming `get_skill`.
-
-    The planner holds one tool, `get_skill`, which takes the same arguments. A page
-    stored before that, and a recording made from data-mcp's own two-tool shape,
-    print the other name. Prose that mentions `get_skill_file` stays as written.
-    Delete this once no stored turn predates the single tool.
-    """
-    return _FILE_CALL_LINE.sub("get_skill", text)
-
-
 def skill_page_key(page: Mapping[str, Any]) -> str:
     """The state key a skill page's text is stored under, from its skill, file and offset."""
     return f"planner:skill_page:{page['skill_id']}:{page['path'] or ''}:{page['offset']}"
@@ -86,8 +68,9 @@ async def _call(
     try:
         result = await surface.call_tool(tool=GET_SKILL, arguments=arguments)
     except ToolSurfaceUnavailableError as exc:
-        sent = {name: value for name, value in arguments.items() if name != NAMES_GET_SKILL}
-        logger.warning("planner get_skill(%s) did not complete; drafting without it: %s", sent, exc)
+        logger.warning(
+            "planner get_skill(%s) did not complete; drafting without it: %s", dict(arguments), exc
+        )
         return "get_skill could not reach data-mcp just now. Draft the plan without this skill."
     if not result.is_error:
         page = {
@@ -130,7 +113,7 @@ def build_skill_tools(surface: ToolSurface) -> list[FunctionTool]:
             str | None, Field(description="The digest a closing line names, on a continuation.")
         ] = None,
     ) -> str:
-        arguments: dict[str, object] = {"skill_id": skill_id, NAMES_GET_SKILL: True}
+        arguments: dict[str, object] = {"skill_id": skill_id}
         if path is not None:
             arguments["path"] = path
         if offset:

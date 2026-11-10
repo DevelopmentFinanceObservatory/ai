@@ -1931,7 +1931,6 @@ _FIX_SAMPLES: dict[str, tuple[str, dict[str, Any]]] = {
             "path": "references/core-oda.md",
             "digest": "sha256:" + "0" * 64,
             "current_digest": "sha256:" + "1" * 64,
-            "tool": "get_skill",
         },
     ),
 }

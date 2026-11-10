@@ -56,8 +56,7 @@ PAGE_CHARS = 32_000
 
 _UNMOUNTED_DETAIL = "this deployment does not serve the Skills API"
 
-# The tool a skill read's `request_invalid` names. `get_skill_file` takes the
-# same arguments, and the public server lists only `get_skill`.
+# The tool a skill read's `request_invalid` names.
 _SKILL_TOOL = "get_skill"
 
 _MAX_AGE = re.compile(r"(?:^|,)\s*max-age\s*=\s*(\d+)\s*(?:,|$)", re.IGNORECASE)
@@ -313,15 +312,28 @@ def offset_refusal(offset: int, *, path: str, length: int) -> ToolRefusal | None
     )
 
 
-def continuation_line(
-    *, skill_id: str, path: str, page: Page, length: int, digest: str, tool: str = "get_skill"
-) -> str:
-    """The closing line of a page that stops short of the end: the exact `tool` call next."""
+def continuation_line(*, skill_id: str, path: str, page: Page, length: int, digest: str) -> str:
+    """The closing line of a page that stops short of the end: the exact call next."""
     return (
         f"This page ends at character {page.next_offset:,} of {length:,}. Read the rest with "
-        f'{tool}(skill_id="{skill_id}", path="{path}", offset={page.next_offset}, '
+        f'get_skill(skill_id="{skill_id}", path="{path}", offset={page.next_offset}, '
         f'digest="{digest}").'
     )
+
+
+# The tool name in a call line a page prints, `get_skill_file(skill_id=...`.
+_FILE_CALL_LINE = re.compile(r"\bget_skill_file(?=\(skill_id=)")
+
+
+def name_get_skill_in_call_lines(text: str) -> str:
+    """`text` with each printed `get_skill_file(skill_id=...` call line naming `get_skill`.
+
+    Both agents hold one skill tool, `get_skill`, which takes the same arguments. A
+    page stored before that, and a recording made from data-mcp's two-tool shape,
+    print the other name. Prose that mentions `get_skill_file` stays as written.
+    Delete this once no stored turn predates the single tool.
+    """
+    return _FILE_CALL_LINE.sub("get_skill", text)
 
 
 def with_closing_line(page_text: str, line: str) -> str:

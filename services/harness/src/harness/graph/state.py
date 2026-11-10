@@ -415,7 +415,7 @@ BUDGETS = {
     "ask_user": 2,
     "plan": 1,
     "get_skill": 2,
-    # A file a skill links, or the next page of a long one.
+    # `get_skill` with a `path`: a file a skill links, or the next page of a long one.
     "get_skill_file": 4,
     "recall": 3,
     # recall(part="canvas") with no component: the canvas listing.
