@@ -30,7 +30,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
-from planner.call import Step
+from planner.call import ResponseCall, Step
 from planner.plan import PLAN_STATE_KEY, Decision, EvidenceRequirement, Plan, PlanStatus
 
 from ..described_nodes import stat_var_node
@@ -249,6 +249,9 @@ class FakeCall:
     call_id: str | None = None
 
     def steps(self) -> Sequence[Step]:
+        return ()
+
+    def response_calls(self) -> Sequence[ResponseCall]:
         return ()
 
 

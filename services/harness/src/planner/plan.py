@@ -30,7 +30,7 @@ is a patch. It names the decisions and requirements that change, by `slot` and
 by `id`, and carries forward every item it does not mention. `removed_decisions`
 and `removed_evidence_requirements` are the deletion channel, since an item
 absent from a patch means unchanged. Whether a given revision amends at all is
-`planner.agent`'s call: a call that states the version it amends routes through
+`submission.service`'s call: a call that states the version it amends routes through
 `amend()`, while a call stating `starts_new_plan` begins a fresh `Plan` at
 version 1 (see `_resolve_intent` there) -- unless the planner was built with
 `question_fixed=True`, where a restart is refused instead of ever reaching
@@ -205,7 +205,7 @@ REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
 REFUSAL_DETAILS_STATE_KEY = "planner:refused_spec_details"
 # The time of the latest Search call made that settled on each spec_id, by
 # spec_id: the search for an input the planner pinned no dataset for
-# (`planner.agent.pin_by_search`) and each compile (`planner.agent.
+# (`planner.source_reads.pin_by_search`) and each compile (`planner.source_reads.
 # compile_on_basis`, `compile_whole`). An answer served again keeps the time
 # of the call that made it (`translator.discovery.answered_once_at`), so it
 # moves nothing (`record_spec_searched`). Kept beside the pins, whose stored
@@ -241,12 +241,12 @@ WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 # The session-state slot holding each pin compiled to put a calculation's
 # inputs on one measure basis or provider scope, or a declared whole over its
 # part (`AlignedPin`), which `submission.service._aligned_bases` reads and
-# `planner.agent.with_source_reads` writes (`submission.service.save_aligned_pin`).
+# `planner.source_reads.with_source_reads` writes (`submission.service.save_aligned_pin`).
 ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 
 # The session-state slot holding the spec block of each source a referral
 # offers the planner in place of a pin (`translator.discovery.discover_source`),
-# or that a scope read answered (`planner.agent.read_scope`), by spec_id.
+# or that a scope read answered (`planner.source_reads.read_scope`), by spec_id.
 # `held_sources` reads it. Recording a plan drops each block it
 # cannot pin (`keep_found_sources`).
 FOUND_SOURCES_STATE_KEY = "planner:found_sources"
@@ -812,7 +812,7 @@ def search_pin_slot(spec_id: str) -> str:
 
     `propose_plan` writes that decision itself when a requirement pins a
     measure offered by a source a search settled on
-    (`planner.agent._measure_decisions`).
+    (`submission.service._measure_decisions`).
     Derived from `spec_id`, so two pins never collide; `spec_id` already
     matches `Identifier`'s pattern, so the prefixed slot does too.
     """
@@ -6282,7 +6282,7 @@ def identity_or_refusal(
     (`shown_definition`). A pin compiled in code is on record through that
     block alone: a scope choice switched on the plan card
     (`harness.graph.switch`) or an input put on its calculation's basis
-    (`planner.agent.compile_on_basis`, `planner.agent.compile_whole`) is
+    (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`) is
     held in `held_sources` and in no search record.
 
     The reason is `None` with a definition, and when none is on record

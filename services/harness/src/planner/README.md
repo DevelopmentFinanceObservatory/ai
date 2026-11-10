@@ -149,7 +149,7 @@ recorded. The check reads the pins the planner wrote, before `propose_plan`
 moves a pin to its copy over the requirement's period. A `user` decision a
 `SumOfRequirement` cites needs the user's pick on a combination ask: the
 `combination_unasked` refusal's action carries the ask's options
-(`planner.agent.COMBINATION_OPTIONS`), Studio shows them with no free-text
+(`submission.service.COMBINATION_OPTIONS`), Studio shows them with no free-text
 box, and the pick comes back as the option's id. A combination ask asks about
 the sum the `combination_unasked` refusal before it names in its `detail`:
 the requirement id and the datasets its sides read. Each refusal binds the

@@ -799,10 +799,10 @@ def _closed_share(kind: str) -> _ClosedShare:
     and read over 2024; alignment compiles the total gross and bilateral in one
     resubmit. `basis`: US health aid counted gross over the total in grant
     equivalents, compiled gross. `searched-total`: `basis` with the total pinned to
-    nothing, which `propose_plan` searches for (`planner.agent.pin_by_search`) and
+    nothing, which `propose_plan` searches for (`planner.source_reads.pin_by_search`) and
     Search answers with the total. `whole`: US health aid Search found over 2023, read
     over 2022, as a share of its whole over every sector, compiled from it
-    (`planner.agent.compile_whole`)."""
+    (`planner.source_reads.compile_whole`)."""
     ctx = _FakeToolContext()
     if kind == "whole":
         part = us_2023_block("health")

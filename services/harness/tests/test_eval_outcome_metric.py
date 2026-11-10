@@ -97,7 +97,7 @@ def _plan_proposal(**fields: object) -> genai_types.FunctionResponse:
 
 def _compiled_proposal(**fields: object) -> genai_types.FunctionResponse:
     """A `propose_plan` whose translation compiled, with what
-    `planner.agent.declare_ready` added: `summary` or a blocked `submission`."""
+    `planner.tools.declare_ready` added: `summary` or a blocked `submission`."""
     return _plan_proposal(version=1, translation={"outcome": "ok"}, **fields)
 
 

@@ -57,9 +57,9 @@ from fastmcp import Client
 from harness.settings import Settings
 from harness.tool_contracts import ResolverError, resolver_digest
 from mcp.types import TextContent
-from planner.agent import read_full_history
 from planner.plan import SessionState
 from planner.skills import DFO_FAQ_SKILL_ID
+from planner.source_reads import read_full_history
 from submission.service import first_year_reads
 from validate import ScriptedLlm, accepted_run, task_payloads, tool_schemas
 
@@ -158,7 +158,7 @@ async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dic
 
 
 # How long a first-year read may take while recording. Production allows
-# `planner.agent.FIRST_YEAR_READ_DEADLINE_SECONDS`; a replay answers at once, so a recording
+# `planner.source_reads.FIRST_YEAR_READ_DEADLINE_SECONDS`; a replay answers at once, so a recording
 # keeps whatever Search answers, however long it takes.
 RECORDING_READ_SECONDS = 180.0
 

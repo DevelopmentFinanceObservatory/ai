@@ -82,6 +82,13 @@ class Step(NamedTuple):
     name: str | None = None
 
 
+class ResponseCall(NamedTuple):
+    """One function call of a model response: the tool's `name` and the call's id."""
+
+    name: str
+    call_id: str | None
+
+
 class PlannerCall(Protocol):
     """One planner tool call, as the readers of what the user answered read it.
 
@@ -89,7 +96,10 @@ class PlannerCall(Protocol):
     being served (`None` outside one), and `steps` the session's history in
     order (`Step`). The answer arrives on a later invocation than the ask
     that paused the run, so the steps run across the whole session, not one
-    invocation.
+    invocation. `response_calls` is the function calls of the model response
+    that holds the call being served, in the order the model wrote them, which
+    `steps` cannot say: an ask the user never answered and an ask of the same
+    response stand side by side in the steps.
     """
 
     @property
@@ -104,6 +114,11 @@ class PlannerCall(Protocol):
 
     def steps(self) -> Sequence[Step]:
         """The steps of the call's session history, in order."""
+        ...
+
+    def response_calls(self) -> Sequence[ResponseCall]:
+        """The calls of the model response that holds the call being served, in order,
+        or none when the call has no id or no response holds it."""
         ...
 
 

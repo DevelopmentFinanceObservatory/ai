@@ -32,7 +32,7 @@ from harness.graph.state import (
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.tool_contracts import resolver_digest
-from planner import agent as planner_agent
+from planner import source_reads as planner_source_reads
 from planner.agent import build_planner_tools
 from planner.plan import (
     ALIGNED_PINS_STATE_KEY,
@@ -503,7 +503,7 @@ def test_a_read_that_leaves_a_candidate_unread_is_made_once(
         assert block is not None
         return {spec_id: block}
 
-    monkeypatch.setattr(planner_agent, "read_found_scope", unread)
+    monkeypatch.setattr(planner_source_reads, "read_found_scope", unread)
     tools, ctx = after_hand_back(envelope=as_candidates())
     (call,) = [call for call in RECORDED["calls"] if call["at"] == "11:22:56.327"]
 

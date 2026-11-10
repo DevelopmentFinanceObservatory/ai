@@ -436,10 +436,10 @@ class PartScope(StrictModel):
 # planner's own words settled, so they are the planner's. They are the
 # measure basis or provider scope of a pin compiled to put a calculation's
 # inputs on one basis or one provider scope
-# (`planner.agent.compile_on_basis`), and every axis an entry settled
+# (`planner.source_reads.compile_on_basis`), and every axis an entry settled
 # on a pin searched for an input the planner pinned no dataset for, posted
 # with the planner's words and no message of the user's
-# (`planner.agent.pin_by_search`). The block is the one source of truth.
+# (`planner.source_reads.pin_by_search`). The block is the one source of truth.
 # `harness.tool_contracts.reading_facts` copies it to the stored reading
 # (`harness.turn_records.SearchReading.planner_axes`), which
 # `carried_entries`' callers read; `submission.service._input_bases` and
@@ -485,7 +485,7 @@ def mark_searched_axes(digest: dict[str, Any], *, spec_id: str) -> None:
     """Mark each axis the scope choices of `digest`'s spec block (`spec_id`) settled
     other than by default as the planner's (`mark_planner_axes`).
 
-    For a search made in the planner's own words, as `planner.agent.pin_by_search`
+    For a search made in the planner's own words, as `planner.source_reads.pin_by_search`
     makes and `translator.discovery.found_blocks` reads from discovery's. A block
     whose scope choices this release cannot read (`part_scope`) marks none.
     """

@@ -10,7 +10,7 @@ The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
 or the `Referral` translation stopped on); a translation that compiles
 declares the plan ready for the user's answer in code
-(`planner.agent.declare_ready`), and ends the planner's run. This module never
+(`planner.tools.declare_ready`), and ends the planner's run. This module never
 constructs a `Plan` itself. An entry that ends without a plan ready ends on a
 refusal whose sentence comes from `harness.sentences`.
 
@@ -70,17 +70,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
-from planner.agent import (
-    BRIEF_STATE_KEY,
-    PENDING_ASK_STATE_KEY,
-    PROPOSE_PLAN,
-    AcceptedAsk,
-    AdkCall,
-    clear_pending_ask,
-    end_run_when_ready,
-    load_pending_ask,
-    with_source_reads,
-)
+from planner.agent import BRIEF_STATE_KEY, PROPOSE_PLAN, AdkCall, end_run_when_ready
 from planner.call import CallSession
 from planner.operations import OperationKind
 from planner.plan import (
@@ -134,7 +124,14 @@ from planner.skills import (
     skill_page_key,
     skills_read,
 )
+from planner.source_reads import with_source_reads
 from planner.tool_results import Outcome, ProblemCode
+from planner.tools import (
+    PENDING_ASK_STATE_KEY,
+    AcceptedAsk,
+    clear_pending_ask,
+    load_pending_ask,
+)
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
     ALIGNED_PIN_WARNINGS_STATE_KEY,
@@ -331,7 +328,7 @@ class PlannerSeamError(RuntimeError):
     """The planner produced no plan ready for the user's answer.
 
     Raised so that a plan the user approves is a plan
-    `planner.agent.declare_ready` declared ready.
+    `planner.tools.declare_ready` declared ready.
 
     `refusal` is the shape `harness.studio_translate._stream_fatal` reads
     (`code`, `retry_mode`), so the user reads the sentence of its code. The
@@ -771,10 +768,10 @@ class PlannerSeam:
                     return self._refused(refused)
                 assert submitted is not None and plan is not None, (
                     "_propose answers a refusal unless a proposal declared the plan on record "
-                    "ready (see planner.agent.declare_ready)"
+                    "ready (see planner.tools.declare_ready)"
                 )
                 if plan.status is not PlanStatus.PENDING_APPROVAL:
-                    # `declare_ready` enforces this (`planner.agent.
+                    # `declare_ready` enforces this (`planner.tools.
                     # _execution_blocked`); repeated here so a future gap in that
                     # allowlist reaches this seam as a loud `PlannerSeamError`
                     # instead of a plan the graph shows the user as approvable.
@@ -912,7 +909,7 @@ class PlannerSeam:
         `harness.graph.PlannerModel.revise`'s contract. The proposal runs
         the chain `propose_plan` runs (`submission.service.submit`), reading
         each first year it needs and compiling each input a calculation needs
-        on another basis or provider scope (`planner.agent.with_source_reads`), then
+        on another basis or provider scope (`planner.source_reads.with_source_reads`), then
         the translation, and the plan is ready when `declare_ready` says so.
         A dataset requirement re-pinned to another spec_id cites the
         decisions that pin states and drops those of the one it left, which
@@ -1250,7 +1247,7 @@ class PlannerSeam:
 
         A terminal refusal (`_is_terminal_refusal`) ends the turn, a `translation` is the
         verdict on the plan the call recorded, and `summary` says the call declared that plan
-        ready (`planner.agent.declare_ready`).
+        ready (`planner.tools.declare_ready`).
         """
         tracker.events += 1
         if tracker.events > _MAX_EVENTS:

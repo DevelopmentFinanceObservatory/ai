@@ -35,9 +35,9 @@ from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
-from planner.agent import PENDING_ASK_STATE_KEY
 from planner.plan import EvidenceRequirement
 from planner.skills import GET_SKILL
+from planner.tools import PENDING_ASK_STATE_KEY
 from planner.workflow import ToolId
 from pydantic import ValidationError
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION

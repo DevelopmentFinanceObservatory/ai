@@ -90,7 +90,7 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import AdkCall, load_pending_ask
+from planner.agent import AdkCall
 from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -155,6 +155,7 @@ from planner.settings import (
 )
 from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
 from planner.tool_results import ProblemCode, ok
+from planner.tools import load_pending_ask
 from planner.workflow import (
     EvidenceBinding,
     ResolvedEntity,

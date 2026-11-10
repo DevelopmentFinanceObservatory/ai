@@ -70,21 +70,17 @@ from harness.tool_contracts import reading_facts
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
 from planner import agent as planner_agent
+from planner import source_reads as planner_source_reads
+from planner import tools as planner_tools
 from planner.agent import (
-    ASK_ACCEPTED,
     BRIEF_STATE_KEY,
-    PENDING_ASK_STATE_KEY,
     AdkCall,
-    ask_refusal,
     ask_user_question,
     build_planner_tools,
     create_planner_agent,
     end_run_when_ready,
-    load_pending_ask,
     planner_instruction,
     prepend_brief,
-    read_full_history,
-    with_source_reads,
 )
 from planner.call import CallSession, elected_spec_ids, prices_chosen
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, PlanTool, compact_schema
@@ -200,7 +196,15 @@ from planner.records import (
     SourceNameCandidate,
     StatVarReading,
 )
+from planner.source_reads import read_full_history, with_source_reads
 from planner.tool_results import Outcome, ProblemCode, problem
+from planner.tools import (
+    ASK_ACCEPTED,
+    PENDING_ASK_STATE_KEY,
+    _ask_beside_ask,
+    ask_refusal,
+    load_pending_ask,
+)
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
@@ -527,7 +531,7 @@ def _propose(
 
     A plan already recorded in `ctx` means this call patches it, so
     `amends_version` defaults to that recorded version, the reading the tool
-    requires the model to state (`planner.agent._resolve_intent`). A first
+    requires the model to state (`submission.service._resolve_intent`). A first
     call passes nothing. `answer_mode` defaults to `computed`, since
     `requirements` is the read pair every caller passes unless it overrides
     it. A test about a call that states its intent wrongly, or not at all,
@@ -976,7 +980,7 @@ async def test_no_planner_tool_writes_pending_approval(
 def test_no_planner_code_names_the_transition_that_mints_pending_approval() -> None:
     # The structural fact examples cannot reach: `Plan.with_translation` is
     # the only transition anywhere that produces `PENDING_APPROVAL`, and no
-    # code in this module calls it -- an AST walk rather than a substring
+    # code in the planner's tool modules calls it -- an AST walk rather than a substring
     # search, since a comment or docstring may mention it and a
     # `getattr(plan, "with_" + "translation")` may not.
     #
@@ -984,7 +988,12 @@ def test_no_planner_code_names_the_transition_that_mints_pending_approval() -> N
     # allowlist (`declare_ready` requires a plan already at that status; see
     # its module docstring) -- a comparison, not a mint, so only a mention
     # outside a `Compare` counts against the invariant.
-    tree = ast.parse(inspect.getsource(planner_agent))
+    tree = ast.parse(
+        "\n".join(
+            inspect.getsource(module)
+            for module in (planner_agent, planner_tools, planner_source_reads)
+        )
+    )
     parents: dict[ast.AST, ast.AST] = {
         child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
     }
@@ -5401,7 +5410,7 @@ async def test_a_refused_read_is_answered_before_a_later_one_that_crashed() -> N
     unretrieved: list[dict[str, Any]] = []
     loop.set_exception_handler(lambda _, context: unretrieved.append(context))
     try:
-        result = await planner_agent._held_in_order(
+        result = await planner_source_reads._held_in_order(
             [refused(), crashing()], state=_FakeToolContext().state
         )
         gc.collect()
@@ -9113,7 +9122,7 @@ async def test_a_whole_compile_names_why_it_could_not_read_its_part(
     pin = us_2023_block("health")["spec_id"]
     save_pin_sources(ctx.state, {pin: source} if source is not None else {})
 
-    read = await planner_agent.compile_whole(
+    read = await planner_source_reads.compile_whole(
         cast(ToolSurface, surface),
         Realignment(pin, (), _WHOLE, _WHOLE, whole_axis=axis),
         state=ctx.state,
@@ -10367,7 +10376,7 @@ def test_a_dac1_donor_whole_of_a_donor_outside_the_dac_is_refused(
     scope = submission_service.part_scope(part["spec_id"], part)
     assert scope is not None
 
-    held = planner_agent._parties_outside(scope, whole, "origin", part_block=part)
+    held = planner_source_reads._parties_outside(scope, whole, "origin", part_block=part)
 
     assert (held.outside, held.unshown) == (("country/ARE",), ())
 
@@ -10645,7 +10654,7 @@ def test_donors_a_part_binds_through_a_choice_alone_count_their_own_flows() -> N
 
 
 def _searched_in_words(block: dict[str, Any], *, stated: bool = True) -> dict[str, Any]:
-    """A copy of `block` as the planner holds a search for it (`planner.agent.pin_by_search`):
+    """A copy of `block` as the planner holds a search for it (`planner.source_reads.pin_by_search`):
     every axis Search settled other than by default marked as the planner's. With
     `stated`, Search read its provider row in the searched words ("multilateral ODA"),
     an explicit entry from text in place of the entry from a choice it was recorded
@@ -10763,7 +10772,7 @@ async def test_a_search_for_an_unpinned_input_is_shown_with_the_requests_warning
         async def call_tool(self, **_: Any) -> ToolCallResult:
             return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
 
-    read = await planner_agent.pin_by_search(
+    read = await planner_source_reads.pin_by_search(
         cast(Any, _Searches()),
         submission_service.Unpinned(
             requirement_id="r",
@@ -10799,7 +10808,7 @@ async def test_a_warning_stating_no_code_reads_the_same_on_both_pin_source_paths
             envelope = {"parts": [{"status": "definite", "spec": block, "warnings": warnings}]}
             return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
 
-    read = await planner_agent.pin_by_search(
+    read = await planner_source_reads.pin_by_search(
         cast(Any, _Searches()),
         submission_service.Unpinned(
             requirement_id="r",
@@ -10833,7 +10842,7 @@ async def test_a_search_that_did_not_complete_is_asked_again_only_when_it_can_su
         async def call_tool(self, **_: Any) -> ToolCallResult:
             raise ToolSurfaceUnavailableError("data-mcp is down", retryable=retryable)
 
-    read = await planner_agent.pin_by_search(
+    read = await planner_source_reads.pin_by_search(
         cast(Any, _Unreachable()),
         submission_service.Unpinned(
             requirement_id="r",
@@ -10860,7 +10869,7 @@ async def test_a_search_that_did_not_complete_is_asked_again_only_when_it_can_su
 
 
 async def test_a_search_against_a_server_that_is_down_is_asked_again() -> None:
-    read = await planner_agent.pin_by_search(
+    read = await planner_source_reads.pin_by_search(
         unreachable_surface(),
         submission_service.Unpinned(
             requirement_id="r",
@@ -15111,7 +15120,7 @@ def _drafted_arguments(decision: DecisionFactory, requirements: RequirementPair)
 
 async def _compiled_then_rejected(call: Any) -> dict[str, object]:
     """An `ok` translation after which the plan on record is rejected, so
-    `planner.agent.declare_ready`'s gate refuses it."""
+    `planner.tools.declare_ready`'s gate refuses it."""
     _translate(call)
     plan = load_plan(call.state)
     assert plan is not None
@@ -18418,12 +18427,10 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
         "candidates": picks if first_accepted else [{"spec_id": "unrelated", "label": "Other"}],
     }
     ctx.session.events.append(
-        SimpleNamespace(
-            get_function_calls=lambda: [
-                SimpleNamespace(id="first", name=PLANNER_ASK, args=first_args),
-                SimpleNamespace(id="plan", name="propose_plan", args={}),
-                SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
-            ]
+        _model_response(
+            SimpleNamespace(id="first", name=PLANNER_ASK, args=first_args),
+            SimpleNamespace(id="plan", name="propose_plan", args={}),
+            SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
         )
     )
 
@@ -18446,6 +18453,53 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
     assert second["code"] == ProblemCode.INVALID_ARGUMENTS.value
     asked = load_pending_ask(ctx.state)
     assert (asked.call_id if asked else None) == ("first" if first_accepted else None)
+
+
+def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its_own() -> None:
+    """The user answered the ask of an earlier run, so the next run's one ask reaches them."""
+    ctx: Any = _FakeToolContext()
+    ctx.session.events.extend(_ask_answered_events(call_id="ask-1"))
+    ctx.session.events.append(
+        _model_response(SimpleNamespace(id="call-1", name=PLANNER_ASK, args={"message": "Which?"}))
+    )
+
+    _assert_asked(ask_user_question(cast(Any, ctx), message="Which?"), ctx)
+
+
+def test_an_ask_after_an_accepted_ask_nobody_answered_is_the_first_of_its_own_response() -> None:
+    """An earlier response's ask was accepted and its answer never came. The ask of a later
+    response is the only ask of its own response, so it reaches the user."""
+    ctx: Any = _FakeToolContext()
+    ctx.session.events.extend(
+        [
+            _model_response(
+                SimpleNamespace(id="ask-1", name=PLANNER_ASK, args={"message": "Which?"})
+            ),
+            _ask_response("ask-1", dict(ASK_ACCEPTED)),
+            _model_response(
+                SimpleNamespace(id="ask-2", name=PLANNER_ASK, args={"message": "Which?"})
+            ),
+        ]
+    )
+    ctx.function_call_id = "ask-2"
+
+    _assert_asked(ask_user_question(cast(Any, ctx), message="Which?"), ctx)
+
+
+def test_an_ask_with_no_call_id_is_in_no_response_and_is_not_refused_beside_another() -> None:
+    """`response_calls` is empty for a call with no id, so no earlier ask is found."""
+    ctx: Any = _FakeToolContext()
+    ctx.session.events.append(
+        _model_response(
+            SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
+            SimpleNamespace(id=None, name=PLANNER_ASK, args={"message": "Which years?"}),
+        )
+    )
+    ctx.function_call_id = None
+    call = AdkCall(cast(Any, ctx))
+
+    assert call.response_calls() == ()
+    assert _ask_beside_ask(call) is None
 
 
 @pytest.mark.parametrize(("offered_for", "refused"), [("debt", False), ("debt_history", True)])

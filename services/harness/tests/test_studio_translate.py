@@ -88,7 +88,7 @@ from harness.wire import (
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
-from planner.agent import COMBINATION_OPTIONS, _session_steps
+from planner.agent import _session_steps
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
@@ -106,7 +106,7 @@ from planner.workflow import ToolId
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
-from submission.service import scope_choice_decisions
+from submission.service import COMBINATION_OPTIONS, scope_choice_decisions
 from translator.discovery import NoTimeLeftError
 from translator.referral import (
     ENTITY_CHOICE_REPAIR,
