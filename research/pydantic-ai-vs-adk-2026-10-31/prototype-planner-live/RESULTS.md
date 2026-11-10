@@ -39,7 +39,21 @@ The third is not breached on any point estimate and not excluded by any interval
 
 ## What drives planner time on both arms
 
-About a third of entries hold a model call that reasons for 2,000 tokens or more: 144 of 420 on Pydantic AI and 123 of 420 on ADK (+5.0 points, -2.9 to +13.1). Those entries take 59 to 62 s at the median against 10 to 11 s for the rest. The reasoning is triggered by the descriptions of the planner's skill tools, on dev's planner as much as this one, and it accounts for the budget closures and for the width of every wall-time interval above. The second run's gap on this share (+8.6 points, -1.4 to +19.5) is the one figure that leans against the port; it should be measured again once the planner's skill tool carries a short description, which removes most such calls.
+About a third of entries hold a model call that reasons for 2,000 tokens or more: 144 of 420 on Pydantic AI and 123 of 420 on ADK (+5.0 points, -2.9 to +13.1). Those entries take 59 to 62 s at the median against 10 to 11 s for the rest. The reasoning is triggered by the descriptions of the planner's skill tools, on dev's planner as much as this one, and it accounts for the budget closures and for the width of every wall-time interval above. The second run's gap on this share (+8.6 points, -1.4 to +19.5) was the one figure that leaned against the port.
+
+## With the planner's skill tool shortened
+
+Dev at 5f37d16d gives the planner one skill tool with a one-sentence description, which removes most long reasoning. `after-skill-fix/` holds the tool-body move brought onto that commit (`s0-on-5f37d16d.diff.gz`: conflicts in 2 files and 5 hunks, 2,722 planner tests passing, declarations byte-equal to dev's), the agent and parity check adapted to four declarations (parity exits 0 over 70 tasks), and a third paired live run of 420 entries.
+
+| Measure                                        | ADK      | Pydantic AI | Paired difference (95% interval) |
+| ---------------------------------------------- | -------- | ----------- | -------------------------------- |
+| Entries with a call of 2,000+ reasoning tokens | 2 of 210 | 1 of 210    | -0.5 points (-2.4 to +1.0)       |
+| Median planner wall time                       | 9.3 s    | 8.1 s       | -12.9% (-22.1% to +4.0%)         |
+| Cached share                                   | 88.7%    | 88.8%       | +0.1 points (-0.3 to +0.5)       |
+| Final acceptance                               | 91.9%    | 91.4%       |                                  |
+| Budget closures                                | 0        | 1           |                                  |
+
+The arms are level on long reasoning, and the wall-time interval now stops at +4%. The one budget closure, on Pydantic AI, was a call that returned no first chunk for 12 s and none for 76 s on its resend, with no reasoning tokens; twelve reruns of that task all ended accepted. That ending appeared on both arms in the earlier runs.
 
 ## What differed from dev and how it was closed
 

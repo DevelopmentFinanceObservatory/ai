@@ -88,7 +88,9 @@ The real planner then ran on Pydantic AI inside the `planner` node of the real S
 
 Turns do need to outlive the client. On production from 5 October to 10 November, 26% of 2,203 turns ran past 60 s of working time and 11% past 100 s, and a planned turn's approval wait is 197 s at the 90th percentile.
 
-Still open: `revise` through the `switch` node, the Cloud SQL connector path, the long-reasoning share on each arm once the planner's skill tool carries a short description, and the orchestrator on live Gemini. Most defects users meet are outside the framework question: 23 of the last 60 merged fixes correct how a plan binds sources or does arithmetic.
+With that description shortened on dev (5f37d16d), a third run of 420 paired entries has the arms level: 1 of 210 Pydantic AI entries and 2 of 210 ADK entries hold such a call, and median planner time is 8.1 s against 9.3 s (-12.9%, interval -22.1% to +4.0%).
+
+Still open: `revise` through the `switch` node, the Cloud SQL connector path, and the orchestrator on live Gemini. Most defects users meet are outside the framework question: 23 of the last 60 merged fixes correct how a plan binds sources or does arithmetic.
 
 ## Decisions for you
 

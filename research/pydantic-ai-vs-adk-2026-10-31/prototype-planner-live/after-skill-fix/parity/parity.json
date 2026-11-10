@@ -1,0 +1,1936 @@
+{
+  "tasks": {
+    "series-debt-stock-kenya-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "series-france-oda-africa": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "series-gdp-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "series-oda-by-sector-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "series-oda-germany-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "series-population-three": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "series-zambia-debt-to-china": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-average-gdp-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-average-oda-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-combined-oda-kenya-uganda": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-cumulative-debt-flows-china-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-cumulative-oda-g7-africa": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-health-oda-kenya-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-health-population-oda-all-donors": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-health-population-oda-germany-by-sector": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-health-population-oda-kenya-by-sector": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-malaria-oda-all-recipients": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-peak-year-oda-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-total-aid-kenya-all-years": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-total-debt-service-zambia": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-total-education-oda-kenya-all-providers": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-total-education-oda-kenya-coverage-brief": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-total-oda-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "aggregate-two-donors-yearly": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "growth-absolute-debt-zambia": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "growth-decline-german-oda": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "growth-gdp-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "growth-population-nigeria": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "growth-total-oda-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "growth-uk-oda-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "comparison-debt-service-health-oda-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "comparison-debt-stock-gdp-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "comparison-oda-kenya-uganda": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "comparison-us-uk-oda-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "sum-bilateral-plus-imputed-france-guatemala": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "sum-bilateral-plus-imputed-japan-indonesia": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "sum-net-flows-aid-debt-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 3,
+          "answers": 1,
+          "tool_calls": [
+            "propose_plan",
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "plan_not_ready",
+          "requests": 3,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "sum-oda-debt-disbursements-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 3,
+          "answers": 1,
+          "tool_calls": [
+            "propose_plan",
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "plan_not_ready",
+          "requests": 3,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "sum-oda-oof-ethiopia": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 3,
+          "answers": 1,
+          "tool_calls": [
+            "propose_plan",
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "plan_not_ready",
+          "requests": 3,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "sum-then-quotient-germany-tanzania": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-bottom-five-african-oda-2021": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-donor-each-year-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-external-debt-african-countries": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-fastest-gdp-growth": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-sectors-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-top-donors-guatemala": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-top-donors-guatemala-since-2020": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-top-donors-malawi": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-top-donors-malawi-latest-year-and-series": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "rank-top-gdp-2022": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "share-each-donor-of-uganda-oda": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "share-germany-of-oda-ethiopia": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "share-health-oda-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "share-nigeria-world-population": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "share-two-donors-of-kenya-oda": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 3,
+          "answers": 1,
+          "tool_calls": [
+            "propose_plan",
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "share-us-of-kenya-oda-scoped-pin": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "quotient-debt-service-per-gdp-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "alternative 0": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "quotient-external-debt-gdp-kenya-nigeria": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "quotient-gdp-per-person-guatemala": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "quotient-keyed-oda-per-person-three": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "quotient-oda-per-person-ethiopia": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "quotient-oda-per-person-france": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "quotient-oda-per-person-malawi": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "join-gdp-debt-service-ghana": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "join-malaria-domestic-and-aid-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "join-oda-debt-service-zambia": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "join-population-gdp-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "filter-donors-above-10b-2021": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "filter-donors-above-200m-kenya": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    },
+    "filter-gdp-above-trillion-2022": {
+      "cases": {
+        "reference": {
+          "stop_reason": "accepted",
+          "requests": 1,
+          "answers": 0,
+          "tool_calls": [
+            "propose_plan"
+          ],
+          "unexplained": {}
+        },
+        "ask-then-propose": {
+          "stop_reason": "accepted",
+          "requests": 2,
+          "answers": 1,
+          "tool_calls": [
+            "ask_user_question",
+            "propose_plan"
+          ],
+          "unexplained": {}
+        }
+      },
+      "unexplained": {}
+    }
+  },
+  "gaps": {
+    "cases": {
+      "models-valid": {
+        "stop_reason": "accepted",
+        "requests": 1,
+        "answers": 0,
+        "tool_calls": [
+          "propose_plan"
+        ],
+        "unexplained": {}
+      },
+      "models-coercible": {
+        "stop_reason": "accepted",
+        "requests": 1,
+        "answers": 0,
+        "tool_calls": [
+          "propose_plan"
+        ],
+        "unexplained": {}
+      },
+      "models-invalid-item": {
+        "stop_reason": "accepted",
+        "requests": 2,
+        "answers": 0,
+        "tool_calls": [
+          "propose_plan",
+          "propose_plan"
+        ],
+        "unexplained": {}
+      },
+      "models-bad-answered": {
+        "stop_reason": "accepted",
+        "requests": 2,
+        "answers": 0,
+        "tool_calls": [
+          "propose_plan",
+          "propose_plan"
+        ],
+        "unexplained": {}
+      },
+      "missing-ask-message": {
+        "stop_reason": "accepted",
+        "requests": 2,
+        "answers": 0,
+        "tool_calls": [
+          "ask_user_question",
+          "propose_plan"
+        ],
+        "unexplained": {}
+      },
+      "missing-skill-id": {
+        "stop_reason": "accepted",
+        "requests": 2,
+        "answers": 0,
+        "tool_calls": [
+          "get_skill",
+          "propose_plan"
+        ],
+        "unexplained": {}
+      },
+      "skill-file-page": {
+        "stop_reason": "accepted",
+        "requests": 2,
+        "answers": 0,
+        "tool_calls": [
+          "get_skill",
+          "propose_plan"
+        ],
+        "unexplained": {}
+      },
+      "no-parts": {
+        "stop_reason": "plan_not_ready",
+        "requests": 1,
+        "answers": 0,
+        "tool_calls": [],
+        "unexplained": {}
+      },
+      "no-parts-then-plan": {
+        "stop_reason": "plan_not_ready",
+        "requests": 1,
+        "answers": 0,
+        "tool_calls": [],
+        "unexplained": {}
+      },
+      "text-only": {
+        "stop_reason": "plan_not_ready",
+        "requests": 1,
+        "answers": 0,
+        "tool_calls": [],
+        "unexplained": {}
+      },
+      "thought-only": {
+        "stop_reason": "plan_not_ready",
+        "requests": 1,
+        "answers": 0,
+        "tool_calls": [],
+        "unexplained": {}
+      }
+    },
+    "unexplained": {}
+  },
+  "thoughts": {
+    "unexplained": {}
+  },
+  "summary": {
+    "tasks": 70,
+    "plans": 79,
+    "cases": 149,
+    "requests_compared": 230,
+    "requests_after_an_answer": 74,
+    "wire": {
+      "declarations": [
+        {
+          "path": "reject_plan.parameters_json_schema",
+          "adk": "<absent>",
+          "pai": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "tools_grouping": [
+        {
+          "path": "",
+          "adk": [
+            4
+          ],
+          "pai": [
+            1,
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "tool_config": [
+        {
+          "path": "",
+          "adk": null,
+          "pai": {
+            "function_calling_config": {
+              "mode": "AUTO"
+            }
+          }
+        }
+      ],
+      "other_config": [
+        "automatic_continuation",
+        "http_options.headers.Content-Type",
+        "http_options.headers.User-Agent",
+        "http_options.headers.user-agent",
+        "http_options.headers.x-goog-api-client",
+        "response_modalities"
+      ]
+    },
+    "unexplained": {
+      "tasks": {},
+      "gaps": {},
+      "thoughts": {}
+    },
+    "pass": true
+  },
+  "broken": null
+}
