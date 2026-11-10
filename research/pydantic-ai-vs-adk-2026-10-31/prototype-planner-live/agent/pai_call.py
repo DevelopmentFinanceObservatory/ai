@@ -1,9 +1,11 @@
-"""The `planner.call.PlannerCall` over a Pydantic AI planner's message record.
+"""The `planner.call.PlannerCall` over a Pydantic AI planner run.
 
 The tool bodies in `planner.tools` read their call through `PlannerCall`: the session
 state, the id of the call being served, the `Step`s of what the user was asked and
-answered and the calls of the response being served (`response_calls`). `PaiCall` produces those steps from messages, as `planner.agent._session_steps`
-produces them from ADK events:
+answered and the calls of the response being served (`response_calls`). The steps are
+those of earlier runs (`PaiCall.earlier`, which the ADK session's planner events give as
+`planner.agent._session_steps` reads them) followed by the live run's own, which `PaiCall`
+produces from the run's messages as `_session_steps` produces them from ADK events:
 
 - the user's own message (`user_message`) is a `message` step;
 - an accepted ask is a `call` step under its tool call id. An ask whose return is the
@@ -18,7 +20,7 @@ tool returns like any other; neither is an answer, because neither carries a `re
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,24 +65,55 @@ def answer_message(ask_id: str, answer: Mapping[str, Any]) -> ModelRequest:
     )
 
 
+class RecordingState(MutableMapping[str, Any]):
+    """A session state dict that notes each key written through it in `written`.
+
+    The planner's tool bodies write session state through `SessionState`, a read and a
+    write. A tool's writes are what ADK carries on its response event's `state_delta`, so
+    the Pydantic AI node reads `written` to build the same delta.
+    """
+
+    def __init__(self, state: dict[str, Any], written: dict[str, None]) -> None:
+        self._state = state
+        self.written = written
+
+    def __getitem__(self, key: str) -> Any:
+        return self._state[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._state[key] = value
+        self.written[key] = None
+
+    def __delitem__(self, key: str) -> None:
+        del self._state[key]
+        self.written.pop(key, None)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._state)
+
+    def __len__(self) -> int:
+        return len(self._state)
+
+
 @dataclass(frozen=True)
 class PaiCall:
-    """One tool call's view of its session: every message of the session in order, the
-    state, and the id of the call being served (`None` outside one).
+    """One tool call's view of its session: the steps of earlier runs, the live run's
+    messages, the state, and the id of the call being served (`None` outside one).
 
-    `messages` is every earlier run's messages and the current run's own, which holds
-    the response whose calls are in flight. The calls of that response run together, so
-    while one of them is served its siblings have no return in `messages`; an ask among
+    `earlier` is the steps of every earlier run. `messages` is the live run's own, which
+    holds the response whose calls are in flight. The calls of that response run together,
+    so while one of them is served its siblings have no return in `messages`; an ask among
     them is not yet put to the user, and a tool other than an ask reads the session as
     it stood before the response (`planner.agent._in_flight_calls`).
     """
 
     messages: Sequence[ModelMessage]
-    state: dict[str, Any]
+    state: MutableMapping[str, Any]
     call_id: str | None = None
+    earlier: Sequence[Step] = ()
 
     def steps(self) -> Sequence[Step]:
-        return tuple(self._steps())
+        return (*self.earlier, *self._steps())
 
     def _steps(self) -> Iterator[Step]:
         refused = {
@@ -156,3 +189,8 @@ def _refusal(content: Any) -> bool:
         and "result" not in content
         and content.get("outcome") != Outcome.OK.value
     )
+
+
+def steps_of(messages: Sequence[ModelMessage]) -> Sequence[Step]:
+    """The steps a run's `messages` hold, once the run is over."""
+    return PaiCall(messages, {}).steps()

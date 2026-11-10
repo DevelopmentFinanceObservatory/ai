@@ -19,6 +19,7 @@ user's answer resumes the node in a run of its own, whose brief carries the answ
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import time
 import traceback
@@ -72,6 +73,7 @@ from planner.agent import BRIEF_STATE_KEY, load_pending_ask  # noqa: E402
 from planner.plan import current_recorded_identity  # noqa: E402
 from planner.settings import AgentSettings  # noqa: E402
 from pydantic_ai import Agent  # noqa: E402
+from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.messages import (  # noqa: E402
     ModelMessage,
     ModelRequest,
@@ -88,6 +90,8 @@ _NO_REQUEST_LIMIT = UsageLimits(request_limit=None)
 
 SESSION_ID = "pai-planner-entry"
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PaiRunner:
@@ -99,7 +103,9 @@ class PaiRunner:
     async def run(self, brief: str) -> None:
         """Run the planner on `brief`, as `ctx.run_node` runs it, and add the run's messages
         to the session. Every model request streams. A tool that ends the run stops it
-        before the next model request, where ADK's `skip_summarization` ends the turn.
+        before the next model request, where ADK's `skip_summarization` ends the turn. A
+        response Pydantic AI refuses (an empty stream, one the provider's filter blocked)
+        ends the run with no plan, as ADK ends a run on a response with no function call.
         """
         session = self.deps.session
         history = session.history()
@@ -110,6 +116,7 @@ class PaiRunner:
             message_history=history,
             deps=self.deps,
             usage_limits=_NO_REQUEST_LIMIT,
+            conversation_id=session.id,
         ) as run:
             try:
                 async for node in run:
@@ -122,6 +129,8 @@ class PaiRunner:
                     async with node.stream(run.ctx) as stream:
                         async for _event in stream:
                             pass
+            except UnexpectedModelBehavior as exc:
+                logger.warning("planner response refused by Pydantic AI: %s", exc)
             finally:
                 session.record.extend([*run.all_messages()[len(history) :], *tail])
 

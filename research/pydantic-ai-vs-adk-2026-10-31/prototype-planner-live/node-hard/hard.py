@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import hardened
+import pai_node
 import pai_planner
 import planner.agent as adk_agent
 import pytest
@@ -19,7 +20,9 @@ from chunked import Call, Chunked
 from google.adk.sessions import InMemorySessionService
 from harness.graph.state import AGENT_NAME as GRAPH_NAME
 from harness.settings import Settings
+from pydantic_ai import Agent
 from scenes import INTERRUPT, TURN, frame, interrupt_body
+from test_node import plan_only
 from tests.orchestrator_fakes import CONVERSATION, stream, studio_client, turn_body
 
 
@@ -52,11 +55,39 @@ def session_of(built: studio_arms.Built) -> Any:
 
 
 @contextmanager
-def hard_arm(monkeypatch: pytest.MonkeyPatch, **fixes: Any) -> Iterator[None]:
-    """The `pai` arm built through `hardened.hard_planner`, with `fixes` as its switches."""
+def hard_arm(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    swallow: bool = True,
+    deltas: bool = True,
+    conversation: bool = True,
+    **fixes: Any,
+) -> Iterator[None]:
+    """The `pai` arm built through `hardened.hard_planner`, with `fixes` (`hold`,
+    `unknown_tools`, `instrument`) as its switches. The other three controls switch off a
+    behaviour of the node in place:
+
+    - `swallow=False`: `UnexpectedModelBehavior` is no exception the runner catches;
+    - `deltas=False`: a tool response event carries the plan and no other written key;
+    - `conversation=False`: the run is given no conversation id.
+    """
     with monkeypatch.context() as scope:
         scope.setattr(studio_arms, "pai_planner", functools.partial(hardened.hard_planner, **fixes))
+        if not swallow:
+            scope.setattr(pai_node, "UnexpectedModelBehavior", type("Never", (Exception,), {}))
+        if not deltas:
+            scope.setattr(pai_node, "response_events", plan_only(pai_node.response_events))
+        if not conversation:
+            scope.setattr(Agent, "iter", without_conversation(Agent.iter))
         yield
+
+
+def without_conversation(iterate: Any) -> Any:
+    def narrowed(self: Any, *args: Any, conversation_id: Any = None, **kwargs: Any) -> Any:
+        del conversation_id
+        return iterate(self, *args, **kwargs)
+
+    return narrowed
 
 
 def trace_tools(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:

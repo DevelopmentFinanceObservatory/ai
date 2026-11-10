@@ -17,20 +17,21 @@ planner's own events reach it under ADK:
   dev's node holds until the draft is done.
 
 Pydantic AI tools write the session state dict and nothing else, where ADK carries each
-tool's writes on its response event's `state_delta`, durable once the event is appended. The
-seam copies a fixed list of keys into `ctx.state` in `PlannerSeam._persist_durable`, which
-omits keys a tool body writes (`translator:*`, `planner:alignments`, skill page texts).
-`PaiPlannerSeam` copies every key the call changed (`mirror_changes`).
+tool's writes on its response event's `state_delta`, durable once the event is appended.
+The tool bodies write through `pai_call.RecordingState`, which notes each key written, and
+the response event of the tools that wrote them carries those keys (`PlannerDeps.
+drain_writes`), so a tool's writes are stored when it ends, a Stop mid-planning included.
 
-The agent's message record, the planner's view of what the user was asked and answered
-(`pai_call.PaiCall`), lives in session state under `CONVERSATION_KEY`, so a resume in a
-new invocation continues it.
+The planner's view of what the user was asked and answered (`pai_call.PaiCall`) is the
+planner events of the session, which this node and ADK's planner both append
+(`planner.agent._session_steps`), then the live run's own steps. A turn can pass between
+the two planners at any ask, and no record of the node's own is stored.
 """
 
 from __future__ import annotations
 
-import copy
-from collections.abc import AsyncIterator, Callable, Container, Mapping
+import logging
+from collections.abc import AsyncIterator, Callable, Container
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,7 +40,7 @@ from google.adk.events import EventActions
 from google.adk.workflow import node
 from google.genai import types
 from harness.planner_seam import PlannerSeam
-from pai_call import answer_message, user_message
+from pai_call import user_message
 from pai_entry import _NO_REQUEST_LIMIT, PaiRunner
 from pai_planner import (
     CallHooks,
@@ -53,21 +54,15 @@ from pai_planner import (
     google_model,
     planner_agent,
 )
-from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, load_pending_ask
-from planner.plan import PLAN_STATE_KEY
+from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, _session_steps, load_pending_ask
+from planner.call import Step
 from planner.settings import AgentSettings
 from pydantic_ai import Agent
-from pydantic_ai.messages import (
-    ModelMessage,
-    ModelMessagesTypeAdapter,
-    ModelRequest,
-    ModelResponse,
-    ToolCallPart,
-    ToolReturnPart,
-)
+from pydantic_ai.exceptions import UnexpectedModelBehavior
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 
-PROPOSE_PLAN = "propose_plan"
-CONVERSATION_KEY = "planner:conversation"
+logger = logging.getLogger(__name__)
+
 # `harness.planner_seam._PLANNER_BRANCH`, the branch every planner run carries.
 PLANNER_BRANCH = "dfo_planner"
 
@@ -104,11 +99,12 @@ def call_events(response: ModelResponse, tools: Container[str] | None) -> list[E
 
 
 def response_events(
-    request: ModelRequest, state: Mapping[str, Any], tools: Container[str] | None
+    request: ModelRequest, drain_writes: Callable[[], dict[str, Any]], tools: Container[str] | None
 ) -> list[Event]:
     """The function-response event ADK emits for the calls to `tools` (all when `None`) a
-    request answers, carrying the plan the call recorded under `PLAN_STATE_KEY` in its
-    `state_delta` when it answers `propose_plan`, which the translator reads."""
+    request answers, carrying in its `state_delta` the keys the tools wrote
+    (`PlannerDeps.drain_writes`): the plan a `propose_plan` recorded, which the translator
+    reads, and every other key the next reader needs durable."""
     parts = [
         types.Part(
             function_response=types.FunctionResponse(
@@ -122,12 +118,10 @@ def response_events(
     ]
     if not parts:
         return []
-    proposed = any(p.function_response.name == PROPOSE_PLAN for p in parts if p.function_response)
-    delta = {PLAN_STATE_KEY: state[PLAN_STATE_KEY]} if proposed and PLAN_STATE_KEY in state else {}
     return [
         Event(
             content=types.Content(role="user", parts=parts),
-            actions=EventActions(state_delta=delta),
+            actions=EventActions(state_delta=drain_writes()),
         )
     ]
 
@@ -145,11 +139,13 @@ class FeedingRunner(PaiRunner):
         owes the stream: a `propose_plan` call before its tool runs, its response and the
         progress reports once the tools of the response have run."""
         session = self.deps.session
-        history = session.history()
         self.deps.ended = False
-        tail: list[ModelMessage] = []
         async with self.agent.iter(
-            brief, message_history=history, deps=self.deps, usage_limits=_NO_REQUEST_LIMIT
+            brief,
+            message_history=session.history(),
+            deps=self.deps,
+            usage_limits=_NO_REQUEST_LIMIT,
+            conversation_id=session.id,
         ) as run:
             try:
                 async for step in run:
@@ -162,18 +158,22 @@ class FeedingRunner(PaiRunner):
                     if not Agent.is_model_request_node(step):
                         continue
                     if self.emit:
-                        for event in response_events(step.request, self.deps.state, self.tools):
+                        for event in response_events(
+                            step.request, self.deps.drain_writes, self.tools
+                        ):
                             yield event
                         for event in self.feed.drain():
                             yield event
                     if self.deps.ended:
-                        tail = [step.request]
                         break
                     async with step.stream(run.ctx) as stream:
                         async for _event in stream:
                             pass
-            finally:
-                session.record.extend([*run.all_messages()[len(history) :], *tail])
+            except UnexpectedModelBehavior as exc:
+                # As on ADK, a response Pydantic AI refuses (an empty stream, one the
+                # provider's filter blocked) ends the run with no plan; the seam refuses
+                # with `plan_not_ready`.
+                logger.warning("planner response refused by Pydantic AI: %s", exc)
 
 
 class PaiCtx:
@@ -223,36 +223,22 @@ def user_text(ctx: Context) -> str:
     raise AssertionError("the turn's session holds no message of the user's")
 
 
-def mirror_changes(ctx: Context, before: Mapping[str, Any]) -> list[str]:
-    """Copy each session-state key that differs from `before` into `ctx.state`, which ADK
-    carries on the node's next event to the stored session. Returns the keys copied."""
-    changed = [
-        key for key, value in ctx.session.state.items() if key not in before or before[key] != value
-    ]
-    for key in changed:
-        ctx.state[key] = ctx.session.state[key]
-    return changed
-
-
 @dataclass
 class PaiPlannerSeam:
     """`harness.graph.seams.PlannerModel` over `PlannerSeam`, the planner on Pydantic AI.
 
-    `mirror` makes every key a call changed durable (`mirror_changes`); a control turns it
-    off and leaves `PlannerSeam._persist_durable`'s own list. `events` has the run yield the
-    planner's events to the stream; without it the seam's progress reports go to the node's
-    own queue, which it relays once the draft is done. `feed_tools` names the tools whose call
-    and response events the run yields: all by default, as ADK's session holds them. The
-    translator reads only `propose_plan`'s. `runner` is the agent loop's class.
+    `events` has the run yield the planner's events to the stream; without it the seam's
+    progress reports go to the node's own queue, which it relays once the draft is done.
+    `feed_tools` names the tools whose call and response events the run yields: all by
+    default, as ADK's session holds them. The translator reads only `propose_plan`'s.
+    `runner` is the agent loop's class.
     """
 
     seam: PlannerSeam
     agent: Agent[PlannerDeps, Any]
-    mirror: bool = True
     events: bool = True
     runner: type[FeedingRunner] = FeedingRunner
     feed_tools: frozenset[str] | None = None
-    mirrored: list[list[str]] = field(default_factory=list)
 
     async def __call__(
         self,
@@ -261,47 +247,44 @@ class PaiPlannerSeam:
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        state = ctx.session.state
-        before = copy.deepcopy(state)
-        record = self._record(ctx)
+        session = PaiSession(
+            ctx.session.id, [user_message(user_text(ctx))], earlier=self._earlier(ctx)
+        )
         feed = Feed()
         runner = self.runner(
             self.agent,
-            PlannerDeps(state=state, session=PaiSession(ctx.session.id, record)),
+            PlannerDeps(state=ctx.session.state, session=session),
             feed,
             self.events,
             self.feed_tools,
         )
-        try:
-            return await self.seam(
-                ctx=PaiCtx(ctx, runner),  # ty: ignore[invalid-argument-type]
-                on_progress=feed.progress if self.events else on_progress,
-                **kwargs,
-            )
-        finally:
-            state[CONVERSATION_KEY] = ModelMessagesTypeAdapter.dump_json(record).decode()
-            if self.mirror:
-                self.mirrored.append(mirror_changes(ctx, before))
+        return await self.seam(
+            ctx=PaiCtx(ctx, runner),  # ty: ignore[invalid-argument-type]
+            on_progress=feed.progress if self.events else on_progress,
+            **kwargs,
+        )
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         return await self.seam.revise(**kwargs)
 
-    def _record(self, ctx: Context) -> list[ModelMessage]:
-        """The message record of the turn: stored by the last call, or the user's message.
-        A call that resumes an ask the record holds no answer to yet adds the answer, as
-        ADK's interrupt route adds its response to the session."""
-        stored = ctx.session.state.get(CONVERSATION_KEY)
-        record: list[ModelMessage] = (
-            list(ModelMessagesTypeAdapter.validate_json(stored))
-            if stored
-            else [user_message(user_text(ctx))]
-        )
+    def _earlier(self, ctx: Context) -> list[Step]:
+        """The steps of the turn so far: the session's planner events, read as ADK's own
+        planner reads them. A call that resumes an ask the events hold no answer to yet
+        adds the answer, as ADK's interrupt route adds its response to the session."""
+        steps = list(_session_steps(ctx.session.events))
         asked = load_pending_ask(ctx.session.state)
-        if ctx.resume_inputs and asked is not None and asked.call_id in ctx.resume_inputs:
-            answer = answer_message(asked.call_id, {"result": ctx.resume_inputs[asked.call_id]})
-            if record[-1] != answer:
-                record.append(answer)
-        return record
+        if not (ctx.resume_inputs and asked is not None and asked.call_id in ctx.resume_inputs):
+            return steps
+        if any(step.kind == "answer" and step.call_id == asked.call_id for step in steps):
+            return steps
+        args = next(
+            (s.args for s in reversed(steps) if s.kind == "call" and s.call_id == asked.call_id),
+            None,
+        )
+        steps.append(
+            Step("answer", asked.call_id, args, {"result": ctx.resume_inputs[asked.call_id]})
+        )
+        return steps
 
 
 def pai_planner(

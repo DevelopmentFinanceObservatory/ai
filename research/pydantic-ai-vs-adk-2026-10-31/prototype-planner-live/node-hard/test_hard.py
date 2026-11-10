@@ -2,33 +2,34 @@
 planner in the same Studio turn, and compared.
 
 Both arms talk to a `chunked.Chunked` client that can stall, go quiet mid-stream and refuse
-a request. The Pydantic AI arm is `hardened.hard_planner`, `node/`'s planner with the fixes
-the cases called for. Every case has a control: the same check on an arm with one fix off,
-which must fail it.
+a request. The Pydantic AI arm is `node/`'s planner over `agent/`, built through
+`hardened.hard_planner` so a control can switch one behaviour off. Every case has a control:
+the same check on an arm with one behaviour off, which must fail it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
-import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from typing import Any
 
-import hardened
-import pai_call
+import pai_node
 import pai_planner
 import pytest
 import scripted as sc
 import studio_arms
 from chunked import NEVER, Call, function_call, say
 from common.telemetry import flush_telemetry, init_telemetry
+from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from hard import bounds, hard_arm, phases, session_of, trace_tools
 from harness.planner_seam import PlannerSeam
 from harness.prefix_cache import PrefixCache
 from harness.turn_budget import bounded, current_turn_budget
 from planner.agent import AGENT_NAME
+from planner.call import Step
 from scenes import TURN, differences, events
 from studio_arms import Gate, build_arm
 from submission.service import COMBINATION_OPTIONS
@@ -47,8 +48,6 @@ from test_node import (
 from tests.orchestrator_fakes import request_text, stream, studio_client, turn_body
 
 type Arm = tuple[studio_arms.Built, list[list[dict[str, Any]]]]
-
-CONVERSATION_KEY = "planner:conversation"
 
 
 def calls(*step: tuple[str, dict[str, Any]]) -> Call:
@@ -71,8 +70,8 @@ def normal(value: Any) -> Any:
 
 
 def state_of(built: studio_arms.Built) -> dict[str, Any]:
-    """The turn's stored session state, without the Pydantic AI path's own record."""
-    return {k: v for k, v in session_of(built).state.items() if k != CONVERSATION_KEY}
+    """The turn's stored session state."""
+    return dict(session_of(built).state)
 
 
 def told(built: studio_arms.Built) -> str:
@@ -130,9 +129,10 @@ async def test_a_cut_after_a_function_call_ends_as_dev_does_and_runs_no_tool(
     assert_no_tool_ran(pai)
     assert_ends_alike(adk, pai)
     assert "plan.proposed" not in events(pai[1][0])
-    # The stored record holds the closing sentence and no function call.
-    record = json.loads(session_of(pai[0]).state[CONVERSATION_KEY])
-    assert all(part["part_kind"] != "tool-call" for m in record for part in m.get("parts", []))
+    # The session's planner events hold no function call, as on dev's arm.
+    for arm in (adk, pai):
+        planner_events = [e for e in session_of(arm[0]).events if e.author == AGENT_NAME]
+        assert not any(e.get_function_calls() for e in planner_events)
 
 
 async def test_control_a_client_that_passes_chunks_on_runs_the_tool_the_cut_call_streamed(
@@ -189,7 +189,7 @@ async def test_control_a_stall_that_may_not_be_resent_ends_the_turn_on_the_first
         budget.retry_spent = True
         return bounded(request, stream=stream)
 
-    monkeypatch.setattr(hardened, "bounded", no_resend)
+    monkeypatch.setattr(pai_planner, "bounded", no_resend)
     adk, pai = await pair(monkeypatch, (STALL, calls(PROPOSE)), settings=FIRST_CHUNK)
 
     with pytest.raises(AssertionError):
@@ -462,13 +462,15 @@ async def test_the_two_tools_of_one_response_overlap_as_they_do_on_dev(
 async def test_control_tools_run_one_after_the_other_write_in_another_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    planner_tools = pai_planner.planner_tools
+
     def one_at_a_time(seam: Any, parts: Any, wiring: Any) -> list[Any]:
-        tools = pai_planner.planner_tools(seam, parts, wiring)
+        tools = planner_tools(seam, parts, wiring)
         for tool in tools:
             tool.sequential = True
         return tools
 
-    monkeypatch.setattr(hardened, "planner_tools", one_at_a_time)
+    monkeypatch.setattr(pai_planner, "planner_tools", one_at_a_time)
     together, later, task = SIBLINGS["a proposal that is accepted, then an ask"]
     _, _, adk_log, pai_log = await traced_pair(monkeypatch, (calls(*together), calls(*later)), task)
 
@@ -525,30 +527,25 @@ async def test_a_turn_resumed_on_fresh_apps_ends_as_one_app_runs_it(
     assert_phases_equal_one_app(built, segments, whole)
 
 
-async def test_control_a_record_kept_on_the_node_object_does_not_survive_a_restart(
+async def test_control_answers_kept_on_the_node_object_do_not_survive_a_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def remembered(self: hardened.HardSeam, ctx: Any) -> list[Any]:
-        record = (
-            vars(self)
-            .setdefault("memory", {})
-            .setdefault(ctx.session.id, [pai_call.user_message(hardened.pai_node.user_text(ctx))])
-        )
-        asked = hardened.load_pending_ask(ctx.session.state)
-        if ctx.resume_inputs and asked is not None and asked.call_id in ctx.resume_inputs:
-            record.append(
-                pai_call.answer_message(asked.call_id, {"result": ctx.resume_inputs[asked.call_id]})
-            )
-        return record
+    earlier = pai_node.PaiPlannerSeam._earlier
 
-    monkeypatch.setattr(hardened.HardSeam, "_record", remembered)
+    def remembered(self: pai_node.PaiPlannerSeam, ctx: Any) -> list[Step]:
+        """The message and each answer this node object was resumed with."""
+        answers = vars(self).setdefault("answers", [])
+        answers.extend(s for s in earlier(self, ctx)[-1:] if s.kind == "answer")
+        return [Step("message"), *answers]
+
+    monkeypatch.setattr(pai_node.PaiPlannerSeam, "_earlier", remembered)
     plan = [("pai", TWO_ASKS[:2]), ("pai", TWO_ASKS[2:3]), ("pai", TWO_ASKS[3:])]
     built, segments = await phases(monkeypatch, WITH_ASK, plan, ANSWERS)
     whole = await two_asks_in_one_app(monkeypatch, "pai")
 
     with pytest.raises(AssertionError):
         assert_phases_equal_one_app(built, segments, whole)
-    # The first answer is not in the new app's record, so the last proposal is refused.
+    # The first answer is not in the new app's memory, so the last proposal is refused.
     assert events(segments[-1])[-1] != "plan.proposed"
 
 
@@ -578,16 +575,23 @@ async def test_a_turn_that_passes_between_planners_lands_the_plan_dev_lands(
     [("adk", "adk", "pai"), ("pai", "adk", "pai")],
     ids=["dev's, dev's, Pydantic AI", "Pydantic AI, dev's, Pydantic AI"],
 )
-async def test_control_a_record_read_only_from_the_nodes_own_key_loses_what_dev_recorded(
+async def test_control_a_node_that_reads_only_the_answer_it_resumes_loses_what_dev_recorded(
     arms: tuple[str, str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = [(arms[0], TWO_ASKS[:2]), (arms[1], TWO_ASKS[2:3]), (arms[2], TWO_ASKS[3:])]
-    built, segments = await phases(
-        monkeypatch, WITH_ASK, plan, ANSWERS, fixes={"record_from": "stored"}
-    )
+    earlier = pai_node.PaiPlannerSeam._earlier
 
-    # Under `node/`'s record the last run reads no first answer (none, or a stale record),
-    # refuses the proposal and asks the model again; the turn ends with no plan.
+    def answer_only(self: pai_node.PaiPlannerSeam, ctx: Any) -> list[Step]:
+        steps = earlier(self, ctx)
+        return [s for s in steps if s.kind == "message"] + [s for s in steps if s.kind == "answer"][
+            -1:
+        ]
+
+    monkeypatch.setattr(pai_node.PaiPlannerSeam, "_earlier", answer_only)
+    plan = [(arms[0], TWO_ASKS[:2]), (arms[1], TWO_ASKS[2:3]), (arms[2], TWO_ASKS[3:])]
+    built, segments = await phases(monkeypatch, WITH_ASK, plan, ANSWERS)
+
+    # The last run reads no first answer, refuses the proposal and asks the model again;
+    # the turn ends with no plan.
     assert events(segments[-1])[-1] != "plan.proposed"
     assert len(built[-1].client.calls) == 3
 
@@ -837,10 +841,23 @@ async def test_control_a_run_with_no_conversation_id_carries_one_pydantic_ai_mak
     assert "#" not in made_up
 
 
+async def without_usage(
+    self: pai_planner.PlannerClient, *, model: str, contents: Any, config: Any
+) -> AsyncIterator[LlmResponse]:
+    """`PlannerClient._raw` with each chunk's usage left off the response."""
+    stream = await self.sent(model=model, contents=contents, config=config)
+    async with aclosing(stream) as chunks:
+        async for chunk in chunks:
+            content = chunk.candidates[0].content if chunk.candidates else None
+            yield LlmResponse(
+                content=content, partial=True, custom_metadata={pai_planner._RAW_CHUNK: chunk}
+            )
+
+
 async def test_control_a_client_that_drops_the_usage_of_each_chunk_loses_the_thought_tokens(
     monkeypatch: pytest.MonkeyPatch, exported_spans: Any
 ) -> None:
-    monkeypatch.setattr(hardened.HoldingClient, "_raw", hardened.PlannerClient._raw)
+    monkeypatch.setattr(pai_planner.PlannerClient, "_raw", without_usage)
     adk = await spans_of(monkeypatch, exported_spans, "adk")
     pai = await spans_of(monkeypatch, exported_spans, "pai")
 

@@ -15,18 +15,23 @@ This module changes the agent loop only:
   `TurnBudget` and runs the after-model callbacks (`PlannerClient`).
 - Thought summaries leave the history as `planner.settings.drop_thought_parts` removes
   them (`drop_unsigned_thoughts`).
+- A call to a tool the planner lacks is answered with ADK's text (`tool_not_found`) and
+  ends the run only when the turn's model-call cap does (`RETRIES`).
+- Pydantic AI's `Instrumentation` gives the planner generation, tool and agent spans, and
+  the run's conversation id is the session's id.
 
 Private names relied on: `PlannerSeam._agent`, `_before_planner_model`,
 `_after_planner_model`, `_after_planner_tool`, `_on_planner_tool_error` (harness);
-`FunctionTool._get_declaration`, `_preprocess_args` and `_get_mandatory_args` (ADK); `GoogleModel._build_content_and_config`
-(Pydantic AI); `orchestrator.agent._retrying` (harness).
+`FunctionTool._get_declaration`, `_preprocess_args` and `_get_mandatory_args` (ADK);
+`GoogleModel._build_content_and_config` (Pydantic AI); `orchestrator.agent._retrying` (harness).
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import warnings
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
@@ -40,15 +45,24 @@ from harness.planner_seam import PlannerSeam
 from harness.prefix_cache import PrefixCache, prefix_key
 from harness.turn_budget import CLOSED_BY_KEY, bounded
 from orchestrator.agent import _retrying
-from pai_call import PaiCall
+from pai_call import PaiCall, RecordingState, steps_of
 from planner.agent import AGENT_NAME
+from planner.call import Step
 from planner.settings import AGENT_THINKING_CONFIG
 from planner.skills import GET_SKILL, GET_SKILL_FILE, read_skill_page
 from planner.tools import EndRun, ask_user, propose, propose_and_translate, reject
 from pydantic_ai import Agent, RunContext, Tool
+from pydantic_ai.capabilities.instrumentation import Instrumentation
 from pydantic_ai.capabilities.process_history import ProcessHistory
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    ThinkingPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.models.wrapper import WrapperModel
@@ -117,39 +131,56 @@ class PlannerParts:
 
 @dataclass
 class PaiSession:
-    """The record of one entry's session: every message of every run, in order.
+    """The session a run belongs to: the user's message and the steps of earlier runs.
 
-    It opens with the user's message (`pai_call.user_message`). A run starts from that
-    message alone and the seam's brief, as ADK's `single_turn` run reads only its own node
-    path, and its messages join the record when it ends. The user's answer to an ask
-    joins it before the run that answer resumes (`pai_call.answer_message`).
+    `record` opens with the user's message (`pai_call.user_message`). A run starts from
+    that message alone and the seam's brief, as ADK's `single_turn` run reads only its own
+    node path.
+
+    `earlier` is the steps of the runs before this one, when a log holds them: the ADK
+    session's planner events, which both planners append. Without it (an entry that has no
+    ADK session) the steps are read off `record`, which then holds every run's messages,
+    and the user's answer to an ask joins it before the run that answer resumes
+    (`pai_call.answer_message`).
     """
 
     id: str
     record: list[ModelMessage]
+    earlier: Sequence[Step] | None = None
 
     def history(self) -> list[ModelMessage]:
         """What a run starts from: the user's message."""
         return [self.record[0]]
 
     def call(self, ctx: RunContext[PlannerDeps]) -> PaiCall:
-        """The `PlannerCall` for the tool call `ctx` serves: the record, then the current
-        run's own messages (those after the user's message it started from)."""
+        """The `PlannerCall` for the tool call `ctx` serves: the earlier steps, then the
+        current run's own messages (those after the user's message it started from)."""
+        earlier = steps_of(self.record) if self.earlier is None else self.earlier
         return PaiCall(
-            messages=[*self.record, *ctx.messages[1:]],
-            state=ctx.deps.state,
+            messages=ctx.messages[1:],
+            state=RecordingState(ctx.deps.state, ctx.deps.written),
             call_id=ctx.tool_call_id,
+            earlier=earlier,
         )
 
 
 @dataclass
 class PlannerDeps:
-    """One entry's run state: the session state ADK's planner reads and writes, the
-    session, and whether a tool ended the run."""
+    """One run's state: the session state ADK's planner reads and writes, the session,
+    the keys the tools wrote since the last `drain_writes`, and whether a tool ended the
+    run."""
 
     state: dict[str, Any]
     session: PaiSession
     ended: bool = False
+    written: dict[str, None] = field(default_factory=dict)
+
+    def drain_writes(self) -> dict[str, Any]:
+        """The keys the tools wrote since the last call, with their values: what ADK
+        carries on the response event of the tools that wrote them."""
+        delta = {key: copy.deepcopy(self.state[key]) for key in self.written if key in self.state}
+        self.written.clear()
+        return delta
 
     def end_run(self) -> None:
         """The `EndRun` the tools end the planner's run with: Pydantic AI stops before the
@@ -323,6 +354,53 @@ def _body(seam: PlannerSeam, tool: BaseTool, wiring: ToolWiring) -> Callable[...
 
 # --- The history -------------------------------------------------------------------
 
+# The model-call cap of one request (`harness.settings.Settings.turn_model_calls_max`) is
+# what ends a run that keeps calling a tool that does not exist, as on ADK. Pydantic AI
+# charges each such call against `retries`, so the allowance sits above the cap.
+RETRIES = 1000
+
+
+def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
+    """What ADK answers a call to a tool the agent lacks, naming the tools it can call in
+    declaration order."""
+    available = ", ".join(tools) or "none"
+    return {
+        "error": (
+            f"Invoking `{name}()` failed as no tool with that name is available. "
+            f"The tools you can call are: {available}. You could retry, but it is "
+            "IMPORTANT that you only call a tool from that list."
+        )
+    }
+
+
+def adk_tool_not_found(tools: Sequence[str]) -> Callable[[list[ModelMessage]], list[ModelMessage]]:
+    """A history processor that gives a call to a tool the planner lacks `tool_not_found`
+    in place of Pydantic AI's retry text."""
+
+    def process(messages: list[ModelMessage]) -> list[ModelMessage]:
+        return [
+            replace(message, parts=[_not_found(part, tools) for part in message.parts])
+            if isinstance(message, ModelRequest)
+            else message
+            for message in messages
+        ]
+
+    return process
+
+
+def _not_found(part: Any, tools: Sequence[str]) -> Any:
+    if not isinstance(part, RetryPromptPart | ToolReturnPart) or part.tool_name in tools:
+        return part
+    text = part.content if isinstance(part.content, str) else ""
+    retried = isinstance(part, RetryPromptPart) or part.retry is not None
+    if retried and (not text or text.startswith("Unknown tool name")):
+        return ToolReturnPart(
+            tool_name=part.tool_name,
+            tool_call_id=part.tool_call_id,
+            content=tool_not_found(part.tool_name, tools),
+        )
+    return part
+
 
 def drop_unsigned_thoughts(messages: list[ModelMessage]) -> list[ModelMessage]:
     """`messages` with every thinking part that carries no thought signature removed, as
@@ -380,6 +458,11 @@ class PlannerClient:
     A call the budget closes answers with the closing sentence, or with the ask the seam's
     after-model callback puts in its place. A call `PlannerModel` answers for the seam (a
     synthetic response) reaches neither the model nor the budget.
+
+    The chunks reach Pydantic AI once `bounded` has finished with the call. Each still
+    passes through `bounded` as it arrives, so the first-chunk deadline, the gaps and the
+    model time are metered as the stream runs; Pydantic AI sees no partial text before
+    the call ends, and the planner's text is never shown while it streams.
     """
 
     client: Client
@@ -405,6 +488,7 @@ class PlannerClient:
             return
         usage: types.GenerateContentResponseUsageMetadata | None = None
         closed = False
+        held: list[types.GenerateContentResponse] = []
         responses = bounded(
             lambda: self._raw(model=model, contents=contents, config=config), stream=True
         )
@@ -414,19 +498,24 @@ class PlannerClient:
                 if _RAW_CHUNK in metadata:
                     chunk: types.GenerateContentResponse = metadata[_RAW_CHUNK]
                     usage = chunk.usage_metadata or usage
-                    yield chunk
+                    held.append(chunk)
                 elif CLOSED_BY_KEY in metadata:
                     # The budget closed the call: the session keeps the final answer alone,
-                    # after the after-model callbacks have seen it.
+                    # whatever was streamed, after the after-model callbacks have seen it.
+                    # The partial copy of a closing sentence is Studio's, never history's.
                     closed = True
                     self.hooks.after(None, response)
                     replaced = self.hooks.seam._after_planner_model(None, response)
-                    yield _as_chunk(replaced or response)
-                # The partial copy of a closing sentence is Studio's, never history's.
+                    held = [_as_chunk(replaced or response)]
         if not closed:
             whole = LlmResponse(usage_metadata=usage, partial=False)
             self.hooks.after(None, whole)
             self.hooks.seam._after_planner_model(None, whole)
+        # Pydantic AI reads the call only now, as ADK's `Gemini` hands its consumer a
+        # function call once the stream ends: a call the budget cut after a function call
+        # was streamed runs no tool.
+        for chunk in held:
+            yield chunk
 
     async def _raw(self, *, model: str, contents: Any, config: Any) -> AsyncIterator[LlmResponse]:
         stream = await self.sent(model=model, contents=contents, config=config)
@@ -434,7 +523,11 @@ class PlannerClient:
             async for chunk in chunks:
                 content = chunk.candidates[0].content if chunk.candidates else None
                 yield LlmResponse(
-                    content=content, partial=True, custom_metadata={_RAW_CHUNK: chunk}
+                    content=content,
+                    partial=True,
+                    # So `bounded` stamps `dfo.model.thoughts_token_count` on the call's span.
+                    usage_metadata=chunk.usage_metadata,
+                    custom_metadata={_RAW_CHUNK: chunk},
                 )
 
 
@@ -618,7 +711,9 @@ def planner_agent(
     keep_thoughts: bool = False,
 ) -> Agent[PlannerDeps, str | None]:
     """The planner as a Pydantic AI agent: the seam's instruction and tools, at LOW thinking
-    with summaries, dropping unsigned thoughts from history unless `keep_thoughts`."""
+    with summaries, dropping unsigned thoughts from history unless `keep_thoughts`, with
+    spans, and answering a call to an unknown tool as ADK does until the turn's call cap
+    ends the run."""
     parts = parts or PlannerParts.of(seam)
     return Agent(
         model,
@@ -627,6 +722,11 @@ def planner_agent(
         deps_type=PlannerDeps,
         output_type=OUTPUT_TYPE,
         model_settings=THINKING_SETTINGS,
-        capabilities=[] if keep_thoughts else [ProcessHistory(drop_unsigned_thoughts)],
+        capabilities=[
+            *([] if keep_thoughts else [ProcessHistory(drop_unsigned_thoughts)]),
+            Instrumentation(),
+            ProcessHistory(adk_tool_not_found([tool.name for tool in parts.tools])),
+        ],
         name=AGENT_NAME,
+        retries=RETRIES,
     )

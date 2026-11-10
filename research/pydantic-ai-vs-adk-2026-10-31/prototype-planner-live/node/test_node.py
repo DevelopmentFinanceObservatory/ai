@@ -26,6 +26,7 @@ from entry import quiet_logs
 from executor.classify import ToolFailure
 from executor.outcomes import RediscoveryNeeded
 from google.adk import Event
+from google.adk.events import EventActions
 from harness.graph import workflow as workflow_module
 from harness.graph.execute import _planner_refusal
 from harness.graph.state import AGENT_NAME as GRAPH_NAME
@@ -33,10 +34,10 @@ from harness.graph.state import ORCHESTRATOR_PLAN_RECORDS_KEY, readable_plan
 from harness.studio_translate import _WORKING_ON_PLAN, _node_name, _Translator
 from harness.turn_events import PLANNER_ASK
 from harness.wire import ActivityStep, StepStatus
-from pai_call import user_message
 from parity import WIRE, shape
 from planner.agent import AGENT_NAME, _session_steps
 from planner.call import CallSession, ResponseCall, Step, prices_chosen
+from planner.plan import PLAN_STATE_KEY
 from planner.workflow import ToolId
 from scenes import (
     INTERRUPT,
@@ -213,14 +214,10 @@ async def test_the_answer_of_an_ask_is_taken_once(arm: Arm) -> None:
     assert again.status_code == 404
 
 
-async def test_control_a_planner_that_keeps_no_record_loses_the_answer(
+async def test_control_a_planner_that_reads_no_earlier_step_loses_the_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        pai_node.PaiPlannerSeam,
-        "_record",
-        lambda self, ctx: [user_message(pai_node.user_text(ctx))],
-    )
+    monkeypatch.setattr(pai_node.PaiPlannerSeam, "_earlier", lambda self, ctx: [Step("message")])
     adk, pai = await both(WITH_ASK, ASK_SCRIPT, after=(("answer", ANSWER),))
 
     # The resumed proposal needs the user's pick of the combination, which no step shows.
@@ -562,10 +559,9 @@ async def stored(
 
 
 def assert_same_records(adk: dict[str, Any], pai: dict[str, Any]) -> None:
-    """The records equal dev's, apart from the key the Pydantic AI path adds."""
-    state = {k: v for k, v in pai["state"].items() if k != pai_node.CONVERSATION_KEY}
-    assert set(adk["state"]) == set(state)
-    assert differences(comparable(adk["state"]), comparable(state)) == []
+    """The records equal dev's."""
+    assert set(adk["state"]) == set(pai["state"])
+    assert differences(comparable(adk["state"]), comparable(pai["state"])) == []
     for key in ("plan", "plan_records", "approvals", "turns", "ledger"):
         assert differences(comparable(adk[key]), comparable(pai[key])) == [], key
 
@@ -578,35 +574,49 @@ async def test_the_records_a_turn_leaves_equal_devs() -> None:
     pai = await stored("pai", PLAIN, SKILL_ASK_SCRIPT, APPROVED)
 
     assert_same_records(adk, pai)
-    assert set(pai["state"]) - set(adk["state"]) == {pai_node.CONVERSATION_KEY}
-    assert pai["state"][pai_node.CONVERSATION_KEY]
     assert events(pai["segments"][-1])[0] == "plan.approved"
     # A turn this small runs no plan step: the recorded plan has no surface to run on, so
     # the ledger and the plan records are empty on both arms.
     assert adk["ledger"] == pai["ledger"]
 
 
-async def test_control_with_only_the_seams_own_list_durable_keys_a_tool_writes_are_lost() -> None:
+def plan_only(response_events: Any) -> Any:
+    """`pai_node.response_events` whose events carry no written key but the plan."""
+
+    def narrowed(*args: Any) -> list[Event]:
+        events_ = response_events(*args)
+        for event in events_:
+            assert event.actions is not None
+            delta = event.actions.state_delta
+            event.actions = EventActions(
+                state_delta={k: v for k, v in delta.items() if k == PLAN_STATE_KEY}
+            )
+        return events_
+
+    return narrowed
+
+
+async def test_control_with_only_the_seams_own_list_durable_keys_a_tool_writes_are_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adk = await stored("adk", WITH_ASK, ASK_SCRIPT, (("answer", ANSWER),))
-    pai = await stored("pai", WITH_ASK, ASK_SCRIPT, (("answer", ANSWER),), pai={"mirror": False})
+    monkeypatch.setattr(pai_node, "response_events", plan_only(pai_node.response_events))
+    pai = await stored("pai", WITH_ASK, ASK_SCRIPT, (("answer", ANSWER),))
 
     with pytest.raises(AssertionError):
         assert_same_records(adk, pai)
     # The first proposal wrote keys the seam's own list lacks (`PlannerSeam._persist_durable`),
-    # which ADK carries on the proposal's response event. The resumed run misses them and
-    # ends with no plan.
+    # which ADK carries on the proposal's response event. The stored session misses them.
     lost = set(adk["state"]) - set(pai["state"])
-    print(f"keys that do not survive the resume: {sorted(lost)}")
     assert {"translator:referral", "translator:discovery", "planner:pin_verdicts"} <= lost
-    assert events(adk["segments"][-1])[-1] == "plan.proposed"
-    assert "plan.proposed" not in events(pai["segments"][-1])
 
 
-async def test_control_a_skill_page_read_before_an_ask_is_lost_on_the_resume_without_the_mirror() -> (
-    None
-):
+async def test_control_a_skill_page_read_before_an_ask_is_lost_on_the_resume_without_the_deltas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adk = await stored("adk", PLAIN, SKILL_ASK_SCRIPT, (("answer", TEXT),))
-    pai = await stored("pai", PLAIN, SKILL_ASK_SCRIPT, (("answer", TEXT),), pai={"mirror": False})
+    monkeypatch.setattr(pai_node, "response_events", plan_only(pai_node.response_events))
+    pai = await stored("pai", PLAIN, SKILL_ASK_SCRIPT, (("answer", TEXT),))
 
     # The brief of the resumed run lists the page, whose text lives under a key the seam does
     # not carry (`planner.skills.skill_page_key`), so the entry raises and the turn fails.

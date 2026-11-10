@@ -4,9 +4,9 @@ The planner runs as a Pydantic AI `Agent` (pydantic-ai-slim 2.66.0, google-genai
 
 ## Files
 
-- `pai_call.py`: `PaiCall`, the `PlannerCall` over a message record. `user_message` and `answer_message` build the two requests the record holds besides the run's own.
-- `pai_planner.py`: the agent. `PlannerParts` reads the instruction and each declaration off the seam's ADK agent. `planner_tools` declares one Pydantic AI tool per declaration, and `run_tool` maps each to its neutral body. `PlannerModel` and `PlannerClient` apply the seam's before-model callback, the prefix cache, the turn budget and the after-model callbacks. `drop_unsigned_thoughts` is the thought filter.
-- `pai_entry.py`: `run_pai_entry`, the equivalent of `entry.run_entry`. `PaiRunner` runs `Agent.iter` and stops it before the next model request when a tool ended the run. `PaiNodeContext` is the `ctx` the graph's planner node and the seam read.
+- `pai_call.py`: `PaiCall`, the `PlannerCall` over the steps of earlier runs and the live run's messages. `RecordingState` is the session state a tool body writes through, noting each key written. `user_message` and `answer_message` build the two requests an entry's record holds besides the run's own, and `steps_of` reads a record's steps.
+- `pai_planner.py`: the agent. `PlannerParts` reads the instruction and each declaration off the seam's ADK agent. `planner_tools` declares one Pydantic AI tool per declaration, and `run_tool` maps each to its neutral body. `PlannerModel` and `PlannerClient` apply the seam's before-model callback, the prefix cache, the turn budget and the after-model callbacks. `drop_unsigned_thoughts` is the thought filter and `adk_tool_not_found` answers a call to a tool the planner lacks. `PaiSession` and `PlannerDeps` hold what a run reads and writes.
+- `pai_entry.py`: `run_pai_entry`, the equivalent of `entry.run_entry`. `PaiRunner` runs `Agent.iter` and stops it before the next model request when a tool ended the run, or when Pydantic AI refuses a response. `PaiNodeContext` is the `ctx` the graph's planner node and the seam read.
 - `scripted.py`: the scripted google-genai client, the ADK arm, and the request comparison.
 - `test_parity.py`: 18 tests.
 
@@ -14,7 +14,7 @@ The planner runs as a Pydantic AI `Agent` (pydantic-ai-slim 2.66.0, google-genai
 
 `run_pai_entry` seeds the state from the recording, runs the graph's `route`, `plan_start` and `planner` node functions over a plain state dict, under a fresh `TurnBudget` and the conversation's recorded identity, as `entry.run_entry` does.
 
-A run starts from the user's message and the brief the seam leaves in state, and sees nothing of an earlier run, as ADK's `single_turn` run reads only its own node path. `PaiSession.record` holds every message of every run in order, with the user's answer joined before the run it resumes; `PaiCall` reads steps from it, so `elected_spec_ids`, `answers_since_referral`, `prices_chosen` and `_ask_beside_ask` see the session as ADK's events show it.
+A run starts from the user's message and the brief the seam leaves in state, and sees nothing of an earlier run, as ADK's `single_turn` run reads only its own node path. `PaiSession.record` holds every message of every run in order, with the user's answer joined before the run it resumes. A tool call's `PaiCall` gives the steps of that record (`steps_of`), or the steps `PaiSession.earlier` holds when a log of earlier runs exists (the node gives the ADK session's planner events), then the steps of the live run's own messages. So `elected_spec_ids`, `answers_since_referral`, `prices_chosen` and `_ask_beside_ask` see the session as ADK's events show it. Tool bodies write session state through `RecordingState`, which notes each key written in `PlannerDeps.written`; `PlannerDeps.drain_writes` returns those keys and values (the node puts them on a response event's `state_delta`).
 
 An accepted ask or a plan declared ready calls `PlannerDeps.end_run`. `PaiRunner.run` sees the flag at the next `ModelRequestNode`, keeps that node's request (it carries the tool returns) and stops. The seam returns the ask; the entry reads it off state, appends the answer, sets `ctx.resume_inputs` to the answer's `result` (what ADK resumes a node with) and runs the node again in a request of its own.
 
@@ -47,6 +47,16 @@ Every request differs from ADK's only by what `GoogleModel` writes for the same 
 | A replayed function call with no signature gets the `skip_thought_signature_validator` placeholder; ADK sends none               | the scripted turns are signed, as Gemini's are |
 
 Two differences the tests found and the code closes: a tool result that is no dict (`get_skill`'s text) goes to the model as `{"return_value": ...}` under Pydantic AI and `{"result": ...}` under ADK, so `_body` wraps it as ADK does; and a resume value is the answer's `result`, not the whole response, so the brief of the resumed run shows the pick.
+
+## Behaviour at the edges
+
+Each is proved against dev's ADK planner in `../node-hard/`, which runs the node on a scripted client that stalls, goes quiet, refuses and ends.
+
+- A call the budget cuts after its function call was streamed runs no tool. `PlannerClient._stream` passes every chunk through `bounded` as it arrives and hands Pydantic AI the chunks once `bounded` returns, or the closing response alone when the budget cut the call, as ADK's `Gemini` hands its consumer a function call only when the stream ends.
+- Usage rides on each chunk (`PlannerClient._raw`), so `bounded` stamps `dfo.model.thoughts_token_count` on the call's span.
+- A call to a tool the planner lacks is answered with ADK's text (`tool_not_found`, written out in `pai_planner.py`, in a history processor) and does not end the run until the turn's model-call cap does: `retries` is `RETRIES` (1000), above the cap, since Pydantic AI charges each such call against it.
+- A response Pydantic AI refuses (`UnexpectedModelBehavior`: an empty stream, a response the provider blocked) ends the run with no plan, as ADK ends a run on a response with no function call. `PaiRunner.run` catches it and the seam refuses with `plan_not_ready`.
+- `Instrumentation()` gives the planner agent, generation and tool spans, and `Agent.iter(conversation_id=session.id)` sets `gen_ai.conversation.id` to the session's id.
 
 ## Controls
 
@@ -87,8 +97,7 @@ Monkeypatches: `PlannerClient` replaces `generate_content_stream` on its own cli
 
 ## Not reproduced or not exercised
 
-- A tool name the planner lacks. ADK answers a tool-not-found response listing the tools; Pydantic AI answers a retry prompt and, past its retries, raises `UnexpectedModelBehavior`. Not run.
-- A budget cut mid-stream with a function call already delivered. `PlannerClient` passes streamed chunks through, so the call would run. Every test runs under a `TurnBudget`, and none reaches a bound, so `PlannerClient`'s closing path, the first-chunk resend and the 403/404 prefix-cache resend are ported and untested.
+- The budget's bounds, the first-chunk resend, the 403/404 prefix-cache resend, an unknown tool name and a refused response. `test_parity.py` reaches none of them; `../node-hard/` does.
 - `_check_branches`: Pydantic AI has no branches, and `ctx.session.events` is empty.
 - A pick's replan, an amendment, `revise`, Stop and the progress relay: the entry runs `__call__` for a first draft and its resume only.
 - Absent from `agent/`: the `validated` tool-config mode, `pai_record`, the experiment fingerprint and the live smoke.

@@ -53,6 +53,7 @@ class _Call:
         self.stream = stream
         self.started = time.perf_counter()
         self.first_chunk_s: float | None = None
+        self.first_chunk_thought: bool | None = None
         self.usage: Any = None
         self.cached_content = bool(_config_field(kwargs.get("config"), "cached_content"))
         self.done = False
@@ -60,6 +61,7 @@ class _Call:
     def observe(self, response: Any) -> None:
         if self.first_chunk_s is None:
             self.first_chunk_s = time.perf_counter() - self.started
+            self.first_chunk_thought = _opens_with_thought(response)
         if (usage := getattr(response, "usage_metadata", None)) is not None:
             self.usage = usage
 
@@ -72,6 +74,7 @@ class _Call:
             "stream": self.stream,
             "seconds": round(time.perf_counter() - self.started, 3),
             "first_chunk_s": None if self.first_chunk_s is None else round(self.first_chunk_s, 3),
+            "first_chunk_thought": self.first_chunk_thought,
             "cached_content": self.cached_content,
             "prompt_tokens": None if usage is None else usage.prompt_token_count or 0,
             "cached_tokens": None if usage is None else usage.cached_content_token_count or 0,
@@ -80,6 +83,15 @@ class _Call:
             "error": None if error is None else _error(error),
         }
         self.sink.append(record)
+
+
+def _opens_with_thought(response: Any) -> bool | None:
+    """Whether the chunk's first part is a thought summary, or `None` when it has no part."""
+    for candidate in getattr(response, "candidates", None) or []:
+        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+        if parts:
+            return bool(getattr(parts[0], "thought", False))
+    return None
 
 
 def _config_field(config: Any, name: str) -> Any:

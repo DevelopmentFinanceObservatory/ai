@@ -1,13 +1,13 @@
-"""Read a driver run's `records.jsonl` and write `RESULTS.md`, every figure computed here.
+"""Read the driver runs' `records.jsonl` and write `RESULTS.md`, every figure computed here.
 
 Both arms are scored over every entry, a failed entry counting as a first proposal not
 accepted, a kind pass missed and whatever calls it made. The paired difference is Pydantic
 AI minus ADK, with a 95% percentile interval from resampling the tasks (both arms keep the
-same resampled tasks, so a task's three repetitions stay together). `--check` compares the
+same resampled tasks, so a task's entries stay together). The first run, the hardened run
+and both pooled are reported, entries pairing by run, task and repetition. `--check` compares the
 file on disk with a fresh one and exits 1 when they differ.
 
-    uv run --package harness python research/pai-planner-live/live-entry/analyse.py \\
-        --out research/pai-planner-live/live-entry/runs/main
+    uv run --package harness python research/pai-planner-live/live-entry/analyse.py
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ CACHED_SHARE_POINTS = 0.02
 WALL_RATIO = 1.10
 AA_NOISE_POINTS = 5.0
 RATE_LIMIT_CODE = 429
+LONG_THINKING_TOKENS = 2000
 
 
 # --- One entry, reduced ------------------------------------------------------------------
@@ -58,6 +59,8 @@ class Entry:
     wall_s: float
     chunk_s: tuple[float, ...]
     closed: bool
+    run: str = ""
+    long_thinking: bool = False
 
 
 def first_chunk_times(tap: Sequence[Mapping[str, Any]]) -> tuple[float, ...]:
@@ -85,6 +88,10 @@ def reduce_entry(record: Mapping[str, Any], task: Task) -> Entry:
         wall_s=record["wall_s"],
         chunk_s=first_chunk_times(record["tap"]),
         closed=record["budget_closed"] is not None,
+        run=record.get("run", ""),
+        long_thinking=any(
+            (call["thinking_tokens"] or 0) >= LONG_THINKING_TOKENS for call in record["tap"]
+        ),
     )
 
 
@@ -126,6 +133,7 @@ STATS = (
     Stat("First chunk, p90", "seconds", _chunks(0.9)),
     Stat("Planner wall time, median", "seconds", _walls(0.5)),
     Stat("Planner wall time, p90", "seconds", _walls(0.9)),
+    Stat("Entries with a call of 2,000+ thinking tokens", "rate", _mean("long_thinking")),
 )
 
 
@@ -162,7 +170,8 @@ def paired(stat: Stat, base: Mapping[str, list[Entry]], test: Mapping[str, list[
         diffs.append(rt - rb)
         ratios.append(rt / rb if rb else math.nan)
     ratios = [r for r in ratios if not math.isnan(r)]
-    return Paired(b, t, (t - b, *interval(diffs)), (t / b if b else math.nan, *interval(ratios)))
+    spread = interval(ratios) if ratios else (math.nan, math.nan)
+    return Paired(b, t, (t - b, *interval(diffs)), (t / b if b else math.nan, *spread))
 
 
 def exact_sign_p(more: int, fewer: int) -> float:
@@ -257,7 +266,20 @@ def after_close(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "proposals": sum(bool(r["proposals"]) for r in closed),
         "extra_reads": len(extra),
         "per_read": [per_read(r) for r in extra],
-        "others": statistics.median(per_read(r) for r in rest),
+        "others": statistics.median(per_read(r) for r in rest) if rest else math.nan,
+    }
+
+
+def thinking(entries: Sequence[Entry]) -> dict[str, float]:
+    """The entries with a call of 2,000 or more thinking tokens, and the median wall time of
+    those with and without one."""
+    long = [e.wall_s for e in entries if e.long_thinking]
+    rest = [e.wall_s for e in entries if not e.long_thinking]
+    return {
+        "entries": len(entries),
+        "long": len(long),
+        "median_long": statistics.median(long) if long else math.nan,
+        "median_rest": statistics.median(rest) if rest else math.nan,
     }
 
 
@@ -266,7 +288,7 @@ def compute(records: Sequence[Mapping[str, Any]], tasks: Mapping[str, Task]) -> 
     entries = {arm: [reduce_entry(r, tasks[r["task"]]) for r in rs] for arm, rs in arms.items()}
     grouped = {arm: by_task(es) for arm, es in entries.items()}
     results = {stat.name: paired(stat, grouped[BASE], grouped[TEST]) for stat in STATS}
-    keyed = {arm: {(e.task, e.rep): e for e in es} for arm, es in entries.items()}
+    keyed = {arm: {(e.run, e.task, e.rep): e for e in es} for arm, es in entries.items()}
     pairs = sorted(set(keyed[BASE]) & set(keyed[TEST]))
     closed_more = sum(keyed[TEST][k].closed and not keyed[BASE][k].closed for k in pairs)
     closed_fewer = sum(keyed[BASE][k].closed and not keyed[TEST][k].closed for k in pairs)
@@ -277,8 +299,9 @@ def compute(records: Sequence[Mapping[str, Any]], tasks: Mapping[str, Task]) -> 
         "records": len(records),
         "tasks": len(grouped[BASE]),
         "reps": sorted({r["rep"] for r in records}),
+        "runs": sorted({r["run"] for r in records}),
         "model": records[0]["model"],
-        "revision": records[0]["revision"],
+        "revision": " and ".join(sorted({r["revision"] for r in records})),
         "arms": {arm: len(rs) for arm, rs in arms.items()},
         "pairs": len(pairs),
         "stats": results,
@@ -304,6 +327,7 @@ def compute(records: Sequence[Mapping[str, Any]], tasks: Mapping[str, Task]) -> 
             for arm, rs in arms.items()
         },
         "after_close": after_close(arms[TEST]),
+        "thinking": {arm: thinking(es) for arm, es in entries.items()},
         "errored": {arm: sum(r["status"] == "error" for r in rs) for arm, rs in arms.items()},
     }
 
@@ -366,98 +390,51 @@ def standing(threshold: Mapping[str, Any]) -> str:
     return "met"
 
 
-def render(figures: Mapping[str, Any]) -> str:
-    stats: Mapping[str, Paired] = figures["stats"]
+def run_summary(figures: Mapping[str, Any]) -> str:
+    """The thresholds of one set of entries, each on a line of its own."""
     rule = thresholds(figures)
-    breached = [key for key, value in rule.items() if value["breached"]]
-    unexcluded = [key for key, value in rule.items() if not value["breached"] and value.get("open")]
+    only = figures["only_test"]
+    cs, ws = rule["b"]["paired"], rule["c"]["paired"]
+    return "\n\n".join(
+        [
+            "(a) Failure classes seen only on the Pydantic AI arm: "
+            + (
+                "**breached**. " + ", ".join(f"`{name}`" for name in only) + "."
+                if only
+                else "**met**. Every failure class on the Pydantic AI arm also occurs on the ADK arm."
+            )
+            + (
+                f" Classes seen only on ADK: {', '.join(f'`{n}`' for n in figures['only_base'])}."
+                if figures["only_base"]
+                else ""
+            ),
+            f"(b) Cached share down more than {CACHED_SHARE_POINTS * 100:.0f} points: "
+            f"**{standing(rule['b'])}**. Pydantic AI {fmt(cs.test, 'rate')}, "
+            f"ADK {fmt(cs.base, 'rate')}, difference {triple(cs.diff, 'rate')}.",
+            f"(c) Median planner wall time up more than {(WALL_RATIO - 1) * 100:.0f}%: "
+            f"**{standing(rule['c'])}**. Pydantic AI {ws.test:.1f} s, "
+            f"ADK {ws.base:.1f} s, ratio {ratio_text(ws.ratio)}.",
+        ]
+    )
+
+
+def render_run(figures: Mapping[str, Any], *, first_run: bool) -> list[str]:
+    """The sections of one set of entries (one run, or the pool of both)."""
+    stats: Mapping[str, Paired] = figures["stats"]
     accept = stats["First proposals accepted"]
     kind = stats["Kind pass"]
-    cached = stats["Cached share of input"]
-    wall = stats["Planner wall time, median"]
     closed = figures["closed"]
     lines: list[str] = []
     out = lines.append
-
-    verdict = (
-        "No threshold is breached on its point estimate"
-        + (
-            f"; the interval does not exclude {' or '.join('(' + k + ')' for k in unexcluded)}."
-            if unexcluded
-            else "."
-        )
-        if not breached
-        else f"{len(breached)} of 3 thresholds breached ({', '.join('(' + k + ')' for k in breached)})."
-    )
-    out("# The planner on Pydantic AI against the planner on ADK, live entries")
+    out("### Thresholds")
     out("")
-    out(
-        f"{verdict} Over {figures['arms'][TEST]} entries on the same tasks as ADK's "
-        f"{figures['arms'][BASE]}, the Pydantic AI entry accepted {fmt(accept.test, 'rate')} of first "
-        f"proposals against {fmt(accept.base, 'rate')}, sent {fmt(cached.test, 'rate')} of its input "
-        f"from the cache against {fmt(cached.base, 'rate')}, and took a median {wall.test:.1f} s "
-        f"against {wall.base:.1f} s ({ratio_text(wall.ratio).split(' ')[0]})."
-    )
+    out(run_summary(figures))
     out("")
-    open_bounds = []
-    if not rule["b"]["breached"] and cached.diff[1] < -CACHED_SHARE_POINTS:
-        open_bounds.append(
-            f"(b), whose interval reaches {fmt(cached.diff[1], 'rate', signed=True)}"
-        )
-    if not rule["c"]["breached"] and wall.ratio[2] > WALL_RATIO:
-        open_bounds.append(
-            f"(c), whose interval reaches {ratio_text(wall.ratio).split('[')[1].split(',')[1].strip(' ]')}"
-        )
-    if open_bounds:
-        out(
-            "The run does not exclude a breach of "
-            + " or ".join(open_bounds)
-            + f". The turn's model-time budget closed {figures['closed'][TEST]} Pydantic AI entries "
-            f"against {figures['closed'][BASE]} ADK entries, a gap the sign test cannot separate from "
-            f"chance (p = {figures['closed']['p']:.2f}); each closure ends an entry at the budget's bound "
-            "and lifts the upper percentiles of wall time."
-        )
-        out("")
-    out(
-        "A threshold is met when the condition that would stop a port does not occur, and its interval excludes it."
-    )
-    out("")
-    out("## Thresholds")
-    out("")
-    only = figures["only_test"]
-    out(
-        "(a) Failure classes seen only on the Pydantic AI arm: "
-        + (
-            "**breached**. " + ", ".join(f"`{name}`" for name in only) + "."
-            if only
-            else "**met**. Every failure class on the Pydantic AI arm also occurs on the ADK arm."
-        )
-        + (
-            f" Classes seen only on ADK: {', '.join(f'`{n}`' for n in figures['only_base'])}."
-            if figures["only_base"]
-            else ""
-        )
-    )
-    out("")
-    cs = rule["b"]["paired"]
-    out(
-        f"(b) Cached share down more than {CACHED_SHARE_POINTS * 100:.0f} points: "
-        f"**{standing(rule['b'])}**. Pydantic AI {fmt(cs.test, 'rate')}, "
-        f"ADK {fmt(cs.base, 'rate')}, difference {triple(cs.diff, 'rate')}."
-    )
-    out("")
-    ws = rule["c"]["paired"]
-    out(
-        f"(c) Median planner wall time up more than {(WALL_RATIO - 1) * 100:.0f}%: "
-        f"**{standing(rule['c'])}**. Pydantic AI {ws.test:.1f} s, "
-        f"ADK {ws.base:.1f} s, ratio {ratio_text(ws.ratio)}."
-    )
-    out("")
-    out("## First-proposal acceptance is a sanity check")
+    out("### First-proposal acceptance is a sanity check")
     out("")
     out(
         f"The eval's A/A run put two identical arms about {AA_NOISE_POINTS:.0f} points apart in "
-        f"first-proposal acceptance. This run's paired difference is {triple(accept.diff, 'rate')}, "
+        f"first-proposal acceptance. The paired difference here is {triple(accept.diff, 'rate')}, "
         f"an interval half-width of {(accept.diff[2] - accept.diff[1]) / 2 * 100:.1f} points. "
         "Acceptance shows that the Pydantic AI entry drafts plans the contract admits at about "
         "ADK's rate. It is a sanity check and not a parity claim. "
@@ -466,33 +443,35 @@ def render(figures: Mapping[str, Any]) -> str:
         f"that {'includes' if kind.diff[1] <= 0 <= kind.diff[2] else 'excludes'} zero."
     )
     out("")
-    out("## Results per arm")
+    out("### Results per arm")
     out("")
     rows = [
         [
-            name,
-            fmt(p.base, stat.unit),
-            fmt(p.test, stat.unit),
-            triple(p.diff, stat.unit),
-            ratio_text(p.ratio) if stat.unit in ("tokens", "seconds", "count") else "",
+            stat.name,
+            fmt(stats[stat.name].base, stat.unit),
+            fmt(stats[stat.name].test, stat.unit),
+            triple(stats[stat.name].diff, stat.unit),
+            ratio_text(stats[stat.name].ratio)
+            if stat.unit in ("tokens", "seconds", "count")
+            else "",
         ]
         for stat in STATS
-        for name, p in [(stat.name, stats[stat.name])]
     ]
     out(md_table(["", "ADK", "Pydantic AI", "Difference [95% interval]", "Relative"], rows))
     out("")
+    per_task = figures["arms"][BASE] / figures["tasks"]
     out(
         f"Each arm ran {figures['arms'][BASE]} entries: {figures['tasks']} tasks at "
-        f"{len(figures['reps'])} repetitions, on `{figures['model']}` at `{figures['revision']}`. "
+        f"{per_task:g} entries per task, on `{figures['model']}` at `{figures['revision']}`. "
         "Every figure counts every entry; a failed entry counts as a first proposal not accepted and "
-        "a kind pass missed. The interval resamples tasks, keeping a task's repetitions together. "
+        "a kind pass missed. The interval resamples tasks, keeping a task's entries together. "
         "Model calls are the calls the entry started, as the eval counts them; requests sent add "
         "the resends the planner makes after a first-chunk stall. Tokens come from the calls that "
         "returned usage. Cached share is cached input over input, pooled over all calls. A call "
         "cancelled before its first chunk counts in first-chunk time as the seconds it waited."
     )
     out("")
-    out("## Endings and failure classes")
+    out("### Endings and failure classes")
     out("")
     names = sorted(set(figures["classes"][BASE].entries) | set(figures["classes"][TEST].entries))
     rows = [
@@ -522,28 +501,29 @@ def render(figures: Mapping[str, Any]) -> str:
         f"{closed['base_only']} (exact sign test p = {closed['p']:.2f})."
     )
     out("")
-    out("## What each arm ran")
-    out("")
-    after = figures["after_close"]
-    out(
-        f"Both arms ran dev at `{figures['revision'].split('+')[0]}` with the tool-body move "
-        "(`planner/tools.py` and `planner/source_reads.py`, which hold the tool bodies both "
-        "frameworks call), so the ADK arm is dev plus that move. The Pydantic AI arm ran the "
-        "agent without the held-chunk fix proved in `node-hard/`, so a budget cut mid-stream "
-        "could run a tool call the model had already delivered. Of the "
-        f"{after['closed']} closed Pydantic AI entries, {after['proposals']} hold a proposal and "
-        f"{after['extra_reads']} record more tool calls than responses that completed before the "
-        "cut, which a delivered call of the cut response would produce. "
-        + (
-            f"That entry's responses wrote {after['per_read'][0]:.0f} output tokens per call, "
-            f"against a median {after['others']:.0f} in the other closed entries, so it holds two "
-            "calls in one response and none from the cut."
-            if after["extra_reads"] == 1 and abs(after["per_read"][0] - after["others"]) < 5
-            else "Read those entries' calls before relying on this."
+    if first_run:
+        out("### What each arm ran")
+        out("")
+        after = figures["after_close"]
+        out(
+            f"Both arms ran dev at `{figures['revision'].split('+')[0]}` with the tool-body move "
+            "(`planner/tools.py` and `planner/source_reads.py`, which hold the tool bodies both "
+            "frameworks call), so the ADK arm is dev plus that move. The Pydantic AI arm ran the "
+            "agent without the held-chunk fix proved in `node-hard/`, so a budget cut mid-stream "
+            "could run a tool call the model had already delivered. Of the "
+            f"{after['closed']} closed Pydantic AI entries, {after['proposals']} hold a proposal and "
+            f"{after['extra_reads']} record more tool calls than responses that completed before the "
+            "cut, which a delivered call of the cut response would produce. "
+            + (
+                f"That entry's responses wrote {after['per_read'][0]:.0f} output tokens per call, "
+                f"against a median {after['others']:.0f} in the other closed entries, so it holds two "
+                "calls in one response and none from the cut."
+                if after["extra_reads"] == 1 and abs(after["per_read"][0] - after["others"]) < 5
+                else "Read those entries' calls before relying on this."
+            )
         )
-    )
-    out("")
-    out("## Rate limits")
+        out("")
+    out("### Rate limits")
     out("")
     out(
         f"No entry ended in a rate-limit error after backing off. Entries rerun after a 429: ADK "
@@ -554,6 +534,142 @@ def render(figures: Mapping[str, Any]) -> str:
         f"{figures['errored'][BASE]}, Pydantic AI {figures['errored'][TEST]}."
     )
     out("")
+    return lines
+
+
+SIDE_BY_SIDE = (
+    "First proposals accepted",
+    "Kind pass",
+    "Cached share of input",
+    "Planner wall time, median",
+    "Planner wall time, p90",
+)
+
+
+def side_by_side(sets: Mapping[str, Mapping[str, Any]]) -> str:
+    """Paired differences (Pydantic AI minus ADK) of the key figures, one column per set."""
+    units = {stat.name: stat.unit for stat in STATS}
+    rows = [
+        [name]
+        + [
+            triple(figures["stats"][name].diff, units[name])
+            + (
+                f" ({ratio_text(figures['stats'][name].ratio).split(' ')[0]})"
+                if units[name] == "seconds"
+                else ""
+            )
+            for figures in sets.values()
+        ]
+        for name in SIDE_BY_SIDE
+    ]
+    rows.append(
+        ["Model-time budget closures, Pydantic AI only / ADK only (sign test)"]
+        + [
+            f"{f['closed']['test_only']} / {f['closed']['base_only']} (p = {f['closed']['p']:.2f})"
+            for f in sets.values()
+        ]
+    )
+    rows.append(
+        ["Model-time budget closures, entries per arm (ADK, Pydantic AI)"]
+        + [f"{f['closed'][BASE]}, {f['closed'][TEST]}" for f in sets.values()]
+    )
+    return md_table(["Paired difference [95% interval]", *sets], rows)
+
+
+def thinking_table(sets: Mapping[str, Mapping[str, Any]]) -> tuple[str, list[str]]:
+    """Per arm and set, the entries with a call of 2,000 or more thinking tokens and their
+    median wall time, and one sentence for each set on whether the arms' shares differ."""
+    rows, sentences = [], []
+    for name, figures in sets.items():
+        for arm, label in ((BASE, "ADK"), (TEST, "Pydantic AI")):
+            t = figures["thinking"][arm]
+            rows.append(
+                [
+                    name,
+                    label,
+                    f"{t['long']} of {t['entries']:.0f} ({t['long'] / t['entries'] * 100:.1f}%)",
+                    f"{t['median_long']:.1f} s",
+                    f"{t['median_rest']:.1f} s",
+                ]
+            )
+        share = figures["stats"]["Entries with a call of 2,000+ thinking tokens"]
+        differs = not share.diff[1] <= 0 <= share.diff[2]
+        sentences.append(
+            f"{name}: the share differs by {triple(share.diff, 'rate')}, so the arms "
+            + ("differ" if differs else "do not differ detectably")
+            + " on it."
+        )
+    header = [
+        "Set",
+        "Arm",
+        "Entries with a call of 2,000+ thinking tokens",
+        "Median wall, with one",
+        "Median wall, without",
+    ]
+    return md_table(header, rows), sentences
+
+
+RUNS = {"First run": "main", "Hardened run": "hardened"}
+
+
+def render(sets: Mapping[str, Mapping[str, Any]]) -> str:
+    """The whole document: `sets` holds the figures of each run and of the pool, in order."""
+    hardened, pooled = sets["Hardened run"], sets["Pooled"]
+    lines: list[str] = []
+    out = lines.append
+    out("# The planner on Pydantic AI against the planner on ADK, live entries")
+    out("")
+    verdicts = []
+    for name, figures in (("hardened run", hardened), ("pool", pooled)):
+        rule = thresholds(figures)
+        breached = [k for k, v in rule.items() if v["breached"]]
+        unexcluded = [k for k, v in rule.items() if not v["breached"] and v.get("open")]
+        text = (
+            f"{len(breached)} of 3 thresholds breached on the {name} "
+            f"({', '.join('(' + k + ')' for k in breached)})"
+            if breached
+            else f"No threshold is breached on the {name}'s point estimates"
+        )
+        if unexcluded:
+            text += (
+                f"; the interval does not exclude {' or '.join('(' + k + ')' for k in unexcluded)}"
+            )
+        verdicts.append(text)
+    wall = pooled["stats"]["Planner wall time, median"]
+    accept = pooled["stats"]["First proposals accepted"]
+    cached = pooled["stats"]["Cached share of input"]
+    out(
+        ". ".join(verdicts)
+        + f". Over {pooled['arms'][TEST]} pooled entries per arm, the Pydantic AI entry accepted "
+        f"{fmt(accept.test, 'rate')} of first proposals against {fmt(accept.base, 'rate')}, sent "
+        f"{fmt(cached.test, 'rate')} of its input from the cache against {fmt(cached.base, 'rate')}, "
+        f"and took a median {wall.test:.1f} s against {wall.base:.1f} s "
+        f"({ratio_text(wall.ratio).split(' ')[0]})."
+    )
+    out("")
+    out(
+        "A threshold is met when the condition that would stop a port does not occur, and its "
+        "interval excludes it. The first run used the agent before the edge-case fixes; the "
+        "hardened run used it after them. The pool pairs entries by run, task and repetition."
+    )
+    out("")
+    out("## Side by side")
+    out("")
+    out(side_by_side(sets))
+    out("")
+    out("## Long reasoning")
+    out("")
+    table, sentences = thinking_table(sets)
+    out(table)
+    out("")
+    out(" ".join(sentences))
+    out("")
+    for name in sets:
+        out(f"## {name}")
+        out("")
+        out(f"Records: {', '.join(f'`runs/{r}`' for r in sets[name]['runs'])}.")
+        out("")
+        lines += render_run(sets[name], first_run=name == "First run")
     return "\n".join(lines)
 
 
@@ -562,13 +678,20 @@ def render(figures: Mapping[str, Any]) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, required=True, help="run directory with records.jsonl")
+    parser.add_argument("--runs", type=Path, default=HERE / "runs", help="directory of runs")
     parser.add_argument("--results", type=Path, default=HERE / "RESULTS.md")
     parser.add_argument("--check", action="store_true", help="fail when RESULTS.md is out of date")
     args = parser.parse_args(argv)
-    records = load_records(args.out / "records.jsonl")
     tasks = {task.id: task for task in load_tasks()}
-    text = render(compute(records, tasks))
+    by_run = {
+        name: [
+            r | {"run": directory} for r in load_records(args.runs / directory / "records.jsonl")
+        ]
+        for name, directory in RUNS.items()
+    }
+    sets = {name: compute(records, tasks) for name, records in by_run.items()}
+    sets["Pooled"] = compute([r for records in by_run.values() for r in records], tasks)
+    text = render(sets)
     if args.check:
         same = args.results.read_text(encoding="utf-8") == text
         print("RESULTS.md matches the records" if same else "RESULTS.md differs from the records")
