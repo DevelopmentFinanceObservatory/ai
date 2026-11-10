@@ -1763,6 +1763,7 @@ def _orchestrator_answer(call_id: str, name: str, response: dict[str, Any]) -> E
 
 _FIRST_PAGE = {"skill_id": "oda-measures"}
 _FILE = {"skill_id": "oda-measures", "path": "references/grant.md"}
+_NULL_PATH = {"skill_id": "oda-measures", "path": None}
 _SKILL_REFUSED = {
     "error": "no such file",
     "code": "skill_resource_not_found",
@@ -1807,8 +1808,17 @@ def test_a_skill_file_read_that_fails_for_good_shows_a_failed_line() -> None:
         (_FIRST_PAGE, _FIRST_PAGE, True),
         (_FILE, _FIRST_PAGE, False),
         (_FIRST_PAGE, _FILE, False),
+        (_FILE, _NULL_PATH, False),
+        (_NULL_PATH, _FIRST_PAGE, True),
     ],
-    ids=["file-then-file", "page-then-page", "file-then-page", "page-then-file"],
+    ids=[
+        "file-then-file",
+        "page-then-page",
+        "file-then-page",
+        "page-then-file",
+        "file-then-null-path",
+        "null-path-then-page",
+    ],
 )
 def test_a_refused_skill_read_is_settled_only_by_a_read_of_its_own_kind(
     refused: dict[str, Any], later: dict[str, Any], settled: bool

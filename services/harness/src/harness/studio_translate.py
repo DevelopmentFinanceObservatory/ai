@@ -2539,8 +2539,9 @@ type _CorrectionKey = tuple[str, bool]
 def _correction_key(name: str, args: Mapping[str, Any]) -> _CorrectionKey:
     """What a later completed call must share with a refused one to correct it:
     the tool, and for `get_skill` whether the call reads a file, given a `path`,
-    or a skill's first page."""
-    return (name, name == "get_skill" and "path" in args)
+    or a skill's first page. A null `path` reads the first page, as an absent
+    one does."""
+    return (name, name == "get_skill" and args.get("path") is not None)
 
 
 def _take_corrected[T](
