@@ -71,6 +71,7 @@ from harness.graph.state import (
 )
 from harness.orchestrator_tools import (
     HANDED_OFF,
+    MAX_RAW_QUERY_CHARS,
     Chart,
     OrchestratorTool,
     build_orchestrator_tools,
@@ -537,6 +538,71 @@ async def test_a_call_with_every_required_argument_runs_the_tool():
     assert found["kind"] == "resolution"
     assert [call["question"] for call in resolver.calls] == ["life expectancy in Kenya"]
     assert "invalid_arguments" not in ctx.state.get(ORCHESTRATOR_CALLS_KEY, {})
+
+
+_PART = {"variable": "aid", "entities": [{"text": "Kenya"}]}
+
+
+@pytest.mark.parametrize(
+    ("message", "sent", "question"),
+    [
+        ("aid to Kenya", {"parts": [_PART]}, "aid to Kenya"),
+        ("x" * (MAX_RAW_QUERY_CHARS + 50), {"parts": [_PART]}, "x" * MAX_RAW_QUERY_CHARS),
+        ("aid to Kenya", {"parts": [_PART], "as_text": False}, "aid to Kenya"),
+        ("aid to Kenya", {"query": "Kenya aid", "parts": [_PART]}, "Kenya aid"),
+    ],
+)
+async def test_a_parsed_search_runs_on_its_query_or_the_user_message(message, sent, question):
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    token = current_user_message.set(message)
+    try:
+        found = await OrchestratorTool(tools["search"]).run_async(args=sent, tool_context=ctx)
+    finally:
+        current_user_message.reset(token)
+
+    assert "invalid" not in found
+    [call] = resolver.calls
+    assert call["question"] == question
+    assert call["parts"] == [_PART]
+    assert "invalid_arguments" not in ctx.state.get(ORCHESTRATOR_CALLS_KEY, {})
+
+
+@pytest.mark.parametrize(
+    ("message", "sent"),
+    [
+        ("aid to Kenya", {}),
+        ("aid to Kenya", {"parts": []}),
+        ("aid to Kenya", {"parts": [_PART], "as_text": True}),
+        (None, {"parts": [_PART]}),
+        ("", {"parts": [_PART]}),
+        ("  ", {"parts": [_PART]}),
+    ],
+)
+async def test_a_search_without_a_query_the_user_message_cannot_fill_is_refused(message, sent):
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    token = current_user_message.set(message)
+    try:
+        found = await OrchestratorTool(tools["search"]).run_async(args=sent, tool_context=ctx)
+    finally:
+        current_user_message.reset(token)
+
+    assert _stated(found) == (HarnessCode.TOOL_ARGUMENTS_INVALID, "correct_and_retry")
+    assert found["invalid"] == [{"loc": "query", "type": "missing"}]
+    assert not resolver.calls
+    assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": 1}
+
+
+def test_search_still_declares_query_as_required():
+    tools, _ = _tools()
+
+    declaration = OrchestratorTool(tools["search"])._get_declaration()
+
+    assert declaration is not None
+    declaration = declaration.model_dump(exclude_none=True)
+    schema = declaration.get("parameters") or declaration["parameters_json_schema"]
+    assert "query" in schema["required"]
 
 
 @pytest.mark.parametrize("call", [_search_role_on_the_part, _search_without_query])
