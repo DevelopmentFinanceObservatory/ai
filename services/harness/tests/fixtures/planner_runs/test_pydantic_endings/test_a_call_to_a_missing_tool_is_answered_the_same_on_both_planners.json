@@ -1,0 +1,286 @@
+{
+  "conversations": [
+    [
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u0",
+            "args": {
+              "q": 0
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u0",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u1",
+            "args": {
+              "q": 1
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u1",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u2",
+            "args": {
+              "q": 2
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u2",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u3",
+            "args": {
+              "q": 3
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u3",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u4",
+            "args": {
+              "q": 4
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u4",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u5",
+            "args": {
+              "q": 5
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u5",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u6",
+            "args": {
+              "q": 6
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u6",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "u7",
+            "args": {
+              "q": 7
+            },
+            "name": "lookup_data"
+          }
+        }
+      ],
+      [
+        "answer",
+        "lookup_data",
+        "u7",
+        {
+          "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+        }
+      ],
+      [
+        "part",
+        {
+          "text": "I cannot look that up."
+        }
+      ]
+    ]
+  ],
+  "last_contents": [
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u0",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u1",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u2",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u3",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u4",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u5",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u6",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "u7",
+            "name": "lookup_data",
+            "response": {
+              "error": "Invoking `lookup_data()` failed as no tool with that name is available. The tools you can call are: ask_user_question, propose_plan, reject_plan. You could retry, but it is IMPORTANT that you only call a tool from that list."
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}
