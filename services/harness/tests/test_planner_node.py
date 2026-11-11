@@ -36,7 +36,7 @@ from google.adk.runners import Runner as AdkRunner
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import errors, types
-from harness import planner_adapter, planner_run, usage
+from harness import planner_adapter, usage
 from harness import planner_node as planner_node_module
 from harness.planner_adapter import PlannerAdapter
 from harness.planner_run import PlannerAdapterError, PlannerRun
@@ -903,16 +903,27 @@ async def test_a_resent_call_counts_against_the_turns_call_cap(plan: Plan) -> No
 
 
 async def _raising(plan: Plan) -> _Entry:
-    """An entry whose second tool answer of one response is past the run's event
-    cap (`harness.planner_run._MAX_EVENTS`, set to 1), which raises out of the run."""
+    """An entry whose second tool answer of one response makes the run's
+    `on_tool_answered` observer raise, which propagates out of the run."""
     scripted = ScriptedGenai(
         [reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), _ask_call("a1"))]
     )
     adapter = scripted_planner(scripted, tools=_proposals(_REFUSED))
     harness = _AdapterHarness()
+    answered: list[str] = []
+
+    def observer(name: str, answer: dict[str, Any] | None) -> None:
+        del answer
+        answered.append(name)
+        if len(answered) == 2:
+            raise PlannerAdapterError("the observer raised")
+
+    def observed(**kwargs: Any) -> PlannerRun:
+        return PlannerRun(**{**kwargs, "on_tool_answered": observer})
+
     with (
         _numbered_call_ids(),
-        mock.patch.object(planner_run, "_MAX_EVENTS", 1),
+        mock.patch.object(planner_adapter, "PlannerRun", observed),
         pytest.raises(PlannerAdapterError),
     ):
         await harness.run(adapter, run_config=_SSE, readings=[], **_planned(plan))

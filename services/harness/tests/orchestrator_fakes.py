@@ -88,7 +88,13 @@ class ScriptLlm(BaseLlm):
 class FailingPlanner:
     """A fake planner that raises `PlannerAdapterError`, the way `PlannerAdapter` fails."""
 
-    def __init__(self, message: str = "the planner ran past 60 events without settling") -> None:
+    def __init__(
+        self,
+        message: str = (
+            "a plan that is draft was declared ready, not pending_approval; "
+            "refusing to report it ready"
+        ),
+    ) -> None:
         self.message = message
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:

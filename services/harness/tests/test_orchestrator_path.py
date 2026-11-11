@@ -942,8 +942,8 @@ async def test_a_planner_adapter_failure_is_handed_back_when_wrapped_and_fatal_w
     events = await run_turn(runner, types.UserContent("Kenya's debt?"))
 
     assert (
-        "The planner could not make a plan: the planner ran past 60 events without settling"
-        in request_text(model.requests[-1])
+        "The planner could not make a plan: a plan that is draft was declared ready, not "
+        "pending_approval; refusing to report it ready" in request_text(model.requests[-1])
     )
     assert not [e for e in events if e.error_code]
     # The failure's code travels with the status that fails the plan's step.
