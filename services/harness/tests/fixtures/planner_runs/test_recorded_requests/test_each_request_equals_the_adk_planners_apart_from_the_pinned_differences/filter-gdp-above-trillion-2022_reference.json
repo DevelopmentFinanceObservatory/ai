@@ -1,0 +1,109 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Which countries had a GDP above 1 trillion US dollars in 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Which countries had a GDP above 1 trillion US dollars in 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "decision_ids": [],
+        "measure": "GDP",
+        "entities": [],
+        "across": [
+          "country"
+        ],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": {
+          "currency": "USD",
+          "prices": "current",
+          "base_year": null
+        },
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "filter",
+        "id": "above_trillion",
+        "decision_ids": [],
+        "input_id": "gdp",
+        "predicates": [
+          {
+            "kind": "place_level",
+            "level": "Country",
+            "role": null,
+            "strict": false
+          },
+          {
+            "kind": "value_threshold",
+            "op": "gt",
+            "value": 1000000000000.0
+          }
+        ]
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The countries with GDP above 1 trillion US dollars in 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "above_trillion"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

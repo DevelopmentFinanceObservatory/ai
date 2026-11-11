@@ -1,0 +1,188 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Put Guatemala's GDP and population in the same table, and divide one by the other"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Put Guatemala's GDP and population in the same table and divide GDP by population for Guatemala from 1960 to 2024",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "end_year",
+        "description": "Which year the table ends at.",
+        "options": [
+          "2024",
+          "2025"
+        ],
+        "chosen": "2024",
+        "resolved_by": "planner_default",
+        "rationale": "The brief asks for 1960 to 2024, though both series reach 2025.",
+        "fixes": {
+          "period": {
+            "start": 1960,
+            "end": 2024
+          },
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "decision_ids": [
+          "end_year"
+        ],
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Guatemala",
+            "role": null
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_c6e4bd63122b2c5bab9ea6470c89ac03",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "population",
+        "decision_ids": [
+          "end_year"
+        ],
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Guatemala",
+            "role": null
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_ed2ac8b98a69e9ff5bef7774cf2f82ea",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "join",
+        "id": "table",
+        "decision_ids": [],
+        "left_id": "gdp",
+        "right_id": "population"
+      },
+      {
+        "kind": "quotient_of",
+        "id": "gdp_per_person",
+        "decision_ids": [],
+        "numerator": {
+          "input_id": "gdp",
+          "entity": null
+        },
+        "denominator": {
+          "input_id": "population",
+          "entity": null
+        },
+        "axis": null,
+        "denominator_axis": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Table combining Guatemala's GDP and population from 1960 to 2024",
+      "Guatemala's GDP divided by population from 1960 to 2024"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "table"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "gdp_per_person"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

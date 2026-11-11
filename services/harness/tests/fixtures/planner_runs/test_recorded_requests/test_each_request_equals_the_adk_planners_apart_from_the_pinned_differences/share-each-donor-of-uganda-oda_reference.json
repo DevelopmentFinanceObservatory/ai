@@ -1,0 +1,149 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "all_donors_total",
+        "description": "What each donor's ODA is a share of.",
+        "options": [
+          "the total from every donor",
+          "each donor's own total"
+        ],
+        "chosen": "the total from every donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks for a share of all ODA to Uganda, the total across every donor.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": "pooled",
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Uganda",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2023
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "share_of",
+        "id": "donor_share",
+        "decision_ids": [
+          "all_donors_total"
+        ],
+        "numerator": {
+          "input_id": "oda",
+          "entity": null
+        },
+        "denominator": {
+          "input_id": "oda",
+          "entity": null
+        },
+        "axis": "donor",
+        "denominator_scope": "pooled"
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Each donor's share of all ODA to Uganda in each year 2015 to 2023"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "donor_share"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [
+          "donor"
+        ],
+        "over": []
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}
