@@ -2920,7 +2920,7 @@ def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_inv
     planner's turn on a `propose_plan` refusal that recorded nothing and
     left nothing to correct within this entry -- `BUDGET_EXHAUSTED`,
     `QUESTION_FIXED`, `NOTHING_TO_PLAN` and `PRICES_UNSERVED` alike. `INVALID_PLAN` -- a
-    question-changing amendment under `question_fixed`, say -- is not among them: it is
+    question-changing amendment, say -- is not among them: it is
     correctable, so the model gets to retry rather than the turn ending on it."""
     for code in ("budget_exhausted", "question_fixed", "nothing_to_plan", "prices_unserved"):
         assert _is_terminal_refusal({"outcome": "refused", "code": code})
@@ -4582,8 +4582,8 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
 ) -> None:
     """The `amend` edge (`approve_n -> planner_n`) seeds `prior_plan` from
     the graph's own record, so a plan is already recorded when this call's
-    one generation runs. This adapter's pair is always built with
-    `question_fixed=True` (`PlannerAdapter.__init__`), so a `starts_new_plan`
+    one generation runs. The turn's question is fixed
+    (`submission.service._resolve_intent`), so a `starts_new_plan`
     call there is refused as `QUESTION_FIXED` -- terminal, recording
     nothing -- rather than beginning a second plan for a different
     question out from under the graph's own `question` state.

@@ -30,12 +30,10 @@ is a patch. It names the decisions and requirements that change, by `slot` and
 by `id`, and carries forward every item it does not mention. `removed_decisions`
 and `removed_evidence_requirements` are the deletion channel, since an item
 absent from a patch means unchanged. Whether a given revision amends at all is
-`submission.service`'s call: a call that states the version it amends routes through
-`amend()`, while a call stating `starts_new_plan` begins a fresh `Plan` at
-version 1 (see `_resolve_intent` there) -- unless the planner was built with
-`question_fixed=True`, where a restart is refused instead of ever reaching
-this module, and an amendment's own `question` is held to the one already
-recorded.
+`submission.service`'s call (see `_resolve_intent` there). A call that states the
+version it amends routes through `amend()`, and its own `question` is held to the
+one already recorded. A call stating `starts_new_plan` while a plan is recorded is
+refused before it reaches this module.
 """
 
 from __future__ import annotations
@@ -316,7 +314,7 @@ ASK_BREAKDOWNS_STATE_KEY = "orchestrator:ask_breakdowns"
 ASKS_ACROSS_YEARS_STATE_KEY = "orchestrator:asks_across_years"
 
 # How many plans one entry into the planner may propose -- a first draft and
-# three more, whether each patches the recorded plan or restarts. Each proposal
+# three more, each patching the recorded plan. Each proposal
 # opens a fresh discovery budget, so without a cap a refer-and-repropose loop
 # is unbounded in calls and spend. The count starts over on every entry into
 # the planner (a new turn, a user amendment, a replan), while `Plan.version`
@@ -4335,7 +4333,7 @@ class Plan(StrictModel):
             "default, and what a plan persisted before this field existed means) leaves an "
             "unread dataset requirement as the answer in its own right; `computed` requires "
             "every dataset requirement to feed a calculation. The planner's proposal tool requires the "
-            "model to pass this explicitly on a first draft or a restart, so the default "
+            "model to pass this explicitly on a first draft, so the default "
             "only governs a plan built another way, such as a legacy record deserialising "
             "without the field."
         ),
@@ -5656,8 +5654,8 @@ def period_licences_held(
     step stating another reduction, a step of another kind and a removed
     step drop it, since each states another figure. A step
     renamed together with its decisions holds no licence of its old id, and
-    one named again in the same call takes a new one. A restart (`previous`
-    `None`) holds only the steps it names.
+    one named again in the same call takes a new one. A first draft
+    (`previous` `None`) holds only the steps it names.
 
     Raises:
         ValueError: If `named` names a step `plan` does not state, or one

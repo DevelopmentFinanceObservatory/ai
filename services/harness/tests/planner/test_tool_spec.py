@@ -36,7 +36,7 @@ from pydantic import Field
 
 _TASKS = Path(__file__).parents[4] / "evals" / "planner_entry" / "tasks"
 
-_VARIANTS = list(itertools.product([False, True], repeat=3))
+_VARIANTS = list(itertools.product([False, True], repeat=2))
 
 
 async def _translate(call: Any) -> dict[str, object]:
@@ -47,13 +47,12 @@ def _surface() -> Any:
     return SimpleNamespace()
 
 
-def _specs(*, translate: bool, surface: bool, question_fixed: bool) -> list[ToolSpec]:
+def _specs(*, translate: bool, surface: bool) -> list[ToolSpec]:
     return [
         *([skill_tool_spec(_surface())] if surface else []),
         *planner_tool_specs(
             translate=_translate if translate else None,
             surface=_surface() if surface else None,
-            question_fixed=question_fixed,
         ),
     ]
 
@@ -117,16 +116,16 @@ def _adk_declaration(spec: ToolSpec) -> str:
 
 
 def _compiled_proposal_spec() -> ToolSpec:
-    specs = use_compiled_proposals(_specs(translate=False, surface=False, question_fixed=False))
+    specs = use_compiled_proposals(_specs(translate=False, surface=False))
     (spec,) = [spec for spec in specs if spec.name == PROPOSE_PLAN]
     return spec
 
 
-@pytest.mark.parametrize(("translate", "surface", "question_fixed"), _VARIANTS)
+@pytest.mark.parametrize(("translate", "surface"), _VARIANTS)
 def test_every_declaration_is_the_one_adk_builds_from_the_same_signature(
-    translate: bool, surface: bool, question_fixed: bool
+    translate: bool, surface: bool
 ) -> None:
-    specs = _specs(translate=translate, surface=surface, question_fixed=question_fixed)
+    specs = _specs(translate=translate, surface=surface)
 
     for spec in specs:
         built = function_declaration(spec).model_dump_json(exclude_none=True)
@@ -233,13 +232,8 @@ def test_the_recorded_proposals_cover_the_task_set() -> None:
     assert len(_recorded_proposals()) >= 70
 
 
-@pytest.mark.parametrize("question_fixed", [False, True])
-async def test_every_recorded_proposal_converts_as_adk_converts_it(question_fixed: bool) -> None:
-    (propose,) = [
-        spec
-        for spec in planner_tool_specs(question_fixed=question_fixed)
-        if spec.name == PROPOSE_PLAN
-    ]
+async def test_every_recorded_proposal_converts_as_adk_converts_it() -> None:
+    (propose,) = [spec for spec in planner_tool_specs() if spec.name == PROPOSE_PLAN]
 
     for payload in _recorded_proposals():
         for raw in (payload, _as_struct(payload)):

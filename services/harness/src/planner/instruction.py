@@ -227,21 +227,10 @@ _PLANNING = (
     "has no defined answer.\n\n"
 )
 
-# What each `propose_plan` call states about which plan it means. Held apart
-# from `_PLANNING` because it is the one paragraph `question_fixed` rewrites:
-# `question_fixed=False` selects `_VERSIONING_FREE`, where a restart is a
-# normal way to begin a second plan; `harness.planner_adapter.PlannerAdapter`
-# passes `question_fixed=True`, where the orchestrator's brief fixes the
-# turn's question. What each argument does is on the argument.
-_VERSIONING_FREE = (
-    "Call `propose_plan` once with the complete first draft, and again "
-    "whenever the user asks for a change. Once a plan is recorded, decide "
-    "deliberately whether the ask patches it (`amends_version`) or is a "
-    "different question that needs a plan of its own (`starts_new_plan`); "
-    "never let the wording of `question` stand in for the choice.\n\n"
-)
-
-_VERSIONING_FIXED = (
+# What each `propose_plan` call states about which plan it means: the
+# orchestrator's brief fixes the turn's question, so a call patches the plan
+# or reports a different question. What each argument does is on the argument.
+_VERSIONING = (
     "Call `propose_plan` once with the complete first draft, and again, "
     "patching it through `amends_version`, whenever the user asks for a "
     "change. This turn's question is fixed, so when the user's reply asks "
@@ -386,7 +375,6 @@ def planner_instruction(
     *,
     has_translator: bool,
     has_skills: bool = False,
-    question_fixed: bool = False,
 ) -> str:
     """The planner's instruction, for the agent it is actually part of.
 
@@ -394,17 +382,10 @@ def planner_instruction(
     a translator `propose_plan` runs, or the skill tool. An instruction
     describing a translation the agent does not run, or naming a tool it
     lacks, sends the model after something that is not there.
-
-    `question_fixed` selects which paragraph explains `starts_new_plan`:
-    `_VERSIONING_FREE` where a restart begins a second plan of its own, or
-    `_VERSIONING_FIXED`, where the turn's question is held and a restart is
-    how the model tells it the user asked a different one.
-    `harness.planner_adapter.PlannerAdapter` passes True. False, the default,
-    selects `_VERSIONING_FREE`.
     """
     return (
         _PLANNING
-        + (_VERSIONING_FIXED if question_fixed else _VERSIONING_FREE)
+        + _VERSIONING
         + (_SKILLS if has_skills else "")
         + (_TRANSLATING if has_translator else _WITHOUT_A_TRANSLATOR)
         + _CLOSING

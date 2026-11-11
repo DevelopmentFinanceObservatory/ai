@@ -77,7 +77,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import itertools
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -410,18 +409,15 @@ def _declarations_digest(request: Request) -> str:
 async def _declaration_digests() -> dict[str, str]:
     """`_declarations_digest` of the first request of a planner run, for each
     setting of `planner.specs.planner_specs` that changes a declaration (a tool
-    surface or none, the question fixed or not).
+    surface or none).
 
     The character counts in the records cannot see a declaration reordered or
     edited at the same length. These digests can.
     """
     digests: dict[str, str] = {}
-    for surface, question_fixed in itertools.product([False, True], repeat=2):
+    for surface in (False, True):
         scripted = ScriptedGenai([reply(text_part("done"))])
-        specs = planner_specs(
-            surface=FixtureSurface(schemas=[]) if surface else None,
-            question_fixed=question_fixed,
-        )
+        specs = planner_specs(surface=FixtureSurface(schemas=[]) if surface else None)
         adapter = PlannerAdapter(
             settings=Settings(),
             surface=FixtureSurface(schemas=[]),
@@ -429,9 +425,7 @@ async def _declaration_digests() -> dict[str, str]:
             client=scripted.client,
         )
         await _AdapterHarness().run(adapter, question="go", readings=[])
-        digests[f"surface={surface},question_fixed={question_fixed}"] = _declarations_digest(
-            scripted.requests[0]
-        )
+        digests[f"surface={surface}"] = _declarations_digest(scripted.requests[0])
     return digests
 
 

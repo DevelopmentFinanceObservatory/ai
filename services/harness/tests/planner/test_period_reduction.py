@@ -240,12 +240,10 @@ def _propose(
     across_years: Sequence[str] = (),
     removed_decisions: Sequence[str] = (),
     reads_user_words: bool = False,
-    restart: bool = False,
 ) -> dict[str, Any]:
     """Propose `requirements`, the last of which answers ask 0 unless `answered` says otherwise.
 
-    A plan on record in `ctx` is the one the call amends, unless `restart`
-    begins a plan of its own. The planner is the adapter's, which reads the
+    A plan on record in `ctx` is the one the call amends. The planner is the adapter's, which reads the
     user's words only in an amendment entry, unless `reads_user_words` makes
     it the standalone planner's.
     """
@@ -263,8 +261,7 @@ def _propose(
         ),
         declined=list(declined),
         across_years=list(across_years),
-        amends_version=recorded.version if recorded is not None and not restart else None,
-        starts_new_plan=restart,
+        amends_version=recorded.version if recorded is not None else None,
         tool_context=ctx,
     )
 
@@ -1026,25 +1023,6 @@ def test_the_standalone_planner_licenses_a_step_it_names_in_a_plan_with_no_asks(
     assert admitted["outcome"] == Outcome.OK.value, admitted
     recorded = load_plan(ctx.state)
     assert recorded is not None and recorded.period_licences == (_licence(step),)
-
-
-def test_a_restart_begins_with_no_licences(decision: Callable[..., Decision]) -> None:
-    ctx = _context(asks=())
-    first = _propose(
-        ctx,
-        [_aid(), _total()],
-        [decision()],
-        answered=(),
-        across_years=["result"],
-        reads_user_words=True,
-    )
-    assert first["outcome"] == Outcome.OK.value, first
-
-    result = _propose(
-        ctx, [_aid(), _total()], [decision()], answered=(), reads_user_words=True, restart=True
-    )
-
-    _refused(result, _gap(asks=(), years=EVERY_YEAR))
 
 
 def _stated(decision: Callable[..., Decision], made: Decision, **fields: Any) -> Plan:

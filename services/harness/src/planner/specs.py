@@ -44,14 +44,13 @@ from planner.tools import (
 PROPOSE_PLAN = PROPOSE_PLAN_PROPOSER.call
 
 # What each `propose_plan` argument means, as the model reads it on the
-# argument itself. `question` and `starts_new_plan` read differently under
-# `question_fixed`, the way `submission.service._resolve_intent` enforces them,
-# and `_FIXED_ARGUMENTS` replaces those two.
+# argument itself. `question` and `starts_new_plan` describe how
+# `submission.service._resolve_intent` holds the turn's question fixed.
 _PROPOSE_PLAN_ARGUMENTS = {
     "question": (
-        "The question this plan answers. Required on a first draft and with "
-        "`starts_new_plan`, which starts at version 1 under it. A patch that "
-        "states one records it; one that omits it keeps the recorded question."
+        "The question this plan answers. Required on a first draft. This "
+        "turn's question is fixed, so a patch either omits it or restates it "
+        "unchanged: it has to match the one already recorded."
     ),
     "answer_mode": (
         "What kind of answer the requirements add up to. `series` answers a "
@@ -131,18 +130,6 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "Required once a plan is recorded, unless `starts_new_plan` is set: "
         "a call stating neither is refused, and `question` never stands in "
         "for the choice."
-    ),
-    "starts_new_plan": (
-        "True begins a plan of its own, at version 1, for a different question "
-        "while a plan is recorded."
-    ),
-}
-
-_FIXED_ARGUMENTS = {
-    "question": (
-        "The question this plan answers. Required on a first draft. This "
-        "turn's question is fixed, so a patch either omits it or restates it "
-        "unchanged: it has to match the one already recorded."
     ),
     "starts_new_plan": (
         "True says the user's reply asks a different question from the one "
@@ -265,7 +252,6 @@ def _reject_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) 
 def planner_tool_specs(
     *,
     translate: Translate | None = None,
-    question_fixed: bool = False,
     reads_user_words: bool = True,
     surface: ToolSurface | None = None,
 ) -> list[ToolSpec]:
@@ -284,12 +270,8 @@ def planner_tool_specs(
     body is a coroutine function. Omitted, it reads nothing and refuses such a
     plan `first_year_unknown`.
 
-    `question_fixed` is passed straight to `submission.service.submit` on
-    every `propose_plan` call, and selects `_FIXED_ARGUMENTS`' descriptions of
-    `question` and `starts_new_plan`, so those two arguments describe the mode
-    the tool actually enforces.
-
-    `reads_user_words` is passed to `submission.service.admit` the same way.
+    `reads_user_words` is passed straight to `submission.service.admit` on
+    every `propose_plan` call.
     It says whether the planner reads the user's own words in every entry, so
     `propose_plan`'s `across_years` may name a step in any of them.
 
@@ -300,9 +282,7 @@ def planner_tool_specs(
 
     def propose_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
         del end_run
-        return propose(
-            call, arguments, question_fixed=question_fixed, reads_user_words=reads_user_words
-        )
+        return propose(call, arguments, reads_user_words=reads_user_words)
 
     async def propose_plan_reading(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
@@ -311,7 +291,6 @@ def planner_tool_specs(
         return await propose_reading_sources(
             call,
             arguments,
-            question_fixed=question_fixed,
             reads_user_words=reads_user_words,
             surface=surface,
         )
@@ -324,7 +303,6 @@ def planner_tool_specs(
             call,
             end_run,
             arguments=arguments,
-            question_fixed=question_fixed,
             reads_user_words=reads_user_words,
             translate=translate,
             surface=surface,
@@ -335,9 +313,6 @@ def planner_tool_specs(
         body = propose_plan_translating
     elif surface is not None:
         body = propose_plan_reading
-    descriptions = (
-        _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS if question_fixed else _PROPOSE_PLAN_ARGUMENTS
-    )
     return [
         ToolSpec(
             name=PLANNER_ASK,
@@ -348,7 +323,7 @@ def planner_tool_specs(
         ToolSpec(
             name=PROPOSE_PLAN,
             description=_PROPOSE_PLAN_DOC,
-            parameters=_described(_PROPOSE_PARAMETERS, descriptions),
+            parameters=_described(_PROPOSE_PARAMETERS, _PROPOSE_PLAN_ARGUMENTS),
             body=body,
             compact=True,
         ),
@@ -396,7 +371,6 @@ def planner_specs(
     *,
     translate: Translate | None = None,
     surface: ToolSurface | None = None,
-    question_fixed: bool = False,
     reads_user_words: bool = True,
 ) -> list[ToolSpec]:
     """The planner's tools, in the order the model is shown them: `get_skill`
@@ -406,7 +380,6 @@ def planner_specs(
         *([skill_tool_spec(surface)] if surface is not None else []),
         *planner_tool_specs(
             translate=translate,
-            question_fixed=question_fixed,
             reads_user_words=reads_user_words,
             surface=surface,
         ),

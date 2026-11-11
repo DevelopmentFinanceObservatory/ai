@@ -352,7 +352,7 @@ The anchor a run reads is the newest year the plan states or a later one. Transl
 - A max or min by entity, matched on each entity's own year against a series that misses a year the max or min can fall in, today or as newer data moves either side, from which a filter removed such a year alone, or whose rows a value filter kept, which can leave out any such year: `invalid_plan`, from `planner.shapes._rejects_paired_picked`. A max or min over a dataset read from its first year can fall in any year back to it, so the series has to be read from its first year too, or the max or min's input bounded from the series' first year, following the newest data where the series' first year does. A series and a max or min read from the same datasets may both stay open to the newest data.
 - A year filter over a max or min by entity whose thresholds keep a year that newer data can move a picked year past. A picked year moves only later, and only while the max or min's input years move. So a fixed first year keeps every entity whose max or min falls at or after it, today and later, and a first year that follows the newest data keeps them only while the input's own first year follows it at the same offset or further ahead. A last year keeps them only while the input's last year sits at or before it today and stays there, unless the input's years do not move at all. The entity whose max or min moves past the year drops out: `invalid_plan`, from `planner.shapes._picked_year_leaves`. Filter the years before the max or min. A filter with no year threshold keeps every entity it keeps today.
 
-Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. `reads_user_words` defaults to true, so the planner reads them in every entry, and `harness.planner_adapter` builds its planner with `reads_user_words` false, so there only an entry the user's amendment at the approval card opened reads them (`planner.plan.amendment_entry`). Elsewhere a call naming a step is refused `invalid_plan`, unless the plan it amends already licenses that step as the call states it, which grants nothing new. A call naming a step that keeps its years is refused everywhere. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it, and a restart begins with no licences. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
+Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. `reads_user_words` defaults to true, so the planner reads them in every entry, and `harness.planner_adapter` builds its planner with `reads_user_words` false, so there only an entry the user's amendment at the approval card opened reads them (`planner.plan.amendment_entry`). Elsewhere a call naming a step is refused `invalid_plan`, unless the plan it amends already licenses that step as the call states it, which grants nothing new. A call naming a step that keeps its years is refused everywhere. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
 
 The `period_reduction_unstated` refusal's `detail.gaps` holds one entry per refused step, in the order `unstated_period_reductions` finds them. Each entry holds:
 
@@ -435,29 +435,23 @@ declines. A dropped ask stays dropped through later patches. A replan's brief
 marks it "(removed by the user)", and admission refuses a replan that answers
 or declines it. Only a later amendment of the user's restores it, by
 answering it. An ask left out with nothing naming it is unaccounted for.
-`starts_new_plan` begins a plan at version 1 instead. The wording of
-`question` plays no part in that choice, so a reworded question cannot be
-read as a new plan.
+The wording of `question` plays no part in which plan a call means, so a
+reworded question cannot be read as a new plan.
 
-**`question_fixed` holds the turn's question against a restart.**
-`planner_tool_specs(..., question_fixed=True)`. The harness's planner
-adapter builds the planner this way, since the orchestrator's `plan` brief fixes
-a turn's `question` before the planner ever runs, and a restart would
-silently swap the question out from under the plan the workflow holds. Under it,
+**The turn's question is fixed.** The orchestrator's `plan` brief fixes a
+turn's `question` before the planner ever runs, and a restart would silently
+swap the question out from under the plan the workflow holds. So
 `starts_new_plan` with a plan already recorded is refused with
-`question_fixed` rather than beginning a fresh plan, records nothing, and is
-how the model tells the harness the user's reply asks a different question:
-the turn ends there for the harness to tell the user to send it as its own
-message. An amendment whose own `question` states something other than the
-one recorded is refused as `invalid_plan` instead, correctable within the same
-round. `question_fixed` defaults to `False`, so a restart behaves as described
-above.
+`question_fixed`, records nothing, and is how the model tells the harness the
+user's reply asks a different question: the turn ends there for the harness to
+tell the user to send it as its own message. An amendment whose own `question`
+states something other than the one recorded is refused as `invalid_plan`
+instead, correctable within the same round (`submission.service._resolve_intent`).
 
 Rounds are capped. Every proposal opens a fresh discovery budget, so one entry
-into the planner may make `MAX_PLAN_ROUNDS` proposals, an amendment or a
-restart alike (counted under `PLAN_ROUNDS_STATE_KEY`, beside the plan rather
-than on it, since a count on the plan would enter the revision it counts), and
-a proposal past that is `budget_exhausted` with
+into the planner may make `MAX_PLAN_ROUNDS` proposals (counted under
+`PLAN_ROUNDS_STATE_KEY`, beside the plan rather than on it, since a count on
+the plan would enter the revision it counts), and a proposal past that is `budget_exhausted` with
 `detail.scope == "plan_rounds"`, no `action`, and nothing touched; the last
 version that compiled stays approvable. Every entry into the planner (a new
 message, an answer that amends, a replan after a refused run) starts the count

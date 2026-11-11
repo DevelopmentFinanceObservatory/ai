@@ -175,10 +175,7 @@ class PlannerRun:
             # leaves nothing correctable within this entry: the round cap
             # (`planner.plan.MAX_PLAN_ROUNDS`, `BUDGET_EXHAUSTED`), or a
             # restart while the graph holds the question fixed
-            # (`QUESTION_FIXED`, the `question_fixed` mode of
-            # `planner.specs.planner_specs`, which
-            # the adapter's own planner always uses, see
-            # `harness.planner_adapter.PlannerAdapter.__init__`). The cap bounds the
+            # (`QUESTION_FIXED`, `submission.service._resolve_intent`). The cap bounds the
             # proposals within one entry into the planner, since
             # `PlannerAdapter.__call__` resets the count on each entry. A restart
             # is refused however fresh that budget is. `NOTHING_TO_PLAN`
