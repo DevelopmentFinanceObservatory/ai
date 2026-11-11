@@ -23,9 +23,9 @@ instruction the planner serves, on one of two runners `PLANNER_RUNNER` selects:
 an `LlmAgent` built by `create_planner_agent()` on the ADK planner, or a
 Pydantic AI agent built by `planner.pydantic_agent.planner_agent()` on the
 Pydantic AI planner, which `harness.planner_node` runs as a function node that
-yields the ADK events an ADK planner run stores. `planner.pydantic_call` reads
-a call's steps on the Pydantic AI planner as `planner.agent.AdkCall` reads
-them on the ADK planner. The tools:
+yields the ADK events an ADK planner run stores. A tool call on either runner
+reads its steps from the session's events through `planner.session.SessionCall`.
+The tools:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

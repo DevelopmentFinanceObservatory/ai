@@ -50,7 +50,7 @@ from harness.sentences import SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
-from planner.agent import AGENT_NAME, session_steps
+from planner.agent import AGENT_NAME
 from planner.call import PlannerCall, elected_spec_ids
 from planner.plan import (
     DatasetRequirement,
@@ -62,6 +62,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
 )
+from planner.session import SessionCall, session_steps
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
@@ -114,6 +115,8 @@ _SPEC = "spec_" + "c" * 32
 _SPEC_NEW = "spec_" + "d" * 32
 # Where the test's `propose_plan` records the spec_ids the user picked.
 _ELECTED_KEY = "planner:elected_spec_ids"
+# Where the test's `propose_plan` records the steps and response calls it read.
+_READ_KEY = "planner:read"
 # Gemini signs the first function call of a response it thought before.
 _SIGNED = b"scripted-signature"
 
@@ -176,14 +179,18 @@ def _proposals(*answers: dict[str, Any], records: Plan | None = None) -> Tools:
     and then as a proposal whose translation compiled the plan on record
     (`harness.scripted.use_compiled_proposals`), recording `records` first when
     the session holds no plan. Every call records the spec_ids the user picked,
-    read from its steps, under `_ELECTED_KEY`. Each seam built gets `answers`
-    afresh."""
+    read from its steps, under `_ELECTED_KEY`, and the steps and response calls
+    it read under `_READ_KEY`. Each seam built gets `answers` afresh."""
 
     def tools(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
         left = list(answers)
 
         def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
             call.state[_ELECTED_KEY] = sorted(elected_spec_ids(call))
+            call.state[_READ_KEY] = {
+                "steps": [[step.kind, step.call_id] for step in call.steps()],
+                "response_calls": [list(response) for response in call.response_calls()],
+            }
             if left:
                 return left.pop(0)
             if records is not None and load_plan(call.state) is None:
@@ -581,22 +588,75 @@ async def test_an_ask_and_its_answer_are_the_same_on_both_planners(plan: Plan) -
     _assert_same(adk, pydantic)
 
 
-async def test_an_ask_beside_a_proposal_stores_one_answers_event_on_both_planners(
-    plan: Plan,
+@pytest.mark.parametrize(
+    "sibling",
+    [call_part(PROPOSE_PLAN, {}, id="p1"), _ask_call("a2")],
+    ids=["proposal", "ask"],
+)
+async def test_an_ask_beside_a_call_stores_one_answers_event_on_both_planners(
+    plan: Plan, sibling: types.Part
 ) -> None:
     """The answers of a response's calls are stored as one event once every call
-    has answered, as the ADK planner stores them."""
+    has answered, as the ADK planner stores them. A proposal beside the ask reads
+    no step of the ask, which has no answer yet, and a second ask beside it is
+    refused, read off its response's calls."""
     adk, pydantic = await _both(
         _Script(
-            replies=[reply(_ask_call("a1"), call_part(PROPOSE_PLAN, {}, id="p1"), usage=_USAGE)],
+            replies=[reply(_ask_call("a1"), sibling, usage=_USAGE)],
             runs=[_planned(plan)],
             setup=_proposals(),
         )
     )
 
+    assert sibling.function_call is not None
+    sibling_id = sibling.function_call.id
     (answers,) = [event for event in _planner_events(adk) if event.get_function_responses()]
-    assert [response.id for response in answers.get_function_responses()] == ["a1", "p1"]
+    assert [response.id for response in answers.get_function_responses()] == ["a1", sibling_id]
+    if sibling_id == "p1":
+        assert adk.state[_READ_KEY] == {
+            "steps": [["message", None]],
+            "response_calls": [[PLANNER_ASK, "a1"], [PROPOSE_PLAN, "p1"]],
+        }
+    else:
+        first, second = answers.get_function_responses()
+        assert (first.response or {}).get("outcome") == Outcome.OK.value
+        assert (second.response or {}).get("code") == ProblemCode.INVALID_ARGUMENTS.value
     _assert_same(adk, pydantic)
+
+
+@pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
+async def test_a_call_reads_its_response_in_the_session_and_no_answer_of_its_sibling(
+    plan: Plan, runner: Runner
+) -> None:
+    """A planner tool reads the session as it stands while the tool runs. The
+    event holding its own response's calls is already there, and its sibling's
+    answer is not, though the sibling ran first."""
+    seen: list[list[tuple[list[str | None], list[str | None]]]] = []
+
+    def tools(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
+        def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+            assert isinstance(call, SessionCall)
+            seen.append(
+                [
+                    (
+                        [c.id for c in event.get_function_calls()],
+                        [r.id for r in event.get_function_responses()],
+                    )
+                    for event in call.events
+                    if event.author == AGENT_NAME
+                ]
+            )
+            return _REFUSED if len(seen) < 2 else _compiled_proposal(call, end_run, arguments)
+
+        return _serving_proposals(specs, body)
+
+    replies = [
+        reply(call_part(PROPOSE_PLAN, {}, id="p1"), call_part(PROPOSE_PLAN, {}, id="p2")),
+    ]
+    with _numbered_call_ids():
+        await _entries(runner, _Script(replies=replies, runs=[_planned(plan)], setup=tools))
+
+    assert seen == [[(["p1", "p2"], [])]] * 2
 
 
 # --- Turns put in the model's place ------------------------------------------------------

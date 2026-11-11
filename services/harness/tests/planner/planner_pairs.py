@@ -37,7 +37,6 @@ from planner.agent import (
     create_planner_agent,
     planner_instruction,
     planner_specs,
-    session_steps,
 )
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
@@ -150,8 +149,9 @@ async def pydantic_run(
 ) -> PairRun:
     """The Pydantic AI planner's runs on `replies`, one per brief, over one state.
 
-    Each run after the first is handed the steps of the turn so far, read by
-    `session_steps` from the events the runs before it would store.
+    Each run's tools read the events the node would have stored by then
+    (`harness.planner_node`): the runs before it, each response of its own as
+    it arrives, and the answers of a response once its calls have all answered.
     """
     scripted = ScriptedGenai(replies)
     planner = planner_agent(
@@ -177,14 +177,22 @@ async def pydantic_run(
     for brief in briefs:
         deps = PlannerDeps(
             state=state,
-            earlier=tuple(session_steps(events)),
+            events=events,
             tool_answered=lambda name, answer: None,
             tool_failed=lambda name, error: {"error": f"{name} failed"},
         )
         responded = len(errors)
-        items = [item async for item in run_planner(planner, deps, question=QUESTION, brief=brief)]
+        items: list[PlannerItem] = []
+        held: list[PlannerItem] = []
+        async for item in run_planner(planner, deps, question=QUESTION, brief=brief):
+            items.append(item)
+            if isinstance(item, PlannerResponse):
+                events += _stored([*held, item])
+                held = []
+            else:
+                held.append(item)
+        events += _stored(held)
         run.conversations.append(_item_turns(items, errors[responded:]))
-        events += _stored(items)
     return run
 
 

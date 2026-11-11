@@ -132,7 +132,7 @@ def _deps(state: dict[str, Any] | None = None, run: _Run | None = None) -> Plann
     run = run or _Run()
     return PlannerDeps(
         state={} if state is None else state,
-        earlier=(),
+        events=[],
         tool_answered=run.tool_answered,
         tool_failed=run.tool_failed,
     )
@@ -316,7 +316,7 @@ async def test_a_call_whose_tool_answered_asks_for_a_retry_is_reported_once() ->
     scripted = ScriptedGenai([reply(call_part("write_a", id="w1")), reply(text_part("done"))])
     agent = planner_agent([_write("a", 1)], instruction="Plan.", model=_google_model(scripted))
     deps = PlannerDeps(
-        state={}, earlier=(), tool_answered=tool_answered, tool_failed=run.tool_failed
+        state={}, events=[], tool_answered=tool_answered, tool_failed=run.tool_failed
     )
 
     items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
@@ -348,7 +348,7 @@ async def test_a_run_pydantic_ai_ends_after_a_call_answered_yields_that_answer()
         misbehaves,
     )
     deps = PlannerDeps(
-        state={}, earlier=(), tool_answered=tool_answered, tool_failed=run.tool_failed
+        state={}, events=[], tool_answered=tool_answered, tool_failed=run.tool_failed
     )
 
     items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]

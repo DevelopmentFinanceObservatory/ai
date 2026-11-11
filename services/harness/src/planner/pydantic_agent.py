@@ -2,7 +2,7 @@
 
 The agent serves each `planner.tool_spec.ToolSpec` with the declaration the
 ADK planner shows for it (`function_declaration`), and a call runs the spec's
-body over a `planner.pydantic_call.PydanticCall` (`run_tool`), with the
+body over a `planner.session.SessionCall` (`run_tool`), with the
 model's arguments as sent. `run_planner` drives one run with `Agent.iter`
 from the user's message and the brief, as the ADK planner's `single_turn`
 run starts from the turn's question and the brief
@@ -37,7 +37,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, cast
 
 from google.genai import types
 from opentelemetry import trace
@@ -66,8 +66,8 @@ from pydantic_ai.models.google import GoogleModelSettings
 from pydantic_ai.profiles.google import GoogleModelProfile
 from pydantic_ai.usage import UsageLimits
 
-from planner.call import RecordingState, Step
-from planner.pydantic_call import PydanticCall, as_function_response
+from planner.call import RecordingState
+from planner.session import SessionCall, SessionEvents
 from planner.settings import AGENT_THINKING_CONFIG
 from planner.tool_spec import ToolSpec, function_declaration, run_tool
 
@@ -132,14 +132,15 @@ class PlannerDeps:
 
     `state` is the session's state. Each call writes it through a
     `RecordingState` of its own, so the keys one call wrote are told apart
-    from another's while every call reads the others' values. `earlier` is
-    the steps of the session before the run. `tool_answered` is told each
+    from another's while every call reads the others' values. `events` is
+    the session's events, the live list each call reads its steps from
+    (`planner.session.SessionCall`). `tool_answered` is told each
     tool's answer and `tool_failed` each tool that raised. `ended` says
     whether a tool ended the run.
     """
 
     state: MutableMapping[str, Any]
-    earlier: Sequence[Step]
+    events: SessionEvents
     tool_answered: ToolAnswered
     tool_failed: ToolFailed
     ended: bool = False
@@ -275,8 +276,7 @@ def _answering_unknown_tools(
 ) -> Callable[[list[ModelMessage]], Awaitable[list[ModelMessage]]]:
     """A history processor that answers each call to a tool not in `tools` with
     `tool_not_found`, in place of the retry Pydantic AI answers it with. It runs
-    before every model request, so the model reads the answer, and the run's
-    messages keep it, so a later call's steps read it too."""
+    before every model request, so the model reads the answer."""
 
     async def process(messages: list[ModelMessage]) -> list[ModelMessage]:
         return [
@@ -318,7 +318,7 @@ def _tool(spec: ToolSpec) -> Tool[PlannerDeps]:
 def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     """The function Pydantic AI calls for `spec`, with the model's arguments unvalidated.
 
-    It runs the spec's body (`run_tool`) over the call's `PydanticCall`, whose
+    It runs the spec's body (`run_tool`) over the call's `SessionCall`, whose
     state is a view of the call's own. An answer that is no dict is wrapped
     under `result`, as ADK wraps one. A body that raises is answered with
     `tool_failed`'s answer, as the ADK planner's tool error callback answers
@@ -342,12 +342,7 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
             record.ended = True
             deps.end_run()
 
-        planner_call = PydanticCall(
-            state=record.view,
-            call_id=ctx.tool_call_id,
-            earlier=deps.earlier,
-            messages=tuple(ctx.messages),
-        )
+        planner_call = SessionCall(deps.events, record.view, ctx.tool_call_id)
         try:
             answer = run_tool(spec, raw, call=planner_call, end_run=end_run)
             if inspect.isawaitable(answer):
@@ -407,7 +402,7 @@ async def run_planner(
     yields nothing more. Closing the iterator closes the run (`Agent.iter`)
     and any stream it holds open.
 
-    `deps` holds the session's state, the earlier steps and the callbacks
+    `deps` holds the session's state and events and the callbacks
     (`PlannerDeps`). `model` is the model the run calls, or None for the
     agent's own. `conversation_id` is the conversation the run's spans name
     (`gen_ai.conversation.id`). None leaves Pydantic AI to make one up.
@@ -538,6 +533,15 @@ def _answered(
     if call is None or not call.reported:
         deps.tool_answered(name, answer)
     return PlannerToolAnswer(name, event.tool_call_id, answer, writes, ended)
+
+
+def as_function_response(value: object) -> dict[str, Any]:
+    """`value` as a function response carries it: a dict as it is, anything else
+    under `result`, as ADK wraps a tool's answer that is no dict."""
+    if isinstance(value, dict):
+        # A function response's keys are the JSON object's, so strings.
+        return cast("dict[str, Any]", value)
+    return {"result": value}
 
 
 def _sent_answer(part: ToolReturnPart) -> dict[str, Any]:

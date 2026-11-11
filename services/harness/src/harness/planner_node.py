@@ -8,7 +8,7 @@ ADK planner's `LlmAgent` stores for the same exchange
 (`harness.planner_events`). ADK's node runner stamps each with the author the
 node sets, the branch of the seam's `override_branch`, the invocation and the
 node's path, so the session the run leaves reads as the ADK planner's to
-`planner.agent.session_steps`, `harness.studio_translate` and the seam.
+`planner.session.session_steps`, `harness.studio_translate` and the seam.
 
 The run traces as the ADK planner's does: its agent is named `AGENT_NAME`, its
 spans name the session as their conversation, and they carry message content
@@ -38,7 +38,7 @@ from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.telemetry import TelemetryConfig
 from google.adk.workflow import BaseNode, node
 from google.genai import Client, types
-from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, session_steps
+from planner.agent import AGENT_NAME, BRIEF_STATE_KEY
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
     PlannerDeps,
@@ -216,7 +216,7 @@ def planner_node(
         )
         deps = PlannerDeps(
             state=ctx.session.state,
-            earlier=tuple(session_steps(ctx.session.events)),
+            events=ctx.session.events,
             tool_answered=run.tool_answered,
             tool_failed=tool_failed,
         )

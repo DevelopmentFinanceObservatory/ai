@@ -75,7 +75,6 @@ from google.genai import Client
 from planner.agent import (
     AGENT_NAME,
     BRIEF_STATE_KEY,
-    AdkCall,
     create_planner_agent,
     end_run_when_ready,
     planner_instruction,
@@ -130,6 +129,7 @@ from planner.plan import (
 )
 from planner.pydantic_agent import PydanticPlanner
 from planner.records import Severity
+from planner.session import SessionCall
 from planner.settings import AgentSettings
 from planner.skills import (
     SKILLS_READ_STATE_KEY,
@@ -928,7 +928,7 @@ class PlannerSeam:
         prior = Plan.model_validate(prior_plan)
         save_plan(state, prior)
         save_plan_rounds(state, 0)
-        call = AdkCall(ctx)
+        call = SessionCall.of(ctx)
         view = _RevisionSession(call=call, inherits=dict(inherits))
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
@@ -954,7 +954,7 @@ class PlannerSeam:
                 closing_refusal(referral) or _unanswered(referral) or not_ready(referral),
                 words=_revision_words(load_plan(state), prior, state=state),
             )
-        answer = end_run_when_ready({**recorded, "translation": translation}, call)
+        answer = end_run_when_ready({**recorded, "translation": translation}, ctx)
         plan = load_plan(state)
         if "summary" not in answer or plan is None:
             blocked = answer.get("submission") or answer.get("translation")

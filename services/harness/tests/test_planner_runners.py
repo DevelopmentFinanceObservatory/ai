@@ -53,7 +53,6 @@ from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from planner import agent as planner_agent_module
-from planner.agent import session_steps
 from planner.call import PlannerCall
 from planner.plan import (
     DatasetRequirement,
@@ -62,6 +61,7 @@ from planner.plan import (
     load_plan,
     save_plan,
 )
+from planner.session import session_steps
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode

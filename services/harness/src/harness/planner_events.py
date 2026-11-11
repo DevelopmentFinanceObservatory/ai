@@ -1,7 +1,7 @@
 """The session events a Pydantic AI planner run stores, shaped as the ADK planner's.
 
 The session's planner events are the one stored record of a planner run on
-either planner: `planner.agent.session_steps`, `harness.studio_translate` and
+either planner: `planner.session.session_steps`, `harness.studio_translate` and
 the planner seam read them. So the node that drives `planner.pydantic_agent.
 run_planner` yields, for each item the run makes, the event the ADK planner's
 `LlmAgent` appends for the same exchange:

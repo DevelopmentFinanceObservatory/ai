@@ -3,9 +3,9 @@
 Each planner tool is a `planner.tool_spec.ToolSpec` (`planner.specs`), whose
 body runs `planner.tools`' or `planner.skills`' code over a
 `planner.call.PlannerCall` and no framework. Here `SpecTool` serves a spec to
-ADK, and `AdkCall` is the `PlannerCall` an ADK tool call is. A `propose_plan`
-whose translation compiles declares the plan ready for the user's answer in
-code (`planner.tools.declare_ready`), and the run ends on it
+ADK, and `planner.session.SessionCall` is the `PlannerCall` an ADK tool call
+is. A `propose_plan` whose translation compiles declares the plan ready for
+the user's answer in code (`planner.tools.declare_ready`), and the run ends on it
 (`skip_summarization`) with no model call after. `end_run_when_ready` does the
 same for an answer the harness builds itself. Declaring a plan ready approves
 nothing. Whatever runs this agent withholds execution until that answer
@@ -28,7 +28,7 @@ builds it. So no tool name, column or operation appears here,
 `PENDING_APPROVAL` is a status only translation writes, and `declare_ready`
 requires a plan that has been through that step. The checks a proposal passes
 before it is recorded are `submission.service`'s, which `propose_plan` runs
-over its call's session (`planner.call.CallSession` over `AdkCall`).
+over its call's session (`planner.call.CallSession` over `SessionCall`).
 
 Every planner tool answers with `planner.tool_results`' typed shape, `ok` or
 `problem` with a stable `code` and, where the next step is known, an
@@ -43,39 +43,28 @@ import functools
 import inspect
 import logging
 import os
-from collections.abc import (
-    Iterable,
-    Iterator,
-    Sequence,
-)
-from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, override
 
 from compiler.surface import ToolSurface
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
-from google.adk.events import Event
 from google.adk.models import BaseLlm, Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import Client, types
-from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
+from harness.turn_events import PLANNER_ASK, after_turn_question
 from opentelemetry import trace
 from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
 from opentelemetry.trace import Status, StatusCode
 from orchestrator.agent import _retrying
 from translator.tool import Translate
 
-from planner.call import (
-    ResponseCall,
-    Step,
-)
-from planner.plan import SessionState
+from planner.session import SessionCall
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
 from planner.specs import planner_tool_specs, skill_tool_spec
-from planner.tool_results import Outcome
 from planner.tool_spec import ToolSpec, function_declaration, run_tool
 from planner.tools import EndRun, ready_and_end
 
@@ -497,206 +486,10 @@ def _end_run(tool_context: ToolContext) -> EndRun:
     return end_run
 
 
-def end_run_when_ready(answer: dict[str, object], call: AdkCall) -> dict[str, object]:
-    """`declare_ready` over the ADK `call`, ending the run once it is ready (`ready_and_end`)."""
-    return ready_and_end(answer, call, _end_run(call.tool_context))
-
-
-@dataclass(frozen=True)
-class AdkCall:
-    """The `planner.call.PlannerCall` an ADK tool call is, over the `ToolContext` serving it.
-
-    `ToolContext` is `Context` (`google.adk.tools.tool_context`), so
-    `tool_context.session` is the same live `Session` every other seam
-    shares, `events` included. The steps are those events read as
-    `session_steps` reads them.
-    """
-
-    tool_context: ToolContext
-
-    @property
-    def state(self) -> SessionState:
-        """The call's session state."""
-        return self.tool_context.state
-
-    @property
-    def call_id(self) -> str | None:
-        """The id of the function call the tool serves."""
-        return self.tool_context.function_call_id
-
-    @functools.cached_property
-    def _steps(self) -> tuple[Step, ...]:
-        return tuple(session_steps(self.tool_context.session.events, serving=self.call_id))
-
-    def steps(self) -> Sequence[Step]:
-        """`session_steps` over the call's session events, read once per call.
-
-        An `AdkCall` serves one tool call, and ADK appends a model response's
-        events only after its tool calls finish, so the events a call sees do
-        not change while it runs and the cached view cannot outlive the
-        response it was read in.
-        """
-        return self._steps
-
-    def response_calls(self) -> Sequence[ResponseCall]:
-        """The calls of the planner model's response that holds the call's own
-        (`_response_holding`)."""
-        if self.call_id is None:
-            return ()
-        calls = _response_holding(self.tool_context.session.events, self.call_id)
-        return tuple(ResponseCall(call.name, call.id) for call in calls)
-
-
-def _function_calls(event: Any) -> list[Any]:
-    """The function calls of `event`'s parts, in order."""
-    if not (event.content and event.content.parts):
-        return []
-    return [part.function_call for part in event.content.parts if part.function_call]
-
-
-def _response_holding(events: Sequence[Event], call_id: str) -> list[Any]:
-    """The function calls of the latest model response in `events` that holds a
-    call with `call_id`, in order, or none.
-
-    The graph's planner node pauses on an accepted ask with an interrupt call
-    (`REQUEST_INPUT_FUNCTION_CALL_NAME`) under the ask's own id, so a later
-    event can hold the id without being the response that made the call. A
-    call of that name under `call_id` is skipped.
-    """
-    for event in reversed(events):
-        calls = _function_calls(event)
-        if any(
-            call.id == call_id and call.name != REQUEST_INPUT_FUNCTION_CALL_NAME for call in calls
-        ):
-            return calls
-    return []
-
-
-def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[str]:
-    """The ids of the calls in the model response that holds the call `serving`
-    which no event answers yet.
-
-    `serving` is a tool that reads steps, never an ask, which decides from its
-    response's call list instead (`_ask_beside_ask`).
-
-    ADK appends a response's merged answers after all its calls finish, so
-    while one call of the response runs, its siblings have no answer in the
-    session, whether they have finished or not.
-    """
-    if serving is None:
-        return frozenset()
-    answered = {
-        part.function_response.id
-        for event in events
-        for part in (event.content.parts if event.content and event.content.parts else ())
-        if part.function_response is not None
-    }
-    calls = _response_holding(events, serving)
-    if not any(call.id == serving and call.name != PLANNER_ASK for call in calls):
-        return frozenset()
-    return frozenset(call.id for call in calls if call.id and call.id not in answered)
-
-
-def session_steps(events: Sequence[Event], *, serving: str | None = None) -> Iterator[Step]:
-    """The steps of a session's `events`, in event order (`planner.call.Step`).
-
-    The only reader of ADK events in the planner. A message the user typed
-    (`_user_message`) is one `message` step; the event's other parts are not
-    read, and no producer in the harness sends a user-typed event that also
-    carries a function part. Every other event yields a `call` step for each
-    ask carrying an id, an `answer` step for each response to one, paired
-    with the `args` of the nearest preceding call sharing its id, and a
-    `response` step for each other tool's response.
-
-    An ask is the planner's own (`PLANNER_ASK`) or one of the workflow's
-    interrupts. The planner's call holds its question flat in `args`. A
-    planner ask whose response is its tool's refusal, or ADK's rejection of
-    the call, never reached the user: it yields no step at all, so every
-    reader sees the session as if the ask had not been made. An accepted
-    one's tool answers `ASK_ACCEPTED`, which says nothing the user did and is
-    not read,
-    and the graph's planner node pauses on it with a `RequestInput` under
-    the call's own id, so the user's answer to that interrupt is the
-    answer to the call, and the interrupt's own call repeats the question.
-    A workflow interrupt is a `RequestInput` its node yields:
-    `create_request_input_event` builds the call with `id=interrupt_id` and
-    dumps the whole `RequestInput` into its `args`, so the node's own
-    `payload` nests under `args["payload"]`, and
-    `create_request_input_response`, which `harness.studio`'s `/interrupt`
-    route sends, builds the answer with `FunctionResponse.id` set to that
-    same `interrupt_id`.
-
-    `serving` is the id of the tool call being served. The calls of its own
-    model response that no event answers yet (`_in_flight_calls`) yield no
-    step, so a call running beside an ask reads the session as it stood
-    before that response, and the ask, which may still be refused or may be
-    accepted, is not counted as put to the user.
-    """
-    refused = _refused_asks(events)
-    in_flight = _in_flight_calls(events, serving)
-    calls: dict[str, dict[str, Any]] = {}
-    planner_asks: set[str] = set()
-    for event in events:
-        if not (event.content and event.content.parts):
-            continue
-        if _user_message(event):
-            yield Step("message")
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if call is not None and call.id is not None:
-                if call.id in in_flight:
-                    continue
-                if call.name == PLANNER_ASK:
-                    if call.id in refused:
-                        continue
-                    planner_asks.add(call.id)
-                elif call.name != REQUEST_INPUT_FUNCTION_CALL_NAME or call.id in planner_asks:
-                    continue
-                calls[call.id] = call.args or {}
-                yield Step("call", call.id, call.args or {})
-                continue
-            response = part.function_response
-            if response is None:
-                continue
-            body = response.response or {}
-            if response.name == PLANNER_ASK and "result" not in body:
-                continue
-            if response.name in (PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME):
-                yield Step("answer", response.id, calls.get(response.id or ""), body)
-            else:
-                yield Step("response", body=body, name=response.name)
-
-
-def _refused_asks(events: Iterable[Event]) -> frozenset[str]:
-    """The ids of the planner asks that never reached the user: their response
-    is neither `ASK_ACCEPTED` nor an answer (no `result`), so it is the tool's
-    refusal or ADK's rejection of the call."""
-    return frozenset(
-        response.id
-        for event in events
-        for part in (event.content.parts if event.content and event.content.parts else ())
-        if (response := part.function_response) is not None
-        and response.id is not None
-        and response.name == PLANNER_ASK
-        and "result" not in (body := response.response or {})
-        and body.get("outcome") != Outcome.OK.value
-    )
-
-
-def _user_message(event: Any) -> bool:
-    """Whether `event` is a message the user typed into the session.
-
-    A user-authored event with text and no `branch`. The planner seam sends
-    its own messages (the brief, an amendment's or a refusal's ask) as
-    user-role content under `harness.planner_seam._PLANNER_BRANCH`, so they
-    are not the user's.
-    """
-    return (
-        getattr(event, "author", None) == "user"
-        and not getattr(event, "branch", None)
-        and any((getattr(part, "text", None) or "").strip() for part in event.content.parts)
-    )
+def end_run_when_ready(answer: dict[str, object], context: ToolContext) -> dict[str, object]:
+    """`declare_ready` over the call `context` serves (`SessionCall.of`), ending
+    the run once it is ready (`ready_and_end`)."""
+    return ready_and_end(answer, SessionCall.of(context), _end_run(context))
 
 
 # The `error.type` ADK records on a `FunctionTool`'s span when its answer holds
@@ -786,7 +579,7 @@ class SpecTool(BaseTool):
     """A `planner.tool_spec.ToolSpec` served to an ADK `LlmAgent`.
 
     The model is shown `function_declaration(spec)`, and a call runs the
-    spec's body over the call's `AdkCall` (`run_tool`), ending the run through
+    spec's body over the call's `SessionCall` (`run_tool`), ending the run through
     `skip_summarization`. `_get_declaration` is the hook `BaseTool` reads the
     declaration through. Its `process_llm_request` adds the declaration to the
     request's one `types.Tool` of function declarations, creating it when the
@@ -813,7 +606,9 @@ class SpecTool(BaseTool):
 
     def invoke(self, args: dict[str, Any], tool_context: ToolContext) -> object:
         """The spec's answer to a call with `args`, awaitable when its body is async."""
-        return run_tool(self.spec, args, call=AdkCall(tool_context), end_run=_end_run(tool_context))
+        return run_tool(
+            self.spec, args, call=SessionCall.of(tool_context), end_run=_end_run(tool_context)
+        )
 
     @override
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
