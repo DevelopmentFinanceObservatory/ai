@@ -38,7 +38,7 @@ from planner.specs import PROPOSE_PLAN
 from planner.tool_spec import Parameter, ToolSpec
 
 from ..planner_expectations import expect, expectation_name, shared
-from ..scripted_genai import Reply, call_part, reply, thought_part
+from ..scripted_genai import Reply, call_part, malformed_call_reply, reply, thought_part
 from ..test_planner_adapter import _translated_plan
 from ..test_planner_node import (
     _MODEL,
@@ -62,6 +62,9 @@ _THE_SESSION = "<the session>"
 # Langfuse's `LangfuseOtelSpanAttributes` names a span carries.
 _OBSERVATION_TYPE = "langfuse.observation.type"
 _USAGE_DETAILS = "langfuse.observation.usage_details"
+# The number of a call's attempts discarded for a malformed function call
+# (`harness.planner_model`).
+_MALFORMED_DISCARDED = "dfo.model.malformed_attempts_discarded"
 
 # The observation type Langfuse gives each GenAI operation
 # (`ObservationTypeMapper`).
@@ -370,6 +373,37 @@ async def test_a_refused_call_is_marked_failed_and_usage_is_counted_once(
     assert [seen["usage"] for seen in shown if seen["type"] == "generation"] == [usage, usage]
     assert [_usage(call) for call in calls] == [usage, usage]
     assert sum(_generic_usage(calls[0]).values()) == usage["total"] + 40 + 4
+    assert [_MALFORMED_DISCARDED in call for call in calls] == [False, False]
+
+
+async def test_a_resent_calls_span_carries_both_attempts_usage(
+    plan: Plan, exported_spans: InMemorySpanExporter
+) -> None:
+    """A reply Gemini ended on a function call it could not parse is discarded and
+    the request sent again within one call. The call's span carries the usage
+    summed over both replies and counts the one discarded attempt."""
+    script = _Script(
+        replies=[malformed_call_reply(usage=_USAGE), _proposal("p1")],
+        runs=[_planned(plan)],
+        setup=_proposals(),
+        budget=_budget,
+    )
+    exported_spans.clear()
+    await _entry(script)
+    (call,) = [
+        span.attributes or {}
+        for span in exported_spans.get_finished_spans()
+        if (span.attributes or {}).get("gen_ai.operation.name") == "chat"
+    ]
+
+    assert _usage(call) == {
+        "input": 160,
+        "output": 18,
+        "input_cached_tokens": 80,
+        "output_reasoning_tokens": 8,
+        "total": 266,
+    }
+    assert call[_MALFORMED_DISCARDED] == 1
 
 
 @pytest.mark.parametrize("capture", ["SPAN_ONLY", "EVENT_ONLY", "NO_CONTENT", None])

@@ -30,7 +30,7 @@ import pytest
 from compiler.surface import FixtureSurface
 from google import genai
 from google.adk import Context, Event
-from google.adk.agents.invocation_context import LlmCallsLimitExceededError
+from google.adk.agents.invocation_context import InvocationContext, LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner as AdkRunner
 from google.adk.workflow import START, Workflow, node
@@ -826,16 +826,52 @@ async def test_a_response_that_errs_or_holds_nothing_ends_the_run_with_no_plan(
     _assert_expected(request, entry)
 
 
+async def test_a_function_call_gemini_could_not_parse_is_sent_once_more(
+    plan: Plan, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A reply streamed as live Gemini streams a function call it could not
+    parse (`malformed_call_reply`) is discarded and the same request sent again.
+    The proposal the second reply makes lands the plan, no event stores the
+    discarded response, and each attempt logs its own usage line and counts as a
+    model call of the invocation."""
+    counted = mock.patch.object(
+        InvocationContext,
+        "increment_llm_call_count",
+        autospec=True,
+        side_effect=InvocationContext.increment_llm_call_count,
+    )
+    with caplog.at_level(logging.INFO, logger=usage.logger.name), counted as calls:
+        entry = await _entry(
+            _Script(
+                replies=[
+                    malformed_call_reply(usage=_USAGE),
+                    reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), usage=_USAGE),
+                ],
+                runs=[_planned(plan)],
+                setup=_proposals(),
+            ),
+        )
+
+    assert entry.outputs[0] is not None and "plan" in entry.outputs[0]
+    first, second = entry.requests
+    assert _request_dumped(first) == _request_dumped(second)
+    stored = [part for event in _planner_events(entry) for part in event.content.parts or ()]
+    assert not [part for part in stored if part.thought_signature and not part.function_call]
+    assert [record.args for record in caplog.records if record.name == usage.logger.name] == [
+        (AGENT_NAME, 120, 40, 9, 4, 133)
+    ] * 2
+    assert calls.call_count == 2
+
+
 async def test_a_function_call_gemini_could_not_parse_ends_the_run_with_no_plan(
     plan: Plan, request: pytest.FixtureRequest
 ) -> None:
-    """A reply streamed as live Gemini streams a function call it could not
-    parse (`malformed_call_reply`) ends the run on `StopCode.PLAN_NOT_READY`
-    with no further model call. The response is stored as its signed empty text
-    part."""
+    """Two replies in a row that Gemini could not parse end the run on
+    `StopCode.PLAN_NOT_READY` after two requests and no more. The second
+    response is stored as its signed empty text part."""
     entry = await _entry(
         _Script(
-            replies=[malformed_call_reply(usage=_USAGE)],
+            replies=[malformed_call_reply(usage=_USAGE), malformed_call_reply(usage=_USAGE)],
             runs=[_planned(plan)],
             setup=_proposals(),
         ),
@@ -845,8 +881,25 @@ async def test_a_function_call_gemini_could_not_parse_ends_the_run_with_no_plan(
         entry.outputs[0] is not None
         and entry.outputs[0]["refused"]["code"] == StopCode.PLAN_NOT_READY
     )
-    assert len(entry.requests) == 1
+    assert len(entry.requests) == 2
     _assert_expected(request, entry)
+
+
+async def test_a_resent_call_counts_against_the_turns_call_cap(plan: Plan) -> None:
+    """The turn's cap is one model call, so the resend of a call Gemini could not
+    parse is closed by the cap and ends the run on its code."""
+    entry = await _entry(
+        _Script(
+            replies=[malformed_call_reply(usage=_USAGE)],
+            runs=[_planned(plan)],
+            setup=_proposals(),
+            budget=_one_call_budget,
+        ),
+    )
+
+    code = StopCode.TURN_MODEL_CALLS_SPENT
+    assert entry.outputs[0] is not None and entry.outputs[0]["refused"]["code"] == code
+    assert len(entry.requests) == 1
 
 
 async def _raising(plan: Plan) -> _Entry:

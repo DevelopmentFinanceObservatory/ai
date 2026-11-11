@@ -21,7 +21,13 @@ whose streamed call is wrapped. Each request is first put in one fixed form
    answers with the closing sentence `bounded_by` gives;
 5. hands `after_response` the code of the bound that closed the call, if one
    did, and the usage the API reported for it; a model turn it returns
-   replaces the response; otherwise the held chunks are delivered.
+   replaces the response;
+6. when Gemini ended the call on `MALFORMED_FUNCTION_CALL` and no bound closed
+   it, discards the held chunks and runs steps 1 to 5 once more, so the second
+   attempt is counted, bounded and logged as a call of its own. The span
+   carries both attempts' usage summed and the number of attempts discarded
+   (`_MALFORMED_DISCARDED`). Otherwise, and after the second attempt whatever
+   its outcome, the held chunks are delivered.
 
 A function call the model sent without an id reaches the planner with one of
 the form ADK gives it (`_with_client_call_ids`), so the planner stores it under
@@ -34,8 +40,8 @@ and carries what Langfuse reads of an ADK `generate_content` span that
 Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and the
 usage Langfuse derives from such a span, set outright so that the usage
 details Pydantic AI adds are not summed into the call's total. A turn put in
-place of a request is no model call, so its span is marked a plain span for
-Langfuse.
+place of a request no attempt was sent for is no model call, so its span is
+marked a plain span for Langfuse.
 """
 
 from __future__ import annotations
@@ -66,6 +72,10 @@ logger = logging.getLogger(__name__)
 
 type Usage = types.GenerateContentResponseUsageMetadata
 
+# A planner call is sent at most this many times. The second send happens when
+# Gemini ends the first on a function call it could not parse.
+_ATTEMPTS = 2
+
 # Langfuse's `LangfuseOtelSpanAttributes.OBSERVATION_TYPE` is the observation
 # type Langfuse gives a span, ahead of the one it infers from the span's GenAI
 # attributes. `OBSERVATION_USAGE_DETAILS` is the usage it reads ahead of every
@@ -74,6 +84,9 @@ _OBSERVATION_TYPE = "langfuse.observation.type"
 _USAGE_DETAILS = "langfuse.observation.usage_details"
 # The OpenTelemetry GenAI attribute ADK records a call's thought tokens under.
 _REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
+# The number of a call's attempts discarded for ending on a function call
+# Gemini could not parse, set only when one was.
+_MALFORMED_DISCARDED = "dfo.model.malformed_attempts_discarded"
 
 # A model turn to answer the next request with in place of the model, or None
 # to send the request.
@@ -198,6 +211,16 @@ class _Answer:
         usages = [chunk.usage_metadata for chunk in self.chunks if chunk.usage_metadata]
         return usages[-1] if usages else None
 
+    @property
+    def malformed(self) -> bool:
+        """Whether Gemini ended the call, no bound having closed it, on a function
+        call it could not parse."""
+        return self.closed_by is None and any(
+            chunk.candidates
+            and chunk.candidates[0].finish_reason == types.FinishReason.MALFORMED_FUNCTION_CALL
+            for chunk in self.chunks
+        )
+
 
 @dataclass
 class _PlannerStream:
@@ -225,26 +248,42 @@ class _PlannerStream:
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
     ) -> AsyncGenerator[types.GenerateContentResponse]:
         span = trace.get_current_span()
-        if self.before_request is not None and (turn := self.before_request()) is not None:
-            if span.is_recording():
-                span.set_attribute(_OBSERVATION_TYPE, "span")
-            yield _chunk(turn, usage=None)
+        spent: Usage | None = None
+        for attempt in range(_ATTEMPTS):
+            if self.before_request is not None and (turn := self.before_request()) is not None:
+                # After a sent attempt the span carries that call's usage, so it
+                # stays a generation.
+                if spent is None and span.is_recording():
+                    span.set_attribute(_OBSERVATION_TYPE, "span")
+                yield _chunk(turn, usage=None)
+                return
+            answer = await self._send(model=model, contents=contents, config=config)
+            usage = answer.usage
+            spent = _added(spent, usage)
+            _record_usage(span, spent)
+            replaced = (
+                self.after_response(answer.closed_by, usage)
+                if self.after_response is not None
+                else None
+            )
+            if replaced is None and answer.malformed and attempt + 1 < _ATTEMPTS:
+                logger.warning(
+                    "planner call to %s ended MALFORMED_FUNCTION_CALL after %s output tokens, "
+                    "sending it again",
+                    model,
+                    usage.candidates_token_count if usage else None,
+                )
+                if span.is_recording():
+                    span.set_attribute(_MALFORMED_DISCARDED, attempt + 1)
+                continue
+            if replaced is not None:
+                yield _chunk(replaced, usage=usage)
+            elif answer.closing is not None:
+                yield _chunk(answer.closing, usage=usage)
+            else:
+                for chunk in answer.chunks:
+                    yield chunk
             return
-        answer = await self._send(model=model, contents=contents, config=config)
-        usage = answer.usage
-        _record_usage(span, usage)
-        replaced = (
-            self.after_response(answer.closed_by, usage)
-            if self.after_response is not None
-            else None
-        )
-        if replaced is not None:
-            yield _chunk(replaced, usage=usage)
-        elif answer.closing is not None:
-            yield _chunk(answer.closing, usage=usage)
-        else:
-            for chunk in answer.chunks:
-                yield chunk
 
     async def _send(
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
@@ -374,9 +413,29 @@ def _id_less_calls(chunk: types.GenerateContentResponse) -> list[types.FunctionC
     ]
 
 
+def _added(spent: Usage | None, usage: Usage | None) -> Usage | None:
+    """The token counts `_record_usage` reads, summed over `spent` and `usage`."""
+    if spent is None or usage is None:
+        return spent or usage
+    counts = (
+        "prompt_token_count",
+        "tool_use_prompt_token_count",
+        "candidates_token_count",
+        "thoughts_token_count",
+        "cached_content_token_count",
+        "total_token_count",
+    )
+    total = spent.model_copy()
+    for name in counts:
+        before, after = getattr(spent, name), getattr(usage, name)
+        if before is not None or after is not None:
+            setattr(total, name, (before or 0) + (after or 0))
+    return total
+
+
 def _record_usage(span: trace.Span, usage: Usage | None) -> None:
-    """Put `usage`, one call's, on `span` as Langfuse reads it from an ADK
-    `generate_content` span.
+    """Put `usage`, summed over a call's attempts (`_added`), on `span` as
+    Langfuse reads it from an ADK `generate_content` span.
 
     ADK records a call's input (prompt and tool-use tokens), output (candidate
     and thought tokens), cached and thought tokens, each only when Gemini
