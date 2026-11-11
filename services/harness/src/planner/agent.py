@@ -711,7 +711,7 @@ def _env_flag(name: str) -> bool | None:
     return None if value is None else value.lower() in ("true", "1")
 
 
-def refuse_vertex_ai(client: Client | None = None) -> None:
+def refuse_vertex_ai(model_name: str, client: Client | None = None) -> None:
     """Refuse to build the planner when the google-genai client its model calls
     through uses Vertex AI.
 
@@ -719,25 +719,32 @@ def refuse_vertex_ai(client: Client | None = None) -> None:
     (`planner.tool_spec.function_declaration`). Vertex AI rejects their
     optional `anyOf` schemas, which ADK rewrites only for its own function
     tools. `create_planner_agent` calls this once, when the planner's model
-    is ADK's `Gemini`, with the client that model calls through. Any other
-    model calls through no google-genai client.
+    is ADK's `Gemini`, with that model's name and the client it calls through.
+    Any other model calls through no google-genai client.
     `harness.planner_seam.PlannerSeam` calls it for the Pydantic AI planner's
-    client.
+    model and client.
+
+    The decision is the one the client makes. A given client decides by its
+    `vertexai`. With none, it is the client ADK's `Gemini` builds for
+    `model_name` with no client options (`Gemini.api_client`): a name of the
+    form `projects/...` selects Vertex AI, and otherwise google-genai takes
+    the backend from the environment, `GOOGLE_GENAI_USE_ENTERPRISE` when set,
+    else `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. That rule
+    is read here without building a client, since building one without an API
+    key or credentials raises.
 
     Args:
-        client: The client the model calls through, decided by its `vertexai`.
-            None gives the client the harness builds with no options, whose
-            `vertexai` google-genai takes from the environment:
-            `GOOGLE_GENAI_USE_ENTERPRISE` when set, otherwise
-            `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. That rule
-            is read here without building a client, since building one without
-            an API key or credentials raises.
+        model_name: The Gemini model's name, as the client is sent it.
+        client: The client the model calls through, or None for the one built
+            for it.
 
     Raises:
         RuntimeError: The client uses Vertex AI.
     """
     if client is not None:
         vertexai = client.vertexai
+    elif model_name.startswith("projects/"):
+        vertexai = True
     else:
         enterprise = _env_flag("GOOGLE_GENAI_USE_ENTERPRISE")
         vertexai = enterprise if enterprise is not None else _env_flag("GOOGLE_GENAI_USE_VERTEXAI")
@@ -745,8 +752,9 @@ def refuse_vertex_ai(client: Client | None = None) -> None:
         raise RuntimeError(
             "The planner's google-genai client uses Vertex AI, which rejects the "
             "planner's tool declarations. Run the planner on a Gemini developer API "
-            "key (GOOGLE_API_KEY): give a client built without vertexai, or unset "
-            "GOOGLE_GENAI_USE_ENTERPRISE and GOOGLE_GENAI_USE_VERTEXAI."
+            "key (GOOGLE_API_KEY): give a client built without vertexai, or name the "
+            "model without a projects/ path and unset GOOGLE_GENAI_USE_ENTERPRISE and "
+            "GOOGLE_GENAI_USE_VERTEXAI."
         )
 
 
@@ -913,7 +921,7 @@ def create_planner_agent(
     """
     model = _retrying(model_name, prefix_cache=prefix_cache)
     if isinstance(model, Gemini):
-        refuse_vertex_ai(client)
+        refuse_vertex_ai(model.model, client)
         if client is not None:
             model = model.model_copy(update={"client": client})
     elif client is not None:

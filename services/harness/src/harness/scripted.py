@@ -287,10 +287,13 @@ class ModelRequest:
     def system_text(self) -> str:
         """The system instruction's text, whether it was sent as a string, as the
         ADK planner sends it, or as a `Content`, as the Pydantic AI planner does."""
-        return _text(self.config.system_instruction)
+        return instruction_text(self.config.system_instruction)
 
 
-def _text(instruction: object) -> str:
+def instruction_text(instruction: object) -> str:
+    """The text of a request's system instruction, in any shape google-genai
+    takes it: a string, a `Content`, a `Part` or a list of them. Anything else
+    reads as no text."""
     match instruction:
         case str():
             return instruction
@@ -299,7 +302,7 @@ def _text(instruction: object) -> str:
         case types.Part(text=text):
             return text or ""
         case list():
-            return "".join(_text(item) for item in instruction)
+            return "".join(instruction_text(item) for item in instruction)
         case _:
             return ""
 

@@ -259,7 +259,8 @@ def _with_tool(agent: PlannerAgent, function: Callable[..., Any]) -> PlannerAgen
 async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -> None:
     """A call whose arguments fail validation is answered by Pydantic AI with a
     retry. That answer is yielded as an error, as Gemini is sent it, so every
-    answer of the response is yielded, its sibling's write with them."""
+    answer of the response is yielded, its sibling's write with them, and
+    `tool_answered` is told it once, as it is told a tool's own answer."""
 
     def counted(n: int) -> dict[str, Any]:
         return {"outcome": "ok", "n": n}
@@ -275,7 +276,11 @@ async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -
         counted,
     )
 
-    items = [item async for item in run_planner(agent, _deps(), question=_QUESTION, brief=_BRIEF)]
+    run = _Run()
+
+    items = [
+        item async for item in run_planner(agent, _deps(run=run), question=_QUESTION, brief=_BRIEF)
+    ]
 
     assert _kinds(items)[0] == "response" and _kinds(items)[-1] == "response"
     answers = {item.call_id: item for item in items[1:-1] if isinstance(item, PlannerToolAnswer)}
@@ -283,6 +288,10 @@ async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -
     assert answers["w1"] == PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})
     assert answers["c1"].name == "counted"
     assert set(answers["c1"].answer) == {"error"}
+    assert sorted(run.answered) == [
+        ("counted", answers["c1"].answer),
+        ("write_a", {"outcome": "ok"}),
+    ]
 
 
 async def test_a_run_pydantic_ai_ends_after_a_call_answered_yields_that_answer() -> None:

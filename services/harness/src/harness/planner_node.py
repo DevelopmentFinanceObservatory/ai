@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from common.telemetry import current_trace_id
+from executor.classify import internal_fault
 from google.adk import Context, Event
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig
@@ -46,6 +47,7 @@ from planner.pydantic_agent import (
     PlannerDeps,
     PlannerResponse,
     PlannerToolAnswer,
+    UnsentQuestionPartError,
     planner_agent,
     run_planner,
 )
@@ -129,9 +131,15 @@ def planner_node(
         A node named `planner.agent.AGENT_NAME` that runs the planner once on
         the session's brief (`planner.agent.BRIEF_STATE_KEY`), after the
         turn's question, and yields the ADK planner's events for the run.
-        The run makes at most the invocation's `RunConfig.max_llm_calls`
-        model calls, when that is above zero, and the call past it raises
-        `LlmCallsLimitExceededError`, as the ADK planner's does (`_LlmCalls`).
+        The run makes at most `RunConfig.max_llm_calls` model calls of its
+        own, when that is above zero, and the call past it raises
+        `LlmCallsLimitExceededError`, the error the ADK planner raises. ADK
+        counts every model call of the invocation against the cap, the
+        orchestrator's and earlier planner runs' included, so a turn can make
+        more calls in total on this planner before the cap trips (`_LlmCalls`).
+        A question holding a part this planner does not send
+        (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
+        any request on an `internal_error` refusal (`run.refused`).
     """
 
     async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
@@ -237,6 +245,19 @@ def planner_node(
                     if answered_every_call(response, held):
                         yield tool_answers_event(response, held, ended=_ended(held))
                         held = []
+        except UnsentQuestionPartError as exc:
+            # Refused before any request, so nothing is held. The run ends on
+            # the refusal, which the seam answers the entry with; an exception
+            # here would fail the whole workflow, since ADK fails the root on
+            # a child node's error. The ADK planner sends the part.
+            logger.error(
+                "planner question refused session=%s invocation=%s: %s",
+                ctx.session.id,
+                ctx.invocation_id,
+                exc,
+            )
+            run.refused = internal_fault(str(exc))
+            return
         except Exception:
             # The ADK planner keeps the answers of a response's finished calls
             # when another of its calls fails. A cancellation stores nothing of
@@ -276,13 +297,17 @@ def directive_turn(directive: Directive | None) -> types.Content | None:
 
 
 class _LlmCalls:
-    """The model calls one run has made, against the invocation's cap.
+    """The model calls one planner run has made, against `RunConfig.max_llm_calls`.
 
-    ADK counts an `LlmAgent`'s calls on the invocation
-    (`InvocationContext.increment_llm_call_count`) and raises
-    `LlmCallsLimitExceededError` on the call past `RunConfig.max_llm_calls`.
-    A turn put in the model's place is not a call. The invocation's count is
-    private to ADK, so this one counts the run's calls alone.
+    ADK counts every `LlmAgent` call of the invocation on one counter
+    (`InvocationContext.increment_llm_call_count`), the orchestrator's and
+    every planner run's, and raises `LlmCallsLimitExceededError` on the call
+    past the cap. This counts one run's calls alone, because ADK keeps the
+    invocation's count where no public API reads or adds to it. A turn on the
+    Pydantic AI planner can therefore make more model calls in total before
+    the cap trips: up to the cap in each planner run, beside the
+    orchestrator's own. A turn put in the model's place is not a call, as in
+    ADK.
     """
 
     def __init__(self, config: RunConfig | None) -> None:

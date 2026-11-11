@@ -128,6 +128,7 @@ from planner.plan import (
     warning_codes,
     windowed_pins,
 )
+from planner.pydantic_agent import PlannerAgent
 from planner.records import Severity
 from planner.settings import AgentSettings
 from planner.skills import (
@@ -393,7 +394,8 @@ class PlannerSeam:
         # the tools (`planner.agent.planner_specs` over the surface and that
         # translation). `client` is the google-genai client the planner's
         # model calls go through, on either runner. None builds one from the
-        # environment. On either runner a client on Vertex AI is refused
+        # environment. On either runner a planner whose client uses Vertex AI,
+        # the given one or the one built for the model's name, is refused
         # (`planner.agent.refuse_vertex_ai`). The ADK planner's Gemini model
         # uses a given client as it is, HTTP options and retries included. The
         # Pydantic AI planner's model sets its retries on each request
@@ -401,6 +403,8 @@ class PlannerSeam:
         #
         # `model` is an ADK model, so the Pydantic AI planner refuses it. It
         # replaces the model `agent_settings` names, and takes no `client`.
+        # It runs as given: the refusal above checks the model it replaces,
+        # not it, so a caller's model on Vertex AI is the caller's to avoid.
         #
         # `on_tool_answered` observes, on either runner, each planner tool's
         # name and the answer the model reads for the call
@@ -415,16 +419,6 @@ class PlannerSeam:
         self._model_name = (
             agent_settings if agent_settings is not None else AgentSettings()
         ).planner_model_name
-        # The ADK planner resolves the name through ADK's model registry. The
-        # Pydantic AI planner runs only the Gemini model the name resolves to.
-        gemini_name = gemini_model_name(self._model_name)
-        if runner == "pydantic_ai" and gemini_name is None:
-            raise ValueError(
-                f"the Pydantic AI planner runs a Gemini model only, and "
-                f"{self._model_name!r} names none; set PLANNER_RUNNER=adk to run it"
-            )
-        if runner == "pydantic_ai":
-            refuse_vertex_ai(client)
         self._prefix_cache = prefix_cache
         # The surface and translation `propose_plan` runs, kept for `revise`,
         # which records a proposal of its own with no model call.
@@ -454,13 +448,22 @@ class PlannerSeam:
         self._instruction = planner_instruction(
             has_translator=True, has_skills=True, question_fixed=True
         )
-        self._agent = self._adk_planner(model=model) if runner == "adk" else None
+        self._agent: LlmAgent | None = None
+        self._pydantic: tuple[str, PlannerAgent] | None = None
+        if runner == "adk":
+            self._agent = self._adk_planner(model=model)
+            return
+        # The ADK planner resolves the name through ADK's model registry. The
+        # Pydantic AI planner runs only the Gemini model the name resolves to.
+        gemini_name = gemini_model_name(self._model_name)
+        if gemini_name is None:
+            raise ValueError(
+                f"the Pydantic AI planner runs a Gemini model only, and "
+                f"{self._model_name!r} names none; set PLANNER_RUNNER=adk to run it"
+            )
+        refuse_vertex_ai(gemini_name, client)
         # Built once and shared by every run, each of which names its own model.
-        self._pydantic = (
-            (gemini_name, pydantic_planner(self._specs, instruction=self._instruction))
-            if runner == "pydantic_ai" and gemini_name is not None
-            else None
-        )
+        self._pydantic = (gemini_name, pydantic_planner(self._specs, instruction=self._instruction))
 
     def _adk_planner(self, *, model: BaseLlm | None) -> LlmAgent:
         """The ADK planner on the seam's tools, with the seam's callbacks."""

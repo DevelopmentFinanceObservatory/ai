@@ -158,9 +158,9 @@ class PlannerResponse:
 
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
-    signature. The model reads what the API reported on the response (usage,
-    finish reason, a blocked prompt) off the stream
-    (`harness.planner_model.ResponseMetadata`).
+    signature. What the API reported on the response (usage, finish reason, a
+    blocked prompt) is the stream's metadata, which `harness.planner_model`
+    reads as `ResponseMetadata`.
     """
 
     parts: tuple[types.Part, ...]
@@ -448,15 +448,23 @@ async def run_planner(
             raise
 
 
+class UnsentQuestionPartError(ValueError):
+    """The turn's question holds a part the Pydantic AI planner does not send
+    (`_question_prompt`)."""
+
+
 def _question_prompt(question: types.Content | str) -> str | list[UserContent]:
     """`question`'s parts as the user prompt Pydantic AI sends as one content of
     the same parts: one text part as its text, several as a list of them.
 
     Studio sends one text part (`harness.studio`). An inline file is sent as
-    `BinaryContent`, its bytes and media type unchanged.
+    `BinaryContent`, its bytes and media type unchanged. Any other part, a
+    file by URI or a function part among them, is refused. The ADK planner
+    sends every part of the question as it is.
 
     Raises:
-        ValueError: A part is neither text nor an inline file.
+        UnsentQuestionPartError: A part is neither text nor an inline file;
+            the message names the part's fields.
     """
     if isinstance(question, str):
         return question
@@ -468,7 +476,11 @@ def _question_prompt(question: types.Content | str) -> str | list[UserContent]:
             media_type = part.inline_data.mime_type or "application/octet-stream"
             prompt.append(BinaryContent(data=part.inline_data.data, media_type=media_type))
         else:
-            raise ValueError(f"the planner sends no {part.model_dump(exclude_none=True)} part")
+            received = sorted(part.model_dump(exclude_none=True))
+            raise UnsentQuestionPartError(
+                f"the question holds a part with {received}; the Pydantic AI planner "
+                "takes text and inline data (inline_data) parts only"
+            )
     if len(prompt) == 1 and isinstance(prompt[0], str):
         return prompt[0]
     return prompt
@@ -494,7 +506,8 @@ def _answered(
     what the run has not yielded, `tool_not_found`'s for a tool the planner
     lacks, which writes nothing, or, for a call Pydantic AI answered without
     running its tool, the answer the model is sent (`_sent_answer`) with
-    whatever the call wrote."""
+    whatever the call wrote, told to `deps.tool_answered` here as a tool's
+    own answer is told in `_tool_function`."""
     name = event.part.tool_name
     if name not in tools:
         return PlannerToolAnswer(
@@ -505,7 +518,9 @@ def _answered(
         return _answer_of(event.tool_call_id, call)
     writes = deps._written(call.view) if call is not None else {}
     ended = call.ended if call is not None else False
-    return PlannerToolAnswer(name, event.tool_call_id, _sent_answer(event.part), writes, ended)
+    answer = _sent_answer(event.part)
+    deps.tool_answered(name, answer)
+    return PlannerToolAnswer(name, event.tool_call_id, answer, writes, ended)
 
 
 def _sent_answer(part: ToolReturnPart) -> dict[str, Any]:

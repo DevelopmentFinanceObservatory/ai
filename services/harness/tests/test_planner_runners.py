@@ -256,25 +256,34 @@ def _genai_client(*, vertexai: bool) -> Client:
     return client
 
 
+# A Gemini model named by its Vertex AI resource path.
+_VERTEX_MODEL = f"projects/p/locations/global/publishers/google/models/{_MODEL}"
+
+
 @pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
 @pytest.mark.parametrize(
-    ("environment", "vertexai", "refused"),
+    ("environment", "model_name", "vertexai", "refused"),
     [
-        pytest.param({}, None, False, id="default-client-developer-api"),
-        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, None, True, id="default-client-vertex"),
-        pytest.param({}, True, True, id="client-on-vertex"),
-        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, False, False, id="client-decides"),
+        pytest.param({}, _MODEL, None, False, id="default-client-developer-api"),
+        pytest.param(
+            {"GOOGLE_GENAI_USE_VERTEXAI": "1"}, _MODEL, None, True, id="default-client-vertex"
+        ),
+        pytest.param({}, _VERTEX_MODEL, None, True, id="default-client-vertex-model-name"),
+        pytest.param({}, _MODEL, True, True, id="client-on-vertex"),
+        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, _MODEL, False, False, id="client-decides"),
     ],
 )
 def test_both_planners_refuse_a_client_on_vertex_ai(
     monkeypatch: pytest.MonkeyPatch,
     runner: Runner,
     environment: dict[str, str],
+    model_name: str,
     vertexai: bool | None,
     refused: bool,
 ) -> None:
-    """A given client decides by its own `vertexai`. With none, the environment
-    decides, as google-genai builds the default client."""
+    """A given client decides by its own `vertexai`. With none, the client built
+    for the model decides: a `projects/...` name selects Vertex AI, as ADK's
+    `Gemini` builds its client, and otherwise the environment does."""
     for name in ("GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"):
         monkeypatch.delenv(name, raising=False)
     for name, value in environment.items():
@@ -284,6 +293,7 @@ def test_both_planners_refuse_a_client_on_vertex_ai(
     def build() -> PlannerSeam:
         return PlannerSeam(
             settings=Settings(planner_runner=runner),
+            agent_settings=AgentSettings(planner_model_name=model_name),
             surface=FixtureSurface(schemas=[]),
             client=client,
         )

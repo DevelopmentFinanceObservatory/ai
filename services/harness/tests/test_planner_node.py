@@ -434,6 +434,34 @@ async def test_a_question_in_two_parts_is_sent_in_two_parts_on_both_planners(pla
     assert sent["pydantic_ai"] == sent["adk"]
 
 
+async def test_a_question_part_the_pydantic_ai_planner_cannot_send_ends_the_entry_refused(
+    plan: Plan,
+) -> None:
+    """A question holding a file by URI, which the ADK planner sends as it is,
+    ends the Pydantic AI planner's entry before any request on a refusal the
+    seam answers with, as it answers any refusal the run ends on."""
+    question = types.Content(
+        role="user",
+        parts=[
+            types.Part(text="Kenya's debt"),
+            types.Part(file_data=types.FileData(file_uri="gs://b/f.pdf", mime_type="x/pdf")),
+        ],
+    )
+    scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
+    seam = _seam("pydantic_ai", scripted, tools=_proposals())
+
+    output = await _SeamHarness().run(
+        seam,
+        new_message=question,
+        run_config=_SSE,
+        readings=[],
+        **_planned(plan),
+    )
+
+    assert scripted.requests == []
+    assert output is not None and output["refused"]["code"] == "internal_error"
+
+
 async def test_a_refused_proposal_then_an_accepted_one_is_the_same_on_both_planners(
     plan: Plan,
 ) -> None:
