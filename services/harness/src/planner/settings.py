@@ -9,6 +9,10 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 
+# The name both planners run under: the author and branch of their events in
+# the session (`harness.planner_events`) and the name of their agent's spans.
+AGENT_NAME = "dfo_planner"
+
 # The concrete version `common.settings.BaseServiceSettings.model_name`'s floating
 # "-latest" alias resolves to today. Pinned rather than aliased because an
 # eval score has to be attributable to one model: under the alias, a score

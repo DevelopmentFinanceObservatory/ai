@@ -32,9 +32,10 @@ plan being changed, the question, and the amendment or refusal ask that
 opened the call. ADK shows a `single_turn` run only the events on its own node
 path, so a call sees nothing an earlier call was sent or read, and an amend or
 replan needs the plan it changes and the skills already read in front of
-it. `_propose` writes the brief to `planner.agent.BRIEF_STATE_KEY` and runs
-the planner with no node input, and `planner.agent.prepend_brief` shows it
-after the turn's question on every request of the run. The entry the user's
+it. `_propose` runs the planner with no node input. The ADK planner reads the
+brief from `planner.agent.BRIEF_STATE_KEY`, where `_propose` writes it, and
+`planner.agent.prepend_brief` shows it after the turn's question on every
+request of the run; the Pydantic AI planner's node is given it. The entry the user's
 answer to a planner-side ask resumes renders it again, with the question and
 the answer added (`_answer_text`), since the planner node reruns on resume.
 
@@ -73,16 +74,13 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow import BaseNode
 from google.genai import Client
 from planner.agent import (
-    AGENT_NAME,
     BRIEF_STATE_KEY,
-    AdkCall,
     create_planner_agent,
     end_run_when_ready,
-    planner_instruction,
-    planner_specs,
     refuse_vertex_ai,
 )
 from planner.call import CallSession
+from planner.instruction import planner_instruction
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
@@ -130,14 +128,15 @@ from planner.plan import (
 )
 from planner.pydantic_agent import PydanticPlanner
 from planner.records import Severity
-from planner.settings import AgentSettings
+from planner.session import SessionCall
+from planner.settings import AGENT_NAME, AgentSettings
 from planner.skills import (
     SKILLS_READ_STATE_KEY,
     skill_page_key,
     skills_read,
 )
 from planner.source_reads import with_source_reads
-from planner.specs import PROPOSE_PLAN
+from planner.specs import PROPOSE_PLAN, planner_specs
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import (
@@ -928,7 +927,7 @@ class PlannerSeam:
         prior = Plan.model_validate(prior_plan)
         save_plan(state, prior)
         save_plan_rounds(state, 0)
-        call = AdkCall(ctx)
+        call = SessionCall.of(ctx)
         view = _RevisionSession(call=call, inherits=dict(inherits))
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
@@ -954,7 +953,7 @@ class PlannerSeam:
                 closing_refusal(referral) or _unanswered(referral) or not_ready(referral),
                 words=_revision_words(load_plan(state), prior, state=state),
             )
-        answer = end_run_when_ready({**recorded, "translation": translation}, call)
+        answer = end_run_when_ready({**recorded, "translation": translation}, ctx)
         plan = load_plan(state)
         if "summary" not in answer or plan is None:
             blocked = answer.get("submission") or answer.get("translation")
@@ -1046,12 +1045,15 @@ class PlannerSeam:
         )
         before = len(ctx.session.events)
         try:
-            # `prepend_brief` shows the brief on every request of the run, the
-            # first after a resume included, so the run takes no node input.
-            ctx.session.state[BRIEF_STATE_KEY] = message
-            planner = (
-                self._agent if self._agent is not None else self._pydantic_planner(run, budget)
-            )
+            # The run takes no node input: the brief reaches every request of
+            # the run, the first after a resume included. The ADK planner's
+            # `prepend_brief` reads it from state; the Pydantic AI planner's
+            # node is given it.
+            if self._agent is not None:
+                ctx.session.state[BRIEF_STATE_KEY] = message
+                planner = self._agent
+            else:
+                planner = self._pydantic_planner(run, budget, message)
             await ctx.run_node(planner, None, run_id=run_id, override_branch=_PLANNER_BRANCH)
         finally:
             current_discovery_time_left.reset(time_left_token)
@@ -1078,8 +1080,9 @@ class PlannerSeam:
             run.refused = closed or not_ready(run.last_referral)
         return run.submitted, plan, run.refused
 
-    def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None) -> BaseNode:
-        """The Pydantic AI planner's node for `run`, on the seam's tools and instruction."""
+    def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None, brief: str) -> BaseNode:
+        """The Pydantic AI planner's node for `run`, on the seam's tools and instruction,
+        shown `brief`."""
         assert self._pydantic is not None, "the seam runs the Pydantic AI planner"
         model_name, planner = self._pydantic
         return planner_node(
@@ -1089,6 +1092,7 @@ class PlannerSeam:
             client=self._genai_client,
             budget=budget,
             prefix_cache=self._prefix_cache,
+            brief=brief,
         )
 
     @cached_property

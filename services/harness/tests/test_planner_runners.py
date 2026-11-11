@@ -53,7 +53,6 @@ from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from planner import agent as planner_agent_module
-from planner.agent import session_steps
 from planner.call import PlannerCall
 from planner.plan import (
     DatasetRequirement,
@@ -62,6 +61,7 @@ from planner.plan import (
     load_plan,
     save_plan,
 )
+from planner.session import session_steps
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
@@ -99,7 +99,6 @@ from .test_planner_node import (
     _ask_call,
     _assert_same,
     _both,
-    _dumped,
     _entries,
     _Entry,
     _frames,
@@ -107,6 +106,7 @@ from .test_planner_node import (
     _planned,
     _planner_events,
     _proposals,
+    _read,
     _referral,
     _Script,
     _seam,
@@ -166,7 +166,7 @@ def _assert_crossed_same(crossed: _Entry, adk: _Entry, pydantic: _Entry) -> None
         zip(crossed.requests, crossed.senders, strict=True)
     ):
         assert _request_dumped(request) == _request_dumped(alone[sender].requests[position])
-    assert _dumped(crossed.events) == _dumped(adk.events)
+    assert _read(crossed.events) == _read(adk.events)
     assert list(session_steps(crossed.events)) == list(session_steps(adk.events))
     assert crossed.state == adk.state
 
@@ -670,7 +670,7 @@ async def test_a_legacy_ask_answered_under_the_pydantic_ai_runner_lands_the_adk_
             assert _request_dumped(pydantic_request) == _request_dumped(adk_request)
         else:
             assert_pinned_wire_differences(adk_request, pydantic_request)
-    assert _dumped(pydantic.events) == _dumped(adk.events)
+    assert _read(pydantic.events) == _read(adk.events)
     assert pydantic.state == adk.state
 
 
@@ -1130,9 +1130,9 @@ _RECORDED_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|\+00:00)"
 
 
 def _untimed(events: Sequence[Event]) -> Any:
-    """`events` dumped as `_dumped` dumps them, less each progress line's
+    """`events` as `_read` reads them, less each progress line's
     duration and with each time recorded in them put as `<time>`."""
-    dumped = _dumped(events)
+    dumped = _read(events)
     for event in dumped:
         event.get("custom_metadata", {}).get("progress", {}).pop("duration_ms", None)
     return _timeless({"events": dumped})["events"]

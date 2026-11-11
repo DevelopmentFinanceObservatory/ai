@@ -18,11 +18,17 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import errors, types
-from harness.planner_model import ResponseMetadata, _in_adk_planner_form, planner_model
+from harness.planner_model import (
+    UnexpectedRequestFormError,
+    Usage,
+    _in_adk_planner_form,
+    planner_model,
+)
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.sentences import SeamCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from orchestrator.agent import _retrying, model_retry_options
+from planner.pydantic_agent import _without_unsigned_thoughts
 from planner.settings import drop_thought_parts, without_unsigned_thoughts
 from pydantic_ai.messages import (
     ModelRequest,
@@ -123,7 +129,7 @@ async def _pai(model: Model) -> ModelResponse:
         ModelRequest(parts=[UserPromptPart("Total ODA to Ghana?")], instructions=INSTRUCTION)
     ]
     parameters = ModelRequestParameters(
-        function_tools=[ToolDefinition(name="lookup", parameters_json_schema=SCHEMA)]
+        function_tools=[ToolDefinition(name="lookup", parameters_json_schema=SCHEMA, strict=False)]
     )
     async with model.request_stream(messages, None, parameters) as stream:
         async for _ in stream:
@@ -171,13 +177,11 @@ class _After:
     """An `after_response` hook that records its calls and answers with `replace`."""
 
     def __init__(self, replace: types.Content | None = None) -> None:
-        self.calls: list[tuple[SeamCode | None, ResponseMetadata]] = []
+        self.calls: list[tuple[SeamCode | None, Usage | None]] = []
         self._replace = replace
 
-    def __call__(
-        self, closed_by: SeamCode | None, metadata: ResponseMetadata
-    ) -> types.Content | None:
-        self.calls.append((closed_by, metadata))
+    def __call__(self, closed_by: SeamCode | None, usage: Usage | None) -> types.Content | None:
+        self.calls.append((closed_by, usage))
         return self._replace
 
 
@@ -206,7 +210,7 @@ async def test_a_cut_after_a_function_call_chunk_delivers_only_the_closing_sente
     assert pai_budget.closed == adk_budget.closed
     assert pai_budget.closed is not None
     assert pai_budget.closed["code"] == SeamCode.TURN_MODEL_TIME_SPENT
-    assert after.calls == [(SeamCode.TURN_MODEL_TIME_SPENT, ResponseMetadata())]
+    assert after.calls == [(SeamCode.TURN_MODEL_TIME_SPENT, None)]
 
 
 async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivered() -> None:
@@ -348,20 +352,9 @@ async def test_before_request_answers_with_no_request_and_no_budget_spent() -> N
     assert (budget.model_calls, budget.closed, after.calls) == (0, None, [])
 
 
-async def test_after_response_sees_what_the_api_reported_and_its_turn_replaces_the_response() -> (
-    None
-):
+async def test_after_response_sees_the_reported_usage_and_its_turn_replaces_the_response() -> None:
     usage = usage_metadata(prompt=40, cached=30, candidates=5)
-    scripted = ScriptedGenai(
-        [
-            reply(
-                call_part("lookup", {"key": "gh"}),
-                usage=usage,
-                finish_reason=types.FinishReason.MAX_TOKENS,
-            )
-        ]
-    )
-    _reporting_version(scripted, "gemini-3.8-flash-001")
+    scripted = ScriptedGenai([reply(call_part("lookup", {"key": "gh"}), usage=usage)])
     replacement = types.Content(role="model", parts=[text_part("Asked instead.")])
     after = _After(replace=replacement)
 
@@ -369,36 +362,10 @@ async def test_after_response_sees_what_the_api_reported_and_its_turn_replaces_t
         planner_model(MODEL, client=scripted.client, budget=_budget(), after_response=after)
     )
 
-    assert after.calls == [
-        (
-            None,
-            ResponseMetadata(
-                usage=usage,
-                finish_reason=types.FinishReason.MAX_TOKENS,
-                model_version="gemini-3.8-flash-001",
-                error_code="MAX_TOKENS",
-            ),
-        )
-    ]
+    assert after.calls == [(None, usage)]
     assert [type(part) for part in response.parts] == [TextPart]
     assert _pai_text(response) == "Asked instead."
     assert response.usage.input_tokens == 40
-
-
-def _reporting_version(scripted: ScriptedGenai, version: str) -> None:
-    """Make every chunk `scripted` streams report `version` as its model version."""
-    opened = scripted.client.aio.models.generate_content_stream
-
-    async def open_stream(**request: Any) -> AsyncIterator[types.GenerateContentResponse]:
-        stream = await opened(**request)
-
-        async def versioned() -> AsyncIterator[types.GenerateContentResponse]:
-            async for chunk in stream:
-                yield chunk.model_copy(update={"model_version": version})
-
-        return versioned()
-
-    scripted.client.aio.models.generate_content_stream = open_stream  # type: ignore[method-assign]
 
 
 async def test_every_request_carries_the_adk_planners_retries() -> None:
@@ -500,13 +467,15 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_ke
     calls: list[str],
 ) -> None:
     """Consecutive thought chunks merge into one part, signed when any chunk of
-    them is. The rule then drops each unsigned one unless nothing else is left.
-    Both planners keep `thoughts` (each part's text and whether it is signed),
-    `text` and `calls`."""
+    them is. The rule then drops each merged unsigned one unless nothing else is
+    left. Both planners keep `thoughts` (each part's text and whether it is
+    signed), `text` and `calls`."""
     script = [Reply(chunks=chunks)]
     pai_scripted, adk_scripted = ScriptedGenai(script), ScriptedGenai(script)
 
-    response = await _pai(planner_model(MODEL, client=pai_scripted.client, budget=_budget()))
+    response = _without_unsigned_thoughts(
+        await _pai(planner_model(MODEL, client=pai_scripted.client, budget=_budget()))
+    )
     adk = await _adk(BoundedGemini(model=MODEL, client=adk_scripted.client), _budget())
     final = adk[-1]
     assert not final.partial
@@ -538,22 +507,51 @@ def _declared(schema: dict[str, Any] | None) -> types.Tool:
     )
 
 
+def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
+    """The config Pydantic AI builds on `PLANNER_PROFILE`, less `overrides`."""
+    fields: dict[str, Any] = {
+        "system_instruction": types.Content(role="user", parts=[types.Part(text="Plan.")]),
+        "tools": [_declared({"type": "object", "properties": {}})],
+        "tool_config": types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.AUTO
+            )
+        ),
+        "response_modalities": [types.Modality.TEXT],
+    }
+    return types.GenerateContentConfig(**{**fields, **overrides})
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param(
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            id="not-the-empty-object",
+        ),
+        pytest.param({"type": "object"}, id="without-properties"),
+    ],
+)
+def test_the_adk_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
+    schema: dict[str, Any],
+) -> None:
+    rewritten = _in_adk_planner_form(_expected_config(tools=[_declared(schema)]))
+
+    assert rewritten.tools == [_declared(schema)]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
         pytest.param(
             "tools",
-            [_declared({"type": "object", "properties": {}, "additionalProperties": False})],
-            id="parameters-schema-not-the-empty-object",
-        ),
-        pytest.param(
-            "tools", [_declared({"type": "object"})], id="parameters-schema-without-properties"
-        ),
-        pytest.param(
-            "tools",
             [_declared(None), types.Tool(google_search=types.GoogleSearch())],
             id="tools-beside-a-non-function-tool",
         ),
+        pytest.param("tools", None, id="no-tools"),
+        pytest.param("tool_config", None, id="no-tool-config"),
+        pytest.param("response_modalities", None, id="no-response-modalities"),
+        pytest.param("system_instruction", None, id="no-instruction"),
         pytest.param(
             "tool_config",
             types.ToolConfig(
@@ -589,12 +587,11 @@ def _declared(schema: dict[str, Any] | None) -> types.Tool:
         ),
     ],
 )
-def test_the_adk_form_passes_through_any_value_it_does_not_expect(field: str, value: Any) -> None:
+def test_the_adk_form_refuses_any_value_it_does_not_expect(field: str, value: Any) -> None:
     """Each rewrite takes only the exact value Pydantic AI sends today; anything
-    else reaches Gemini as it came, so the cross-runner request tests fail on it
-    instead of it being rewritten unseen."""
-    config = types.GenerateContentConfig(**{field: value})
+    else is refused, since a form Gemini would read differently must not be sent
+    unseen."""
+    config = _expected_config(**{field: value})
 
-    rewritten = _in_adk_planner_form(config)
-
-    assert getattr(rewritten, field) == value
+    with pytest.raises(UnexpectedRequestFormError):
+        _in_adk_planner_form(config)

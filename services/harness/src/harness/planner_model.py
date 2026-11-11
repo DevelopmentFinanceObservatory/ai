@@ -21,11 +21,8 @@ planner sends (`_in_adk_planner_form`). Each call the planner makes, in order:
    function call was streamed runs no tool. A call a bound closes answers with
    the closing sentence the ADK planner's model gives;
 5. hands `after_response` the code of the bound that closed the call, if one
-   did, and what the API reported on the response (`ResponseMetadata`); a
-   model turn it returns replaces the response;
-6. otherwise delivers the held chunks less their unsigned thought summaries
-   (`planner.settings.without_unsigned_thoughts`), so the planner's next
-   request carries the parts the ADK planner's session keeps.
+   did, and the usage the API reported for it; a model turn it returns
+   replaces the response; otherwise the held chunks are delivered.
 
 A function call the model sent without an id reaches the planner with one of
 the form ADK gives it (`_with_client_call_ids`), so both planners store it
@@ -39,10 +36,7 @@ that Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and
 the usage Langfuse derives from the ADK planner's span, set outright so that the
 usage details Pydantic AI adds are not summed into the call's total. A turn put
 in place of a request is no model call and the ADK planner opens no span for
-it, so its span is marked a plain span for Langfuse. The thought summaries
-step 6 drops go on the span as `dfo.model.dropped_thoughts`, since the ADK
-planner's span shows them in its output, when the span carries message content
-(`include_content`), as the ADK planner's output does.
+it, so its span is marked a plain span for Langfuse.
 """
 
 from __future__ import annotations
@@ -59,10 +53,9 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, errors, types
 from opentelemetry import trace
 from orchestrator.agent import model_retry_options
-from planner.settings import without_unsigned_thoughts
+from planner.pydantic_agent import NO_PARAMETERS, PLANNER_PROFILE
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.google import GoogleProvider
 
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
@@ -86,27 +79,10 @@ _REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 type BeforeRequest = Callable[[], types.Content | None]
 
 
-@dataclass(frozen=True)
-class ResponseMetadata:
-    """What the API reported on one call's response, read as ADK's stream
-    aggregator reads it for the response it stores: the last usage and the
-    last finish reason any chunk carried, the last chunk's model version, and
-    the error the response is. A finish reason other than `STOP` is the error,
-    with the last chunk's finish message. A last chunk with no candidate and a
-    blocked prompt is the block, with its message. Each is None when the API
-    reported none."""
-
-    usage: Usage | None = None
-    finish_reason: types.FinishReason | None = None
-    model_version: str | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-
-
 # Called with the code of the bound that closed the call (None when none did)
-# and what the API reported on the response. It gives a model turn to answer
+# and the last usage any of its chunks carried. It gives a model turn to answer
 # with in place of the response, or None to keep it.
-type AfterResponse = Callable[[SeamCode | None, ResponseMetadata], types.Content | None]
+type AfterResponse = Callable[[SeamCode | None, Usage | None], types.Content | None]
 
 
 def planner_model(
@@ -117,8 +93,6 @@ def planner_model(
     prefix_cache: PrefixCache | None = None,
     before_request: BeforeRequest | None = None,
     after_response: AfterResponse | None = None,
-    profile: ModelProfile | None = None,
-    include_content: bool = False,
 ) -> GoogleModel:
     """The `GoogleModel` the Pydantic AI planner runs on.
 
@@ -132,16 +106,10 @@ def planner_model(
         before_request: Run before each request (`BeforeRequest`).
         after_response: Run on each response the model gave or a bound
             closed (`AfterResponse`).
-        profile: The model profile, which decides how requests are built.
-            None gives Gemini's own (`google_model_profile`).
-        include_content: Whether each call's span carries message content,
-            the dropped thought summaries among it. Pass the value the
-            planner's agent is instrumented with
-            (`planner.pydantic_agent.PydanticPlanner.include_content`). The
-            default keeps the summaries off the span.
 
     Returns:
-        A `GoogleModel` on `profile` whose streamed calls go through the
+        A `GoogleModel` on `PLANNER_PROFILE`, the profile `_in_adk_planner_form`
+        expects, whose streamed calls go through the
         steps above.
     """
     stream = _PlannerStream(
@@ -150,12 +118,11 @@ def planner_model(
         prefix_cache=prefix_cache,
         before_request=before_request,
         after_response=after_response,
-        include_content=include_content,
     )
     # `GoogleProvider` takes a `Client`, and the wrapper reads as one everywhere
     # `GoogleModel` reads it.
     provider = GoogleProvider(client=cast(Client, _Client(client, stream)))
-    return GoogleModel(model_name, provider=provider, profile=profile)
+    return GoogleModel(model_name, provider=provider, profile=PLANNER_PROFILE)
 
 
 @dataclass
@@ -168,32 +135,11 @@ class _Answer:
     closed_by: SeamCode | None = None
 
     @property
-    def metadata(self) -> ResponseMetadata:
-        """What the API reported on the call's chunks (`ResponseMetadata`)."""
+    def usage(self) -> Usage | None:
+        """The last usage any of the call's chunks carried, as ADK's stream
+        aggregator reads it."""
         usages = [chunk.usage_metadata for chunk in self.chunks if chunk.usage_metadata]
-        finish_reasons = [
-            chunk.candidates[0].finish_reason
-            for chunk in self.chunks
-            if chunk.candidates and chunk.candidates[0].finish_reason
-        ]
-        finish_reason = finish_reasons[-1] if finish_reasons else None
-        last = self.chunks[-1] if self.chunks else None
-        candidate = last.candidates[0] if last is not None and last.candidates else None
-        error_code = error_message = None
-        if finish_reason is not None and finish_reason != types.FinishReason.STOP:
-            error_code = finish_reason.value
-            error_message = candidate.finish_message if candidate is not None else None
-        elif last is not None and candidate is None and last.prompt_feedback is not None:
-            block_reason = last.prompt_feedback.block_reason
-            error_code = block_reason.value if block_reason is not None else None
-            error_message = last.prompt_feedback.block_reason_message
-        return ResponseMetadata(
-            usage=usages[-1] if usages else None,
-            finish_reason=finish_reason,
-            model_version=last.model_version if last is not None else None,
-            error_code=error_code,
-            error_message=error_message,
-        )
+        return usages[-1] if usages else None
 
 
 @dataclass
@@ -205,7 +151,6 @@ class _PlannerStream:
     prefix_cache: PrefixCache | None
     before_request: BeforeRequest | None
     after_response: AfterResponse | None
-    include_content: bool
 
     async def __call__(
         self, *, model: str, contents: Any, config: Any = None
@@ -228,11 +173,10 @@ class _PlannerStream:
             yield _chunk(turn, usage=None)
             return
         answer = await self._send(model=model, contents=contents, config=config)
-        metadata = answer.metadata
-        usage = metadata.usage
+        usage = answer.usage
         _record_usage(span, usage)
         replaced = (
-            self.after_response(answer.closed_by, metadata)
+            self.after_response(answer.closed_by, usage)
             if self.after_response is not None
             else None
         )
@@ -241,10 +185,7 @@ class _PlannerStream:
         elif answer.closing is not None:
             yield _chunk(answer.closing, usage=usage)
         else:
-            kept = _without_unsigned_thoughts(answer.chunks)
-            if self.include_content:
-                _record_dropped_thoughts(span, answer.chunks, kept)
-            for chunk in kept:
+            for chunk in answer.chunks:
                 yield chunk
 
     async def _send(
@@ -409,23 +350,6 @@ def _record_usage(span: trace.Span, usage: Usage | None) -> None:
     span.set_attribute(_USAGE_DETAILS, json.dumps(details))
 
 
-def _record_dropped_thoughts(
-    span: trace.Span,
-    chunks: list[types.GenerateContentResponse],
-    kept: list[types.GenerateContentResponse],
-) -> None:
-    """Put the text of the thought summaries `chunks` held and `kept` does not
-    on `span`, as `dfo.model.dropped_thoughts`."""
-    if kept is chunks or not span.is_recording():
-        return
-    left = {id(part) for chunk in kept for part in _parts(chunk)}
-    dropped = "".join(
-        part.text or "" for chunk in chunks for part in _parts(chunk) if id(part) not in left
-    )
-    if dropped:
-        span.set_attribute("dfo.model.dropped_thoughts", dropped)
-
-
 def _without_client_call_ids(contents: Any) -> list[types.Content]:
     """`contents`, as `GoogleModel` built them, less the call ids ADK gives a
     call the model sent without one.
@@ -442,9 +366,12 @@ def _without_client_call_ids(contents: Any) -> list[types.Content]:
     return stripped
 
 
-# The parameters schema Pydantic AI gives a declaration with no parameters
-# (`pydantic_ai.models.google._function_declaration_from_tool`).
-_NO_PARAMETERS_SCHEMA = {"type": "object", "properties": {}}
+class UnexpectedRequestFormError(ValueError):
+    """A request config `GoogleModel` built is not in a form `_in_adk_planner_form` rewrites.
+
+    Gemini's behaviour follows a request's bytes, so a form the rewrite does
+    not know is refused instead of sent as it came.
+    """
 
 
 def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
@@ -458,15 +385,15 @@ def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
     request in this form shares the ADK planner's cache. The request that
     creates the cache is this one, so the cache holds the same form.
 
-    Each field Pydantic AI sends otherwise is rewritten, and kept as it came
-    when it holds anything the ADK planner's form has no equal for:
+    Each field Pydantic AI sends is rewritten, and a value of any other shape
+    raises `UnexpectedRequestFormError`:
 
     - the system instruction, one user `Content` of one text part, becomes
       that text;
     - one `Tool` per function declaration becomes one `Tool` of them all, in
       order;
     - a declaration whose parameters schema is the empty object
-      (`_NO_PARAMETERS_SCHEMA`) loses it;
+      (`NO_PARAMETERS`) loses it;
     - a tool config of nothing but the `AUTO` function calling mode is
       dropped, as `AUTO` is Gemini's default with tools;
     - `response_modalities` of `TEXT` alone is dropped, as text is the
@@ -479,17 +406,15 @@ def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
     Pydantic AI gives an unsigned replayed call in the contents.
     """
     built = types.GenerateContentConfig.model_validate(config or {})
+    _require_only_auto(built.tool_config)
+    _require_only_text(built.response_modalities)
     http_options = built.http_options or types.HttpOptions()
     return built.model_copy(
         update={
             "system_instruction": _instruction_as_text(built.system_instruction),
             "tools": _as_one_tool(built.tools),
-            "tool_config": None if _only_auto(built.tool_config) else built.tool_config,
-            "response_modalities": (
-                None
-                if built.response_modalities == [types.Modality.TEXT]
-                else built.response_modalities
-            ),
+            "tool_config": None,
+            "response_modalities": None,
             "http_options": http_options.model_copy(
                 update={"retry_options": model_retry_options()}
             ),
@@ -498,28 +423,29 @@ def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
     )
 
 
-def _instruction_as_text(instruction: Any) -> Any:
-    """`instruction` as its text when it is one `Content` of one text part,
-    else as it is."""
-    if not isinstance(instruction, types.Content) or not instruction.parts:
-        return instruction
-    if len(instruction.parts) != 1:
-        return instruction
-    part = instruction.parts[0]
-    dumped = part.model_dump(exclude_none=True)
-    return part.text if dumped.keys() == {"text"} else instruction
+def _instruction_as_text(instruction: Any) -> str | None:
+    """The text of `instruction`, one `Content` of one text part."""
+    if isinstance(instruction, types.Content) and instruction.parts and len(instruction.parts) == 1:
+        part = instruction.parts[0]
+        if part.model_dump(exclude_none=True).keys() == {"text"}:
+            return part.text
+    raise UnexpectedRequestFormError(
+        f"the system instruction is not one text part: {instruction!r}"
+    )
 
 
-def _as_one_tool(tools: list[Any] | None) -> list[Any] | None:
+def _as_one_tool(tools: list[Any] | None) -> list[types.Tool]:
     """`tools` as one `Tool` holding every function declaration in order, each
-    less an empty parameters schema, when every tool holds function
-    declarations alone, else as they are."""
+    less an empty parameters schema. Every tool must hold function
+    declarations alone."""
     if not tools or not all(
         isinstance(tool, types.Tool)
         and tool.model_dump(exclude_none=True).keys() == {"function_declarations"}
         for tool in tools
     ):
-        return tools
+        raise UnexpectedRequestFormError(
+            f"the tools are not function declarations alone: {tools!r}"
+        )
     return [
         types.Tool(
             function_declarations=[
@@ -534,16 +460,28 @@ def _as_one_tool(tools: list[Any] | None) -> list[Any] | None:
 def _without_empty_parameters(
     declaration: types.FunctionDeclaration,
 ) -> types.FunctionDeclaration:
-    if declaration.parameters_json_schema != _NO_PARAMETERS_SCHEMA:
+    if declaration.parameters_json_schema != NO_PARAMETERS:
         return declaration
     return declaration.model_copy(update={"parameters_json_schema": None})
 
 
-def _only_auto(tool_config: types.ToolConfig | None) -> bool:
-    """Whether `tool_config` sets nothing but the `AUTO` function calling mode."""
-    return tool_config is not None and tool_config.model_dump(mode="json", exclude_none=True) == {
+def _require_only_auto(tool_config: types.ToolConfig | None) -> None:
+    """Check that `tool_config` sets nothing but the `AUTO` function calling
+    mode, which is Gemini's default with tools, so none need be sent."""
+    if tool_config is None or tool_config.model_dump(mode="json", exclude_none=True) != {
         "function_calling_config": {"mode": "AUTO"}
-    }
+    }:
+        raise UnexpectedRequestFormError(
+            f"the tool config is not the AUTO mode alone: {tool_config!r}"
+        )
+
+
+def _require_only_text(modalities: list[str] | None) -> None:
+    """Check that `modalities` is `TEXT` alone, which is the default, so none need be sent."""
+    if modalities != [types.Modality.TEXT]:
+        raise UnexpectedRequestFormError(
+            f"the response modalities are not TEXT alone: {modalities!r}"
+        )
 
 
 def _chunk(content: types.Content, *, usage: Usage | None) -> types.GenerateContentResponse:
@@ -554,82 +492,11 @@ def _chunk(content: types.Content, *, usage: Usage | None) -> types.GenerateCont
     )
 
 
-def _without_unsigned_thoughts(
-    chunks: list[types.GenerateContentResponse],
-) -> list[types.GenerateContentResponse]:
-    """`chunks`, one response's, less the parts of each merged part
-    `without_unsigned_thoughts` drops.
-
-    The rule reads the response as an agent holds it: ADK's stream aggregator
-    and Pydantic AI's parts manager both merge consecutive text parts of one
-    kind, thought or answer, into one part, signed when any part of the run
-    is (`_text_runs`). A merged thought part is dropped or kept whole, so a
-    run of thought chunks with a signature on any one of them stays, as on
-    the ADK planner. The rule reads only whether the merged part carries a
-    signature.
-    """
-    runs = _text_runs([part for chunk in chunks for part in _parts(chunk)])
-    merged = [_merged(run) for run in runs]
-    kept = without_unsigned_thoughts(merged)
-    if kept is None:
-        return chunks
-    kept_runs = {id(part) for part in kept}
-    kept_ids = {
-        id(part)
-        for run, whole in zip(runs, merged, strict=True)
-        if id(whole) in kept_runs
-        for part in run
-    }
-    return [_keeping(chunk, kept_ids) for chunk in chunks]
-
-
-def _text_runs(parts: list[types.Part]) -> list[list[types.Part]]:
-    """`parts` in runs: consecutive parts with text and one `thought` value
-    together, every other part alone."""
-    runs: list[list[types.Part]] = []
-    for part in parts:
-        last = runs[-1][-1] if runs else None
-        if last is not None and part.text and last.text and part.thought == last.thought:
-            runs[-1].append(part)
-        else:
-            runs.append([part])
-    return runs
-
-
-def _merged(run: list[types.Part]) -> types.Part:
-    """The one part an agent makes of `run`, as far as `without_unsigned_thoughts`
-    reads it: its text, its kind, and a thought signature when any part of the
-    run carries one."""
-    if len(run) == 1:
-        return run[0]
-    signature = next((part.thought_signature for part in run if part.thought_signature), None)
-    return types.Part(
-        text="".join(part.text or "" for part in run),
-        thought=run[0].thought,
-        thought_signature=signature,
-    )
-
-
 def _parts(chunk: types.GenerateContentResponse) -> list[types.Part]:
     """The parts of `chunk`'s first candidate, the one ADK and Pydantic AI read."""
     if not chunk.candidates or chunk.candidates[0].content is None:
         return []
     return chunk.candidates[0].content.parts or []
-
-
-def _keeping(
-    chunk: types.GenerateContentResponse, kept_ids: set[int]
-) -> types.GenerateContentResponse:
-    """`chunk` with only the parts of its first candidate whose ids are in `kept_ids`."""
-    if not chunk.candidates:
-        return chunk
-    first, *rest = chunk.candidates
-    content = first.content
-    if content is None:
-        return chunk
-    parts = [part for part in content.parts or [] if id(part) in kept_ids]
-    first = first.model_copy(update={"content": content.model_copy(update={"parts": parts})})
-    return chunk.model_copy(update={"candidates": [first, *rest]})
 
 
 class _Models:
@@ -672,8 +539,8 @@ class _Client:
 __all__ = [
     "AfterResponse",
     "BeforeRequest",
-    "ResponseMetadata",
     "StreamResumedError",
+    "UnexpectedRequestFormError",
     "Usage",
     "planner_model",
     "resumed_over_output",

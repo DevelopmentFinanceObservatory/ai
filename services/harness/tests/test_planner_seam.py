@@ -98,7 +98,6 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import AGENT_NAME, AdkCall, planner_specs
 from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -156,12 +155,15 @@ from planner.plan import (
     save_refused_specs,
 )
 from planner.records import GroupBy, Reduction, RelativePeriod
+from planner.session import SessionCall
 from planner.settings import (
+    AGENT_NAME,
     AGENT_THINKING_CONFIG,
     AgentSettings,
     drop_thought_parts,
 )
 from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
+from planner.specs import planner_specs
 from planner.tool_results import ProblemCode, ok
 from planner.tool_spec import ToolSpec
 from planner.tools import load_pending_ask
@@ -1198,7 +1200,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered(
     planner's run, and the seam answers the ask, which the node pauses on, so
     the node resolves no output. The call's own function-call event is on
     record afterward, in the session's own event history
-    (`planner.agent.session_steps`'s own docstring). But an offer is not an
+    (`planner.session.session_steps`'s own docstring). But an offer is not an
     election: with no answer from the user on record, nothing the call
     offered counts as something the user chose.
     """
@@ -1230,7 +1232,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered(
     fake_tool_context = SimpleNamespace(
         state={}, function_call_id=None, session=SimpleNamespace(events=events)
     )
-    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset()
+    assert elected_spec_ids(SessionCall.of(fake_tool_context)) == frozenset()
 
 
 async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_runs_once(
@@ -5662,7 +5664,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     fake_tool_context = SimpleNamespace(
         state={}, function_call_id=None, session=SimpleNamespace(events=await harness.events())
     )
-    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset({SPEC_B})
+    assert elected_spec_ids(SessionCall.of(fake_tool_context)) == frozenset({SPEC_B})
 
 
 async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(

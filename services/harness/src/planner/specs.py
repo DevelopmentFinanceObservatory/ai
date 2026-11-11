@@ -3,8 +3,9 @@
 `planner_tool_specs` builds `ask_user_question`, `propose_plan` and
 `reject_plan`, and `skill_tool_spec` builds `get_skill`. Each spec's body runs
 `planner.tools`' or `planner.skills`' code over the call it is given. The
-description and parameters are what the model reads. `planner.agent` serves
-the specs to ADK.
+description and parameters are what the model reads. `planner_specs` lists
+them in the order the model is shown them, and `planner.agent` serves them to
+ADK.
 """
 
 from __future__ import annotations
@@ -390,3 +391,24 @@ def skill_tool_spec(surface: ToolSurface) -> ToolSpec:
         ),
         body=get_skill,
     )
+
+
+def planner_specs(
+    *,
+    translate: Translate | None = None,
+    surface: ToolSurface | None = None,
+    question_fixed: bool = False,
+    reads_user_words: bool = True,
+) -> list[ToolSpec]:
+    """The planner's tools, in the order the model is shown them: `get_skill`
+    when `surface` is given (`skill_tool_spec`), then
+    `planner_tool_specs`, each argument as that function documents it."""
+    return [
+        *([skill_tool_spec(surface)] if surface is not None else []),
+        *planner_tool_specs(
+            translate=translate,
+            question_fixed=question_fixed,
+            reads_user_words=reads_user_words,
+            surface=surface,
+        ),
+    ]

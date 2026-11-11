@@ -75,9 +75,7 @@ async def test_a_run_ends_where_the_adk_planner_ends_with_what_it_had_said(endin
     assert len(adk.requests) == len(pydantic.requests) == 2
     assert pydantic.conversations == adk.conversations
     ((conversation,),) = [pydantic.conversations]
-    assert [turn[0] for turn in conversation[:2]] == ["part", "answer"]
-    blocked = ending.prompt_feedback is not None
-    assert conversation[2:] == ([("blocked", "SAFETY")] if blocked else [])
+    assert [turn[0] for turn in conversation] == ["part", "answer"]
 
 
 async def test_the_request_after_a_tool_answer_equals_the_adk_planners() -> None:

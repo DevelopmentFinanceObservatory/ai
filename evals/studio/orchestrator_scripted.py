@@ -65,8 +65,8 @@ from harness.studio import StudioRunner, create_studio_router
 from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
-from planner.agent import planner_specs
 from planner.plan import Plan, SessionState, save_plan
+from planner.specs import planner_specs
 from planner.tool_spec import ToolSpec
 from pydantic import Field
 from translator.tool import build_translate
