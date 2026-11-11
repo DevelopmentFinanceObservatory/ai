@@ -1,8 +1,8 @@
 """The arms a run can set against the baseline.
 
 An arm changes what the planner is shown and nothing else: each of its `edits` rewrites
-each request the planner sends its model, after the seam's own before-model callbacks,
-so the arm's planner runs the same entry as the baseline's. Add an arm here to try a
+each request the planner's google-genai client is sent (`entry.RequestEdit`), so the
+arm's planner runs the same entry as the baseline's. Add an arm here to try a
 declaration or instruction change before writing it into the planner. A change already
 in production code is measured across revisions instead: run `baseline` on the base
 revision, then `baseline-replica` on the changed one against those records

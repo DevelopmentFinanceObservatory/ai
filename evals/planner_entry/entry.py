@@ -16,8 +16,9 @@ each of the task's payloads makes. `run_entry` replays them through production c
   holds those spec blocks as `harness.studio` holds a turn's
   (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerSeam`, which renders the planner's first message from that state and runs
-  the planner with production's instruction, tools and callbacks, each request
-  under the `TurnBudget` a served request gets (`harness.turn_budget`).
+  the planner, on the runner `planner_runner` names (`harness.settings.Settings`),
+  with production's instruction, tools and callbacks, each request under the
+  `TurnBudget` a served request gets (`harness.turn_budget`).
 
 Two edges are replaced. The planner's `get_skill` reads the recording through
 `RecordedSurface`. The seam's translate step is the eval's own,
@@ -25,7 +26,9 @@ which ends the entry once a plan is recorded (`PlanRecorded`), so a run measures
 draft up to its first accepted plan. Given `TranslationCalls`, it first runs
 production's translation on that plan (`translator.tool.build_translate`), its calls
 to data-mcp and the graph's resolve door answered from the recording; that is how
-`validate.py` checks each plan compiles.
+`validate.py` checks each plan compiles. The planner's model calls go through a
+google-genai client the eval wraps (`Probe.client`), where it notes each request and
+answer and applies an arm's edits, on either runner alike.
 Every entry runs at the planner's served thinking level and model-time budget.
 The planner streams, as it does in a studio turn.
 """
@@ -40,7 +43,16 @@ import json
 import logging
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Mapping,
+    Sequence,
+)
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -55,17 +67,14 @@ from data_mcp.node_lookup import NodeOutcome
 from data_mcp.search_tool import SearchContext
 from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.adk import Event
-from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import EventActions
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.workflow import START, Workflow
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
-from google.genai import types
+from google.genai import Client, types
+from google.genai.client import AsyncClient
 from harness.graph.seams import PlannerModel
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
 from harness.graph.workflow import planner_entry
@@ -80,8 +89,9 @@ from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
-from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
+from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
+from orchestrator.agent import model_retry_options
 from planner.agent import AGENT_NAME as PLANNER_AGENT
 from planner.call import PlannerCall
 from planner.plan import (
@@ -667,13 +677,15 @@ class PlanRecorded(Exception):  # noqa: N818 -- a stop signal, not a fault
 
 
 class _DropPlanRecorded(logging.Filter):
-    """Drops the seam's error log for the eval's own stop, which it reads as a tool failure."""
+    """Drops the planner's error log for the eval's own stop, which it reads as a tool
+    failure: the seam's on the ADK planner, the node's on the Pydantic AI planner."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not (record.exc_info and isinstance(record.exc_info[1], PlanRecorded))
 
 
-logging.getLogger("harness.planner_seam").addFilter(_DropPlanRecorded())
+for _logger in ("harness.planner_seam", "harness.planner_node"):
+    logging.getLogger(_logger).addFilter(_DropPlanRecorded())
 
 
 def quiet_logs() -> None:
@@ -688,7 +700,21 @@ def quiet_logs() -> None:
 GAVE_UP = "gave_up"
 
 
-RequestEdit = Callable[[LlmRequest], None]
+@dataclass
+class ModelRequest:
+    """One request the planner's model client is sent, in google-genai's types."""
+
+    model: str
+    contents: list[types.Content]
+    config: types.GenerateContentConfig
+
+
+# An arm's change to each request the planner's model client is sent, made in place.
+# The system instruction, tools and tool config travel where the request sends them:
+# on the request itself, or, on a request sent against the prefix cache
+# (`harness.prefix_cache`), on that cache's create, which the edit is handed as a
+# request with no contents.
+RequestEdit = Callable[[ModelRequest], None]
 
 
 # A model call's usage before its whole answer arrives: unknown, and left so when the
@@ -706,21 +732,27 @@ _UNFINISHED_CALL: dict[str, Any] = {
 class Probe:
     """What one entry did that its session's events do not carry: the plan the first
     accepted proposal recorded and the id of the `propose_plan` call that recorded it,
-    the code of the refusal an entry with no plan ended on, each model call it
-    started, with its tokens and latency once the whole answer arrived, and what
-    `translator` answered for the plan when one is set."""
+    the code of the refusal an entry with no plan ended on, each request the planner's
+    model client was sent, each model call, with its tokens and latency once the whole
+    answer arrived, and what `translator` answered for the plan when one is set.
+
+    The planner's model reaches the model only through the client `client` returns, on
+    either runner, so a turn the seam or the turn budget answers in the model's place
+    is no call. A request sent while the previous call's answer is unfinished is that
+    call sent again (a first-chunk resend, or a resend after the prefix cache was
+    found gone), so it is one call, timed from its first send."""
 
     plan: Plan | None = None
     plan_call: str | None = None
     refused_code: str | None = None
+    requests: list[ModelRequest] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
     # Production's translation, run on the recorded plan before the entry ends, and
     # what it answered.
     translator: Translate | None = None
     translation: dict[str, object] | None = None
     _started: float = 0.0
-    # The requests the current turn budget had sent before the call in flight.
-    _requests_before: int | None = None
+    _answering: bool = False
 
     async def translate(self, call: PlannerCall) -> dict[str, object]:
         self.plan = load_plan(call.state)
@@ -746,43 +778,170 @@ class Probe:
             self.refused_code = None if code is None else str(code)
         return answer
 
-    def before_model(
-        self, callback_context: CallbackContext, llm_request: LlmRequest
-    ) -> LlmResponse | None:
-        """Note a call about to go to the model. It runs after the seam's own callbacks,
-        so a request the seam answers itself is no call."""
-        del callback_context, llm_request
-        budget = current_turn_budget.get()
-        self._requests_before = None if budget is None else budget.model_calls
+    def client(self, client: Client, *, edits: Sequence[RequestEdit] = ()) -> Client:
+        """`client`, each streamed request it is sent edited by `edits` and noted, and
+        each answer's usage and latency noted. `client` itself is left unchanged."""
+        return _ProbedClient(client, _ProbedModels(client.aio.models, self, edits), edits)
+
+    def _sent(self, request: ModelRequest) -> None:
+        self.requests.append(request)
+        if self._answering:
+            return
+        self._answering = True
         self._started = time.perf_counter()
         self.calls.append(dict(_UNFINISHED_CALL))
-        return None
 
-    def after_model(
-        self, callback_context: CallbackContext, llm_response: LlmResponse
-    ) -> LlmResponse | None:
-        del callback_context
-        budget = current_turn_budget.get()
-        if (
-            budget is not None
-            and budget.model_calls == self._requests_before
-            and CLOSED_BY_KEY in (llm_response.custom_metadata or {})
-        ):
-            # The budget answered this call itself, with no request to the model.
-            self.calls.pop()
-            self._requests_before = None
-            return None
-        usage = llm_response.usage_metadata
-        # A streamed call answers in chunks and then once whole; count the whole answer.
-        if usage is not None and not llm_response.partial and self.calls:
-            self.calls[-1] = {
-                "prompt_tokens": usage.prompt_token_count or 0,
-                "cached_tokens": usage.cached_content_token_count or 0,
-                "output_tokens": usage.candidates_token_count or 0,
-                "thinking_tokens": usage.thoughts_token_count or 0,
-                "latency_s": round(time.perf_counter() - self._started, 3),
-            }
-        return None
+    def _answered(self, usage: types.GenerateContentResponseUsageMetadata | None) -> None:
+        self._answering = False
+        if usage is None:
+            return
+        self.calls[-1] = {
+            "prompt_tokens": usage.prompt_token_count or 0,
+            "cached_tokens": usage.cached_content_token_count or 0,
+            "output_tokens": usage.candidates_token_count or 0,
+            "thinking_tokens": usage.thoughts_token_count or 0,
+            "latency_s": round(time.perf_counter() - self._started, 3),
+        }
+
+    def _failed(self) -> None:
+        self._answering = False
+
+    async def _watched(
+        self, stream: AsyncIterator[types.GenerateContentResponse]
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        """`stream`'s chunks, the last usage any carried noted once it ends. A stream
+        cut by its reader (a bound or a first-chunk resend) leaves the call unfinished;
+        one that raised ends it unanswered."""
+        usage = None
+        try:
+            async with aclosing(
+                cast(AsyncGenerator[types.GenerateContentResponse], stream)
+            ) as chunks:
+                async for chunk in chunks:
+                    usage = chunk.usage_metadata or usage
+                    yield chunk
+        except Exception:
+            self._failed()
+            raise
+        self._answered(usage)
+
+
+def _edited(
+    model: str,
+    contents: list[types.Content],
+    config: types.GenerateContentConfig,
+    edits: Sequence[RequestEdit],
+) -> ModelRequest:
+    """A copy of the request, with `edits` made to it."""
+    request = ModelRequest(
+        model=model,
+        contents=[content.model_copy(deep=True) for content in contents],
+        config=config.model_copy(deep=True),
+    )
+    for edit in edits:
+        edit(request)
+    return request
+
+
+class _ProbedModels:
+    """`client.aio.models` with its streamed call edited and noted by a `Probe`."""
+
+    def __init__(self, models: Any, probe: Probe, edits: Sequence[RequestEdit]) -> None:
+        self._models = models
+        self._probe = probe
+        self._edits = tuple(edits)
+
+    async def generate_content_stream(
+        self, *, model: str, contents: Any, config: Any = None
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        request = _edited(
+            model,
+            [types.Content.model_validate(content) for content in contents],
+            types.GenerateContentConfig.model_validate(config or {}),
+            self._edits,
+        )
+        self._probe._sent(request)
+        if self._edits:
+            model, contents, config = request.model, request.contents, request.config
+        try:
+            stream = await self._models.generate_content_stream(
+                model=model, contents=contents, config=config
+            )
+        except Exception:
+            self._probe._failed()
+            raise
+        return self._probe._watched(stream)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._models, name)
+
+
+class _ProbedCaches:
+    """`client.aio.caches` with each create's system instruction, tools and tool config
+    edited by `edits`."""
+
+    def __init__(self, caches: Any, edits: Sequence[RequestEdit]) -> None:
+        self._caches = caches
+        self._edits = tuple(edits)
+
+    async def create(self, *, model: str, config: Any = None) -> types.CachedContent:
+        if self._edits:
+            created = types.CreateCachedContentConfig.model_validate(config or {})
+            prefix = types.GenerateContentConfig(
+                system_instruction=created.system_instruction,
+                tools=created.tools,
+                tool_config=created.tool_config,
+            )
+            request = _edited(model, [], prefix, self._edits)
+            model = request.model
+            config = created.model_copy(
+                update={
+                    "system_instruction": request.config.system_instruction,
+                    "tools": request.config.tools,
+                    "tool_config": request.config.tool_config,
+                }
+            )
+        return await self._caches.create(model=model, config=config)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._caches, name)
+
+
+class _ProbedAsyncClient:
+    """`client.aio` with `_ProbedModels` and `_ProbedCaches` in place of its own."""
+
+    def __init__(
+        self, aio: AsyncClient, models: _ProbedModels, edits: Sequence[RequestEdit]
+    ) -> None:
+        self._aio = aio
+        self.models = models
+        self.caches = _ProbedCaches(aio.caches, edits)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._aio, name)
+
+
+class _ProbedClient(Client):
+    """`client` with `_ProbedAsyncClient` as its `aio`.
+
+    A `Client`, since ADK's `Gemini` takes nothing else, built without
+    `Client.__init__`: every other attribute is `client`'s own, and the wrapped client
+    stays open when this one is collected.
+    """
+
+    def __init__(self, client: Client, models: _ProbedModels, edits: Sequence[RequestEdit]) -> None:
+        self._client = client
+        self._probed_aio = _ProbedAsyncClient(client.aio, models, edits)
+
+    @property
+    def aio(self) -> AsyncClient:
+        return cast(AsyncClient, self._probed_aio)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    def __del__(self) -> None:
+        pass
 
 
 class _Watched:
@@ -799,35 +958,29 @@ class _Watched:
         return await self._probe.note(self._seam.revise(**kwargs))
 
 
+def live_client() -> Client:
+    """The google-genai client a live entry's planner calls go through, built from the
+    environment with the HTTP retries the served planner's model makes
+    (`orchestrator.agent.model_retry_options`)."""
+    return Client(http_options=types.HttpOptions(retry_options=model_retry_options()))
+
+
 def build_seam(
-    *,
-    probe: Probe,
-    surface: RecordedSurface,
-    prefix_cache: PrefixCache | None,
-    edits: Sequence[RequestEdit] = (),
-    model: BaseLlm | None = None,
+    *, probe: Probe, surface: RecordedSurface, prefix_cache: PrefixCache | None, client: Client
 ) -> PlannerSeam:
-    """The seam `harness.wiring.build_planner` builds, with the probe's translate step.
+    """The seam `harness.wiring.build_planner` builds, on the runner
+    `Settings().planner_runner` names, with the probe's translate step and the
+    planner's model calls going through `client`.
 
     The planner, its instruction, its tools and the seam's callbacks are production's
-    own. `edits` change each request the planner sends its model (`arms.Arm`), and the
-    probe notes each one and its answer. `model` stands in for the planner's model, as
-    `validate.py`'s scripted model does.
+    own.
     """
-
-    def edit_request(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-        del callback_context
-        for edit in edits:
-            edit(llm_request)
-
     return PlannerSeam(
         settings=Settings(),
         surface=surface,
         prefix_cache=prefix_cache,
         translate=probe.translate,
-        model=model,
-        before_model_callbacks=[edit_request, probe.before_model],
-        after_model_callbacks=[probe.after_model],
+        client=client,
     )
 
 
@@ -862,15 +1015,18 @@ async def run_entry(
     recording: Mapping[str, Any],
     *,
     prefix_cache: PrefixCache | None,
+    client: Client | None = None,
     edits: Sequence[RequestEdit] = (),
-    model: BaseLlm | None = None,
     timeout_s: float = 300.0,
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
 ) -> EntryRun:
-    """Run `task`'s planner entry once on a fresh session.
+    """Run `task`'s planner entry once on a fresh session, on the planner runner
+    `Settings().planner_runner` names.
 
-    The entry ends at the first plan `propose_plan` records, at an ask of the user, or
+    The planner's model calls go through `client`, a live client (`live_client`) when
+    None; `edits` change each request it is sent (`RequestEdit`), and the probe notes
+    each one and its answer. The entry ends at the first plan `propose_plan` records, at an ask of the user, or
     wherever the seam ends it (a bound of its request's budget, its round budget, a
     correction it gave up on), or after `timeout_s`. The planner streams, as a studio
     turn runs it. `answers` are the user's replies to the entry's asks, in order; each
@@ -893,7 +1049,10 @@ async def run_entry(
     if resolver.left():
         raise RecordingMismatchError(f"{task.id}: {resolver.left()} recorded searches went unasked")
     seam = build_seam(
-        probe=probe, surface=surface, prefix_cache=prefix_cache, edits=edits, model=model
+        probe=probe,
+        surface=surface,
+        prefix_cache=prefix_cache,
+        client=probe.client(client if client is not None else live_client(), edits=edits),
     )
     sessions = InMemorySessionService()
     session = await sessions.create_session(app_name=_APP, user_id=_USER, state=state)
@@ -1211,11 +1370,13 @@ __all__ = [
     "KINDS",
     "PERIOD_REFUSAL",
     "EntryRun",
+    "ModelRequest",
     "PeriodReduction",
     "Probe",
     "RecordedResolver",
     "RecordedSurface",
     "RecordingMismatchError",
+    "RequestEdit",
     "Task",
     "TaskStateError",
     "answer_id",
@@ -1223,6 +1384,7 @@ __all__ = [
     "entry_record",
     "first_year_gaps",
     "inputs_digest",
+    "live_client",
     "load_recording",
     "load_tasks",
     "orchestrator_state",

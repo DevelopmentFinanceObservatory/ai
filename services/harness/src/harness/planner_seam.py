@@ -69,6 +69,7 @@ from google.adk import Context, Event
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.base_llm import BaseLlm
+from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
@@ -400,13 +401,15 @@ class PlannerSeam:
         #
         # `translate` replaces the translation `propose_plan` runs, and `specs`
         # the tools (`planner.agent.planner_specs` over the surface and that
-        # translation). `client` is the google-genai client the Pydantic AI
-        # planner's calls go through, one built from the environment when
-        # None.
+        # translation). `client` is the google-genai client the planner's
+        # model calls go through, on either runner; None builds one from the
+        # environment. The ADK planner's Gemini model uses a given client as
+        # it is, HTTP options included.
         #
         # `model`, `before_model_callbacks` and `after_model_callbacks` are the
         # ADK planner's, so the Pydantic AI planner refuses them. `model`
-        # replaces the model `agent_settings` names. `before_model_callbacks`
+        # replaces the model `agent_settings` names, and takes no `client`.
+        # `before_model_callbacks`
         # run after the seam's own, which answer a request themselves once the
         # entry has to stop, so they see only the requests the model is sent.
         # `after_model_callbacks` run before the seam's own, so they see each
@@ -417,6 +420,8 @@ class PlannerSeam:
             model is not None or before_model_callbacks or after_model_callbacks
         ):
             raise ValueError("a model and model callbacks run on the ADK planner only")
+        if model is not None and client is not None:
+            raise ValueError("a model and a client replace the same thing; give one")
         refuse_vertex_ai()
         self._client = client
         self._model_name = (
@@ -480,6 +485,8 @@ class PlannerSeam:
         )
         if model is not None:
             agent.model = model
+        elif self._client is not None:
+            agent.model = _on_client(agent.model, self._client)
         # The callbacks are assigned exactly once, here, as bound methods,
         # and read the call they belong to off `_active_call` (a
         # `ContextVar` `_propose` sets for the duration of its own
@@ -1307,6 +1314,18 @@ class PlannerSeam:
                 _answer_text(answered) if answered is not None else "",
             ]
         )
+
+
+def _on_client(model: str | BaseLlm, client: Client) -> Gemini:
+    """`model`, the ADK planner's Gemini model, calling through `client`.
+
+    Raises:
+        ValueError: If `model` is not a Gemini model, which alone takes a
+            google-genai client.
+    """
+    if not isinstance(model, Gemini):
+        raise ValueError(f"a client runs a Gemini planner model only, not {model!r}")
+    return model.model_copy(update={"client": client})
 
 
 def _ask_text(
