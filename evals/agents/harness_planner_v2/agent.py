@@ -3,8 +3,8 @@
 Score it with `just eval-planner`, then read the results with `just eval-web` --
 `evals/README.md` covers why scoring belongs to the CLI. Both need a Gemini
 developer API key, `GOOGLE_API_KEY`, in the repo-root `.env`, which ADK loads
-before importing this module. The planner refuses to build when ADK's Google
-variant is Vertex AI.
+before importing this module. The planner refuses to build when its Gemini
+model would call Vertex AI.
 
 The planner is built with no translator, so the cases score
 its plan-lifecycle tools alone.
