@@ -39,10 +39,10 @@ from opentelemetry.trace import StatusCode
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
+    PlannerAnswers,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
-    PlannerToolAnswer,
     planner_agent,
     run_planner,
     tool_not_found,
@@ -136,8 +136,8 @@ async def _run(
     return items, scripted
 
 
-def _answers(items: Sequence[PlannerItem]) -> list[PlannerToolAnswer]:
-    return [item for item in items if isinstance(item, PlannerToolAnswer)]
+def _answers(items: Sequence[PlannerItem]) -> list[types.FunctionResponse]:
+    return [answer for item in items if isinstance(item, PlannerAnswers) for answer in item.answers]
 
 
 def _responses(items: Sequence[PlannerItem]) -> list[PlannerResponse]:
@@ -278,7 +278,7 @@ async def test_a_call_with_arguments_the_schema_refuses_reaches_the_body_unvalid
 
     items, scripted = await _run([spec], [reply(stray, missing), reply(text_part("done"))])
 
-    answers = {answer.call_id: answer.answer for answer in _answers(items)}
+    answers = {answer.id: answer.response or {} for answer in _answers(items)}
     assert answers["c1"] == {"outcome": "ok"}
     assert answers["c2"].get("outcome") != "ok" and "name" in str(answers["c2"])
     assert len(scripted.requests) == 2
@@ -298,7 +298,7 @@ async def test_a_call_keeps_the_id_the_model_sent() -> None:
 
     called = [part.function_call.id for part in _responses(items)[0].parts if part.function_call]
     assert called == ["sent", "also"]
-    assert sorted(answer.call_id for answer in _answers(items)) == ["also", "sent"]
+    assert [answer.id for answer in _answers(items)] == ["sent", "also"]
 
 
 # --- Unknown tools and the retry allowance --------------------------------------------
@@ -314,7 +314,7 @@ async def test_a_call_to_an_unknown_tool_is_answered_as_the_adk_planner_answers_
     items, scripted = await _run([_BARE], _unknown_calls(3))
 
     expected = tool_not_found("nope", ["bare"])
-    assert [answer.answer for answer in _answers(items)] == [expected] * 3
+    assert [answer.response for answer in _answers(items)] == [expected] * 3
     sent = scripted.requests[-1].content_list[-1].parts or []
     assert [part.function_response.response for part in sent if part.function_response] == [
         expected
@@ -367,7 +367,7 @@ async def test_a_run_ends_before_the_request_after_a_call_that_ended_it() -> Non
     )
 
     assert len(scripted.requests) == 1
-    assert [answer.ended for answer in _answers(items)] == [True]
+    assert [answer.id for answer in _answers(items)] == ["c1"]
 
 
 async def test_a_run_goes_past_the_default_cap_of_fifty_requests() -> None:
@@ -410,12 +410,12 @@ async def test_a_responses_calls_run_after_it_is_yielded_and_before_the_next_req
     )
 
     first = ["PlannerResponse"]
-    assert seen == [first, first, [*first, "PlannerToolAnswer", "PlannerToolAnswer", *first]]
+    assert seen == [first, first, [*first, "PlannerAnswers", *first]]
 
 
-async def test_the_calls_of_a_response_answer_in_the_order_they_finish() -> None:
-    # `run_planner` yields each answer as its call finishes, so the events a response's
-    # calls store come in that order, as ADK's do.
+async def test_the_answers_of_a_response_come_in_call_order_whatever_order_they_finish_in() -> None:
+    # `run_planner` takes a response's answers from the tool returns Pydantic AI
+    # collects into the next request, which holds them in the order of the calls.
     async def slow(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
         await asyncio.sleep(0.05)
         return {"which": "slow"}
@@ -427,7 +427,7 @@ async def test_the_calls_of_a_response_answer_in_the_order_they_finish() -> None
         [reply(call_part("slow", id="a"), call_part("bare", id="b")), reply(text_part("done"))],
     )
 
-    assert [answer.call_id for answer in _answers(items)] == ["b", "a"]
+    assert [answer.id for answer in _answers(items)] == ["a", "b"]
 
 
 # --- Request shape across messages ----------------------------------------------------

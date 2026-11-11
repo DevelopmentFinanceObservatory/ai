@@ -183,15 +183,9 @@ async def pydantic_run(
         )
         responded = len(errors)
         items: list[PlannerItem] = []
-        held: list[PlannerItem] = []
         async for item in run_planner(planner, deps, question=QUESTION, brief=brief):
             items.append(item)
-            if isinstance(item, PlannerResponse):
-                events += _stored([*held, item])
-                held = []
-            else:
-                held.append(item)
-        events += _stored(held)
+            events += _stored(item)
         run.conversations.append(_item_turns(items, errors[responded:]))
     return run
 
@@ -233,23 +227,22 @@ def _item_turns(items: Sequence[PlannerItem], errors: Sequence[str | None]) -> l
                 turns.append(("blocked", error))
             turns.extend(("part", _dumped(part)) for part in item.parts)
         else:
-            turns.append(("answer", item.name, item.call_id, item.answer))
+            turns.extend(
+                ("answer", answer.name, answer.id, answer.response) for answer in item.answers
+            )
     return turns
 
 
-def _stored(items: Sequence[PlannerItem]) -> list[Event]:
-    """The events a run's `items` stand for, as far as `session_steps` reads them."""
-    events: list[Event] = []
-    for item in items:
-        if isinstance(item, PlannerResponse):
-            if item.parts:
-                content = types.Content(role="model", parts=list(item.parts))
-                events.append(Event(author=AGENT_NAME, branch=_BRANCH, content=content))
-            continue
-        response = types.FunctionResponse(id=item.call_id, name=item.name, response=item.answer)
-        content = types.Content(role="user", parts=[types.Part(function_response=response)])
-        events.append(Event(author=AGENT_NAME, branch=_BRANCH, content=content))
-    return events
+def _stored(item: PlannerItem) -> list[Event]:
+    """The event `item` stands for, if any, as far as `session_steps` reads it."""
+    if isinstance(item, PlannerResponse):
+        if not item.parts:
+            return []
+        content = types.Content(role="model", parts=list(item.parts))
+    else:
+        parts = [types.Part(function_response=answer) for answer in item.answers]
+        content = types.Content(role="user", parts=parts)
+    return [Event(author=AGENT_NAME, branch=_BRANCH, content=content)]
 
 
 def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:

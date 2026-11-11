@@ -9,10 +9,10 @@ run_planner` yields, for each item the run makes, the event the ADK planner's
 - `model_response_event` for a model response (`PlannerResponse`), as soon as
   it arrives;
 - `tool_answers_event` for the answers of one response's calls
-  (`PlannerToolAnswer`), once every call of the response has answered
-  (`answered_every_call`). The ADK planner runs a response's calls together
-  and appends one event holding every answer, in the order the calls were
-  made, with one state delta, after the last call has answered.
+  (`PlannerAnswers`), once every call of the response has answered. The ADK
+  planner runs a response's calls together and appends one event holding
+  every answer, in the order the calls were made, with one state delta, after
+  the last call has answered.
 
 The builders leave out what ADK's node runner sets on every event a node
 yields: the event's id and timestamp, `invocation_id`, `node_info.path` and
@@ -23,25 +23,21 @@ and `branch`, which it takes from the `override_branch` the node is run with
 model version and usage are the ones the API reported, which the node reads
 off the raw google-genai response.
 
-A run stopped while a response's calls are running leaves no event for that
-response, as the ADK planner leaves none. ADK cancels the calls and appends
-nothing for them, so the state the response's calls wrote, answered or not,
-is not stored. A run whose calls end on an error other than a cancellation
-stores the answers of the calls that answered, as ADK keeps them. The node
-yields `tool_answers_event` over those answers alone.
+A run stopped or failed while a response's calls are running leaves no event
+for that response's answers, so the state its calls wrote, answered or not,
+is not stored. ADK leaves none on a stop, and on an error other than a
+cancellation stores the answers of the calls that answered.
 """
 
 from __future__ import annotations
 
-import copy
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from google.adk.events import Event, EventActions
 from google.adk.events.event import NodeInfo
 from google.genai import types
-from planner.pydantic_agent import PlannerResponse, PlannerToolAnswer
+from planner.pydantic_agent import PlannerAnswers, PlannerResponse
 
 type Usage = types.GenerateContentResponseUsageMetadata
 
@@ -119,88 +115,24 @@ def model_response_event(
     return event
 
 
-def answered_every_call(response: PlannerResponse, answers: Sequence[PlannerToolAnswer]) -> bool:
-    """Whether `answers` answer every function call of `response`."""
-    answered = {answer.call_id for answer in answers}
-    return all(call_id in answered for call_id in _call_ids(response))
+def tool_answers_event(answers: PlannerAnswers, *, ended: bool) -> Event:
+    """The one event the ADK planner stores for the answers of a response's calls.
 
-
-def tool_answers_event(
-    response: PlannerResponse, answers: Sequence[PlannerToolAnswer], *, ended: bool
-) -> Event:
-    """The one event the ADK planner stores for the answers of `response`'s calls.
-
-    `answers` are given in the order the calls answered, as `run_planner`
-    yields them. The event holds each answer as a function response, in the
-    order of the calls in `response`. Its state delta merges each call's
-    writes in that order, a later call's value replacing an earlier one's and
-    two dicts merging key by key, as ADK merges them. A list or dict that more
-    than one call wrote then takes the value of the call that answered last,
-    as ADK takes the value the session holds once every call has answered.
-    `ended` says whether a call ended the run (`planner.tools.EndRun`), which
-    ADK records as `skip_summarization`.
-
-    Raises:
-        ValueError: An answer is to no call of `response`, or `answers` is empty.
+    The event holds `answers`' function responses, in call order, and their
+    state as its state delta, which is the session's value once every call
+    has answered. `ended` says whether a call ended the run
+    (`planner.tools.EndRun`), which ADK records as `skip_summarization`.
     """
-    if not answers:
-        raise ValueError("a function response event needs at least one answer")
-    order = {call_id: position for position, call_id in enumerate(_call_ids(response))}
-    stray = [answer.call_id for answer in answers if answer.call_id not in order]
-    if stray:
-        raise ValueError(f"answers to calls the response did not make: {stray}")
-    in_call_order = sorted(answers, key=lambda answer: order[answer.call_id])
     parts = [
-        types.Part(
-            function_response=types.FunctionResponse(
-                id=answer.call_id, name=answer.name, response=copy.deepcopy(answer.answer)
-            )
-        )
-        for answer in in_call_order
+        types.Part(function_response=answer.model_copy(deep=True)) for answer in answers.answers
     ]
     return Event(
         content=types.Content(role="user", parts=parts),
         actions=EventActions(
-            state_delta=_merged_writes(in_call_order, answered_last_first=answers[::-1]),
+            state_delta=answers.state,
             skip_summarization=True if ended else None,
         ),
     )
-
-
-def _call_ids(response: PlannerResponse) -> list[str]:
-    return [
-        part.function_call.id
-        for part in response.parts
-        if part.function_call is not None and part.function_call.id is not None
-    ]
-
-
-def _merged_writes(
-    in_call_order: Sequence[PlannerToolAnswer], *, answered_last_first: Sequence[PlannerToolAnswer]
-) -> dict[str, Any]:
-    """The calls' writes merged as ADK merges the state deltas of parallel calls."""
-    merged: dict[str, Any] = {}
-    for answer in in_call_order:
-        _deep_merge(merged, copy.deepcopy(answer.writes))
-    writers = Counter(key for answer in in_call_order for key in answer.writes)
-    latest: dict[str, Any] = {}
-    for key, count in writers.items():
-        if count < 2:
-            continue
-        value = next(answer.writes[key] for answer in answered_last_first if key in answer.writes)
-        if isinstance(value, dict | list):
-            latest[key] = copy.deepcopy(value)
-    return _deep_merge(merged, latest)
-
-
-def _deep_merge(into: dict[str, Any], other: Mapping[str, Any]) -> dict[str, Any]:
-    """`other` merged into `into`: dicts key by key, anything else replaced."""
-    for key, value in other.items():
-        if isinstance(into.get(key), dict) and isinstance(value, dict):
-            _deep_merge(into[key], value)
-        else:
-            into[key] = value
-    return into
 
 
 def _actionable(parts: Sequence[types.Part]) -> bool:

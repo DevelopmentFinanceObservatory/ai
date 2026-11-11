@@ -7,8 +7,7 @@ seam runs `harness.planner_node`. Both serve the same tools: the real
 `ask_user_question` and `get_skill`, and a `propose_plan` whose answers the
 script sets. The stored sessions are then compared: their events field by
 field apart from ids and timestamps, what `session_steps` and Studio's
-translator read from them, and their state. The builders of
-`harness.planner_events` are also tested on their own.
+translator read from them, and their state.
 """
 
 from __future__ import annotations
@@ -25,11 +24,7 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness.planner_events import (
-    NO_CONTENT_ERROR_CODE,
-    answered_every_call,
-    tool_answers_event,
-)
+from harness.planner_events import NO_CONTENT_ERROR_CODE
 from harness.planner_seam import PlannerSeam
 from harness.scripted_plan import scripted_plan
 from harness.settings import Settings
@@ -39,7 +34,6 @@ from harness.turn_events import PLANNER_ASK
 from planner.agent import AGENT_NAME
 from planner.call import PlannerCall
 from planner.plan import PLAN_STATE_KEY
-from planner.pydantic_agent import PlannerResponse, PlannerToolAnswer
 from planner.session import session_steps
 from planner.skills import SKILLS_READ_STATE_KEY
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
@@ -357,36 +351,3 @@ def _call_ids(stored: _Stored) -> list[str]:
 def _renamed(event: Event, old: str, new: str) -> Event:
     dumped = event.model_dump_json().replace(old, new)
     return Event.model_validate_json(dumped)
-
-
-# --- The builders on their own --------------------------------------------------------
-
-
-def _response(*parts: types.Part) -> PlannerResponse:
-    return PlannerResponse(parts=parts)
-
-
-def test_answers_are_ordered_by_call_and_their_writes_merged_as_adk_merges_them() -> None:
-    response = _response(_ask("a1"), _proposal("p1"))
-    answers = [
-        PlannerToolAnswer(PROPOSE_PLAN, "p1", {"outcome": "ok"}, {"n": 2, "d": {"y": 2}}),
-        PlannerToolAnswer(PLANNER_ASK, "a1", {"outcome": "ok"}, {"n": 1, "d": {"x": 1}}),
-    ]
-
-    assert answered_every_call(response, answers)
-    assert not answered_every_call(response, answers[:1])
-    event = tool_answers_event(response, answers, ended=False)
-
-    assert [r.id for r in event.get_function_responses()] == ["a1", "p1"]
-    # In call order a scalar is replaced and two dicts merge. The dict two calls
-    # wrote then merges in the value of the call that answered last.
-    assert event.actions.state_delta == {"n": 2, "d": {"x": 1, "y": 2}}
-    assert event.actions.skip_summarization is None
-    assert tool_answers_event(response, answers, ended=True).actions.skip_summarization is True
-
-
-def test_an_answer_to_no_call_of_the_response_is_refused() -> None:
-    with pytest.raises(ValueError, match="did not make"):
-        tool_answers_event(
-            _response(_ask("a1")), [PlannerToolAnswer(PLANNER_ASK, "x", {}, {})], ended=False
-        )

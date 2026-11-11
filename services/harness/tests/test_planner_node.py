@@ -68,7 +68,6 @@ from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import EndRun
-from pydantic_ai.exceptions import UnexpectedModelBehavior
 from submission.service import scope_choice_decisions
 from translator.tool import Translate, build_translate
 
@@ -830,93 +829,19 @@ async def _raising(runner: Runner, plan: Plan) -> _Entry:
     )
 
 
-async def test_a_run_that_raises_while_calls_run_keeps_the_answered_calls_on_both(
-    plan: Plan,
+@pytest.mark.parametrize(("runner", "answered"), [("adk", ["p1"]), ("pydantic_ai", [])])
+async def test_a_run_that_raises_while_calls_run_stores_the_finished_answers_on_adk_alone(
+    plan: Plan, runner: Runner, answered: list[str]
 ) -> None:
-    """The ADK planner keeps the answer of the call that finished when its sibling's
-    raises. The Pydantic AI planner yields the answer it held."""
-    adk = await _raising("adk", plan)
-    pydantic = await _raising("pydantic_ai", plan)
+    """A run that raises while a response's calls run fails the turn. The ADK
+    planner keeps the answer of the call that finished before its sibling's
+    raised, and the Pydantic AI planner stores none of the response's
+    answers. Both store the response."""
+    entry = await _raising(runner, plan)
 
-    (answered,) = [
-        response for event in _planner_events(adk) for response in event.get_function_responses()
-    ]
-    assert answered.id == "p1"
-    _assert_same(adk, pydantic)
-
-
-def _counted(n: int) -> dict[str, Any]:
-    """A tool whose typed argument Pydantic AI validates."""
-    return {"outcome": "ok", "n": n}
-
-
-def _misbehaving(proposed: asyncio.Event) -> Callable[[], Any]:
-    """A tool that ends the run as a response Pydantic AI refuses ends it, once
-    `propose_plan` beside it has answered (`proposed`)."""
-
-    async def _misbehaves() -> None:
-        await proposed.wait()
-        raise UnexpectedModelBehavior("the model misbehaved")
-
-    return _misbehaves
-
-
-@pytest.mark.parametrize(
-    ("tool", "name", "arguments", "answered"),
-    [
-        pytest.param(
-            lambda _: _counted, "_counted", {"n": "many"}, {"p1", "x1"}, id="answered-with-a-retry"
-        ),
-        pytest.param(_misbehaving, "_misbehaves", {}, {"p1"}, id="ending-the-run"),
-    ],
-)
-async def test_a_call_pydantic_ai_answers_itself_still_stores_its_siblings_answer(
-    plan: Plan,
-    tool: Callable[[asyncio.Event], Callable[..., Any]],
-    name: str,
-    arguments: dict[str, Any],
-    answered: set[str],
-) -> None:
-    """A call Pydantic AI answers without its tool, or that ends the run, leaves
-    the answers of its response stored with the answer of `propose_plan` beside
-    it, as the ADK planner keeps a response's finished calls. No planner tool
-    reaches either path, so a Pydantic AI tool of the test's own does, on the
-    Pydantic AI planner alone."""
-    proposed = asyncio.Event()
-    extra = tool(proposed)
-
-    def proposes(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
-        del call, end_run, arguments
-        proposed.set()
-        return _REFUSED
-
-    scripted = ScriptedGenai(
-        [
-            reply(
-                call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED),
-                call_part(name, arguments, id="x1"),
-            ),
-            reply(text_part("done")),
-        ]
-    )
-    seam = _seam("pydantic_ai", scripted, tools=lambda specs: _serving_proposals(specs, proposes))
-    assert seam._pydantic is not None
-    model_name, planner = seam._pydantic
-    planner.agent.tool_plain(extra)
-    seam._pydantic = (
-        model_name,
-        dataclasses.replace(planner, tools=(*planner.tools, name)),
-    )
-    harness = _SeamHarness()
-
-    await harness.run(seam, run_config=_SSE, readings=[], **_planned(plan))
-
-    stored = {
-        response.id
-        for event in _planner_events(await _stored(harness))
-        for response in event.get_function_responses()
-    }
-    assert stored == answered
+    events = _planner_events(entry)
+    assert [call.id for event in events for call in event.get_function_calls()] == ["p1", "a1"]
+    assert [r.id for event in events for r in event.get_function_responses()] == answered
 
 
 async def _stored(harness: _SeamHarness) -> _Entry:

@@ -41,9 +41,8 @@ from google.genai import Client, types
 from planner.agent import AGENT_NAME, BRIEF_STATE_KEY
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
+    PlannerAnswers,
     PlannerDeps,
-    PlannerResponse,
-    PlannerToolAnswer,
     PydanticPlanner,
     UnsentQuestionPartError,
     planner_agent,
@@ -51,7 +50,7 @@ from planner.pydantic_agent import (
 )
 from planner.tool_spec import ToolSpec
 
-from harness.planner_events import answered_every_call, model_response_event, tool_answers_event
+from harness.planner_events import model_response_event, tool_answers_event
 from harness.planner_model import (
     ResponseMetadata,
     StreamResumedError,
@@ -220,8 +219,6 @@ def planner_node(
             tool_answered=run.tool_answered,
             tool_failed=tool_failed,
         )
-        response: PlannerResponse | None = None
-        held: list[PlannerToolAnswer] = []
         items = run_planner(
             planner,
             deps,
@@ -236,32 +233,26 @@ def planner_node(
         try:
             async with aclosing(items):
                 async for item in items:
-                    if isinstance(item, PlannerResponse):
-                        response, held = item, []
-                        # ADK stores no event for a response with no parts,
-                        # unless the response is an error, a blocked prompt's.
-                        if item.parts or recorded.error_code is not None:
-                            yield model_response_event(
-                                item,
-                                usage=recorded.usage,
-                                finish_reason=recorded.finish_reason,
-                                model_version=recorded.model_version,
-                                custom_metadata=recorded.custom_metadata,
-                                partial=recorded.partial,
-                                error_code=recorded.error_code,
-                                error_message=recorded.error_message,
-                            )
-                        continue
-                    assert response is not None, "a call's answer follows its response"
-                    held.append(item)
-                    if answered_every_call(response, held):
-                        yield tool_answers_event(response, held, ended=_ended(held))
-                        held = []
+                    if isinstance(item, PlannerAnswers):
+                        yield tool_answers_event(item, ended=deps.ended)
+                    # ADK stores no event for a response with no parts, unless
+                    # the response is an error, a blocked prompt's.
+                    elif item.parts or recorded.error_code is not None:
+                        yield model_response_event(
+                            item,
+                            usage=recorded.usage,
+                            finish_reason=recorded.finish_reason,
+                            model_version=recorded.model_version,
+                            custom_metadata=recorded.custom_metadata,
+                            partial=recorded.partial,
+                            error_code=recorded.error_code,
+                            error_message=recorded.error_message,
+                        )
         except UnsentQuestionPartError as exc:
-            # Refused before any request, so nothing is held. The run ends on
-            # the refusal, which the seam answers the entry with; an exception
-            # here would fail the whole workflow, since ADK fails the root on
-            # a child node's error. The ADK planner sends the part.
+            # Refused before any request. The run ends on the refusal, which
+            # the seam answers the entry with; an exception here would fail
+            # the whole workflow, since ADK fails the root on a child node's
+            # error. The ADK planner sends the part.
             logger.error(
                 "planner question refused session=%s invocation=%s: %s",
                 ctx.session.id,
@@ -271,11 +262,6 @@ def planner_node(
             run.refused = internal_fault(str(exc))
             return
         except Exception as exc:
-            # The ADK planner keeps the answers of a response's finished calls
-            # when another of its calls fails. A cancellation stores nothing of
-            # the response, so it is not caught and the held answers go.
-            if response is not None and held:
-                yield tool_answers_event(response, held, ended=_ended(held))
             if resumed_over_output(exc):
                 # A dropped connection the SDK resumed. Raised as one, so the
                 # turn ends as a dropped Gemini call ends it
@@ -290,11 +276,6 @@ def planner_node(
                 )
                 raise StreamResumedError(str(exc)) from exc
             raise
-        # A run `run_planner` ends without raising on a response Pydantic AI
-        # refuses may leave calls of the last response unanswered. The answers
-        # of its finished calls are kept, as an exception keeps them.
-        if response is not None and held:
-            yield tool_answers_event(response, held, ended=_ended(held))
 
     return node(dfo_planner, name=AGENT_NAME)
 
@@ -319,11 +300,6 @@ def directive_turn(directive: Directive | None) -> types.Content | None:
         case None:
             return None
     return types.Content(role="model", parts=[part])
-
-
-def _ended(answers: Sequence[PlannerToolAnswer]) -> bool:
-    """Whether a call of `answers` ended the run."""
-    return any(answer.ended for answer in answers)
 
 
 __all__ = ["SKIP_THOUGHT_SIGNATURE", "directive_turn", "planner_node", "pydantic_planner"]
