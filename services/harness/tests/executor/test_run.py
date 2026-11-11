@@ -1305,7 +1305,7 @@ async def test_missing_years_are_recorded_or_refused_as_the_requirement_says(
     [
         pytest.param("graph", ["Kenya", "Germany", None], id="named-by-the-graph"),
         # A lookup that fails or hangs leaves the donors unlabelled, and the
-        # step goes on, whatever seam was injected.
+        # step goes on, whatever lookup was injected.
         pytest.param("graph-fails", ["Kenya", None, None], id="graph-lookup-fails"),
         pytest.param("raises", ["Kenya", None, None], id="injected-lookup-raises"),
         pytest.param("hangs", ["Kenya", None, None], id="injected-lookup-hangs"),
@@ -1346,7 +1346,7 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
     async def injected(refs: Sequence[str]) -> Mapping[str, str]:
         asked.append(list(refs))
         if lookup == "raises":
-            raise RuntimeError("a seam's own defect")
+            raise RuntimeError("a lookup's own defect")
         await asyncio.Event().wait()
         return {}
 

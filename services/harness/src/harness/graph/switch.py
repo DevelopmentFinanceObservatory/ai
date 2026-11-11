@@ -16,7 +16,7 @@ window (`submission.service._window_pins`) and the translation resolves
 the copy. The turn keeps Search's answers
 (`translator.discovery.resolving_once`), so a switch repeating one the
 turn made posts nothing. The
-plan is then revised by the planner seam with no model call
+plan is then revised by the planner adapter with no model call
 (`harness.graph.interfaces.PlannerModel.revise`): each requirement pinning a
 switched source pins the compiled one, the decisions follow their pins,
 and the plan compiles again. The node stores each new reading, so later
@@ -157,7 +157,7 @@ _RETRYABLE_REVISION_CODES = frozenset(
     }
 )
 
-# The state the planner seam and the translator keep while drafting, which a
+# The state the planner adapter and the translator keep while drafting, which a
 # revision that fails leaves as it found. The parts Search answered this turn
 # (`RESOLVED_STATE_PREFIX`) and the times they were answered
 # (`RESOLVED_AT_STATE_PREFIX`) are not drafting state. Each holds whatever the

@@ -683,7 +683,7 @@ def test_run_sse_is_retired_in_favour_of_the_studio_routes() -> None:
 
 def test_studio_routes_are_mounted() -> None:
     """The studio surface is part of the served app: an unauthenticated turn
-    against `create_app` hits the auth seam and gets a 401."""
+    against `create_app` hits the auth check and gets a 401."""
     client = TestClient(create_app(settings=Settings()))
 
     response = client.post(
@@ -819,7 +819,7 @@ def _fake_clock_and_sleep(
 
 async def test_prepare_tables_with_retries_succeeds_after_transient_failures() -> None:
     """A `prepare_tables` that fails twice then succeeds returns normally,
-    having paused between attempts through the injected `sleep`/`now` seam
+    having paused between attempts through the injected `sleep` and `now`
     -- no real delay, so the test stays fast."""
     attempts: list[int] = []
 

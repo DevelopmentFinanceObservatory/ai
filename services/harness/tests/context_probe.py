@@ -47,7 +47,7 @@ the framing behind would still read as a non-zero bucket.
 
 `harness.planner_adapter.PlannerAdapter._message` is the other text part on the
 planner path, and it buckets separately as `text(planner-brief)` on its own opening
-words. It is the seam's own input, a full brief carrying the search readings,
+words. It is the adapter's own input, a full brief carrying the search readings,
 the canvas and conversation digests, the plan being changed and the question.
 
 Every planner call renders that full brief, and every request of the call
@@ -130,8 +130,8 @@ _RELAY_AUTHOR = re.compile(r"^\[([^\]]+)\]")
 RELAY_BUCKET = "text(fenced-relay)"
 RELAY_BUCKET_PREFIX = RELAY_BUCKET + ":"
 
-# The seam's own brief, bucketed on the opening words of `harness.planner_adapter.
-# _READINGS_CONTEXT`: the one part of a planner request this seam assembles itself, not ADK relaying or
+# The planner brief, bucketed on the opening words of `harness.planner_adapter.
+# _READINGS_CONTEXT`: the one part of a planner request this adapter assembles itself, not ADK relaying or
 # a tool answering. Spelled out, not imported from `planner_adapter`, for the same
 # reason `RELAY_MARKER` is: importing it would hide the fact that the text
 # moved, which is the thing this bucket exists to measure. It is the one input
@@ -373,7 +373,7 @@ def field_limits_record() -> dict[str, Any]:
     decisions: eight datasets with `MAX_ENTITIES` entities and
     `MAX_ACROSS_WORDS` `across` words apiece, nine filters with eight predicates apiece, and one of every other kind (aggregate,
     growth, rank, share_of, quotient_of, comparison, join). Every string is at its limit;
-    those the seam renders as JSON are made of `ASTRAL_CHAR`, and a predicate
+    those the adapter renders as JSON are made of `ASTRAL_CHAR`, and a predicate
     lists every entity name. Each decision and requirement validates on its
     own. The record as a plan does not: it serialises to far more than
     `MAX_PLAN_RECORD_CHARS`, and `Plan` refuses it for that alone.

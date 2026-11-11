@@ -3116,7 +3116,7 @@ class Landing:
 
 def _landing_tools(executor: FakeExecutor) -> tuple[Landing, dict[str, Any], SimpleNamespace]:
     """The tools over `executor`, its cards landing on one conversation's
-    canvas, which the tools read through the Studio seams."""
+    canvas, which the tools read through the Studio interfaces."""
     state = ConversationState(conversation_id="c1")
     landing = Landing(executor, state)
     tools, ctx = _tools(

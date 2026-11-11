@@ -320,7 +320,7 @@ sync:
 # Never run in CI: these drive the real agent through the real model, so they
 # need a live credential. See evals/README.md.
 #
-# The real workflow and planner seam run with scripted models, and every model
+# The real workflow and planner adapter run with scripted models, and every model
 # request is recorded and checked. Cases marked xfail hold a known gap (see
 # evals/studio/README.md). CI runs the same battery via
 # services/harness/tests/test_studio_orchestrator_eval.py.

@@ -1,6 +1,6 @@
 """One log line per model call, with the token counts the API reported.
 
-Every seam that calls a model funnels its `usage_metadata` through
+Every component that calls a model funnels its `usage_metadata` through
 `log_usage`, so a grep for "token usage" over a server log reconstructs
 what a turn cost. Logging only -- nothing reads these numbers back.
 """

@@ -49,7 +49,7 @@ type Turn = tuple[Any, ...]
 def adapter_specs(*, surface: ToolSurface | None, translate: Translate | None) -> list[ToolSpec]:
     """The planner's tools as `harness.planner_adapter.PlannerAdapter` builds them over
     `surface` and `translate`, for a test that changes them before handing them
-    to the seam as `specs`."""
+    to the adapter as `specs`."""
     return planner_specs(
         translate=translate, surface=surface, question_fixed=True, reads_user_words=False
     )

@@ -3450,7 +3450,7 @@ def _unavailable(
 
     A call the planner entry had no time left to issue (`not_issued`)
     refers the requirement back as `discovery_unavailable` marked
-    `not_issued`, which the planner seam takes as the request's wall-clock
+    `not_issued`, which the planner adapter takes as the request's wall-clock
     bound spent and ends the entry on. Any other failure names no `action`, and `translator.mechanical` refers
     it back as `discovery_unavailable` unmarked.
     """

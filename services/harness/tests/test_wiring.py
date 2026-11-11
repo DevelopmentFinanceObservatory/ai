@@ -1,4 +1,4 @@
-"""Tests for `harness.wiring`: which implementation stands behind the planner seam.
+"""Tests for `harness.wiring`: which implementation stands behind the planner.
 
 `build_planner` is a thin assembly function; its own behaviour worth pinning
 is what it does with `surface` -- pass it straight to `PlannerAdapter` so the
@@ -62,7 +62,7 @@ async def test_the_planner_looks_up_each_request_in_the_prefix_cache_it_is_given
     """The served planner sends each model call through the process's one prefix
     cache."""
     scripted = ScriptedGenai([reply(text_part("No plan."))])
-    # The seam builds its google-genai client from the environment.
+    # The adapter builds its google-genai client from the environment.
     monkeypatch.setattr(planner_adapter, "Client", lambda: scripted.client)
     prefix_cache = _LookupSpy()
 

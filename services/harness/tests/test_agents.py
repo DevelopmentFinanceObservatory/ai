@@ -1,4 +1,4 @@
-"""Tests for the planner the seam builds with translation attached, and `harness.agents`.
+"""Tests for the planner the adapter builds with translation attached, and `harness.agents`.
 
 Each planner test reads the planner from the model's side, through the first request
 that a scripted google-genai client (`ScriptedGenai`) receives from it. Whether the
@@ -37,7 +37,7 @@ def _adapter(
     surface: ToolSurface | None = None,
     agent_settings: AgentSettings | None = None,
 ) -> PlannerAdapter:
-    """The seam over `surface` (an empty fixture surface by default), its model
+    """The adapter over `surface` (an empty fixture surface by default), its model
     calls answered by `scripted`."""
     return PlannerAdapter(
         settings=Settings(),

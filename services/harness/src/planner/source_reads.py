@@ -827,7 +827,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     `submission.service.SearchedPin` with its digest, and the time the
     search was made as one settling on its spec_id
     (`planner.plan.record_spec_searched`), so the next proposal
-    pins it and the planner seam stores it as a reading of the conversation
+    pins it and the planner adapter stores it as a reading of the conversation
     (`harness.planner_adapter.store_searched_pin_readings`). Any other answer is
     held as a search that settled on nothing, under Search's part status, or
     `refused` for a refusal, and the next proposal is refused

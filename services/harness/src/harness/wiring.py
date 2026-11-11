@@ -1,4 +1,4 @@
-"""Assembly of the planner seam for the live server.
+"""Assembly of the planner adapter for the live server.
 
 The one place that knows which implementation stands behind the workflow's
 `PlannerModel`: the planner-translator pair behind `harness.planner_adapter`.
@@ -26,7 +26,7 @@ def build_planner(
     surface: ToolSurface,
     prefix_cache: PrefixCache | None = None,
 ) -> PlannerAdapter:
-    """The planner seam: the planner with the translation from
+    """The planner adapter: the planner with the translation from
     `translator.tool.build_translate` attached to `propose_plan`, adapted by
     `harness.planner_adapter.PlannerAdapter`. `surface` is the tool surface the
     translation discovers on, the compiler checks against, and the planner's

@@ -116,7 +116,7 @@ def _proposal(question: str, decision: DecisionFactory, *requirements: Any) -> A
 
 
 def _adapter(surface: ToolSurface, proposal: Any) -> PlannerAdapter:
-    """The seam over `surface`, its model sending the `propose_plan` call
+    """The adapter over `surface`, its model sending the `propose_plan` call
     `proposal` and then text."""
     scripted = ScriptedGenai([reply(call_part(*proposal)), reply(text_part("done"))])
     return PlannerAdapter(settings=Settings(), surface=surface, client=scripted.client)

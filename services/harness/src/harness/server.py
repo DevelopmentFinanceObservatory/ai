@@ -196,7 +196,7 @@ async def _prepare_tables_with_retries(
     exception and followed by a `sleep` pause that doubles up to
     `_PREPARE_TABLES_MAX_BACKOFF_S`, capped so it never pushes the call past
     `budget_s` total. The last exception is re-raised once no time remains
-    in the budget. `sleep` and `now` are seams for tests to replace real
+    in the budget. `sleep` and `now` are parameters for tests to replace real
     waiting and a real clock with instant, deterministic fakes.
     """
     deadline = now() + budget_s
@@ -444,7 +444,7 @@ def create_app(
         )
     else:
         logger.info("early mints: off (EARLY_MINT=false)")
-    # The store exists before the workflow because the recall seam is
+    # The store exists before the workflow because the recall function is
     # bound to it (conversation resolved per request via contextvar).
     store = StudioStore(app.state.session_service, app_name=AGENT_NAME)
     # Built once and threaded into both the `execute` node below and

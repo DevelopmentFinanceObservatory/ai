@@ -3,7 +3,7 @@
 Each entry runs on one script of a scripted google-genai client, through the
 workflow node `tests.test_planner_adapter._AdapterHarness` drives, in a session of its
 own, under Studio's streaming run config, and is checked against the entry's
-stored expectation (`tests.planner_expectations`) on what the seam answers, the
+stored expectation (`tests.planner_expectations`) on what the adapter answers, the
 progress it reports, the requests the model received, the events the session
 stores, the steps `session_steps` reads from them, and the stored state. The
 The Studio tests run a whole turn through
@@ -130,7 +130,7 @@ def _proposals(*answers: dict[str, Any], records: Plan | None = None) -> Tools:
     (`harness.scripted.use_compiled_proposals`), recording `records` first when
     the session holds no plan. Every call records the spec_ids the user picked,
     read from its steps, under `_ELECTED_KEY`, and the steps and response calls
-    it read under `_READ_KEY`. Each seam built gets `answers` afresh."""
+    it read under `_READ_KEY`. Each adapter built gets `answers` afresh."""
 
     def tools(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
         left = list(answers)
@@ -173,8 +173,8 @@ class _Entry:
 
 @dataclass
 class _Script:
-    """An entry's script: the model's replies, the seam's arguments for each run,
-    which the user's `answer` to the pending ask resumes, how the seam is set up,
+    """An entry's script: the model's replies, the adapter's arguments for each run,
+    which the user's `answer` to the pending ask resumes, how the adapter is set up,
     and the budget each run is given."""
 
     replies: Sequence[Reply]
@@ -189,7 +189,7 @@ async def _entry(
     *,
     then: Callable[[PlannerAdapter, _AdapterHarness], Any] | None = None,
 ) -> _Entry:
-    """Run `script`'s runs in one session on one seam, ADK's call ids numbered
+    """Run `script`'s runs in one session on one adapter, ADK's call ids numbered
     (`_numbered_call_ids`)."""
     scripted = ScriptedGenai(script.replies)
     adapter = scripted_planner(
@@ -232,7 +232,7 @@ async def _entry(
 def _read(events: Sequence[Event]) -> list[dict[str, Any]]:
     """What the session's readers read of `events`, in order.
 
-    `planner.session.session_steps`, Studio's translator and the seam read a
+    `planner.session.session_steps`, Studio's translator and the adapter read a
     planner event's author, branch, invocation, node path, whether it is
     partial, its content (role and parts: text, thought and signature, each
     call's name, arguments and id, each answer's name, id and response) and
@@ -290,7 +290,7 @@ def _request_dumped(request: Request) -> dict[str, Any]:
 
 
 def _briefs(request: Request) -> list[str]:
-    """The text of each part of `request` that holds the seam's brief."""
+    """The text of each part of `request` that holds the planner brief."""
     return [
         part.text
         for content in request.content_list
@@ -456,7 +456,7 @@ async def test_a_question_part_the_planner_cannot_send_ends_the_entry_refused(
     plan: Plan,
 ) -> None:
     """A question holding a file by URI ends the entry before any request on a
-    refusal the seam answers with, as it answers any refusal the run ends on."""
+    refusal the adapter answers with, as it answers any refusal the run ends on."""
     question = types.Content(
         role="user",
         parts=[
@@ -950,7 +950,7 @@ async def test_a_run_past_the_invocations_model_call_cap_stores_the_error_event(
 async def test_two_entries_at_once_on_one_pydantic_ai_adapter_keep_to_their_own_runs(
     plan: Plan,
 ) -> None:
-    """One seam's Pydantic AI planner serves two entries running at once, each in
+    """One adapter's Pydantic AI planner serves two entries running at once, each in
     its own session. The planner is built once, each request carries its own
     entry's question and answers, and each session stores the same events as
     the other."""

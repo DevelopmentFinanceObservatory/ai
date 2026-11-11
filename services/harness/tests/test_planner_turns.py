@@ -2,9 +2,9 @@
 requests and its sessions over turns that amend, replan and switch, and its
 resume of the sessions in `fixtures/adk_planner_sessions`.
 
-Each test runs a script on a scripted google-genai client through the seam. An
+Each test runs a script on a scripted google-genai client through the adapter. An
 entry is checked against the stored expectation of its test
-(`tests.planner_expectations`) on what the seam answers, the progress it reports,
+(`tests.planner_expectations`) on what the adapter answers, the progress it reports,
 the requests the model received, the events the session stores, the steps
 `session_steps` reads from them and the stored state, as `tests.test_planner_node`
 checks them.
@@ -166,7 +166,7 @@ async def test_the_planner_calls_the_gemini_model_adks_registry_resolves(
 
 
 async def test_two_planned_turns_over_one_prefix_cache_create_it_once(plan: Plan) -> None:
-    """A planned turn, then the same turn on a seam built afresh over one
+    """A planned turn, then the same turn on an adapter built afresh over one
     `PrefixCache`: the first creates the cache, the second finds it by the same
     key and sends against it."""
     caches = _Caches()

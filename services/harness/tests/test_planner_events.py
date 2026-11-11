@@ -2,7 +2,7 @@
 
 Each conversation runs on one script of a scripted google-genai client, through
 `harness.planner_adapter.PlannerAdapter` as `tests.test_planner_node` runs it. The
-seam serves the real `ask_user_question` and `get_skill`, and a `propose_plan`
+adapter serves the real `ask_user_question` and `get_skill`, and a `propose_plan`
 whose answers the script sets. Each stored session is then checked against the
 conversation's stored expectation (`tests.planner_expectations`) on what its
 readers read: each event as `tests.test_planner_node._read` reads it, what
@@ -65,7 +65,7 @@ _PLAN_JSON = scripted_plan(_QUESTION, spec_id=None).model_dump_json()
 @dataclass
 class _Skills:
     """A tool surface serving `get_skill`: each page's text, after its delay. It
-    lists no tools, so a translation the seam runs finds no schema."""
+    lists no tools, so a translation the adapter runs finds no schema."""
 
     delays: Mapping[str, float]
 

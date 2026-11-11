@@ -611,7 +611,7 @@ async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[
         allowance_s = min(step_deadline.remaining() - _EVIDENCE_DEADLINE_MARGIN_S, allowance_s)
     if allowance_s <= 0:
         return {}
-    # Whatever an injected seam raises, only the names go unread, so the catch is broad.
+    # Whatever an injected dependency raises, only the names go unread, so the catch is broad.
     try:
         async with asyncio.timeout(allowance_s):
             return await label_refs(refs)

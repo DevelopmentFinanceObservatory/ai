@@ -8,7 +8,7 @@ results with their replay recipes (`publish_result`, the completion gate's
 analysis-mcp through the execute node's `ToolSurface` (see
 `harness.agents.build_tool_surface`); this module never sees them. Both
 speak MCP over streamable HTTP to the mounts `harness.server.create_app`
-hosts in-process -- the same seam a split-out deployment would use, just
+hosts in-process -- the same interface a split-out deployment would use, just
 loopback.
 Every `Client(...)` construction below goes through `self._policy`
 (`harness.mcp_deadlines.McpTimeoutPolicy`), which carries `auth=self._token`

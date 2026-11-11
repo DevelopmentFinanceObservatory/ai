@@ -1,4 +1,4 @@
-"""The graph's planner seam, backed by the planner agent.
+"""The graph's planner adapter, backed by the planner agent.
 
 An adapter over the planner, a Pydantic AI agent run as a workflow node
 (`harness.planner_node`), on one set of tools with translation attached to
@@ -379,7 +379,7 @@ class PlannerAdapter:
         )
         # The orchestrator states the plan's question in its brief
         # (`harness.graph.state.ORCHESTRATOR_BRIEF_KEY`) before the planner
-        # ever runs, so this seam's planner restarts no plan for another
+        # ever runs, so this adapter's planner restarts no plan for another
         # question. `starts_new_plan` is refused with `QUESTION_FIXED`, handled
         # below as `BUDGET_EXHAUSTED` is. The orchestrator reads the user's
         # words and marks its asks (across years). The planner reads them only
@@ -500,7 +500,7 @@ class PlannerAdapter:
                 # always carry the graph's own record and their own ask
                 # (`harness.graph`'s own `planner` node). `prior_plan is
                 # None` alone is not enough to gate this on: a caller of
-                # this seam directly can omit it on a real amendment too
+                # this adapter directly can omit it on a real amendment too
                 # (`amendment` set, still nothing to seed `propose_plan`
                 # from but the session's own last draft -- see
                 # `test_a_sixth_amendment_turn_still_records_its_own_
@@ -517,7 +517,7 @@ class PlannerAdapter:
                 # first entry has nothing to clear. A later `plan` call in
                 # the same turn does: without this, its first-draft entry
                 # would find the earlier entry's plan still on record and,
-                # with this seam's pair built with `question_fixed=True`,
+                # with this adapter's pair built with `question_fixed=True`,
                 # could only amend it, since `starts_new_plan` is refused.
                 # The plan's alignments go with it (`clear_plan`), so no
                 # amendment of the new draft reads an input the old plan
@@ -650,7 +650,7 @@ class PlannerAdapter:
                 if plan.status is not PlanStatus.PENDING_APPROVAL:
                     # `declare_ready` enforces this (`planner.tools.
                     # _execution_blocked`); repeated here so a future gap in that
-                    # allowlist reaches this seam as a loud `PlannerAdapterError`
+                    # allowlist reaches this adapter as a loud `PlannerAdapterError`
                     # instead of a plan the graph shows the user as approvable.
                     raise PlannerAdapterError(
                         f"a plan that is {plan.status.value} was declared ready, not "
@@ -729,7 +729,7 @@ class PlannerAdapter:
         # `__call__` writes `PIN_SOURCES_STATE_KEY`, empty included, on every
         # entry, so a resume after a planner-side ask sees this turn's own
         # value once `propose_plan` runs again. The `in` check only guards a
-        # direct caller of this seam's pair that bypassed `__call__`.
+        # direct caller of this adapter's pair that bypassed `__call__`.
         if PIN_SOURCES_STATE_KEY in ctx.session.state:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,

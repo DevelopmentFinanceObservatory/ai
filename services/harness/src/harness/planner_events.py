@@ -2,7 +2,7 @@
 
 The session's planner events are the one stored record of a planner run:
 `planner.session.session_steps`, `harness.studio_translate` and the planner
-seam read them. They read each event's author, branch, invocation, node path,
+adapter read them. They read each event's author, branch, invocation, node path,
 content and state delta, so the node that drives
 `planner.pydantic_agent.run_planner` yields, for each item the run makes, an
 event holding the content and state delta an ADK `LlmAgent` stores for the

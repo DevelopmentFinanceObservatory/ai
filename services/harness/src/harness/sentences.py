@@ -29,12 +29,12 @@ sentence fails `tests/test_sentences.py`:
 the question a referral the user decides puts to them.
 
 The first three hold reason clauses, lower case and without a full stop, so a
-seam sentence can carry one (`{why}`) and a declined ask reads "not computed
+stop sentence can carry one (`{why}`) and a declined ask reads "not computed
 because <reason>". A `STOP_SENTENCES` entry is a template filled by
 `refusal_sentence` from the refusal's own `detail`. The tables are separate
 because the vocabularies share values: `requirement_unmeetable` is both a
 referral kind and a compile issue code, and `discovery_unavailable` both a
-referral kind and a seam code. A seam code has two texts: its `STOP_SENTENCES`
+referral kind and a stop code. A stop code has two texts: its `STOP_SENTENCES`
 template, which the orchestrator reads and quotes, and its `FAILURE_CLASS`
 sentence, which the Activity log shows.
 """

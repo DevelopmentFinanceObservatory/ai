@@ -38,7 +38,7 @@ modules described below, adapted for its workflow by
 `harness.planner_adapter.PlannerAdapter`. The planner is a Pydantic AI agent that
 runs inside the function node `harness.planner_node`. Its model calls go
 through `harness.planner_model`, and the node yields each response and tool
-answer as an ADK session event (`harness.planner_events`). The seam builds the
+answer as an ADK session event (`harness.planner_events`). The adapter builds the
 tool specs and the instruction the agent serves.
 
 The plan-approve-execute workflow spans four top-level modules beside it,
@@ -82,7 +82,7 @@ See `services/harness/src/planner/README.md`,
 `services/harness/src/compiler/README.md` and
 `services/harness/src/executor/README.md`.
 
-**`services/data-mcp`** is a FastMCP server over the Data seam of the
+**`services/data-mcp`** is a FastMCP server over the Data API of the
 `apis` repo: the Search API (served at `/api/search/*`) today, the
 Datasets API (`/api/datasets/*`) next, both reading from the `dcp`
 graph. Only agent-facing tool definitions belong here; the search and

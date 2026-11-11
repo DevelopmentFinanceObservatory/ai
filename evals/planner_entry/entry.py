@@ -20,7 +20,7 @@ each of the task's payloads makes. `run_entry` replays them through production c
   under the `TurnBudget` a served request gets (`harness.turn_budget`).
 
 Two edges are replaced. The planner's `get_skill` reads the recording through
-`RecordedSurface`. The seam's translate step is the eval's own,
+`RecordedSurface`. The adapter's translate step is the eval's own,
 which ends the entry once a plan is recorded (`PlanRecorded`), so a run measures the
 draft up to its first accepted plan. Given `TranslationCalls`, it first runs
 production's translation on that plan (`translator.tool.build_translate`), its calls
@@ -670,7 +670,7 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
 class PlanRecorded(Exception):  # noqa: N818 -- a stop signal, not a fault
     """Raised by the eval's translate step once `propose_plan` has recorded a plan.
 
-    The seam answers a planner tool that raises with a final refusal
+    The adapter answers a planner tool that raises with a final refusal
     (`planner_tool_failed`) and makes no further model call, so the entry ends on the
     first accepted proposal.
     """
@@ -690,12 +690,12 @@ for _logger in ("harness.planner_adapter", "harness.planner_node"):
 
 def quiet_logs() -> None:
     """Silence what a run's record already holds: ADK's traceback for a failed node and
-    the wiring's line for an entry the seam gave up on."""
+    the wiring's line for an entry the adapter gave up on."""
     for name in ("google_adk", "harness.wiring"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
-# The stop reason of an entry the seam gave up on (`PlannerAdapterError`): the planner
+# The stop reason of an entry the adapter gave up on (`PlannerAdapterError`): the planner
 # ended its turns with no accepted plan and no ask, and corrections did not change that.
 GAVE_UP = "gave_up"
 
@@ -762,7 +762,7 @@ class Probe:
     answer arrived, and what `translator` answered for the plan when one is set.
 
     The planner reaches the model only through the client `client` returns, so a
-    turn the seam or the turn budget answers in the model's place is no call. A
+    turn the adapter or the turn budget answers in the model's place is no call. A
     call stays open from its first send until a whole answer arrives or the
     entry's next request starts (`next_request`). A send while one is open is that call
     sent again (a first-chunk resend, or a resend after the prefix cache was found
@@ -985,10 +985,10 @@ def live_client() -> Client:
 def build_adapter(
     *, probe: Probe, surface: RecordedSurface, prefix_cache: PrefixCache | None, client: Client
 ) -> PlannerAdapter:
-    """The seam `harness.wiring.build_planner` builds, with the probe's translate
+    """The adapter `harness.wiring.build_planner` builds, with the probe's translate
     step and the planner's model calls going through `client`.
 
-    The planner, its instruction, its tools and the planner node the seam runs it in
+    The planner, its instruction, its tools and the planner node the adapter runs it in
     (`harness.planner_node`) are production's own.
     """
     return PlannerAdapter(
@@ -1042,7 +1042,7 @@ async def run_entry(
     The planner's model calls go through `client`, a live client (`live_client`) when
     None. `edits` change each request it is sent (`RequestEdit`), and the probe notes
     each one and its answer. The entry ends at the first plan `propose_plan` records,
-    at an ask of the user, or wherever the seam ends it (a bound of its request's
+    at an ask of the user, or wherever the adapter ends it (a bound of its request's
     budget, its round budget, a correction it gave up on), or after `timeout_s`. The
     planner streams, as a studio turn runs it. `answers` are the user's replies to
     the entry's asks, in order. Each resumes the paused entry, as the studio's
@@ -1072,7 +1072,7 @@ async def run_entry(
     )
     sessions = InMemorySessionService()
     session = await sessions.create_session(app_name=_APP, user_id=_USER, state=state)
-    # The seam wrapped as `harness.server.create_app` wraps it.
+    # The adapter wrapped as `harness.server.create_app` wraps it.
     planner = handing_back_planner_failures(probe.watch(adapter))
     runner = Runner(node=entry_workflow(planner), app_name=_APP, session_service=sessions)
     message = types.Content(role="user", parts=[types.Part.from_text(text=task.question)])
@@ -1239,7 +1239,7 @@ def _requirement_kinds(arguments: Mapping[str, Any]) -> list[str]:
 def proposals(calls: Sequence[Mapping[str, Any]], *, recorded: str | None) -> list[dict[str, Any]]:
     """Each `propose_plan` call: what it sent and what the tool answered.
 
-    The call `recorded`, which recorded the entry's plan, answers with the seam's
+    The call `recorded`, which recorded the entry's plan, answers with the adapter's
     tool-error text, since the eval's translate step stops inside it, so it is marked
     `ok`. A model response can hold several proposals, so the call is found by its id.
     """
@@ -1319,7 +1319,7 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 
 def stop_reason(run: EntryRun) -> str:
     """How the entry ended: `accepted`, `timeout` (the eval's own limit), `error`, the
-    seam's refusal code, or `asked_user` (an ask the tool took, which the entry paused
+    adapter's refusal code, or `asked_user` (an ask the tool took, which the entry paused
     on, still awaiting the user's answer). A refusal wins over an ask, since the entry
     it ends pauses on nothing."""
     if run.probe.plan is not None:

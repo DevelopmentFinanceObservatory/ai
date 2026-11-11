@@ -57,7 +57,7 @@ class Settings(BaseServiceSettings):
     apps mounted in-process by `harness.server.create_app`, derived from
     this service's own `port`. Setting `DATA_MCP_URL` / `ANALYSIS_MCP_URL`
     / `PRESENTATION_MCP_URL` always wins over that default -- that env
-    override is the seam for a future split back into standalone services
+    override is the override point for a future split back into standalone services
     (point it at the split-out service's URL instead of the loopback path).
     `database_url` and the `session_store_*` fields together select ADK's
     session backend (`harness.session_store.build_session_service`):

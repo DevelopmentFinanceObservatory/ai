@@ -4,7 +4,7 @@
 shared store; `aggregate`, through the mounted `analysis_mcp` app, resolves that
 frame; the executor binds the one to the other, checks the retrieval against
 its requirement, and accepts the run. The upstream mint is a canned response
-and the artifact fetch is patched at the one seam nothing threads a transport
+and the artifact fetch is patched at the one function nothing threads a transport
 into, so no socket opens (see `test_materialisation_across_services.py`).
 """
 

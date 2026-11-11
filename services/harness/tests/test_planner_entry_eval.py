@@ -4,12 +4,12 @@ and its summary scores runs as its README says.
 `validate.py` proposes each task's plans through the eval's own entry, the real
 orchestrator tools, graph nodes and `PlannerAdapter` over the task's recording, with a
 scripted model in place of the planner's. So a change to the planner's rules, the
-seam's brief or the orchestrator's search storage that leaves a reference plan
+planner brief or the orchestrator's search storage that leaves a reference plan
 refused, a plan whose translation no longer compiles, or a recording that no longer
 replays or lacks a first-year read or a call the translation makes, fails here rather
 than in a paid run. No model, no network. The full-set test takes about 20 s. It runs
 one scripted entry for each of the tasks' plans, and one more per task for the datasets
-its seam shows the planner.
+its adapter shows the planner.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
 """

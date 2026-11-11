@@ -1,7 +1,7 @@
 """`PlannerAdapter` with its model calls answered by a `ScriptedGenai`.
 
-`scripted_planner` builds the seam's planner (`harness.planner_node`) over the
-scripted client. `SSE` is Studio's streaming run config, which a seam on the
+`scripted_planner` builds the adapter's planner (`harness.planner_node`) over the
+scripted client. `SSE` is Studio's streaming run config, which an adapter on the
 scripted client runs under: `ScriptedGenai` scripts the streamed call only.
 """
 
@@ -51,7 +51,7 @@ def scripted_planner(
     translate: Translate | None = None,
     tools: Tools | None = None,
 ) -> PlannerAdapter:
-    """The seam over `surface` (an empty `FixtureSurface` by default), its model
+    """The adapter over `surface` (an empty `FixtureSurface` by default), its model
     calls answered by `scripted`, serving the planner's tools as `tools` changes
     them."""
     surface = surface if surface is not None else FixtureSurface(schemas=[])

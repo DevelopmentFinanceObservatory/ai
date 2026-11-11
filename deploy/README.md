@@ -197,7 +197,7 @@ out into its own Cloud Run service is additive, not a rewrite:
 1. Point the harness's `DATA_MCP_URL` / `ANALYSIS_MCP_URL` /
    `PRESENTATION_MCP_URL` env var at the new service's `https` URL instead
    of the in-container loopback path (a Cloud Run service URL already is
-   one). That env override is the seam `harness.settings.Settings` was
+   one). That env override is the override point `harness.settings.Settings` was
    built with, so no code change is needed on the harness side.
 1. Provision `MCP_API_TOKEN` as a shared secret on both the harness and the
    split-out service. The harness's own minted-token default only works

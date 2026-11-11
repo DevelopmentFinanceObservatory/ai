@@ -1,6 +1,6 @@
 """CI's share of the studio eval set (`evals/studio`, `--mode scripted`).
 
-The cases run the real workflow and planner seam under a real ADK runner, with
+The cases run the real workflow and planner adapter under a real ADK runner, with
 every model scripted, and check what each model was shown. Three things are
 held here: the cases report as marked (a pass, or an expected failure that
 still fails), each check and each stream invariant fails when the property it
@@ -91,7 +91,7 @@ class _SkillReadFailedError(RuntimeError):
 async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_receives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A planner tool whose body raises is logged with the answer the seam gives
+    """A planner tool whose body raises is logged with the answer the adapter gives
     the model for it (`failed_tool_answer`)."""
     scripted = _load("orchestrator_scripted")
     run = _load("run")

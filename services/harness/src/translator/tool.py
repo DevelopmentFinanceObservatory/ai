@@ -15,7 +15,7 @@ the run stopped on, flattened so its own `outcome`
 (`translator.referral.OUTCOME_OF`) is the verdict's: `choice_required` with
 the candidate sources, `invalid_input` for a requirement the planner repairs,
 `unsupported`, `transient` or `internal`. The referral is also saved in
-session state, for the planner seam's stall watchdog and `declare_ready`'s
+session state, for the planner adapter's stall watchdog and `declare_ready`'s
 gate. A plan that is not a translatable draft answers with the typed problem
 that says so.
 
@@ -224,7 +224,7 @@ def _referral_payload(referral: Referral) -> dict[str, object]:
     source the planner may pin without a fresh search: rendered without
     `spec_id` so the only way one reaches a pinnable choice is a real
     `source_ambiguous` or `pinned_source_not_found` referral. `budget_spent`
-    and `not_issued` appear only when set, the cases the planner seam ends
+    and `not_issued` appear only when set, the cases the planner adapter ends
     the entry on, and `source_mismatch` and `stop_code` likewise. `withheld`
     appears only when a source is withheld, each rendered without its
     `spec_id` beside the scope it drops, since no pin may name it,

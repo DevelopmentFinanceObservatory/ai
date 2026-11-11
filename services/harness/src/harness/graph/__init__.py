@@ -11,9 +11,9 @@ question to the user, and `plan_start` hands its brief to `planner` ->
 `approve` -> `execute`, whose result `plan_done` hands back to the agent.
 
 Everything external is injected (`executor`, `tool_surface`,
-`definition_surface`, `run_ledger`, `publisher`). The seams are async: ADK
+`definition_surface`, `run_ledger`, `publisher`). The injected dependencies are async: ADK
 runs a sync function node inline on the event loop, and the real implementations (`harness.mcp_client`)
-call the loopback MCP mounts over HTTP on that same loop -- a sync seam would
+call the loopback MCP mounts over HTTP on that same loop -- a sync dependency would
 block the loop and deadlock the loopback request.
 
 Behavioral guarantees the topology encodes:

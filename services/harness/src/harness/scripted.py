@@ -1,4 +1,4 @@
-"""Deterministic stand-ins for the studio's seams, for tests and the scripted eval.
+"""Deterministic stand-ins for the studio's injected dependencies, for tests and the scripted eval.
 
 Each answers from fixed data with no LLM, no MCP call and no upstream:
 `ScriptedExecutor` (the agent's and the canvas's tool calls),
@@ -361,7 +361,7 @@ async def _one_chunk(part: types.Part) -> AsyncIterator[types.GenerateContentRes
 
 
 class ScriptedPlannerModel:
-    """A `PlannerModel` seam with no model.
+    """A `PlannerModel` with no model.
 
     Drafts the canned plan `harness.scripted_plan.scripted_plan` builds. A
     re-entry -- a replan after a refusal, or a user amendment -- redrafts the
@@ -384,7 +384,7 @@ class ScriptedPlannerModel:
         pick: DecisionPick | None = None,
     ) -> dict[str, Any]:
         # Nothing to report and nothing to run through the workflow's
-        # session: this seam has no model round trips to relay and no
+        # session: this planner has no model round trips to relay and no
         # agent to host via `ctx.run_node`. It drafts the same canned plan
         # whatever the readings name.
         del ctx, readings, refusal, amendment, canvas_digest, conversation_digest, on_progress

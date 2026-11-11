@@ -6,7 +6,7 @@ them, `harness.planner_adapter`, exported `PlannerAgent` and
 `PlannerAgentError`. That module path now names its replacement instead
 (`harness.planner_adapter.PlannerAdapter`, over `harness.planner_node` and
 `translator.tool`), so banning the path would also ban legitimate use of
-the current seam. Banning `PlannerAgent`/`PlannerAgentError` by name is
+the current adapter. Banning `PlannerAgent`/`PlannerAgentError` by name is
 strictly stronger than banning the old path was: it catches the frozen
 adapter reintroduced under any module, not only the one it used to live at.
 

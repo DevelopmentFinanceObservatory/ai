@@ -90,7 +90,7 @@ _BUSY = SimpleNamespace(
 
 
 class Tools:
-    """The replayer's tool seam over analysis-mcp's functions, recording each call.
+    """The replayer's tool client over analysis-mcp's functions, recording each call.
     `answers` replaces a tool's answer, and `after` runs once a call has returned."""
 
     def __init__(self) -> None:

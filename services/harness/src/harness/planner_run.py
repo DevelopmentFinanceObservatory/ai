@@ -57,10 +57,10 @@ class PlannerAdapterError(RuntimeError):
 
     `refusal` is the shape `harness.studio_translate._stream_fatal` reads
     (`code`, `retry_mode`), so the user reads the sentence of its code. The
-    default code is `internal_error`, because the seam stopping on its own
+    default code is `internal_error`, because the adapter stopping on its own
     account is a fault of the system, whatever the question. The wire
     grammar has no member for it, so the frame states
-    `capability_unavailable`. Every way this seam fails on its own account
+    `capability_unavailable`. Every way this adapter fails on its own account
     replays the same way against the same state, so the default is
     `do_not_retry`. A caller told to retry a deterministic failure pays for
     the same stall again. `fix.detail` holds the message for the log.
@@ -174,7 +174,7 @@ class PlannerRun:
             # restart while the graph holds the question fixed
             # (`QUESTION_FIXED`, the `question_fixed` mode of
             # `planner.specs.planner_specs`, which
-            # the seam's own planner always uses, see
+            # the adapter's own planner always uses, see
             # `harness.planner_adapter.PlannerAdapter.__init__`). The cap bounds the
             # proposals within one entry into the planner, since
             # `PlannerAdapter.__call__` resets the count on each entry. A restart
@@ -457,7 +457,7 @@ def _user_decided_ask(referral: Mapping[str, Any] | None) -> dict[str, Any] | No
 
     A referral of a kind in `translator.referral.USER_DECIDES` carrying
     pinnable candidates (`_pinnable_candidates`) leaves the pick to the user,
-    so the seam asks it, led by the referral's sentence
+    so the adapter asks it, led by the referral's sentence
     (`harness.sentences.referral_sentence`). One marked `source_mismatch`
     asks which other source to use instead. One with no candidates leaves
     the planner to say what cannot be done and ask what to change.

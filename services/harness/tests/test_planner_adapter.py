@@ -3,7 +3,7 @@
 
 Model-free. A scripted google-genai client (`tests.scripted_genai.ScriptedGenai`)
 answers the planner's model calls (`tests.scripted_planner.scripted_planner`). Most
-scenarios either hand the seam an already-compiled `Plan` (built the way
+scenarios either hand the adapter an already-compiled `Plan` (built the way
 `tests/planner/test_agent.py`'s `_translate` helper builds one, through the
 real `Plan.with_translation`) and give the planner the `propose_plan`
 `harness.scripted.use_compiled_proposals` installs, so the scripted model's
@@ -258,7 +258,7 @@ def _last_amended_version(request: Any, *, default: int) -> int:
     `propose_plan` answers with `version`, and that number is where a model
     reads the `amends_version` its next call has to state. A request with no
     such answer in it yet is the turn's first proposal: the model has the
-    version from the seam brief's own "version N" line, which `default`
+    version from the planner brief's own "version N" line, which `default`
     stands in for.
     """
     for content in reversed(_contents(request)):
@@ -329,7 +329,7 @@ class _AdapterHarness:
     """Drives `PlannerAdapter.__call__` through a real, dynamically-scheduled
     `Context` -- the same primitive `harness.graph`'s own planner node
     drives `PlannerAdapter` through, and the only way to get a `Context`
-    `ctx.run_node` will accept, since this seam has no `Runner` of its
+    `ctx.run_node` will accept, since this adapter has no `Runner` of its
     own to call directly.
 
     One `_AdapterHarness` reuses the same session across every `run` call,
@@ -456,7 +456,7 @@ async def _run_adapter(adapter: PlannerAdapter, **kwargs: Any) -> dict[str, Any]
     """One-shot `_AdapterHarness.run`, for a test that only makes one call and
     does not need to inspect `ctx.state` afterward."""
     output = await _AdapterHarness().run(adapter, **kwargs)
-    assert output is not None, "the seam node produced no output -- did it raise silently?"
+    assert output is not None, "the adapter's node produced no output: did it raise silently?"
     return output
 
 
@@ -528,7 +528,7 @@ async def test_the_adapter_returns_a_plan_a_graph_node_can_validate(
     )
 
     # The node's own validation (`Plan.model_validate(drafted["plan"])` in
-    # `harness.graph.planning`'s `planner` node), repeated here as the contract this seam owes it.
+    # `harness.graph.planning`'s `planner` node), repeated here as the contract this adapter owes it.
     validated = Plan.model_validate(drafted["plan"])
     assert validated.version == plan.version
     assert validated.status is PlanStatus.PENDING_APPROVAL
@@ -568,7 +568,7 @@ async def test_a_prior_plan_is_what_propose_plan_amends_from(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """An amendment starts from the graph's own record, not whatever this
-    seam last left in the session: seeding `prior_plan` through
+    adapter last left in the session: seeding `prior_plan` through
     `save_plan` on every call means the second call's version-5 record,
     not the first call's version-1 draft, is what the amendment builds on
     -- even though both calls share the same session.
@@ -578,7 +578,7 @@ async def test_a_prior_plan_is_what_propose_plan_amends_from(
     wording, so the seed is what makes that version the right one to name: a
     session still holding the first call's version-1 draft refuses this call
     as amending the wrong version. What records version 6 is therefore the
-    graph's own seeded record, not what this seam left in the session.
+    graph's own seeded record, not what this adapter left in the session.
     """
     harness = _AdapterHarness()
     made_decision = decision()
@@ -1078,7 +1078,7 @@ async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused
 
 async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() -> None:
     """The planner's `ask_user_question` call, accepted, ends the
-    planner's run, and the seam answers the ask, which the node pauses on, so
+    planner's run, and the adapter answers the ask, which the node pauses on, so
     the node resolves no output. The call's own function-call event is on
     record afterward, in the session's own event history
     (`planner.session.session_steps`'s own docstring). But an offer is not an
@@ -1267,7 +1267,7 @@ async def _pause_on_a_legacy_ask(harness: _AdapterHarness, question: dict[str, A
     """Leave `harness`'s session paused on a long-running
     `REQUEST_INPUT_FUNCTION_CALL_NAME` call asking `question`, with no pending
     ask recorded. No planner builds that call, so this helper stands in for the
-    seam and appends the call to the stored session."""
+    adapter and appends the call to the stored session."""
     call_id = "legacy-ask"
     call = types.FunctionCall(id=call_id, name=REQUEST_INPUT_FUNCTION_CALL_NAME, args=question)
 
@@ -1407,7 +1407,7 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_adapters_own_ask(
     referral: dict[str, Any], candidates: list[dict[str, str]]
 ) -> None:
     """The translation refers a requirement back with candidates the user
-    picks from, so the seam asks them itself: the run pauses on an
+    picks from, so the adapter asks them itself: the run pauses on an
     `ask_user_question` call led by the referral's table sentence, and no
     model turn composes it."""
     scripted = ScriptedGenai([_calls(*_DECLARE), _says("never sent")])
@@ -1451,7 +1451,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """The planner node runs a pick's replan under the switch's
-    `_unless_stopped`, which runs the seam as a task so a Stop can reach it.
+    `_unless_stopped`, which runs the adapter as a task so a Stop can reach it.
     A planner-side ask pauses the run through a real `ctx.run_node`,
     the pick survives the pause in durable state, the answer resumes and
     finishes the draft, and the run reports its proposal from inside the
@@ -1507,7 +1507,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
 ) -> None:
     """ADK hands a node its input only on a live run, so a planner-side ask's
     resume would send the model no brief if the brief travelled as node
-    input. The seam gives the brief to the planner's node
+    input. The adapter gives the brief to the planner's node
     (`harness.planner_node.planner_node`), which puts it after the turn's
     question on every request: the first request after the answer,
     which runs the planner again with the user's pick in its brief, and the
@@ -1601,7 +1601,7 @@ def _rediscovery_refusal(spec_id: str, code: str = "over_ceiling") -> dict[str, 
 def test_a_wave_with_two_refused_specs_names_both() -> None:
     """`_replan_refusal`'s `also_stopped` carries a wave's other stops
     (`executor.run._Run.execute`'s siblings); a `RediscoveryNeeded` among
-    them names a second refused spec this seam must treat the same as the
+    them names a second refused spec this adapter must treat the same as the
     primary's own: named in the `avoid` sentence, not just the first."""
     adapter = _scripted_planner(ScriptedGenai([]))
     refusal = _rediscovery_refusal(SPEC)
@@ -2494,7 +2494,7 @@ def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
 async def test_the_brief_seeded_with_a_split_plan_shows_the_plan_the_model_wrote(
     decision: Any,
 ) -> None:
-    """The graph hands the seam the stored plan, copies and all. The brief the
+    """The graph hands the adapter the stored plan, copies and all. The brief the
     planner reads names `debt` and its source, and neither the copy nor the
     copy's pin."""
     stored = stored_split_plan(decision)
@@ -2630,7 +2630,7 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
     amended_from: list[int] = []
 
     # Both entries run in one node, as the graph's planner node re-enters the
-    # seam over the `amend` edge in the same session. No translation
+    # adapter over the `amend` edge in the same session. No translation
     # compiles, so each ends with no plan ready, leaving its draft on record.
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
@@ -4514,7 +4514,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
 ) -> None:
     """The `amend` edge (`approve_n -> planner_n`) seeds `prior_plan` from
     the graph's own record, so a plan is already recorded when this call's
-    one generation runs. This seam's pair is always built with
+    one generation runs. This adapter's pair is always built with
     `question_fixed=True` (`PlannerAdapter.__init__`), so a `starts_new_plan`
     call there is refused as `QUESTION_FIXED` -- terminal, recording
     nothing -- rather than beginning a second plan for a different
@@ -4583,7 +4583,7 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     assert first is not None and "plan" in first
     first_requests = len(scripted.requests)
 
-    # A seam with the real `propose_plan`, on the same session.
+    # An adapter with the real `propose_plan`, on the same session.
     adapter = _scripted_planner(scripted)
 
     # This second entry's draft carries no translation, so it is never
@@ -4831,7 +4831,7 @@ async def test_an_entry_leaves_no_session_write_out_of_the_stored_session(
 ) -> None:
     """Every key a planner entry leaves in the live session state, when it
     pauses on an ask or finishes, holds the same value in the stored session,
-    except `temp:` keys. Nothing the seam or the planner's tools write is lost
+    except `temp:` keys. Nothing the adapter or the planner's tools write is lost
     at the next `Runner.run_async`."""
     drafts = _Drafts(
         _amendment_proposal(decision, requirement, derived_requirement),
@@ -4951,7 +4951,7 @@ async def test_a_turn_that_loops_past_the_round_cap_is_refused_not_raised(
     *within* one turn, since the model can call it more than once inside a
     single `_propose`/`ctx.run_node` call and nothing but the round cap counts
     that. This scripts five `propose_plan` calls in one continuous planner
-    turn (one `__call__`, one `_propose`, and no second turn), so the fifth is the one that goes past the cap. The seam returns a
+    turn (one `__call__`, one `_propose`, and no second turn), so the fifth is the one that goes past the cap. The adapter returns a
     refusal and does not raise `PlannerAdapterError`: raising it would end the
     turn through `_stream_fatal`'s `close_turn(error=...)`, which `begin_turn`
     documents as abandoning the paused session and its plan, so the last

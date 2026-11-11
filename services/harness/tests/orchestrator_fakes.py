@@ -86,7 +86,7 @@ class ScriptLlm(BaseLlm):
 
 
 class FailingPlanner:
-    """A planner seam that raises `PlannerAdapterError`, the way `PlannerAdapter` fails."""
+    """A fake planner that raises `PlannerAdapterError`, the way `PlannerAdapter` fails."""
 
     def __init__(self, message: str = "the planner ran past 60 events without settling") -> None:
         self.message = message
@@ -96,7 +96,7 @@ class FailingPlanner:
 
 
 class RefusingPlanner:
-    """A planner seam that refuses to draft, as `PlannerAdapter` does at its round cap."""
+    """A fake planner that refuses to draft, as `PlannerAdapter` does at its round cap."""
 
     def __init__(self, *, final: bool = False) -> None:
         self.questions: list[str] = []

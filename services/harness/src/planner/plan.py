@@ -334,7 +334,7 @@ MAX_PLAN_DECISIONS = 24
 # The most evidence requirements one plan may state. A plan that spends
 # `translator.discovery.DISCOVERY_CALL_BUDGET` (8, one search per dataset
 # requirement) carries about eight dataset requirements and about as many
-# calculations over them; the realistic upper end the seam brief is sized
+# calculations over them; the realistic upper end the planner brief is sized
 # from is nine requirements in total. Sixteen dataset requirements with their
 # calculations is roughly twice the budget, so a plan at the cap is refused
 # for its size rather than for a discovery budget it can never spend.
@@ -4311,7 +4311,7 @@ _MODEL_AUTHORED = {"question", "answer_mode", "decisions", "evidence_requirement
 
 
 def _serialised_chars(value: Any) -> int:
-    """Characters of `value` as compact JSON with non-ASCII left as written, as the seam renders it."""
+    """Characters of `value` as compact JSON with non-ASCII left as written, as the adapter renders it."""
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
@@ -6446,7 +6446,7 @@ class AlignedPin(StrictModel):
     `option_ids` holds one option per axis moved, measure basis or provider
     scope, sorted (`submission.service.Realignment.option_ids`). `digest` is
     Search's answer as a search's digest
-    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    (`harness.tool_contracts.resolver_digest`), which the planner adapter stores
     as a reading of the conversation.
 
     A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is

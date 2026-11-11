@@ -57,10 +57,10 @@ and `internal`. `translator.tool.issue_resolution` maps every
 `CompileIssueCode` to one resolution: discover the source again, refer the
 requirement for repair (naming the `constraint` and the permitted `repair`),
 refer it as unmeetable or unsupported, or close as an `internal_failure`,
-logged under the `reference` the referral carries. The planner seam ends the
+logged under the `reference` the referral carries. The planner adapter ends the
 planner's entry on an internal failure. A translation that fails with the
 same issues it failed with before in the session is referred again marked
-`repeated`, and the seam stops the planner's run on it.
+`repeated`, and the adapter stops the planner's run on it.
 
 `describe` is not a tool of its own: translation calls it from code
 (`translator.discovery.fetch_definitions`), immediately before compiling, to

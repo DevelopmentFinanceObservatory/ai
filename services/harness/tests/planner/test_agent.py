@@ -12669,7 +12669,7 @@ def test_a_user_decision_restated_and_left_uncited_is_refused_as_dropped(
 
 
 def _typed(text: str, *, branch: str | None = None) -> Event:
-    """A user-role text event: the user's own message, or the planner seam's under `branch`."""
+    """A user-role text event: the user's own message, or the planner adapter's under `branch`."""
     return Event(
         author="user",
         branch=branch,
@@ -12753,7 +12753,7 @@ def test_what_counts_as_the_user_speaking_after_the_plan_was_recorded(
     after: Callable[[int], list[Any]],
     lands: bool,
 ) -> None:
-    """The user's own message counts and the planner seam's does not; a bare
+    """The user's own message counts and the planner adapter's does not; a bare
     retry's answer repeating the version moves no mark; and a plan this
     session never recorded was recorded before the turn's message."""
     dataset, derived = requirements
@@ -14636,7 +14636,7 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 
 
 # The instruction the served planner carries: the translator attached, the
-# skill tools built and the question held by the harness graph's seam.
+# skill tools built and the question held by the harness graph.
 _SERVED_INSTRUCTION = planner_instruction(has_translator=True, has_skills=True, question_fixed=True)
 
 

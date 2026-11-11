@@ -60,7 +60,7 @@ battery via `services/harness/tests/test_studio_orchestrator_eval.py`. A case's 
   (`variable`, `status`, and for a definite part `spec_id`, `sentence`, `coverage`,
   `warnings`), run through the same digest the served resolver builds.
 - `plan_spec_id`: the source the canned plan retrieves. The planner's model submits
-  the plan `harness.scripted_plan` builds, so the seam renders its real first message
+  the plan `harness.scripted_plan` builds, so the adapter renders its real first message
   and the approval, execution and hand-back nodes run as served; `propose_plan` and
   its translation are not exercised.
 - `planner`: the planner model's replies instead, in the orchestrator script's shape.

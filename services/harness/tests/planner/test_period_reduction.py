@@ -211,7 +211,7 @@ def _context(
     """The part of ADK's `ToolContext` `propose_plan` reads.
 
     `across_years` numbers the asks the orchestrator marked, and
-    `amendment` is what the seam recorded of the entry, `None` for a session
+    `amendment` is what the adapter recorded of the entry, `None` for a session
     it recorded nothing in.
     """
     state: dict[str, Any] = {
@@ -245,7 +245,7 @@ def _propose(
     """Propose `requirements`, the last of which answers ask 0 unless `answered` says otherwise.
 
     A plan on record in `ctx` is the one the call amends, unless `restart`
-    begins a plan of its own. The planner is the seam's, which reads the
+    begins a plan of its own. The planner is the adapter's, which reads the
     user's words only in an amendment entry, unless `reads_user_words` makes
     it the standalone planner's.
     """

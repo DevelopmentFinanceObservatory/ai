@@ -250,8 +250,8 @@ def test_the_budget_refusal_is_stated_as_a_per_entry_budget_in_the_user_s_terms(
 
     The plan's own version can read higher than the count (it climbs across
     entries), so the sentence names the budget. It makes no claim about what
-    can still be approved: the seam has no view of the graph's record, and the
-    graph adds that claim where its record supports it.
+    can still be approved: the adapter that writes it has no view of the graph's
+    record, and the graph adds that claim where its record supports it.
     """
     text = refusal_sentence(
         {"code": "budget_exhausted", "detail": {"scope": "plan_rounds", "rounds": 4, "version": 9}}

@@ -12,7 +12,7 @@ which resumes the run.
 Every request the model receives, and the plan the entry lands, equal the case's
 stored expectation (`tests.planner_expectations`). That covers the first request of
 each entry, built from the recorded readings, skills and asks, and, for an entry with
-an ask, the request after the ask is answered. The stored requests hold the seam's
+an ask, the request after the ask is answered. The stored requests hold the adapter's
 brief as a marker (`planner_expectations.BRIEF`). No model or network is involved,
 since the recorded answers replay from files.
 """

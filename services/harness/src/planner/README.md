@@ -441,7 +441,7 @@ read as a new plan.
 
 **`question_fixed` holds the turn's question against a restart.**
 `planner_tool_specs(..., question_fixed=True)`. The harness's planner
-seam builds the planner this way, since the orchestrator's `plan` brief fixes
+adapter builds the planner this way, since the orchestrator's `plan` brief fixes
 a turn's `question` before the planner ever runs, and a restart would
 silently swap the question out from under the plan the workflow holds. Under it,
 `starts_new_plan` with a plan already recorded is refused with

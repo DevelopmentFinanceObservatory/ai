@@ -4485,7 +4485,7 @@ class SearchedPin(StrictModel):
     (`translator.discovery.requirement_revision`), so a requirement restated
     with other words, parties or years is searched again. `spec_id` is the
     dataset Search settled on and `digest` its answer as a search's digest
-    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    (`harness.tool_contracts.resolver_digest`), which the planner adapter stores
     as a reading of the conversation; both are `None` when Search settled on
     no one dataset, and `_aligned_bases` then refuses the plan. `status` is
     the status Search answered the part with (`definite`, `ambiguous`,

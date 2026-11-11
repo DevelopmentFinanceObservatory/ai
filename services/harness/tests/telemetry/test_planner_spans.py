@@ -1,6 +1,6 @@
 """What a Langfuse reader sees of a planner entry.
 
-Each entry runs through the seam on the Pydantic AI planner over a scripted
+Each entry runs through the adapter on the Pydantic AI planner over a scripted
 google-genai client (`tests.test_planner_node`), and the planner's spans are
 read the way Langfuse's OTLP ingestion reads them (`_seen`): the observation
 type, name, model, session, input, output, usage, level and status message, the

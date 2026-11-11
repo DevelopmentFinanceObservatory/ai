@@ -1,4 +1,4 @@
-"""The studio, scripted: real workflow, real planner seam, no model.
+"""The studio, scripted: real workflow, real planner adapter, no model.
 
 This module builds the studio `harness.server` serves and replaces only what
 a model or an upstream would answer:
@@ -9,7 +9,7 @@ a model or an upstream would answer:
   calls answered by a scripted google-genai client
   (`harness.scripted.scripted_client`). Its model either proposes the canned plan `harness.scripted_plan` builds,
   through a `propose_plan` that declares the plan on record ready
-  (`harness.scripted.use_compiled_proposals`), so the seam renders its real
+  (`harness.scripted.use_compiled_proposals`), so the adapter renders its real
   first message and the workflow's approval, execution and hand-back nodes
   run as served, or, when the case scripts it (`planner`),
   answers from that script and drives the real `propose_plan`, whose
@@ -100,7 +100,7 @@ class Log:
 
     def planner_tool_answered(self, tool: str, answer: dict[str, Any] | None) -> None:
         """Record a planner tool call by the answer the model receives for it: the
-        tool's own, an argument refusal, or the seam's answer for a tool that
+        tool's own, an argument refusal, or the adapter's answer for a tool that
         raised (`PlannerAdapter`'s `on_tool_answered`)."""
         response = answer or {}
         self.entries.append(
@@ -445,8 +445,8 @@ def _planner_adapter(
     tools: Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]] = tuple,
     on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> PlannerAdapter:
-    """The real seam, built with `settings`, over `surface`, its model calls
-    answered by `answer`, its tools the ones the seam builds for itself
+    """The real adapter, built with `settings`, over `surface`, its model calls
+    answered by `answer`, its tools the ones the adapter builds for itself
     (`planner.specs.planner_specs` over `surface` and its translation) as
     `tools` changes them, and each tool's answer told to `on_tool_answered`."""
     translate = build_translate(surface=surface)

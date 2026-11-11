@@ -6,7 +6,7 @@ to pick the conversation's client, which names the conversation to the MCP
 servers in its `x-dfo-caller` header (`common.caller`), which data-mcp and
 analysis-mcp record as a stored frame's `writer`. It is a contextvar
 because the value has to cross the graph: studio -> ADK runner -> graph
-node -> executor, and none of those seams carries wire identity, since the
+node -> executor, and none of those layers carries wire identity, since the
 graph must stay runnable without any studio layer at all.
 
 `current_user_message` holds the user's own message for the turn, which the
@@ -28,7 +28,7 @@ current_conversation_id: ContextVar[str] = ContextVar(
 )
 
 # The same identity as a (principal, conversation_id) PAIR, for lookups that
-# need the store key itself (the recall seam). Kept
+# need the store key itself (the recall function). Kept
 # separate because principal and conversation_id are both client-influenced
 # strings -- splitting the joined form back apart would be ambiguous.
 current_conversation_key: ContextVar[tuple[str, str] | None] = ContextVar(

@@ -1943,7 +1943,7 @@ def test_the_planner_starting_a_first_draft_opens_working_on_a_plan() -> None:
 
 
 def test_the_adapters_late_progress_reports_are_not_shown() -> None:
-    """The node relays the seam's reports only after the draft is done, so
+    """The node relays the adapter's reports only after the draft is done, so
     they would repeat the live lines out of order."""
     translator = _translator()
     report = {"agent": "dfo_planner", "tools": ["propose_plan"], "duration_ms": 5}
@@ -2106,7 +2106,7 @@ _SOURCE_ASK = {
 
 
 def _scripted_adapter(scripted: ScriptedGenai) -> PlannerAdapter:
-    """The seam over an empty fixture surface, its model answered by `scripted`."""
+    """The adapter over an empty fixture surface, its model answered by `scripted`."""
     return PlannerAdapter(
         settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
     )

@@ -22,13 +22,13 @@ from its first report to its final `complete` or `failed` frame, so the
 Activity feed holds one line per step and updates it in place.
 
 The planner node has no such recorder -- its work happens inside a
-`PlannerModel` seam's own model round trips, not through the tool surface.
+`PlannerModel`'s own model round trips, not through the tool surface.
 Its agent's function-call events reach the runner stream as each call is
 made, so each call it makes becomes a status line ("Checking the plan
 against the data", "Getting the plan ready for you", ...) the moment it
 happens, after the "Working on a plan" line the node opens as a draft
 starts. One status line runs at a time; the next one, the plan card, a
-pause or the segment's end completes it. The seam's own `on_progress` reports, which
+pause or the segment's end completes it. The planner's own `on_progress` reports, which
 the node can only relay once the draft is done (`harness.graph`'s
 `planner` node), say the same thing late and are not shown.
 """
@@ -576,7 +576,7 @@ class _RecordingSurface:
     `executor.run.execute_approved_plan` against this wrapper instead of the
     bare `ToolSurface`, timing each `call_tool` and tagging the record with
     the conversation that made it, the same discipline `_RecordingExecutor`
-    uses for the scripted `Executor` seam. `list_tools` passes straight
+    uses for the scripted `Executor`. `list_tools` passes straight
     through; only calls are wire progress.
 
     Two things beyond timing:
@@ -1214,7 +1214,7 @@ def _switch_failed(payload: Mapping[str, Any]) -> PlanSwitchFailed | None:
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     """The planner node's payload as a `planner.plan.Plan`. The planner
     node itself validates a model-drafted plan (`harness.graph.planning`'s `planner` node
-    raises on a draft the seam could not validate), so this only ever sees
+    raises on a draft the adapter could not validate), so this only ever sees
     a plan already known good.
 
     `refusal_note` is the one field a `"pending_refusal"`-routed payload,
@@ -1413,7 +1413,7 @@ class _Translator:
                     frames.extend(self._proposal_answered(response.response or {}, recorded))
             return frames
         node = _node_name(event)
-        # The planner node's other `custom_metadata` events, the seam's
+        # The planner node's other `custom_metadata` events, the adapter's
         # late `progress` reports, carry no output and add no frame.
         started = event.custom_metadata.get(PLANNER_STARTED_KEY) if event.custom_metadata else None
         if node == "planner" and isinstance(started, dict):

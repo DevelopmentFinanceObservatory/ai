@@ -3,7 +3,7 @@
 the helpers they share.
 
 The workflow tests run the orchestrator topology (`orchestrator_runner`):
-the agent hands a brief to a planner seam, the turn pauses on the plan card,
+the agent hands a brief to a planner, the turn pauses on the plan card,
 and the answer resumes it into `execute` and `plan_done`. The rest are unit
 tests of the node helpers. Everything runs offline against scripted fakes:
 no model, no MCP server.
@@ -610,7 +610,7 @@ async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any
     """A wrong answer, one naming another revision or stating no
     timezone-aware approval time, routes to amend; `ScriptedPlannerModel`
     redrafts the same canned steps as the next version, bumping `version`
-    and `previous_version` the way any `PlannerModel` seam must."""
+    and `previous_version` the way any `PlannerModel` must."""
     surface = _CallRecordingSurface(ScriptedSurface())
     runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
@@ -1390,7 +1390,7 @@ async def test_plan_amendment_lineage_is_real() -> None:
     assert plan.decisions[0].chosen in plan.decisions[0].options
 
 
-# --- the planner node against a model seam --------------------------------
+# --- the planner node against a planner model --------------------------------
 
 
 def _planner_plan(
@@ -1402,7 +1402,7 @@ def _planner_plan(
     stat_vars: str | None = None,
     terminal: tuple[str, ...] = ("totals",),
 ) -> PlannerPlan:
-    """A real, translated `planner.plan.Plan` -- the shape a `PlannerModel` seam hands back.
+    """A real, translated `planner.plan.Plan` -- the shape a `PlannerModel` hands back.
 
     `stat_vars` is the reading its `get_data` step sends, for a plan whose
     source is a family of StatVars; `None` sends none. `terminal` names the
@@ -1509,7 +1509,7 @@ class _Planner:
 async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_state(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """The seam returns `{"plan": <planner.plan.Plan JSON>, "summary": ...}`;
+    """The planner returns `{"plan": <planner.plan.Plan JSON>, "summary": ...}`;
     the node validates it as a `planner.plan.Plan`, and emits `summary` and
     `revision` beside it -- both the record and the wire keys, not one
     constructed from parts the way the frozen adapter's protocol was.
@@ -1531,7 +1531,7 @@ async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_sta
 
 
 async def test_the_planner_node_raises_on_a_malformed_plan_rather_than_constructing_one() -> None:
-    """A draft the seam could not itself validate must not reach the approve gate."""
+    """A draft the planner could not itself validate must not reach the approve gate."""
     planner = _Planner([{"plan": {"decisions": "not-a-list"}, "summary": {}}])
     runner, _ = _plan_runner(planner)
 
@@ -1567,7 +1567,7 @@ async def test_a_turn_closed_mid_draft_cancels_the_planner_and_writes_no_state_a
     await that cancellation, which throws into whatever node is suspended.
     The `planner` node is suspended in exactly that way whenever a draft is
     in flight: it awaits `models.planner(...)` directly (`harness.graph.planning`'s
-    `planner`), so a cancellation there throws straight into the seam's own
+    `planner`), so a cancellation there throws straight into the planner's own
     suspended `ctx.run_node` call. The draft must not survive: it is a live
     model and tool round trip that would otherwise keep running, and keep
     writing session state, after the turn has closed."""
@@ -1579,7 +1579,7 @@ async def test_a_turn_closed_mid_draft_cancels_the_planner_and_writes_no_state_a
     stream = runner.run_async(user_id="u", session_id="s", new_message=types.UserContent(_BRIEF))
 
     # Drive the stream one frame at a time, the way `studio._sse_stream`
-    # does, until the seam signals a draft is in flight. `next_frame` is
+    # does, until the planner signals a draft is in flight. `next_frame` is
     # then the in-flight `anext()` task, suspended inside the planner
     # node's own `await models.planner(...)` call -- exactly what
     # `_unwind`, below, closes over in the real stop-and-disconnect path.
@@ -1631,7 +1631,7 @@ class _AskingPlanner:
 
 
 async def test_a_planner_side_pause_relays_its_progress_before_the_question() -> None:
-    """The `planner` node relays the progress the seam reported, then pauses
+    """The `planner` node relays the progress the planner reported, then pauses
     on the planner's question under its call id, carrying the call's
     arguments as the payload. No `plan.proposed` or `refused` output follows:
     the turn is suspended, not settled."""
@@ -1677,7 +1677,7 @@ class _GatedPlanner:
 
 
 async def test_the_planner_node_announces_a_draft_before_the_planner_returns() -> None:
-    """The node's first event reaches the runner stream while the seam is
+    """The node's first event reaches the runner stream while the planner is
     still drafting, so Studio can say a plan is under way."""
     planner = _GatedPlanner()
     runner, _ = _plan_runner(planner)
@@ -1751,7 +1751,7 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
 ) -> None:
     """The planner asks the user a question while amending a plan, and the
     plan on record is unreadable when the answer resumes it. The `planner`
-    node finds that itself: nothing is left to amend, so the seam is handed
+    node finds that itself: nothing is left to amend, so the planner is handed
     no amendment and no prior plan, and the card says why."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _AskingOnAmendPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
@@ -1986,7 +1986,7 @@ async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
 ) -> None:
     """The planner refuses the replan: the card offers the plan on record
     again with the switch node's `switch_failed`, carrying the refusal's code,
-    or the seam's `plan_not_ready` for a refusal stating none, and the
+    or the planner's `plan_not_ready` for a refusal stating none, and the
     sentence for the user, and the drafting state is put back. The same pick
     can succeed again only where a scope switch's revision could, whatever
     the refusal's `final` says."""
@@ -2328,7 +2328,7 @@ async def test_an_approved_plan_compiled_against_an_older_get_data_is_refused_fo
 async def test_a_refused_amendment_still_offers_the_pending_version_for_approval(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A `PlannerModel` seam can refuse to draft at all
+    """A `PlannerModel` can refuse to draft at all
     (`harness.planner_adapter.PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap,
     surfaced as `{"refused": {"text": ...}}` rather than a raised
     `PlannerAdapterError`). The planner node never writes `ctx.state["plan"]`
@@ -2916,7 +2916,7 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
     # A method choice, not a dead end: the planner is asked again (the
-    # scripted seam redrafts the same plan, so the version does not bump),
+    # scripted planner redrafts the same plan, so the version does not bump),
     # and a fresh approval is pending rather than the turn closing.
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     assert len(planner.calls) == 2
@@ -3893,7 +3893,7 @@ async def _switch_runner(
     as one resolved with `stored_groups` when given) beside its block naming `entity_groups` when given, held as the
     whole `earlier_whole` an earlier plan compiled from its part when given,
     then answered with a switch to `option_id`, by default its sector to CRS
-    120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
+    120 and 130, through `search`. Returns the runner, the planner, the plan, the scope and the
     resumed turn's events."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
@@ -4325,7 +4325,7 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
         scope["compiled"]["spec_id"]
     ]
-    # The fake seam drafted with no pin sources or rounds of its own.
+    # The fake planner drafted with no pin sources or rounds of its own.
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
     resolved = [
@@ -4578,7 +4578,7 @@ class _TranslatingPlanner(_Planner):
 
 class _SwitchedOff(NamedTuple):
     """A switch off a stated source (`_switch_off_a_stated_source`): the runner, the
-    switch's events, the seam that revised, the pin Search answered and the copy
+    switch's events, the planner that revised, the pin Search answered and the copy
     of it over the plan's years."""
 
     runner: Any

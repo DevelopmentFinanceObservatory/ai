@@ -45,7 +45,7 @@ async def _live_schemas() -> dict[str, ToolSchema]:
 async def test_every_pinned_hash_matches_the_live_schema() -> None:
     # Failing here means a server changed a tool's arguments or its declared
     # output. Re-read the schema, check the row's inputs still name the right
-    # seams, and re-pin. A row pinning no output hash is compared on its
+    # arguments, and re-pin. A row pinning no output hash is compared on its
     # input alone.
     live = await _live_schemas()
 
