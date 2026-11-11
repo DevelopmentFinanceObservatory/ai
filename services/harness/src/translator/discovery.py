@@ -3506,7 +3506,8 @@ def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
     Discovery searches the planner's own words, so each axis a block's scope
     choices settled other than by default is marked as the planner's
     (`harness.scope_choices.mark_searched_axes`), as for a search the planner
-    makes itself (`planner.source_reads.pin_by_search`). A block whose scope choices this release cannot read marks none.
+    makes itself (`planner.source_reads.pin_by_search`). A block whose scope
+    choices this release cannot read marks none.
     A block of an answer that is not definite, a candidate or a nearest
     series, is marked unread as any such block is (`planner.plan.scope_unread`).
     """

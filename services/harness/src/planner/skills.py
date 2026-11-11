@@ -2,17 +2,17 @@
 
 It is data-mcp's `get_skill`, called through the harness's
 `compiler.surface.ToolSurface` (`read_skill_page`) in the shape the public MCP
-surface offers: the skill's first page, or one file of it when `path` is given,
-with `offset` and `digest` to read on. `planner.specs.skill_tool_spec` declares it
-as the planner's `get_skill` tool. A call answers with data-mcp's text as it came back, a
-refusal's included: an unknown id refuses `skill_not_found`, and a deployment
-with no Skills API refuses `capability_unavailable`, which the planner reads and
-drafts on without the skill. A call that does not complete answers with one
-sentence saying so.
+surface offers. A call reads the skill's first page, or one file of it when
+`path` is given, with `offset` and `digest` to read on.
+`planner.specs.skill_tool_spec` declares it as the planner's `get_skill` tool.
+A call answers with data-mcp's text as it came back, a refusal's included. An
+unknown id refuses `skill_not_found`, and a deployment with no Skills API
+refuses `capability_unavailable`, which the planner reads and drafts on without
+the skill. A call that does not complete answers with one sentence saying so.
 
 Each answer data-mcp serves without an error is also recorded in session
-state (`SKILLS_READ_STATE_KEY`), so a later run of the same plan can be shown
-what an earlier run read (`harness.planner_seam`) instead of reading it again.
+state (`SKILLS_READ_STATE_KEY`). A later run of the same plan is shown what an
+earlier run read (`harness.planner_seam`) and does not read it again.
 """
 
 from __future__ import annotations

@@ -986,8 +986,8 @@ async def test_no_planner_tool_writes_pending_approval(
 def test_no_planner_code_names_the_transition_that_mints_pending_approval() -> None:
     # The structural fact examples cannot reach: `Plan.with_translation` is
     # the only transition anywhere that produces `PENDING_APPROVAL`, and no
-    # code in the planner's tool modules calls it -- an AST walk rather than a substring
-    # search, since a comment or docstring may mention it and a
+    # code in the planner's tool modules calls it. The check walks the AST,
+    # since a comment or docstring may mention it and a
     # `getattr(plan, "with_" + "translation")` may not.
     #
     # `PENDING_APPROVAL` itself is named once, in `_execution_blocked`'s own
@@ -10822,7 +10822,7 @@ def test_donors_a_part_binds_through_a_choice_alone_count_their_own_flows() -> N
 
 
 def _searched_in_words(block: dict[str, Any], *, stated: bool = True) -> dict[str, Any]:
-    """A copy of `block` as the planner holds a search for it (`planner.source_reads.pin_by_search`):
+    """A copy of `block` as the planner holds a search for it (`pin_by_search`):
     every axis Search settled other than by default marked as the planner's. With
     `stated`, Search read its provider row in the searched words ("multilateral ODA"),
     an explicit entry from text in place of the entry from a choice it was recorded
@@ -18757,10 +18757,11 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
 
 @pytest.mark.parametrize("author", [AGENT_NAME, "another_planner"])
 def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(author: str) -> None:
-    """The graph's planner node pauses on an accepted ask with an interrupt call under the
-    ask's own id, so on a replayed invocation that event can be the latest one holding the
-    served ask's id. It is not the model's response. The ask is the response's second
-    and is refused, whatever the agent that wrote the response is named."""
+    """The graph's planner node pauses on an accepted ask with an interrupt call
+    under the ask's own id. On a replayed invocation that event can be the latest
+    one holding the served ask's id. The interrupt is a separate event from the
+    model's response. The ask is the response's second and is refused, whatever the
+    agent that wrote the response is named."""
     ctx: Any = _FakeToolContext()
     response = _model_response(
         SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
@@ -18783,7 +18784,7 @@ def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(autho
 
 
 def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its_own() -> None:
-    """The user answered the ask of an earlier run, so the next run's one ask reaches them."""
+    """The user answered an earlier run's ask, so this run's one ask reaches them."""
     ctx: Any = _FakeToolContext()
     ctx.session.events.extend(_ask_answered_events(call_id="ask-1"))
     ctx.session.events.append(
@@ -18796,8 +18797,8 @@ def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its
 
 
 def test_an_ask_after_an_accepted_ask_nobody_answered_is_the_first_of_its_own_response() -> None:
-    """An earlier response's ask was accepted and its answer never came. The ask of a later
-    response is the only ask of its own response, so it reaches the user."""
+    """An earlier response's ask was accepted and its answer never came. The ask of a
+    later response is the only ask of its own response, so it reaches the user."""
     ctx: Any = _FakeToolContext()
     ctx.session.events.extend(
         [

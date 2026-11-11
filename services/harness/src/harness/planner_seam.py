@@ -10,8 +10,8 @@ The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
 or the `Referral` translation stopped on); a translation that compiles
 declares the plan ready for the user's answer in code
-(`planner.tools.declare_ready`), and ends the planner's run. This module never
-constructs a `Plan` itself. An entry that ends without a plan ready ends on a
+(`planner.tools.declare_ready`), and ends the planner's run. This module builds no
+`Plan` itself. An entry that ends without a plan ready ends on a
 refusal whose sentence comes from `harness.sentences`.
 
 `ctx.run_node` shares one session both directions with the graph's own
@@ -822,8 +822,9 @@ class PlannerSeam:
         `harness.graph.PlannerModel.revise`'s contract. The proposal runs
         the chain `propose_plan` runs (`submission.service.submit`), reading
         each first year it needs and compiling each input a calculation needs
-        on another basis or provider scope (`planner.source_reads.with_source_reads`), then
-        the translation, and the plan is ready when `declare_ready` says so.
+        on another basis or provider scope
+        (`planner.source_reads.with_source_reads`), then the translation, and
+        the plan is ready when `declare_ready` says so.
         A dataset requirement re-pinned to another spec_id cites the
         decisions that pin states and drops those of the one it left, which
         go with it. The proposal opens its own round count, as a planner
